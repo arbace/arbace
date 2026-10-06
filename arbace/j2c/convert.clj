@@ -513,7 +513,11 @@
       (= nm "this") (r (or (:this env) 'this) (erasure (.type t)))
       (= nm "super") (r 'super (erasure (.type t)))
       (and (= "VAR" (jt/kind sym)) (local? sym))
-      (r (or (get (:locals env) sym) (do (note! :warn/unknown-local) (symbol nm))) (var-type sym))
+      (r (or (get (:locals env) sym)
+             (do (note! :warn/unknown-local)
+                 (when (System/getenv "J2C_DEBUG") (println "unknown local" nm "in" (str (current-class env))))
+                 (symbol nm)))
+         (var-type sym))
       (= "VAR" (jt/kind sym))
       (do (note! :form/field-read)
           (r (field-ref env sym) (var-type sym)))
@@ -707,7 +711,9 @@
             [afs ats] (call-args env m (.type meth) args ve loose?)
             qual (when (instance? JCTree$JCFieldAccess meth) (.selected ^JCTree$JCFieldAccess meth))]
         (note! (if (= callee "this") :form/this-call :form/super-call))
-        (when (pin-needed? env m site ats true) (note! :warn/ctor-call-ambiguous))
+        (when (pin-needed? env m site ats true)
+          (note! :warn/ctor-call-ambiguous)
+          (when (System/getenv "J2C_DEBUG") (println "ambiguous constructor call in" (str (current-class env)) (str m))))
         (r (cond
              (= callee "this") (apply list 'this. afs)
              qual (apply list '.super (:f (ex env qual)) afs)
@@ -1971,7 +1977,35 @@
                        [_ e2] (drop (inc i) steps)]
                    (not (refs-sym? e2 s1)))))))
 
+(defn- for-loop-patterns
+  "A for loop whose condition binds pattern variables used in the body or the update: a
+  `loop` testing the condition with if-instance."
+  [env ctx ^JCTree$JCForLoop t]
+  (let [decls (filter #(instance? JCTree$JCVariableDecl %) (.init t))
+        exprs (remove #(instance? JCTree$JCVariableDecl %) (.init t))
+        [bv env'] (reduce (fn [[bv env] ^JCTree$JCVariableDecl d]
+                            (let [[sf init env'] (binding-for env d (when (.init d) (ex env (.init d))))]
+                              [(conj bv sf init) env']))
+                          [[] env] decls)
+        pre (mapv #(ex-stmt env' (.expr ^JCTree$JCExpressionStatement %)) exprs)
+        body-fn (fn [e]
+                  (let [update (mapv #(ex-stmt e (.expr ^JCTree$JCExpressionStatement %)) (.step t))
+                        next (conj update '(recur))
+                        li {:tree t :kind :while :update update}]
+                    (do-form (stmts (push-loop e li)
+                                    {:fall next :jumps {[:continue t] next [:break t] []} :vpos nil}
+                                    [(.body t)]))))
+        l (wrap-label env t (list (h env 'loop) [] (cond-form env' (.cond t) body-fn (fn [_] nil))))]
+    (note! :form/loop)
+    (into (cond
+            (seq bv) [(list (h env 'let) bv l)]
+            (seq pre) (conj pre l)
+            :else [l])
+          (when (cn? t) (:fall ctx)))))
+
 (defn- for-loop [env ctx ^JCTree$JCForLoop t]
+  (if (and (.cond t) (has-patterns? (.cond t)))
+    (for-loop-patterns env ctx t)
   (if (recur-style? t)
     (let [[bv env'] (reduce (fn [[bv env] ^JCTree$JCVariableDecl d]
                               (let [[sf init env'] (binding-for env d (ex env (.init d)) true)
@@ -2015,7 +2049,7 @@
               (seq bv) [(list (h env 'let) bv w)]
               (seq pre) (conj pre w)
               :else [w])
-            (when (cn? t) (:fall ctx))))))
+            (when (cn? t) (:fall ctx)))))))
 
 (defn- for-each-loop [env ctx ^JCTree$JCEnhancedForLoop t]
   (let [d (.var t)
@@ -2139,10 +2173,21 @@
 (def match-exception-default
   (list 'throw (list (f/member (f/cref "java.lang.MatchException") ".") nil nil)))
 
+(defn- split-pattern-groups
+  "A case with several patterns (case A _, B _ ->) becomes one arm per pattern."
+  [groups]
+  (mapcat (fn [g]
+            (let [pats (filter #(instance? JCTree$JCPatternCaseLabel %) (:labels g))]
+              (if (> (count pats) 1)
+                (do (note! :switch/split-patterns)
+                    (for [p pats] (assoc g :labels [p])))
+                [g])))
+          groups))
+
 (defn- switch-arms
   "Convert the arms; `body-fn` converts one arm's body given its env."
   [env sel-type groups body-fn]
-  (let [arms (for [g groups]
+  (let [arms (for [g (split-pattern-groups groups)]
                (let [[lbl env'] (arm-label env sel-type g)]
                  [lbl (body-fn env' g)]))
         defaults (filter #(or (= :default (first %)) (and (seq? (first %)) (= :default (second (first %))))) arms)
