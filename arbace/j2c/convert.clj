@@ -434,7 +434,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Names: locals, fields, enclosing instances
 
-(declare assigned-syms local? simplify ex ex-stmt stmts stmt class-form anon-form lambda-form method-ref-form switch-form
+(declare poly-call? assigned-syms local? simplify ex ex-stmt stmts stmt class-form anon-form lambda-form method-ref-form switch-form
          call-args)
 
 (defn- enclosing-classes [env] (:classes env))
@@ -457,11 +457,14 @@
           (member (class-ref env c) "this")))))
 
 (defn- qualifying-class
-  "For a member referenced by simple name: the innermost enclosing class of which it is a
-  member (JLS 13.1)."
+  "For a member referenced by simple name: for an instance member the innermost enclosing
+  class of which it is a member (whose instance is the receiver); for a static member the
+  current class when it is a member of it, else its declaring class, as javac does."
   [env ^Symbol sym]
-  (or (first (filter #(member-of? sym %) (enclosing-classes env)))
-      (.owner sym)))
+  (if (jt/static? sym)
+    (if (member-of? sym (current-class env)) (current-class env) (.owner sym))
+    (or (first (filter #(member-of? sym %) (enclosing-classes env)))
+        (.owner sym))))
 
 (defn- field-bare?
   "True when field `sym` can be written by its bare name here (§4.5, §5.2)."
@@ -523,7 +526,7 @@
 
 (defn- class-literal [env ^Type t]
   (note! :form/class-literal)
-  (if (prim? t)
+  (if (or (prim? t) (jt/void? t))
     (member (cref (str "java.lang." ({"int" "Integer" "char" "Character" "void" "Void"}
                                      (str (jt/prim-sym t)) (str/capitalize (str (jt/prim-sym t))))))
             "TYPE")
@@ -653,7 +656,7 @@
   (let [ps (vec (if (and mtype (instance? Type$MethodType (.asMethodType mtype)))
                   (.getParameterTypes mtype)
                   (.getParameterTypes (.erasure m jt/*types*))))
-        poly? (.isSignaturePolymorphic jt/*types* m)]
+        poly? (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m))]
     (cond
       poly? (repeat n nil)
       varargs-elem (concat (map erasure (butlast ps)) (repeat (erasure varargs-elem)))
@@ -727,9 +730,11 @@
                           [(coerce env qr qt) qt (.tsym qt)]))))
             loose? (and ve (only-method-named? env m site false))
             [afs ats] (call-args env m (.type meth) args ve loose?)
-            pin? (pin-needed? env m site ats false)
+            poly? (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m))
+            pin? (or poly? (pin-needed? env m site ats false))
             rt (if (and (= nm "clone") (instance? Type$ArrayType site)) site (ret-type m))
-            rt (if (.isSignaturePolymorphic jt/*types* m) (erasure (.type t)) rt)]
+            rt (if poly? (erasure (.type t)) rt)]
+        (when poly? (note! :form/signature-polymorphic))
         (note! (if static? :form/static-call :form/instance-call))
         (r (cond
              static?
@@ -737,6 +742,13 @@
                           pin? (m+ (param-tags env m)))
                    call (apply list head afs)]
                (if (and recv (not (identical? recv 'super))) (list 'do recv call) call))
+             poly?
+             ;; the call site descriptor: param-tags from javac's call site types, the
+             ;; result type as a tag on the call
+             (let [call (apply list (m+ (member (class-ref env head-class) (str "." nm))
+                                        [:param-tags (mapv #(erased-form env %) (.getParameterTypes (.type meth)))])
+                               recv afs)]
+               (if (or (jt/object? rt) (jt/void? rt)) call (tag call (erased-form env rt))))
              pin?
              (apply list (m+ (member (class-ref env head-class) (str "." nm)) (param-tags env m))
                     recv afs)
@@ -1108,6 +1120,12 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Casts, instanceof, conditionals
 
+(defn- poly-call? [^JCTree e]
+  (let [e (TreeInfo/skipParens e)]
+    (and (instance? JCTree$JCMethodInvocation e)
+         (let [m (TreeInfo/symbol (.meth ^JCTree$JCMethodInvocation e))]
+           (and (instance? Symbol$MethodSymbol m) (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m)))))))
+
 (defn- type-cast [env ^JCTree$JCTypeCast t]
   (let [x (ex env (.expr t))
         target (.type t)
@@ -1115,6 +1133,11 @@
         from (:t x)]
     (note! :form/cast)
     (cond
+      ;; a signature polymorphic call takes its result type from the cast (JLS 15.12.3)
+      (poly-call? (.expr t)) (r (if (some #(and (vector? %) (= :tag (first %))) (f/items (:f x)))
+                                  (:f x)
+                                  (tag (:f x) (erased-form env te)))
+                                te)
       (prim? te)
       (cond
         (= from :lit-int)
@@ -1135,7 +1158,7 @@
           (r (if (same? u te) f (list (widen-op (tag-name te)) f)) te)))
       (jt/components target)
       (r (list (h env 'cast) (type-form env (erasure target)) (:f x)) te)
-      (= from :null) x
+      (= from :null) (r (cast-form env nil te) te)
       (prim? from) (let [b (if (= from :lit-int) (int-type) from)]
                      (r (box-call env (:f x) b) (erasure (jt/boxed b))))
       (= from :lit-int) (r (box-call env (:f x) (int-type)) (erasure (jt/boxed (int-type))))
@@ -1320,7 +1343,9 @@
     (if (and (instance? JCTree$JCUnary t)
              (#{"PREINC" "PREDEC" "POSTINC" "POSTDEC"} (str (.getTag t))))
       (:f (inc-dec env t false))
-      (:f (ex env t)))))
+      (if (poly-call? t)
+        (tag (:f (ex env t)) 'void)
+        (:f (ex env t))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Control flow analysis
