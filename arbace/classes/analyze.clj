@@ -1449,7 +1449,8 @@
                                        (if (vector? cls) cls [cls]))
                          ltype (reduce env/lub (map t/internal->desc classes))
                          b (make-binding actx sym ltype)]
-                     {:classes classes :b b :body (analyze-body (with-local actx b) cbody)})))
+                     {:classes classes :b b :body (analyze-body (with-local actx b) cbody)
+                      :type-anns (mapv #(code-type-anns actx %) (if (vector? cls) cls [cls]))})))
         fn (when fin (analyze-body actx (rest fin)))]
     {:op :try :body bn :catches cns :finally fn
      :type (unify-nodes (cons bn (map :body cns)))}))

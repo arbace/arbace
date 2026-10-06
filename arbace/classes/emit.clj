@@ -743,10 +743,23 @@
       (emit-to gen2 (:body node) t))
     (.visitLabel (mv gen) end)))
 
-(defn- register-handlers [gen segments handler type]
-  (doseq [[^Label s ^Label e] segments]
-    (when (and s e (< (.getOffset s) (.getOffset e)))
-      (.visitTryCatchBlock (mv gen) s e handler type))))
+(declare write-ann-value)
+
+(defn- register-handlers
+  ([gen segments handler type] (register-handlers gen segments handler type nil))
+  ([gen segments handler type anns]
+   (doseq [[^Label s ^Label e] segments]
+     (when (and s e (< (.getOffset s) (.getOffset e)))
+       (.visitTryCatchBlock (mv gen) s e handler type)
+       (let [i (dec (get (swap! (:finish gen) update :handlers (fnil inc 0)) :handlers))]
+         ;; type annotations of a catch parameter, per exception table entry
+         (doseq [[path {:keys [type visible values]}] anns]
+           (let [^AnnotationVisitor av (.visitTryCatchAnnotation
+                                         (mv gen) (.getValue (arbace.asm.TypeReference/newTryCatchReference i))
+                                         (when (seq path) (arbace.asm.TypePath/fromString path))
+                                         type visible)]
+             (doseq [[k v] values] (write-ann-value av k v))
+             (.visitEnd av))))))))
 
 (defn emit-try [gen node ctx]
   (let [m (mv gen)
@@ -786,10 +799,10 @@
                     (when expr? (xstore gen rt rslot))
                     (when fin (emit gen fin :stmt))
                     (.visitJumpInsn m Opcodes/GOTO end))
-                  [h (:classes c)])))]
-        (doseq [[h classes] handlers
-                c classes]
-          (register-handlers gen body-segs h c))
+                  [h (:classes c) (:type-anns c)])))]
+        (doseq [[h classes anns] handlers
+                [c a] (map vector classes (or anns (repeat nil)))]
+          (register-handlers gen body-segs h c a))
         (when fin
           (let [h (Label.) s (alloc-slot gen t/object-desc)]
             (.visitLabel m h)

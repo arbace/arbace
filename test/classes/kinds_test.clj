@@ -287,3 +287,13 @@
                 ^{:tag (java.util.List ^{NC true} String)} l (new ^{NC true} java.util.ArrayList)
                 ^boolean b (instance? ^{NC true} String o)]
             s)))]))
+
+(deftest catch-parameter-type-annotations
+  (same-shapes? 'classes.kinds-test
+    {"NC2" "import java.lang.annotation.*; @Target({ElementType.TYPE_USE}) @Retention(RetentionPolicy.RUNTIME) @interface NC2 {}"
+     "TC2" "class TC2 { int f(String s) { try { return Integer.parseInt(s); } catch (@NC2 NumberFormatException e) { return -1; } } }"}
+    '[(^:annotation ^{java.lang.annotation.Target [java.lang.annotation.ElementType/TYPE_USE]
+                      java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME} NC2)
+      (TC2
+        (method f ^int [this ^String s]
+          (try (Integer/parseInt s) (catch ^{NC2 true} NumberFormatException e -1))))]))

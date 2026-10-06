@@ -127,8 +127,10 @@ with the converted `Compiler`. Clojure's upstream test suite on that runtime
 (`CLOJURE_TESTS_RUN=stage0 CLOJURE_SRC=<classes>:<repo> bin/clojure-tests`) has no regressions
 against the baseline: 83 namespaces, 809 tests, 20,718 of 20,750 assertions (the same 32
 spec-message failures as the baseline), test.generative 27 of 27 (2026-10-06). The scratch steps,
-in `.tmp/` of the worktree: copy the converter's output, patch it as notes 1 and 2 below say, compile
-every file with `arbace.classes.compiler/compile-forms` and `write-classes!`, run the suite.
+in `.tmp/` of the worktree: copy the converter's output, compile every file with
+`arbace.classes.compiler/compile-forms` and `write-classes!`, run the suite. The first run needed
+two hand patches of the converter's output (notes 1 and 2 below); its later output needs none and
+gives the same result.
 
 ## Coverage (§8)
 
@@ -146,7 +148,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
 | `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, `cast`, `instance?`, `new`); catch parameters and method reference type arguments todo |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, `cast`, `instance?`, `new`, catch parameters); method reference type arguments todo |
 | `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
 | `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
