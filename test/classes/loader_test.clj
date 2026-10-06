@@ -35,3 +35,10 @@
                    "(require 'classes.aot.sample) (println classes.aot.sample/answer (.getName (.getClassLoader classes.aot.sample.Greeter)))")]
       (is (= 0 (:exit r)) (:err r))
       (is (re-find #"^Hello, AOT app" (:out r)) (:out r)))))
+
+(deftest source-path-cycles
+  (require 'classes.srcpath)
+  (let [ping (Class/forName "classes.srcpath.Ping" true (clojure.lang.RT/makeClassLoader))]
+    (is (= 22 (clojure.lang.Reflector/invokeStaticMethod ping "ping" (object-array [(int 4)]))))
+    ;; Pong/BASE, a constant of a class entered from source, is inlined
+    (is (= 42 (.get (.getDeclaredField ping "LIMIT") nil)))))

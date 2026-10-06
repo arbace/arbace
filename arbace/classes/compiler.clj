@@ -37,7 +37,7 @@
   [ns forms]
   (binding [env/*compile-set* (atom {})
             a/*unit* {:order (atom []) :counters (atom {}) :switch-maps (atom {})
-                      :switch-holders (atom {})}]
+                      :switch-holders (atom {}) :source-tried (atom #{})}]
     (let [names (vec (for [f forms]
                        (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))]
       (a/process-classes! 0)
@@ -48,7 +48,8 @@
           (swap! env/*compile-set* assoc h (e/switch-holder-decl top h enums))
           (swap! (:order a/*unit*) conj h)
           (swap! (:switch-holders a/*unit*) assoc top h)))
-      (let [classes (vec (for [c @(:order a/*unit*)]
+      (let [classes (vec (for [c @(:order a/*unit*)
+                               :when (not (:declared-only (a/decl c)))]
                            {:name c :bytes (e/emit-class c) :info (a/decl c)}))]
         {:names names :classes classes}))))
 

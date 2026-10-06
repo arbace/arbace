@@ -36,8 +36,15 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; class names (§5.2)
 
+(declare enter-from-source!)
+
+(def ^:dynamic *source-lookup*
+  "Whether class names that resolve to nothing are looked up as p/C.clj sources (§9.2)."
+  true)
+
 (defn- class-exists? [n]
-  (boolean (or (decl n) (env/load-class n))))
+  (boolean (or (decl n) (env/load-class n)
+               (and *source-lookup* *unit* (enter-from-source! n)))))
 
 (defn resolve-class-sym
   "Resolves a class name symbol from `scope` {:class internal-name :ns ns :local-classes {}}:
@@ -49,9 +56,11 @@
           ns (:ns scope)]
       (cond
         (and (str/includes? s "$") (not (str/starts-with? s "$")))
-        (let [[head tail] (str/split s #"\$" 2)]
-          (when-let [h (resolve-class-sym scope (symbol head))]
-            (let [n (str h "$" tail)] (when (class-exists? n) n))))
+        (or (let [v (when ns (get (ns-map ns) sym))]   ; (import '(java.util Map$Entry))
+              (when (class? v) (str/replace (.getName ^Class v) "." "/")))
+            (let [[head tail] (str/split s #"\$" 2)]
+              (when-let [h (resolve-class-sym scope (symbol head))]
+                (let [n (str h "$" tail)] (when (class-exists? n) n)))))
 
         (str/includes? s ".")
         (let [n (str/replace s "." "/")] (when (class-exists? n) n))
@@ -263,7 +272,7 @@
         sig (when sig?
               (str (t/type-params-signature env/interface? tps)
                    (t/signature super-t) (apply str (map t/signature ifaces-t))))]
-    (update-decl! n assoc
+    (update-decl! n assoc :headers-done true
                   :super (:name super-t) :interfaces (mapv :name ifaces-t)
                   :super-t super-t :interfaces-t (vec ifaces-t)
                   :signature sig
@@ -2130,10 +2139,10 @@
   order, then analyzes their code."
   [from]
   (let [names (subvec @(:order *unit*) from)]
-    (doseq [n names] (resolve-header! n))
+    (doseq [n names :when (not (:headers-done (decl n)))] (resolve-header! n))
     (doseq [n names] (resolve-members! n))
-    (doseq [n (supertypes-first names)] (add-bridges! n))
-    (doseq [n names] (analyze-class! n))))
+    (doseq [n (supertypes-first names) :when (not (:declared-only (decl n)))] (add-bridges! n))
+    (doseq [n names :when (not (:declared-only (decl n)))] (analyze-class! n))))
 
 (defn analyze-anon [actx [_ _ super-form args & members]]
   (when-not (vector? args) (fail "anon needs a vector of constructor arguments"))
@@ -2618,3 +2627,45 @@
      :restart (make-binding actx (gensym "restart$") "I")
      :top (nest-host (:class actx))
      :type ty}))
+
+;; ---------------------------------------------------------------------------------------------
+;; source path (§9.2): declarations of classes from p/C.clj, without compiling their code
+
+(defn- read-source-forms [url]
+  (with-open [r (clojure.lang.LineNumberingPushbackReader.
+                  (java.io.InputStreamReader. (.openStream ^java.net.URL url) "UTF-8"))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r)))))))
+
+(defn enter-from-source!
+  "Looks up the top-level class of internal name n as a source p/C.clj on the class path. Its
+  namespace and import forms are evaluated and its class forms entered as declarations only
+  (headers and members), so code being compiled can refer to them. Returns n when found."
+  [n]
+  (let [top (first (str/split n #"\$"))
+        tried (or (:source-tried *unit*) (atom #{}))]
+    (when (and (:source-tried *unit*) (not (@tried top)))
+      (swap! tried conj top)
+      (when-let [url (.getResource (clojure.lang.RT/baseLoader) (str top ".clj"))]
+        (let [forms (read-source-forms url)
+              ns (binding [*ns* *ns*]
+                   (doseq [f forms
+                           :when (and (seq? f) (#{'in-ns 'ns 'import 'clojure.core/in-ns 'clojure.core/import}
+                                                  (first f)))]
+                     (eval f))
+                   *ns*)
+              class-forms (for [f forms
+                                f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                                :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
+                            (rest f))
+              from (count @(:order *unit*))
+              names (doall (for [cf class-forms]
+                             (let [parsed (p/parse-class {:ns ns :nesting :top} cf)
+                                   tn (top-name ns parsed)]
+                               (when-not (decl tn)
+                                 (declare-class! {:nesting :top} parsed)))))
+              new (subvec @(:order *unit*) from)]
+          (doseq [c new] (update-decl! c assoc :declared-only true))
+          (doseq [c new] (resolve-header! c))
+          (doseq [c new] (resolve-members! c))
+          (when (decl n) n))))))

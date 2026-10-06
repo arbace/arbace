@@ -186,7 +186,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | part | status |
 |---|---|
 | §9.1 one namespace per package, files loaded into it | done (converted files compile; `bin/class-forms-check`) |
-| §9.2 class environment: current form, defined classes, class path | done; source path lookup (entering classes from `p/C.clj` without compiling them) todo |
+| §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.clj` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | partial: vars (read and call); keywords, collection literals, `fn` todo |
