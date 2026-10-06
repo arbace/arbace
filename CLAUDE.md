@@ -20,6 +20,15 @@ Prior art:
   `SEED.bash` (now only in git history, commit `d21dc91`). Never modify it. The rewrite is derived
   from it but lives elsewhere.
 - `LICENSE.md` holds the licenses of all vendored code. Extend it when vendoring from a new source.
+- `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`.
+  - `arbace/javalisp/` is javalisp: Java source <-> Clojure-readable s-expressions, specified in
+    `doc/javalisp/SPEC.md`. Run it with `bin/javalisp -m arbace.javalisp.main ...`, which starts
+    the vendored `clojure/` with access to the JDK's javac internals (it needs the compiled
+    `clojure/**/*.class`, which are gitignored).
+  - After changing javalisp, rerun its checks. They must stay clean apart from the known limits
+    in the spec:
+    `check clojure /root/jdk26u/src /root/jdk26u/test`, `classes clojure` and
+    `classes-each /root/jdk26u/test`.
 
 ## Records
 
