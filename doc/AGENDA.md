@@ -7,7 +7,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - The repository is bootstrapped with docs only: README.md, CLAUDE.md, doc/AGENDA.md and
   doc/JOURNAL.md.
-- No code yet.
+- `clojure/` holds the frozen reference baseline: Clojure's Java and clj sources, with spec stubbed
+  out, plus ASM repackaged as `clojure.asm`. It compiles with `javac -g` and the REPL works. The
+  seed script is kept only in git history (commit `d21dc91`).
+- `LICENSE.md` holds the vendored licenses: EPL-1.0 for Clojure and BSD-3-Clause for ASM.
 
 ## Next
 

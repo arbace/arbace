@@ -44,3 +44,14 @@ log.
 - The result is 183 `.java` files and 48 `.clj` files under `clojure/`. The compiled `.class`
   files are already gitignored.
 - Licenses: Clojure is EPL-1.0 and ASM is BSD-3-Clause (INRIA, France Telecom).
+
+## 2026-10-06: Freeze clojure/, drop SEED.bash, add LICENSE.md
+
+- `clojure/` is the frozen reference baseline for the rewrite and is never modified. The rewrite
+  lives outside it.
+- `SEED.bash` was committed together with `clojure/` in `d21dc91` and then deleted from the
+  worktree because it is fragile. It is kept only in git history. The upstream revisions are pinned
+  in the previous entry.
+- Added `LICENSE.md`, which concatenates the vendored licenses:
+  - Clojure's EPL-1.0, converted to Markdown from `epl-v10.html` at clojure `98d735fab02f`.
+  - ASM's BSD-3-Clause, verbatim from `LICENSE.txt` at asm `0460f74ba642`.

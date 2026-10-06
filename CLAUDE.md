@@ -14,6 +14,13 @@ Prior art:
 - https://github.com/golang/go is a model for a slimmer runtime and anything else useful from it.
   The Go language itself is out of scope.
 
+## Layout
+
+- `clojure/` is the frozen reference baseline: upstream Clojure and ASM sources as seeded by
+  `SEED.bash` (now only in git history, commit `d21dc91`). Never modify it. The rewrite is derived
+  from it but lives elsewhere.
+- `LICENSE.md` holds the licenses of all vendored code. Extend it when vendoring from a new source.
+
 ## Records
 
 - `doc/AGENDA.md` holds the current state of the work. Keep it up to date: rewrite it freely so it
