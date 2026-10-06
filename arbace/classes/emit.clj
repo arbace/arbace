@@ -851,6 +851,14 @@
     (:const v) (.visit av name (ann-const-value v))
     :else (fail (str "Bad annotation value " (pr-str v)))))
 
+(defn write-type-annotations
+  "visit-fn: (fn [type-ref type-path desc visible])."
+  [visit-fn anns]
+  (doseq [{:keys [ref path type visible values]} (force anns)]
+    (let [^AnnotationVisitor av (visit-fn (int ref) (when (seq path) (arbace.asm.TypePath/fromString path)) type visible)]
+      (doseq [[k v] values] (write-ann-value av k v))
+      (.visitEnd av))))
+
 (defn write-annotations [visit-fn anns]
   (doseq [{:keys [type visible values]} (force anns)]
     (let [^AnnotationVisitor av (visit-fn type visible)]
@@ -1091,6 +1099,7 @@
     (when-let [mp (method-parameters d m)]
       (doseq [[nm fl] mp] (.visitParameter mv nm fl)))
     (write-annotations #(.visitAnnotation mv %1 %2) (:annotations m))
+    (write-type-annotations #(.visitTypeAnnotation mv %1 %2 %3 %4) (:type-annotations m))
     (when (some (comp seq force) (:param-annotations m))
       (let [pas (map force (:param-annotations m))]
         (.visitAnnotableParameterCount mv (count pas) true)
@@ -1220,6 +1229,7 @@
         (.visitOuterClass cw (:outer d) (when m (:name m))
                           (when m (if (= "<init>" (:name m)) (ctor-real-desc (:outer d) m) (:desc m))))))
     (write-annotations #(.visitAnnotation cw %1 %2) (:annotations d))
+    (write-type-annotations #(.visitTypeAnnotation cw %1 %2 %3 %4) (:type-annotations d))
     (doseq [p (:permits-final d)] (.visitPermittedSubclass cw p))
     (doseq [c (:components d)]
       (let [rv (.visitRecordComponent cw (:name c) (:desc c) (:sig c))]
@@ -1230,6 +1240,7 @@
             fv (.visitField cw (:flags f) (:name f) (:desc f) (:sig f)
                             (when (some? c) (const-attr-value (:desc f) c)))]
         (write-annotations #(.visitAnnotation fv %1 %2) (:annotations f))
+        (write-type-annotations #(.visitTypeAnnotation fv %1 %2 %3 %4) (:type-annotations f))
         (.visitEnd fv)))
     (when (this0-field? d)
       (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) "this$0"

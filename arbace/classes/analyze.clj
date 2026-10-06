@@ -5,7 +5,7 @@
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p])
-  (:import (arbace.asm Opcodes Type MethodVisitor ClassWriter)))
+  (:import (arbace.asm Opcodes Type MethodVisitor ClassWriter TypeReference)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; compilation unit
@@ -181,6 +181,60 @@
                          (or (nil? ts) (ts target)))
                       (force anns)))))
 
+(declare annotations-now)
+
+(defn decl-annotations
+  "Declaration annotations in metadata m for declaration context `context` (an ElementType
+  name): those without @Target or whose @Target includes it."
+  [scope m context]
+  (delay (vec (filter #(let [ts (annotation-targets (t/desc->internal (:type %)))]
+                         (or (nil? ts) (ts context)))
+                      (annotations-now scope m)))))
+
+(defn type-annotations
+  "Type annotations of a declared type tn at type reference `ref` (an int): those inside the
+  type, and those of the declaration's metadata m whose @Target includes TYPE_USE."
+  [scope ref tn m]
+  (delay
+    (vec (concat
+           (when (and m tn (not= "V" (:desc tn)))
+             (for [a (annotations-now scope m)
+                   :let [ts (annotation-targets (t/desc->internal (:type a)))]
+                   :when (and ts (ts "TYPE_USE"))]
+               (assoc a :ref ref :path (t/element-path tn))))
+           (when tn
+             (for [[path anns] (t/type-anns tn)
+                   a (annotations-now scope anns)]
+               (assoc a :ref ref :path path)))))))
+
+(defn- tparam-type-annotations
+  "Type annotations of type parameters and their bounds (sort: class or method)."
+  [scope tps class?]
+  (delay
+    (vec (apply concat
+                (map-indexed
+                  (fn [i {:keys [anns bounds]}]
+                    (concat
+                      (for [a (annotations-now scope (into {} (filter (comp symbol? key) anns)))]
+                        (assoc a :ref (.getValue (TypeReference/newTypeParameterReference
+                                                   (if class? TypeReference/CLASS_TYPE_PARAMETER
+                                                              TypeReference/METHOD_TYPE_PARAMETER) i))
+                                 :path ""))
+                      (apply concat
+                             (map-indexed
+                               (fn [j b]
+                                 ;; bound index 0 is the class bound, empty when the first bound is an interface
+                                 (let [bj (if (and (= :class (:t (first bounds))) (env/interface? (:name (first bounds))))
+                                            (inc j) j)]
+                                   (force (type-annotations scope
+                                                            (.getValue (TypeReference/newTypeParameterBoundReference
+                                                                         (if class? TypeReference/CLASS_TYPE_PARAMETER_BOUND
+                                                                                    TypeReference/METHOD_TYPE_PARAMETER_BOUND)
+                                                                         i bj))
+                                                            b nil))))
+                               bounds))))
+                  tps)))))
+
 (defn annotations-now
   [scope m]
   (vec (for [[k v] m
@@ -297,7 +351,15 @@
                   :super-t super-t :interfaces-t (vec ifaces-t)
                   :signature sig
                   :permits (mapv #(:name (pt %)) (get-in d [:opts :permits]))
-                  :annotations (annotations scope (:meta d)))
+                  :annotations (decl-annotations scope (:meta d) (if (= kind :annotation) "ANNOTATION_TYPE" "TYPE"))
+                  :type-annotations
+                  (delay (vec (concat
+                                (force (tparam-type-annotations (type-scope scope) tps true))
+                                (when-not (#{:interface :annotation} kind)
+                                  (force (type-annotations scope (.getValue (TypeReference/newSuperTypeReference -1)) super-t nil)))
+                                (apply concat
+                                       (map-indexed (fn [i it] (force (type-annotations scope (.getValue (TypeReference/newSuperTypeReference i)) it nil)))
+                                                    ifaces-t))))))
     (when (has? (:flags (env/info (:name super-t))) Opcodes/ACC_FINAL)
       (when-not (and (= kind :enum) false)
         (fail (str "Cannot extend final class " (:name super-t)))))
@@ -351,6 +413,28 @@
          "(" (apply str (map (comp t/signature :tn) params)) ")" (t/signature ret-tn)
          (when (some t/generic? throws-tn) (apply str (map #(str "^" (t/signature %)) throws-tn))))))
 
+(defn- method-type-annotations [scope tps mmeta ret-tn pinfos throws-tn recv]
+  (delay
+    (vec (concat
+           (force (tparam-type-annotations scope tps false))
+           (when ret-tn
+             (force (type-annotations scope (.getValue (TypeReference/newTypeReference TypeReference/METHOD_RETURN))
+                                      ret-tn mmeta)))
+           (when recv
+             (for [a (annotations-now scope (into {} (filter (comp symbol? key) (clojure.core/meta recv))))
+                   :let [ts (annotation-targets (t/desc->internal (:type a)))]
+                   :when (and ts (ts "TYPE_USE"))]
+               (assoc a :ref (.getValue (TypeReference/newTypeReference TypeReference/METHOD_RECEIVER)) :path "")))
+           (apply concat
+                  (map-indexed (fn [i p]
+                                 (force (type-annotations scope (.getValue (TypeReference/newFormalParameterReference i))
+                                                          (:tn p) (:meta p))))
+                               pinfos))
+           (apply concat
+                  (map-indexed (fn [i tn]
+                                 (force (type-annotations scope (.getValue (TypeReference/newExceptionReference i)) tn nil)))
+                               throws-tn))))))
+
 (defn- enter-method [n scope m]
   (let [d (decl! n)
         meta (:meta m)
@@ -391,9 +475,9 @@
      :desc (t/method-desc (map :desc pinfos) ret)
      :sig (method-signature tps pinfos ret-tn throws-tn)
      :throws (mapv #(t/desc->internal (erase scope %)) throws-tn)
-     :annotations (annotations scope meta)
-     :param-annotations (mapv #(annotations scope (:meta %)) pinfos)
-     :ret-type-anns nil
+     :annotations (decl-annotations scope meta "METHOD")
+     :param-annotations (mapv #(decl-annotations scope (:meta %) "PARAMETER") pinfos)
+     :type-annotations (method-type-annotations scope tps meta ret-tn pinfos throws-tn recv)
      :default (get-in m [:opts :default]) :has-default (contains? (:opts m) :default)
      :member m :scope scope :kind :method}))
 
@@ -418,8 +502,9 @@
      :desc (t/method-desc (map :desc pinfos) "V")
      :sig (method-signature tps pinfos {:t :prim :desc "V"} throws-tn)
      :throws (mapv #(t/desc->internal (erase scope %)) throws-tn)
-     :annotations (annotations scope vmeta)
-     :param-annotations (mapv #(annotations scope (:meta %)) pinfos)
+     :annotations (decl-annotations scope vmeta "CONSTRUCTOR")
+     :param-annotations (mapv #(decl-annotations scope (:meta %) "PARAMETER") pinfos)
+     :type-annotations (method-type-annotations scope tps nil nil pinfos throws-tn recv)
      :compact (boolean (:compact vmeta))
      :member m :scope scope :kind :ctor}))
 
@@ -435,7 +520,8 @@
                     (or (t/prim? desc) (= desc t/string-desc)))]
     {:name (:name m) :owner n :flags flags :desc desc :tn :tn
      :sig (when (t/generic? tn) (t/signature tn))
-     :annotations (annotations scope meta)
+     :annotations (decl-annotations scope meta "FIELD")
+     :type-annotations (type-annotations scope (.getValue (TypeReference/newTypeReference TypeReference/FIELD)) tn meta)
      :init (:init m) :has-init (:has-init m) :member m
      :const (when const? (delay (:val (analyze-const-form scope (:init m) desc :lenient))))}))
 

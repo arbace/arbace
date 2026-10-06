@@ -208,3 +208,36 @@
       (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME
                       java.lang.annotation.Target [java.lang.annotation.ElementType/RECORD_COMPONENT]} AnnRC)
       (^:record R [^{AnnF true AnnM true AnnP true AnnAny true AnnRC true} ^int a])]))
+
+(deftest type-annotations-in-declarations
+  (same-shapes? 'classes.kinds-test
+    {"NN" "import java.lang.annotation.*; @Target({ElementType.TYPE_USE, ElementType.TYPE_PARAMETER}) @Retention(RetentionPolicy.RUNTIME) @interface NN {}"
+     "Both" "import java.lang.annotation.*; @Target({ElementType.TYPE_USE, ElementType.FIELD}) @Retention(RetentionPolicy.CLASS) @interface Both {}"
+     "TA" "import java.util.*;
+     class TA<@NN T extends @NN Comparable<T>> extends @NN Object implements @NN Comparable<TA<T>> {
+       @NN String f;
+       @Both String g;
+       List<@NN String> l;
+       String @NN [] arr;
+       @NN String[] arr2;
+       Map<? extends @NN Number, String> w;
+       @NN String m(@NN int x, List<@NN T> y) throws @NN Exception { return null; }
+       <@NN U> void n() {}
+       public int compareTo(TA<T> o) { return 0; }
+     }"}
+    '[(^:annotation ^{java.lang.annotation.Target [java.lang.annotation.ElementType/TYPE_USE java.lang.annotation.ElementType/TYPE_PARAMETER]
+                      java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME} NN)
+      (^:annotation ^{java.lang.annotation.Target [java.lang.annotation.ElementType/TYPE_USE java.lang.annotation.ElementType/FIELD]
+                      java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/CLASS} Both)
+      (TA :type-params [(^{NN true} T extends ^{NN true} (Comparable T))]
+          :extends ^{NN true} Object
+          :implements [^{NN true} (Comparable (TA T))]
+        (field ^{NN true} ^String f)
+        (field ^{Both true} ^String g)
+        (field ^{:tag (java.util.List ^{NN true} String)} l)
+        (field ^{:tag ^{NN true} String/1} arr)
+        (field ^{NN true} ^String/1 arr2)
+        (field ^{:tag (java.util.Map (? extends ^{NN true} Number) String)} w)
+        (method ^{NN true} m :throws [^{NN true} Exception] ^String [this ^{NN true} ^int x ^{:tag (java.util.List ^{NN true} T)} y] nil)
+        (method n :type-params [^{NN true} U] ^void [this])
+        (method ^:public compareTo ^int [this ^{:tag (TA T)} o] 0))]))

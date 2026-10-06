@@ -285,3 +285,27 @@
     :wild (if (:bound tn) (update tn :bound #(subst env %)) tn)
     :inter (update tn :types #(mapv (partial subst env) %))
     tn))
+
+(defn type-anns
+  "The annotations inside a parsed type: [[type-path anns-map] ...], type paths in ASM's string
+  form (\"[\" array element, \".\" inner type, \"*\" wildcard bound, \"N;\" type argument N)."
+  [tn]
+  (letfn [(walk [tn path]
+            (concat
+              (when (and (= :class (:t tn)) (:outer tn)) (walk (:outer tn) path))
+              (let [path (if (and (= :class (:t tn)) (:outer tn)) (str path ".") path)]
+                (concat
+                  (when-let [a (:anns tn)] [[path a]])
+                  (case (:t tn)
+                    :array (walk (:elem tn) (str path "["))
+                    :class (apply concat (map-indexed (fn [i a] (walk a (str path i ";"))) (:args tn)))
+                    :wild (when (:bound tn) (walk (:bound tn) (str path "*")))
+                    nil)))))]
+    (walk tn "")))
+
+(defn element-path
+  "The type path of the type a declaration annotation applies to: the innermost element type of
+  an array type (JLS 9.7.4)."
+  [tn]
+  (loop [tn tn path ""]
+    (if (= :array (:t tn)) (recur (:elem tn) (str path "[")) path)))

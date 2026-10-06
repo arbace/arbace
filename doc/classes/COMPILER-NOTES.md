@@ -146,7 +146,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
 | `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | todo |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names); in code (locals, casts, `new`...) todo |
 | `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
 | `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
@@ -187,7 +187,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `Record` | done ≡ |
 | `BootstrapMethods` | done ≡ (`StringConcatFactory`, `LambdaMetafactory`, `ObjectMethods`, `SwitchBootstraps`) |
 | `Runtime(In)VisibleAnnotations`, parameter annotations, `AnnotationDefault` | done ≡ (record component annotations propagated by `@Target`) |
-| `Runtime(In)VisibleTypeAnnotations` | todo |
+| `Runtime(In)VisibleTypeAnnotations` | done ≡ for declarations; in `Code` todo |
 | `MethodParameters` | done ≡ (inner, local, anonymous and enum constructors, `valueOf`, canonical record constructors) |
 | `Deprecated` | done ≡ |
 | `Module` | done ≡ |
