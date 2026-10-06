@@ -39,6 +39,19 @@
   [specs & body]
   `(~'class* :local ~specs ~@body))
 
+(defmacro defmodule
+  "(defmodule name directive*) writes module-info.class when compiling files (SPEC §4.14)."
+  [& form]
+  (compiler/write-module! *ns* form)
+  nil)
+
+(defmacro defpackage
+  "(defpackage name) writes the package's package-info.class (its annotations) when compiling
+  files (SPEC §4.14)."
+  [nm]
+  (compiler/write-package! *ns* nm)
+  nil)
+
 ;; ---------------------------------------------------------------------------------------------
 ;; code forms
 

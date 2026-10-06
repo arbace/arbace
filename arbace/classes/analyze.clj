@@ -21,7 +21,7 @@
   ([msg] (fail msg {}))
   ([msg data] (throw (ex-info msg (assoc data :arbace/compile-error true)))))
 
-(defn decl [n] (get @env/*compile-set* n))
+(defn decl [n] (some-> env/*compile-set* deref (get n)))
 (defn decl! [n] (or (decl n) (fail (str "Not in the compilation: " n))))
 (defn update-decl! [n f & args] (apply swap! env/*compile-set* update n f args))
 (defn state [n] (:state (decl! n)))
@@ -160,6 +160,26 @@
   Returns [{:type desc :visible bool :values {name value}}], SOURCE ones dropped."
   [scope m]
   (delay (annotations-now scope m)))
+
+(defn annotation-targets
+  "The ElementType names of annotation type n's @Target, or nil when it has none."
+  [n]
+  (if-let [d (decl n)]
+    (some (fn [[k v]] (when (and (symbol? k) (= "java/lang/annotation/Target"
+                                                (resolve-class-sym (class-scope n) k)))
+                        (set (map name (if (vector? v) v [v])))))
+          (:meta d))
+    (when-let [c (env/load-class n)]
+      (when-let [t (.getAnnotation ^Class c java.lang.annotation.Target)]
+        (set (map str (.value ^java.lang.annotation.Target t)))))))
+
+(defn for-target
+  "Annotations applicable to declaration context `target` (an ElementType name), as javac
+  propagates record component annotations."
+  [anns target]
+  (delay (vec (filter #(let [ts (annotation-targets (t/desc->internal (:type %)))]
+                         (or (nil? ts) (ts target)))
+                      (force anns)))))
 
 (defn annotations-now
   [scope m]
@@ -474,7 +494,7 @@
             record-fields (for [c comps]
                             {:name (:name c) :owner n :desc (:desc c) :sig (:sig c)
                              :flags (bit-or Opcodes/ACC_PRIVATE Opcodes/ACC_FINAL)
-                             :annotations (:annotations c) :component c})
+                             :annotations (for-target (:annotations c) "FIELD") :component c})
             declared? (fn [nm desc] (some #(and (= nm (:name %)) (= desc (:desc %))) methods))
             record-methods
             (when (= kind :record)
@@ -482,7 +502,7 @@
                 (for [c comps :when (not (declared? (:name c) (str "()" (:desc c))))]
                   (derived-method n (:name c) (str "()" (:desc c)) Opcodes/ACC_PUBLIC :record-accessor
                                   :component c :sig (:sig (assoc c :sig (some->> (:sig c) (str "()"))))
-                                  :annotations (:annotations c)))
+                                  :annotations (for-target (:annotations c) "METHOD")))
                 (for [[nm desc] [["toString" "()Ljava/lang/String;"] ["hashCode" "()I"]
                                  ["equals" "(Ljava/lang/Object;)Z"]]
                       :when (not (declared? nm desc))]
@@ -498,7 +518,7 @@
                                     :flags (if compact (:flags compact) (class-access d))
                                     :params (mapv (fn [c] {:sym (:sym c) :desc (:desc c) :tn (:tn c) :flags 0
                                                            :meta (:meta c)}) comps)
-                                    :param-annotations (mapv :annotations comps)
+                                    :param-annotations (mapv #(for-target (:annotations %) "PARAMETER") comps)
                                     :sig (when (some t/generic? (map :tn comps))
                                            (str "(" (apply str (map (comp t/signature :tn) comps)) ")V"))
                                     :canonical true :kind :ctor :scope scope}]
@@ -2278,10 +2298,14 @@
   (let [cn (analyze actx c)
         mn (when (> (count form) 2) (analyze actx msg))
         cls (:class actx)]
-    (when (#{:interface :annotation} (:kind (decl! cls)))
-      (fail "java-assert in an interface is not supported yet"))
-    (swap! (state cls) assoc :uses-assert true)
+    ;; in an interface the flag lives in a synthetic holder class of the outermost class (javac)
+    (if (#{:interface :annotation} (:kind (decl! cls)))
+      (do (swap! (:assert-holders *unit*) assoc (nest-host cls) nil)
+          ;; and the interface's <clinit> reads it, so the holder initializes with it
+          (swap! (state cls) assoc :interface-assert (nest-host cls)))
+      (swap! (state cls) assoc :uses-assert true))
     {:op :assert :test cn :msg mn :class cls
+     :holder-top (when (#{:interface :annotation} (:kind (decl! cls))) (nest-host cls))
      :msg-desc (when mn
                  (let [mt (value-type (:type mn))]
                    (case mt ("I" "S" "B") "I" "Z" "Z" "C" "C" "J" "J" "F" "F" "D" "D" t/object-desc)))

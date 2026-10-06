@@ -182,3 +182,29 @@
       (^:public ^:abstract ^:sealed Node
         (defclass ^:static ^:final Leaf :extends Node)
         (defclass ^:static ^:final Pair :extends Node))]))
+
+(deftest interface-asserts-and-record-annotation-targets
+  (same-shapes? 'classes.kinds-test
+    {"I" "public interface I {
+       default void f(int x) { assert x > 0; }
+       static void g(int x) { assert x > 1 : \"g\"; }
+     }"
+     "AnnF" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target({ElementType.FIELD}) @interface AnnF {}"
+     "AnnM" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target({ElementType.METHOD}) @interface AnnM {}"
+     "AnnP" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target({ElementType.PARAMETER}) @interface AnnP {}"
+     "AnnAny" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @interface AnnAny {}"
+     "AnnRC" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target({ElementType.RECORD_COMPONENT}) @interface AnnRC {}"
+     "R" "record R(@AnnF @AnnM @AnnP @AnnAny @AnnRC int a) {}"}
+    '[(^:public ^:interface I
+        (method f ^void [this ^int x] (java-assert (> x 0)))
+        (method ^:static g ^void [^int x] (java-assert (> x 1) "g")))
+      (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME
+                      java.lang.annotation.Target [java.lang.annotation.ElementType/FIELD]} AnnF)
+      (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME
+                      java.lang.annotation.Target [java.lang.annotation.ElementType/METHOD]} AnnM)
+      (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME
+                      java.lang.annotation.Target [java.lang.annotation.ElementType/PARAMETER]} AnnP)
+      (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME} AnnAny)
+      (^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME
+                      java.lang.annotation.Target [java.lang.annotation.ElementType/RECORD_COMPONENT]} AnnRC)
+      (^:record R [^{AnnF true AnnM true AnnP true AnnAny true AnnRC true} ^int a])]))

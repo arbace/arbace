@@ -1126,7 +1126,13 @@
   (let [st @(:state d)
         nodes (:clinit st)
         extra (cond->> (:clinit-extra st)
-                (:uses-assert st) (cons (assertion-clinit (:name d))))]
+                (:uses-assert st) (cons (assertion-clinit (:name d)))
+                (:interface-assert st)
+                (cons (fn [gen]
+                        (.visitFieldInsn (mv gen) Opcodes/GETSTATIC
+                                         (get @(:assert-holders a/*unit*) (:interface-assert st))
+                                         "$assertionsDisabled" "Z")
+                        (insn gen Opcodes/POP))))]
     (when (or (seq nodes) (seq extra))
       (let [mv (.visitMethod cw Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)
             gen (new-gen mv (:name d) "V" true)]
@@ -1217,7 +1223,7 @@
     (doseq [p (:permits-final d)] (.visitPermittedSubclass cw p))
     (doseq [c (:components d)]
       (let [rv (.visitRecordComponent cw (:name c) (:desc c) (:sig c))]
-        (write-annotations #(.visitAnnotation rv %1 %2) (:annotations c))
+        (write-annotations #(.visitAnnotation rv %1 %2) (a/for-target (:annotations c) "RECORD_COMPONENT"))
         (.visitEnd rv)))
     (doseq [f (:fields d)]
       (let [c (when (:const f) (env/const-value f))
@@ -1280,8 +1286,9 @@
 (defn- outermost [n] (loop [n n] (if-let [o (:outer (a/decl n))] (recur o) n)))
 
 (defmethod emit-extra :assert [gen node ctx]
-  (let [m (mv gen) end (Label.)]
-    (.visitFieldInsn m Opcodes/GETSTATIC (:class node) "$assertionsDisabled" "Z")
+  (let [m (mv gen) end (Label.)
+        owner (if-let [top (:holder-top node)] (get @(:assert-holders a/*unit*) top) (:class node))]
+    (.visitFieldInsn m Opcodes/GETSTATIC owner "$assertionsDisabled" "Z")
     (.visitJumpInsn m Opcodes/IFNE end)
     (emit-cond gen (:test node) true end)
     (.visitTypeInsn m Opcodes/NEW "java/lang/AssertionError")
@@ -1706,3 +1713,12 @@
                             (insn gen Opcodes/POP)
                             (.visitLabel m after)
                             (.visitTryCatchBlock m start end h "java/lang/NoSuchFieldError"))))))]})})
+
+(defn assert-holder-decl
+  "javac's synthetic class holding $assertionsDisabled for asserts in interfaces."
+  [top name]
+  {:name name :kind :class :nesting :anon :outer top :nest-host top :simple nil
+   :flags (bit-or Opcodes/ACC_SUPER Opcodes/ACC_SYNTHETIC)
+   :inner-flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC)
+   :super "java/lang/Object" :interfaces [] :fields [] :methods [] :members [] :member-classes {}
+   :state (atom {:captures [] :uses-assert true})})

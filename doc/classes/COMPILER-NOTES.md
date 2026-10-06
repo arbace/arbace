@@ -139,8 +139,8 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 
 | kinds | status |
 |---|---|
-| `COMPILATION_UNIT`, `PACKAGE`, `IMPORT` | done: namespace package, `ns`/`import`, own-package and `java.lang` fallback; `defpackage` todo |
-| `MODULE`, `REQUIRES`, `EXPORTS`, `OPENS`, `USES`, `PROVIDES` | todo (`defmodule`) |
+| `COMPILATION_UNIT`, `PACKAGE`, `IMPORT` | done ≡: namespace package, `ns`/`import`, own-package and `java.lang` fallback, `defpackage` (`package-info.class`) |
+| `MODULE`, `REQUIRES`, `EXPORTS`, `OPENS`, `USES`, `PROVIDES` | done ≡ (`defmodule`: `module-info.class`, `java.base` mandated, required system modules' versions) |
 | `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION_TYPE` | done ≡ (top-level, member, inner, local, anonymous; enum constant bodies; compact constructors) |
 | `METHOD` | done ≡ (instance, static, abstract, native, default, private interface, varargs, throws, overloads, `deftype`-style untyped signatures) |
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
@@ -154,7 +154,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `LABELED_STATEMENT`, `BREAK`, `CONTINUE`, `RETURN`, `YIELD` | done ≡ (also through `finally` and `locking`) |
 | `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, case labels | done ≡ (int-like, `String`, enums with ordinals or `$SwitchMap$`, `nil`, patterns with guards) |
 | `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping) |
-| `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert` in classes; `java-assert` in interfaces todo) |
+| `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert`, in interfaces through javac's holder class) |
 | `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
 | `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls, `C/super` calls and javac's `access$` accessors); `(.super o args)` todo |
 | `NEW_ARRAY`, `ARRAY_ACCESS` | done ≡ |
@@ -172,7 +172,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `ACC_SYNCHRONIZED`, `ACC_VOLATILE`, `ACC_TRANSIENT`, `ACC_VARARGS`, `ACC_NATIVE`, `ACC_ABSTRACT`, `ACC_INTERFACE` | done ≡ |
 | `ACC_SYNTHETIC`, `ACC_BRIDGE` | done ≡ (`this$0`, `val$x`, `$VALUES`, `$values`, `$assertionsDisabled`, lambda methods, `$SwitchMap$` holders, bridges) |
 | `ACC_ANNOTATION`, `ACC_ENUM`, `ACC_MANDATED` | done ≡ |
-| `ACC_MODULE` | todo |
+| `ACC_MODULE`, module flags | done ≡ |
 
 ### Attributes (§8.3)
 
@@ -186,11 +186,11 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `PermittedSubclasses` | done ≡ (`:permits`, inferred, enums with constant bodies) |
 | `Record` | done ≡ |
 | `BootstrapMethods` | done ≡ (`StringConcatFactory`, `LambdaMetafactory`, `ObjectMethods`, `SwitchBootstraps`) |
-| `Runtime(In)VisibleAnnotations`, parameter annotations, `AnnotationDefault` | done ≡ |
+| `Runtime(In)VisibleAnnotations`, parameter annotations, `AnnotationDefault` | done ≡ (record component annotations propagated by `@Target`) |
 | `Runtime(In)VisibleTypeAnnotations` | todo |
 | `MethodParameters` | done ≡ (inner, local, anonymous and enum constructors, `valueOf`, canonical record constructors) |
 | `Deprecated` | done ≡ |
-| `Module` | todo |
+| `Module` | done ≡ |
 
 ### Other parts of the spec
 

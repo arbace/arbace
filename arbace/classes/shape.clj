@@ -58,6 +58,17 @@
              (visit [version access name sig super ifaces]
                (swap! c assoc :version version :flags access :name name :signature sig
                       :super super :interfaces (set ifaces)))
+             (visitModule [n acc v]
+               (let [mm (atom {:name n :flags acc :version v})]
+                 (swap! c assoc :module mm)
+                 (proxy [arbace.asm.ModuleVisitor] [Opcodes/ASM9]
+                   (visitRequire [m fl ver] (swap! mm update :requires (fnil conj #{}) [m fl ver]))
+                   (visitExport [p fl ms] (swap! mm update :exports (fnil conj #{}) [p fl (set ms)]))
+                   (visitOpen [p fl ms] (swap! mm update :opens (fnil conj #{}) [p fl (set ms)]))
+                   (visitUse [s] (swap! mm update :uses (fnil conj #{}) s))
+                   (visitProvide [s ps] (swap! mm update :provides (fnil conj #{}) [s (vec ps)]))
+                   (visitPackage [p] (swap! mm update :packages (fnil conj #{}) p))
+                   (visitMainClass [m] (swap! mm assoc :main-class m)))))
              (visitNestHost [h] (swap! c assoc :nest-host h))
              (visitNestMember [m] (swap! c update :nest-members (fnil conj #{}) m))
              (visitPermittedSubclass [p] (swap! c update :permitted (fnil conj #{}) p))
@@ -92,7 +103,7 @@
                    (visitAnnotationDefault []
                      (let [s (atom {})] (swap! m assoc :default s) (ann-visitor s)))))))]
     (.accept cr cv ClassReader/SKIP_DEBUG)
-    (assoc (realize-anns @c)
+    (assoc (cond-> (realize-anns @c) (:module @c) (update :module deref))
            :fields (into (sorted-map) (for [[k f] @fields] [k (realize-anns @f)]))
            :methods (into (sorted-map)
                           (for [[k m] @methods]
