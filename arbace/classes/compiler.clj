@@ -36,11 +36,18 @@
   compilation. Returns {:names [top-level names] :classes [{:name :bytes :info}]}."
   [ns forms]
   (binding [env/*compile-set* (atom {})
-            a/*unit* {:order (atom []) :counters (atom {})}]
+            a/*unit* {:order (atom []) :counters (atom {}) :switch-maps (atom {})
+                      :switch-holders (atom {})}]
     (let [names (vec (for [f forms]
                        (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))]
       (a/process-classes! 0)
       (infer-permits!)
+      ;; javac's $SwitchMap$ holder classes, named after all anonymous classes
+      (doseq [[top enums] @(:switch-maps a/*unit*)]
+        (let [h (a/local-class-name top nil)]
+          (swap! env/*compile-set* assoc h (e/switch-holder-decl top h enums))
+          (swap! (:order a/*unit*) conj h)
+          (swap! (:switch-holders a/*unit*) assoc top h)))
       (let [classes (vec (for [c @(:order a/*unit*)]
                            {:name c :bytes (e/emit-class c) :info (a/decl c)}))]
         {:names names :classes classes}))))

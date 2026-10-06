@@ -866,7 +866,12 @@
 
 (defn new-gen [^MethodVisitor mv cls ret static?]
   {:mv mv :class cls :slots (atom {}) :next (atom (if static? 0 1)) :ret ret :targets {}
-   :cleanups [] :unsafe (java.util.IdentityHashMap.)})
+   :cleanups [] :unsafe (java.util.IdentityHashMap.) :finish (atom {})})
+
+(defn finish-gen!
+  "Code emitted once at the end of a method (the MatchException handler of record patterns)."
+  [gen]
+  (doseq [[_ f] @(:finish gen) :when (fn? f)] (f)))
 
 (defn- has? [flags f] (not (zero? (bit-and (or flags 0) f))))
 
@@ -978,7 +983,8 @@
     (when (and (= :record (:kind d)) (or (:compact m) (= :record-canonical (:derived m))))
       (emit-assign-fields-from-params gen d (:params ab)))
     (when (or (nil? (:body ab)) (not= :none (:type (:body ab))))
-      (.visitInsn mv Opcodes/RETURN))))
+      (.visitInsn mv Opcodes/RETURN))
+    (finish-gen! gen)))
 
 (defn- method-parameters
   "The MethodParameters entries [[name-or-nil flags] ...] javac writes for method m of d, or nil."
@@ -1096,7 +1102,8 @@
            (when-let [r (:recv ab)] (swap! (:slots gen) assoc (:id r) 0))
            (bind-param-slots! gen (:params ab))
            (.visitCode mv)
-           (emit gen (:body ab) :return))
+           (emit gen (:body ab) :return)
+           (finish-gen! gen))
       (has? (:flags m) (bit-or Opcodes/ACC_ABSTRACT Opcodes/ACC_NATIVE)) nil
       :else (do (.visitCode mv)
                 (if (= "V" (:ret m)) (.visitInsn mv Opcodes/RETURN)
@@ -1121,6 +1128,7 @@
         (doseq [f extra] (f gen))
         (doseq [nd nodes] (emit-clinit-node gen nd))
         (.visitInsn mv Opcodes/RETURN)
+        (finish-gen! gen)
         (.visitMaxs mv 0 0)
         (.visitEnd mv)))))
 
@@ -1403,6 +1411,7 @@
       (swap! (:slots gen) assoc (:id b) (alloc-slot gen (:type b))))
     (.visitCode mv)
     (emit gen (:body node) :return)
+    (finish-gen! gen)
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
@@ -1422,3 +1431,262 @@
         (insn gen Opcodes/POP)))
     (emit-indy-lambda gen node (when (= kind :bound) [(a/value-type (:type (:recv node)))]) h)
     (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
+;; ---------------------------------------------------------------------------------------------
+;; switch and patterns
+
+(defn- emit-switch-insn
+  "tableswitch or lookupswitch, chosen as javac chooses."
+  [gen keyed dflt]
+  (let [ks (sort (keys keyed))
+        n (count ks)]
+    (if (zero? n)
+      (do (insn gen Opcodes/POP) (.visitJumpInsn (mv gen) Opcodes/GOTO dflt))
+      (let [lo (long (first ks)) hi (long (last ks))
+            table-space (+ 4 (- hi lo -1)) table-time 3
+            lookup-space (+ 3 (* 2 n)) lookup-time n]
+        (if (<= (+ table-space (* 3 table-time)) (+ lookup-space (* 3 lookup-time)))
+          (.visitTableSwitchInsn (mv gen) (int lo) (int hi) dflt
+                                 (into-array Label (for [k (range lo (inc hi))] (get keyed (int k) dflt))))
+          (.visitLookupSwitchInsn (mv gen) dflt (int-array ks) (into-array Label (map keyed ks))))))))
+
+(def ^:private match-exception-ctor "(Ljava/lang/String;Ljava/lang/Throwable;)V")
+
+(defn- match-handler
+  "The method's handler wrapping exceptions of record accessors in MatchException."
+  [gen]
+  (or (get @(:finish gen) :match-label)
+      (let [h (Label.) m (mv gen)]
+        (swap! (:finish gen) assoc :match-label h
+               :match (fn []
+                        (let [s (alloc-slot gen t/object-desc)]
+                          (.visitLabel m h)
+                          (.visitVarInsn m Opcodes/ASTORE s)
+                          (.visitTypeInsn m Opcodes/NEW "java/lang/MatchException")
+                          (insn gen Opcodes/DUP)
+                          (.visitVarInsn m Opcodes/ALOAD s)
+                          (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/Throwable" "toString" "()Ljava/lang/String;" false)
+                          (.visitVarInsn m Opcodes/ALOAD s)
+                          (.visitMethodInsn m Opcodes/INVOKESPECIAL "java/lang/MatchException" "<init>" match-exception-ctor false)
+                          (insn gen Opcodes/ATHROW))))
+        h)))
+
+(defn- emit-pattern
+  "Matches the value in `slot` (of type vt) against pattern p, binding its variables; jumps to
+  fail when it does not match. tested: the type test was already done (typeSwitch)."
+  [gen p vt slot fail tested]
+  (let [m (mv gen)
+        cd (:class p)]
+    (when (and (:test p) (not tested))
+      (.visitVarInsn m Opcodes/ALOAD slot)
+      (.visitTypeInsn m Opcodes/INSTANCEOF (t/desc->internal cd))
+      (.visitJumpInsn m Opcodes/IFEQ fail))
+    (case (:kind p)
+      :type (when-let [b (:b p)]
+              (xload gen vt slot)
+              (when (and (t/ref? cd) (not= cd vt) (not (env/assignable? vt cd)))
+                (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal cd)))
+              (let [s (alloc-slot gen (:type b))]
+                (swap! (:slots gen) assoc (:id b) s)
+                (xstore gen (:type b) s)))
+      :record (let [rs (alloc-slot gen cd)]
+                (.visitVarInsn m Opcodes/ALOAD slot)
+                (when-not (and (t/ref? vt) (env/assignable? vt cd))
+                  (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal cd)))
+                (.visitVarInsn m Opcodes/ASTORE rs)
+                (doseq [{:keys [accessor pattern]} (:comps p)]
+                  (let [ct (subs (:desc accessor) 2)
+                        cs (alloc-slot gen ct)
+                        start (Label.) end (Label.)]
+                    (.visitVarInsn m Opcodes/ALOAD rs)
+                    (.visitLabel m start)
+                    (.visitMethodInsn m Opcodes/INVOKEVIRTUAL (:owner accessor) (:name accessor) (:desc accessor) false)
+                    (.visitLabel m end)
+                    (.visitTryCatchBlock m start end (match-handler gen) "java/lang/Throwable")
+                    (xstore gen ct cs)
+                    (emit-pattern gen pattern ct cs fail false)))))))
+
+(defmethod emit-extra :if-instance [gen node ctx]
+  (let [m (mv gen)
+        t (a/value-type (:type node))
+        els (Label.) end (Label.)
+        s (alloc-slot gen (a/value-type (:type (:expr node))))
+        vt (a/value-type (:type (:expr node)))]
+    (emit gen (:expr node) :expr)
+    (.visitVarInsn m Opcodes/ASTORE s)
+    (emit-pattern gen (:pattern node) vt s els false)
+    (if (= ctx :expr) (emit-to gen (:then node) t) (emit gen (:then node) ctx))
+    (when-not (= :none (:type (:then node))) (.visitJumpInsn m Opcodes/GOTO end))
+    (.visitLabel m els)
+    (if (= ctx :expr) (emit-to gen (:else node) t) (emit gen (:else node) ctx))
+    (.visitLabel m end)))
+
+(def ^:private switch-bsm-desc
+  (str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+       "[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;"))
+
+(defn- enum-ordinal [e c]
+  (if-let [d (a/decl e)]
+    (first (keep-indexed (fn [i k] (when (= c (:name k)) i)) (:constants d)))
+    (.ordinal ^Enum (Enum/valueOf (env/load-class e) c))))
+
+(defn switch-map-field [e] (str "$SwitchMap$" (str/replace e #"[/.]" "\\$")))
+
+(defmethod emit-extra :switch [gen node ctx]
+  (let [m (mv gen)
+        t (a/value-type (:type node))
+        expr? (= ctx :expr)
+        end (Label.) dflt (Label.)
+        cases (:cases node)
+        arm-labels (vec (repeatedly (count cases) #(Label.)))
+        emit-arm (fn [body]
+                   (if expr? (emit-to gen body t) (emit gen body :stmt))
+                   (when-not (= :none (:type body)) (.visitJumpInsn m Opcodes/GOTO end)))
+        indexed (for [[ci c] (map-indexed vector cases) l (:labels c)] [ci l])
+        emit-arms-and-default
+        (fn [arm-code]
+          (doseq [[ci c] (map-indexed vector cases)]
+            (.visitLabel m (nth arm-labels ci))
+            (arm-code ci c)
+            (emit-arm (:body c)))
+          (.visitLabel m dflt)
+          (if-let [d (:default node)]
+            (emit-arm d)
+            (when expr? (insn gen Opcodes/ACONST_NULL)))
+          (.visitLabel m end))]
+    (case (:kind node)
+      :int
+      (do (emit-to gen (:sel node) "I")
+          (emit-switch-insn gen (into {} (for [[ci l] indexed]
+                                           [(let [v (:const l)] (int (if (char? v) (int v) v))) (nth arm-labels ci)]))
+                            dflt)
+          (emit-arms-and-default (fn [_ _])))
+
+      :string
+      (let [ss (alloc-slot gen t/string-desc) ts (alloc-slot gen "I")
+            second-switch (Label.)
+            strs (vec (for [[ci l] indexed] [(:const l) ci]))
+            buckets (group-by #(.hashCode ^String (first %)) (map-indexed (fn [i [sv ci]] [sv i ci]) strs))
+            bucket-labels (into {} (for [h (keys buckets)] [(int h) (Label.)]))]
+        (emit gen (:sel node) :expr)
+        (.visitVarInsn m Opcodes/ASTORE ss)
+        (insn gen Opcodes/ICONST_M1)
+        (.visitVarInsn m Opcodes/ISTORE ts)
+        (.visitVarInsn m Opcodes/ALOAD ss)
+        (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/String" "hashCode" "()I" false)
+        (emit-switch-insn gen bucket-labels second-switch)
+        (doseq [[h entries] buckets]
+          (.visitLabel m (bucket-labels (int h)))
+          (doseq [[sv i _] (reverse entries)]
+            (let [nxt (Label.)]
+              (.visitVarInsn m Opcodes/ALOAD ss)
+              (.visitLdcInsn m sv)
+              (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/String" "equals" "(Ljava/lang/Object;)Z" false)
+              (.visitJumpInsn m Opcodes/IFEQ nxt)
+              (emit-const gen "I" i)
+              (.visitVarInsn m Opcodes/ISTORE ts)
+              (.visitJumpInsn m Opcodes/GOTO second-switch)
+              (.visitLabel m nxt)))
+          (.visitJumpInsn m Opcodes/GOTO second-switch))
+        (.visitLabel m second-switch)
+        (.visitVarInsn m Opcodes/ILOAD ts)
+        (emit-switch-insn gen (into {} (map-indexed (fn [i [_ ci]] [(int i) (nth arm-labels ci)]) strs)) dflt)
+        (emit-arms-and-default (fn [_ _])))
+
+      :enum
+      (let [e (t/desc->internal (:sel-type node))]
+        (if (:enum-direct node)
+          (do (emit gen (:sel node) :expr)
+              (.visitMethodInsn m Opcodes/INVOKEVIRTUAL e "ordinal" "()I" false)
+              (emit-switch-insn gen (into {} (for [[ci l] indexed] [(int (enum-ordinal e (:enum l))) (nth arm-labels ci)])) dflt))
+          (let [holder (get @(:switch-holders a/*unit*) (:top node))
+                values (get-in @(:switch-maps a/*unit*) [(:top node) e :values])]
+            (.visitFieldInsn m Opcodes/GETSTATIC holder (switch-map-field e) "[I")
+            (emit gen (:sel node) :expr)
+            (.visitMethodInsn m Opcodes/INVOKEVIRTUAL e "ordinal" "()I" false)
+            (insn gen Opcodes/IALOAD)
+            (emit-switch-insn gen (into {} (for [[ci l] indexed] [(int (get values (:enum l))) (nth arm-labels ci)])) dflt)))
+        (emit-arms-and-default (fn [_ _])))
+
+      :pattern
+      (let [st (:sel-type node)
+            enum? (and (t/class-desc? st) (has? (:flags (env/info (t/desc->internal st))) Opcodes/ACC_ENUM))
+            labels (vec (for [[ci l] indexed :when (not (:null l)) :when (not (:default l))] [ci l]))
+            null-arm (some (fn [[ci l]] (when (:null l) ci)) indexed)
+            default-too (some (fn [[ci l]] (when (:default l) ci)) indexed)
+            ss (alloc-slot gen st) rs (alloc-slot gen "I")
+            loop-l (Label.)
+            case-labels (vec (repeatedly (count labels) #(Label.)))
+            bsm-args (for [[_ l] labels]
+                       (cond (:pattern l) (Type/getType ^String (:class (:pattern l)))
+                             (:enum l) (:enum l)
+                             :else (let [v (:const l)] (if (char? v) (Integer/valueOf (int v)) (if (integer? v) (Integer/valueOf (int v)) v)))))]
+        (emit gen (:sel node) :expr)
+        (when-not null-arm
+          (insn gen Opcodes/DUP)
+          (.visitMethodInsn m Opcodes/INVOKESTATIC "java/util/Objects" "requireNonNull"
+                            "(Ljava/lang/Object;)Ljava/lang/Object;" false)
+          (insn gen Opcodes/POP))
+        (.visitVarInsn m Opcodes/ASTORE ss)
+        (insn gen Opcodes/ICONST_0)
+        (.visitVarInsn m Opcodes/ISTORE rs)
+        (.visitLabel m loop-l)
+        (.visitVarInsn m Opcodes/ALOAD ss)
+        (.visitVarInsn m Opcodes/ILOAD rs)
+        (.visitInvokeDynamicInsn m (if enum? "enumSwitch" "typeSwitch") (str "(" st "I)I")
+                                 (Handle. Opcodes/H_INVOKESTATIC "java/lang/runtime/SwitchBootstraps"
+                                          (if enum? "enumSwitch" "typeSwitch") switch-bsm-desc false)
+                                 (object-array bsm-args))
+        (emit-switch-insn gen (merge (into {} (map-indexed (fn [i _] [(int i) (nth case-labels i)]) labels))
+                                     (when null-arm {(int -1) (nth arm-labels null-arm)}))
+                          dflt)
+        ;; per label: bind, test nested patterns and the guard, else restart after this label
+        (doseq [[i [ci l]] (map-indexed vector labels)]
+          (.visitLabel m (nth case-labels i))
+          (let [c (nth cases ci)
+                restart (Label.)]
+            (when-let [p (:pattern l)]
+              (emit-pattern gen p st ss restart true))
+            (when-let [g (:guard c)] (emit-cond gen g false restart))
+            (.visitJumpInsn m Opcodes/GOTO (nth arm-labels ci))
+            (when (or (:pattern l) (:guard c))
+              (.visitLabel m restart)
+              (emit-const gen "I" (inc i))
+              (.visitVarInsn m Opcodes/ISTORE rs)
+              (.visitJumpInsn m Opcodes/GOTO loop-l))))
+        (emit-arms-and-default (fn [_ _]))))))
+
+(defn switch-holder-decl
+  "javac's synthetic class holding the $SwitchMap$ arrays of the outermost class top."
+  [top name enums]
+  {:name name :kind :class :nesting :anon :outer top :nest-host top :simple nil
+   :flags (bit-or Opcodes/ACC_SUPER Opcodes/ACC_SYNTHETIC)
+   :inner-flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC)
+   :super "java/lang/Object" :interfaces [] :fields [] :methods [] :members [] :member-classes {}
+   :switch-holder true
+   :state (atom {:captures []
+                 :extra-fields (for [[e _] enums]
+                                 {:name (switch-map-field e) :desc "[I"
+                                  :flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC)})
+                 :clinit-extra
+                 [(fn [gen]
+                    (let [m (mv gen)]
+                      (doseq [[e {:keys [order values]}] enums]
+                        (.visitMethodInsn m Opcodes/INVOKESTATIC e "values" (str "()[L" e ";") false)
+                        (insn gen Opcodes/ARRAYLENGTH)
+                        (.visitIntInsn m Opcodes/NEWARRAY Opcodes/T_INT)
+                        (.visitFieldInsn m Opcodes/PUTSTATIC name (switch-map-field e) "[I")
+                        (doseq [c order]
+                          (let [start (Label.) end (Label.) h (Label.) after (Label.)]
+                            (.visitLabel m start)
+                            (.visitFieldInsn m Opcodes/GETSTATIC name (switch-map-field e) "[I")
+                            (.visitFieldInsn m Opcodes/GETSTATIC e c (str "L" e ";"))
+                            (.visitMethodInsn m Opcodes/INVOKEVIRTUAL e "ordinal" "()I" false)
+                            (emit-const gen "I" (get values c))
+                            (insn gen Opcodes/IASTORE)
+                            (.visitLabel m end)
+                            (.visitJumpInsn m Opcodes/GOTO after)
+                            (.visitLabel m h)
+                            (insn gen Opcodes/POP)
+                            (.visitLabel m after)
+                            (.visitTryCatchBlock m start end h "java/lang/NoSuchFieldError"))))))]})})

@@ -29,6 +29,8 @@
 (defn has? [flags f] (not (zero? (bit-and (or flags 0) f))))
 (defn static-flag? [m] (has? (:flags m) Opcodes/ACC_STATIC))
 
+(defn nest-host [n] (env/nest-host n))
+
 (defn ns-package [ns] (str/replace (munge (name (ns-name ns))) "." "/"))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -607,6 +609,8 @@
     :let (literal-tail? (:body node))
     :if (and (or (= :none (:type (:then node))) (literal-tail? (:then node)))
              (or (= :none (:type (:else node))) (literal-tail? (:else node))))
+    :switch (every? #(or (= :none (:type %)) (literal-tail? %))
+                    (cons (or (:default node) {:op :none}) (map :body (:cases node))))
     false))
 
 (defn unify-nodes
@@ -720,7 +724,7 @@
 
 (def arbace-specials
   '#{class* label* break* continue* return* switch* lambda* method-ref* java-str* java-assert*
-     for-each* super. this.})
+     for-each* with-resources* if-instance* super. this.})
 
 (defn- core-var? [v]
   (and (var? v) (#{"clojure.core" "arbace.classes.core"} (name (ns-name (.ns ^clojure.lang.Var v))))))
@@ -924,9 +928,24 @@
   (let [from (:type node)
         c (conversion node from to)]
     (cond
-      (and (nil? c) (#{:do :let :if} (:op node)) (t/prim? to))
+      (and (nil? c) (#{:do :let :if :switch :label :if-instance :try :loop} (:op node)) (t/prim? to))
       ;; tails of a block take the context's type (literal narrowing in branches)
       (case (:op node)
+        :switch (let [cs (mapv #(update % :body convert-node to :what what) (:cases node))
+                      d (some-> (:default node) (convert-node to :what what))]
+                  (when-not d (fail (str "switch without default has no value of type " to)))
+                  (assoc node :cases cs :default d :type (unify-nodes (cons d (map :body cs)))))
+        (:label :loop) (let [b (convert-node (:body node) to :what what)]
+                         (doseq [v @(:breaks (:target node))]
+                           (when-not (conversion v (:type v) to)
+                             (fail (str "Cannot convert " what " of type " (pr-str (:type v)) " to " to))))
+                         (assoc node :body b :type to))
+        :if-instance (let [th (convert-node (:then node) to :what what)
+                           el (convert-node (:else node) to :what what)]
+                       (assoc node :then th :else el :type (unify (:type th) (:type el))))
+        :try (let [b (convert-node (:body node) to :what what)
+                   cs (mapv #(update % :body convert-node to :what what) (:catches node))]
+               (assoc node :body b :catches cs :type to))
         :do (let [r (convert-node (:ret node) to :what what)] (assoc node :ret r :type (if (= :none (:type node)) :none to)))
         :let (let [b (convert-node (:body node) to :what what)] (assoc node :body b :type (:type b)))
         :if (let [th (convert-node (:then node) to :what what)
@@ -1664,6 +1683,7 @@
               java-str* (analyze-java-str actx form)
               java-assert* (analyze-java-assert actx form)
               for-each* (analyze-for-each actx form)
+              if-instance* (analyze-if-instance actx form)
               with-resources* (analyze-with-resources actx form)
               switch* (analyze-switch actx form)
               lambda* (analyze-lambda actx form)
@@ -1711,8 +1731,7 @@
                            (let [ns (mapv #(analyze actx %) args)]
                              {:op :or :args ns :type (reduce unify (map :type ns))}))
                   "locking" (analyze-locking actx form)
-                  "if-instance" (analyze-if-instance actx form)
-                  "when-instance" (analyze-if-instance actx (list 'if-instance (second form) (cons 'do (nnext form))))
+
                   "boolean" (let [n (unboxed (analyze actx (first args)))]
                               (if (= "Z" (:type n)) n (fail "boolean of a non-boolean")))
                   nil))))
@@ -2061,8 +2080,6 @@
     (analyze-body actx2 body)))
 
 (defn- not-yet [what] (fn [& _] (fail (str what " is not implemented yet"))))
-(def analyze-switch (not-yet "switch"))
-(def analyze-if-instance (not-yet "if-instance"))
 
 (defn analyze-enum-body
   "The anonymous class E$n of an enum constant with a body; its constructor takes the enum
@@ -2351,3 +2368,142 @@
             [m va] (select-method actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
         (when va (fail "Variable arity method references are not supported yet"))
         (assoc base :kind :static :owner cn :name mname :desc (:desc m) :itf (env/interface? cn))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; patterns and switch (§5.8)
+;;
+;; pattern: {:kind :type :class desc :b binding-or-nil :test bool}
+;;          {:kind :record :class desc :comps [{:accessor method :pattern p}]}
+
+(defn- enum-class? [d]
+  (and (t/class-desc? d) (has? (:flags (env/info (t/desc->internal d))) Opcodes/ACC_ENUM)))
+
+(defn analyze-pattern
+  "Analyzes a pattern form against a value of static type st. Returns [pattern actx-with-bindings]."
+  [actx form st & {:keys [component]}]
+  (cond
+    (symbol? form)
+    (let [tag (:tag (meta form))
+          ty (cond tag (actx-desc actx tag)
+                   component st
+                   (= '_ form) st
+                   :else (fail (str "A type pattern needs a type: " form)))
+          unnamed (= "_" (name form))
+          b (when-not unnamed (make-binding actx form ty :mutable (boolean (:mutable (meta form)))))
+          test (not (or (= ty st) (and (t/ref? ty) (t/ref? st) (env/assignable? st ty))
+                        (and (t/prim? ty) (= ty st))))]
+      (when (and (t/prim? ty) (not= ty st))
+        (fail (str "Primitive pattern of type " ty " for a value of type " st " is not supported")))
+      [{:kind :type :class ty :b b :test test} (if b (with-local actx b) actx)])
+
+    (and (seq? form) (symbol? (first form)))
+    (let [rn (or (resolve-class actx (first form)) (fail (str "Unknown record " (first form))))
+          rd (t/internal->desc rn)
+          info (env/info! rn)
+          comps (or (:components info)
+                    (when-let [c (env/load-class rn)]
+                      (when (.isRecord ^Class c)
+                        (for [rc (.getRecordComponents ^Class c)]
+                          {:name (.getName ^java.lang.reflect.RecordComponent rc)
+                           :desc (t/class->desc (.getType ^java.lang.reflect.RecordComponent rc))})))
+                    (fail (str (first form) " is not a record")))
+          _ (when-not (= (count comps) (count (rest form)))
+              (fail (str "Record pattern " (first form) " needs " (count comps) " component patterns")))
+          [cps actx] (reduce (fn [[cps actx] [c f]]
+                               (let [[p actx] (analyze-pattern actx f (:desc c) :component true)
+                                     acc {:owner rn :name (:name c) :desc (str "()" (:desc c))}]
+                                 [(conj cps {:accessor acc :pattern p}) actx]))
+                             [[] actx] (map vector comps (rest form)))]
+      [{:kind :record :class rd :comps cps
+        :test (not (and (t/ref? st) (env/assignable? st rd)))} actx])
+
+    :else (fail (str "Bad pattern: " (pr-str form)))))
+
+(defn analyze-if-instance [actx [_ [pat x :as bv] then else :as form]]
+  (when-not (and (vector? bv) (= 2 (count bv))) (fail "if-instance needs [pattern expr]"))
+  (let [xn (analyze actx x)
+        xt (value-type (:type xn))
+        _ (when-not (t/ref? xt) (fail "if-instance of a primitive"))
+        temp (make-binding actx (gensym "inst$") xt)
+        [p pactx] (analyze-pattern actx pat xt)
+        p (if (= :type (:kind p)) (assoc p :test true) (assoc p :test true))
+        tn (analyze pactx then)
+        en (analyze actx else)]
+    {:op :if-instance :expr xn :temp temp :pattern p :then tn :else en
+     :type (unify-nodes [tn en])}))
+
+(defn- switch-map!
+  "Registers a use of enum constant `c` of enum e in the outermost class's $SwitchMap$; returns
+  its mapped value."
+  [actx e c]
+  (let [top (nest-host (:class actx))
+        maps (:switch-maps *unit*)]
+    (get-in (swap! maps update-in [top e]
+                   (fn [m] (let [m (or m {:values {} :order []})]
+                             (if (get (:values m) c) m
+                                 (-> m (assoc-in [:values c] (inc (count (:values m))))
+                                     (update :order conj c))))))
+            [top e :values c])))
+
+(defn- constant-label [actx form desc]
+  (let [n (analyze-const-form (scope-of actx) form desc)]
+    (or n (fail (str "switch label is not a constant: " (pr-str form))))))
+
+(defn analyze-switch [actx [_ sel & clauses]]
+  (let [sn (analyze actx sel)
+        st (value-type (:type sn))
+        [pairs dflt] (if (odd? (count clauses))
+                       [(partition 2 (butlast clauses)) [(last clauses)]]
+                       [(partition 2 clauses) nil])
+        null-label? #(or (nil? %) (and (seq? %) (some nil? %)))
+        enum? (enum-class? st)
+        kind (cond (some (fn [[l]] (or (vector? l) (null-label? l))) pairs) :pattern
+                   (#{"I" "S" "B" "C"} (prim-type sn)) :int
+                   (= st t/string-desc) :string
+                   enum? :enum
+                   :else (fail (str "switch on a value of type " (pr-str st))))
+        sel-node (if (= kind :int) (unboxed sn) sn)
+        enum-name (fn [l]
+                    (when-not (symbol? l) (fail (str "Enum switch label must be a constant name: " (pr-str l))))
+                    (let [en (t/desc->internal st)
+                          f (env/find-field en (name l))]
+                      (when-not (and f (has? (:flags f) Opcodes/ACC_ENUM))
+                        (fail (str "No enum constant " (name l) " in " en)))
+                      (name l)))
+        cases
+        (vec
+          (for [[l body] pairs]
+            (cond
+              (vector? l)
+              (let [[pf & opts] l
+                    {guard :when} (apply hash-map opts)
+                    [p pactx] (analyze-pattern actx pf st)
+                    gn (when guard (analyze pactx guard))]
+                {:labels [{:pattern p}] :guard gn :body (analyze pactx body)})
+
+              :else
+              (let [ls (if (seq? l) l [l])
+                    labels (vec (for [x ls]
+                                  (cond
+                                    (nil? x) {:null true}
+                                    (= :default x) {:default true}
+                                    (= kind :enum) {:enum (enum-name x)}
+                                    (and (= kind :pattern) enum?) {:enum (enum-name x)}
+                                    :else
+                                    (let [d (case kind :int "I" :string t/string-desc
+                                                  (if (#{"Ljava/lang/Integer;" "Ljava/lang/Character;" "Ljava/lang/Short;" "Ljava/lang/Byte;"} st)
+                                                    (t/unbox-of st) t/string-desc))
+                                          c (constant-label actx x (if (= kind :pattern) (if (= d t/string-desc) d "I") d))]
+                                      {:const (:val c) :ctype (:type c)}))))]
+                {:labels labels :body (analyze actx body)}))))
+        default (when dflt (analyze actx (first dflt)))
+        _ (when (= kind :enum)
+            (when-not (= (nest-host (:class actx)) (nest-host (t/desc->internal st)))
+              (doseq [c cases l (:labels c)] (switch-map! actx (t/desc->internal st) (:enum l)))))
+        bodies (concat (map :body cases) [(or default (const-node :null nil))])]
+    {:op :switch :kind kind :sel sel-node :sel-type (if (= kind :int) "I" st) :cases cases :default default
+     :enum-direct (and (= kind :enum) (= (nest-host (:class actx)) (nest-host (t/desc->internal st))))
+     :sel-binding (make-binding actx (gensym "sel$") (if (= kind :int) "I" st))
+     :restart (make-binding actx (gensym "restart$") "I")
+     :top (nest-host (:class actx))
+     :type (unify-nodes bodies)}))
