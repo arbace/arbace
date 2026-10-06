@@ -1726,9 +1726,12 @@
             (arm-code ci c)
             (emit-arm (:body c)))
           (.visitLabel m dflt)
-          (if-let [d (:default node)]
-            (emit-arm d)
-            (when expr? (insn gen Opcodes/ACONST_NULL)))
+          (if-let [ci (some (fn [[ci l]] (when (:default l) ci)) indexed)]
+            ;; (nil :default): that arm is also the default
+            (.visitJumpInsn m Opcodes/GOTO (nth arm-labels ci))
+            (if-let [d (:default node)]
+              (emit-arm d)
+              (when expr? (insn gen Opcodes/ACONST_NULL))))
           (.visitLabel m end))]
     (case (:kind node)
       :int

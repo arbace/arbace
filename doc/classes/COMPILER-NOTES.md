@@ -152,7 +152,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
 | `WHILE_LOOP`, `DO_WHILE_LOOP`, `FOR_LOOP`, `ENHANCED_FOR_LOOP` | done ≡ (`while`, `loop`/`recur`, `dotimes`, `for-each` over arrays and `Iterable`s) |
 | `LABELED_STATEMENT`, `BREAK`, `CONTINUE`, `RETURN`, `YIELD` | done ≡ (also through `finally` and `locking`) |
-| `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, case labels | done ≡ (int-like, `String`, enums with ordinals or `$SwitchMap$`, `nil`, patterns with guards) |
+| `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, case labels | done ≡ (int-like, `String`, enums with ordinals or `$SwitchMap$`, `nil`, `(nil :default)`, patterns with guards) |
 | `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping) |
 | `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert`, in interfaces through javac's holder class) |
 | `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
@@ -201,7 +201,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | partial: vars (read and call), keywords, quoted data, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`); `fn`, `letfn`, `case` todo |
-| §5.6 reflection is an error | done (unresolved members are compile errors; there is no reflective fallback) |
+| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `clojure.lang.Reflector` with a warning |
 | `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
 ## Notes for the converter

@@ -925,7 +925,7 @@
 
 (declare accessorize)
 
-(declare outer-super-call code-type-anns)
+(declare outer-super-call code-type-anns analyze-method-call*)
 
 (declare clj-constant clj-collection clj-var-field)
 
@@ -1615,8 +1615,36 @@
        (= "[Ljava/lang/Object;" (first (first (t/parse-method-desc (:desc m)))))
        (= 1 (count (first (t/parse-method-desc (:desc m)))))))
 
+(defn- reflective-call
+  "With ^{:reflection :warn} on the class, a call the compiler cannot resolve goes through
+  clojure.lang.Reflector at run time, with a warning (SPEC §12 question 7)."
+  [actx target mname arg-nodes why]
+  (binding [*out* *err*]
+    (println (str "Reflection warning, " (str/replace (:class actx) "/" ".") " - call to method "
+                  mname " can't be resolved (" why ").")))
+  {:op :invoke :kind :static :owner "clojure/lang/Reflector" :itf false :name "invokeInstanceMethod"
+   :desc "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
+   :target nil
+   :args [(convert-node target t/object-desc) (const-node t/string-desc mname)
+          {:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) arg-nodes)}]
+   :type t/object-desc})
+
 (defn analyze-method-call
   "(.name target args) where target is a node of static type `tt`."
+  [actx target mname args & {:keys [special param-tags owner-override ret-tag]}]
+  (if (and (= :warn (:reflection actx)) (not special))
+    (try (analyze-method-call* actx target mname args :param-tags param-tags :owner-override owner-override
+                               :ret-tag ret-tag)
+         (catch clojure.lang.ExceptionInfo e
+           (if (and (:arbace/compile-error (ex-data e))
+                    (re-find #"^(No accessible method|No matching method|Ambiguous call)" (ex-message e))
+                    (t/ref? (value-type (:type target))))
+             (reflective-call actx target mname (mapv #(analyze actx %) args) (ex-message e))
+             (throw e))))
+    (analyze-method-call* actx target mname args :special special :param-tags param-tags
+                          :owner-override owner-override :ret-tag ret-tag)))
+
+(defn analyze-method-call*
   [actx target mname args & {:keys [special param-tags owner-override ret-tag]}]
   (let [tt (value-type (:type target))
         _ (when-not (t/ref? tt) (fail (str "Method call ." mname " on a value of type " (pr-str tt))))
@@ -2069,6 +2097,7 @@
         f (assoc (new-frame kind n (class-parent-frame n) boundary) :static static?)
         cactx (creation-actx n)]
     {:class n :ns (:ns d) :bounds bounds :static static? :frame f
+     :reflection (some #(:reflection (:meta (decl %))) (take-while some? (iterate #(some-> % decl :outer) n)))
      :locals (or (:locals cactx) {})
      :local-classes (merge (:local-classes cactx) (:local-classes d))
      :labels {} :method-info method-info :ret ret}))
@@ -2895,7 +2924,8 @@
         _ (when (= kind :enum)
             (when-not (= (nest-host (:class actx)) (nest-host (t/desc->internal st)))
               (doseq [c cases l (:labels c)] (switch-map! actx (t/desc->internal st) (:enum l)))))
-        bodies (concat (map :body cases) [(or default (const-node :null nil))])
+        default-arm? (some (fn [c] (some :default (:labels c))) cases)
+        bodies (concat (map :body cases) (when-not default-arm? [(or default (const-node :null nil))]))
         ty (unify-nodes bodies)
         cases (mapv #(update % :body literal-branch ty) cases)
         default (some-> default (literal-branch ty))]

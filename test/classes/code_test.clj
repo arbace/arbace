@@ -145,3 +145,11 @@
                      :quoted '(1 (2 3) {:x [y]})}))])]
     (is (= {:n 3 :kw :foo :sym 'bar :vec [1 "two" 3] :set #{:a} :twice 6 :quoted '(1 (2 3) {:x [y]})}
            (clojure.lang.Reflector/invokeStaticMethod C "data" (object-array [(int 3)]))))))
+
+(deftest reflection-escape
+  (let [[C] (load-forms 'classes.code-test
+              '[(^:public ^{:reflection :warn} Refl
+                  (method ^:public ^:static len [o] (.length o)))])]
+    (is (= 3 (clojure.lang.Reflector/invokeStaticMethod C "len" (object-array ["abc"]))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (load-forms 'classes.code-test '[(^:public NoRefl (method ^:public ^:static len [o] (.length o)))])))))

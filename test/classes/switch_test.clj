@@ -94,3 +94,12 @@
     (is (= ["nil" "empty" "str:x" "long" "other"] (map #(call 'kind %) [nil "" "x" 5 1.0])))
     (is (= ["Sun" "work" "Sat"] (map #(call 'day (int %)) [0 3 6])))
     (is (= [1 2 99 99 -1] (map #(call 'word %) ["one" "two" "Aa" "BB" "x"])))))
+
+(deftest null-default-shape
+  (same-shapes? 'classes.switch-test
+    {"ND" "public class ND {
+       static String f(Object o) { return switch (o) { case String s -> s; case null, default -> \"?\"; }; }
+     }"}
+    '[(^:public ND
+        (method ^:static f ^String [^Object o]
+          (switch o [^String s] s (nil :default) "?")))]))
