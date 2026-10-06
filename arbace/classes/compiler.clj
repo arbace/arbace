@@ -43,17 +43,17 @@
                        (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))]
       (a/process-classes! 0)
       (infer-permits!)
-      ;; javac's $SwitchMap$ holder classes, named after all anonymous classes
-      (doseq [[top enums] @(:switch-maps a/*unit*)]
-        (let [h (a/local-class-name top nil)]
-          (swap! env/*compile-set* assoc h (e/switch-holder-decl top h enums))
+      ;; javac's synthetic holder class of the outermost class: $SwitchMap$ arrays and the
+      ;; $assertionsDisabled of interfaces share it; it is named after all anonymous classes
+      (doseq [top (distinct (concat (keys @(:switch-maps a/*unit*)) (keys @(:assert-holders a/*unit*))))]
+        (let [h (a/local-class-name top nil)
+              enums (get @(:switch-maps a/*unit*) top)
+              d (cond-> (e/switch-holder-decl top h (or enums {}))
+                  (contains? @(:assert-holders a/*unit*) top) (update :state #(atom (assoc @% :uses-assert true))))]
+          (swap! env/*compile-set* assoc h d)
           (swap! (:order a/*unit*) conj h)
-          (swap! (:switch-holders a/*unit*) assoc top h)))
-      (doseq [[top _] @(:assert-holders a/*unit*)]
-        (let [h (a/local-class-name top nil)]
-          (swap! env/*compile-set* assoc h (e/assert-holder-decl top h))
-          (swap! (:order a/*unit*) conj h)
-          (swap! (:assert-holders a/*unit*) assoc top h)))
+          (when enums (swap! (:switch-holders a/*unit*) assoc top h))
+          (when (contains? @(:assert-holders a/*unit*) top) (swap! (:assert-holders a/*unit*) assoc top h))))
       (let [classes (vec (for [c @(:order a/*unit*)
                                :when (not (:declared-only (a/decl c)))]
                            {:name c :bytes (e/emit-class c) :info (a/decl c)}))]
