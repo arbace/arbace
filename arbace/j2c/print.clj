@@ -99,8 +99,19 @@
     (false? x) "false"
     :else (throw (ex-info (str "can't print " (class x)) {:x x}))))
 
+(def ^:dynamic ^java.util.IdentityHashMap *flat-cache* nil)
+
+(declare flat*)
+
 (defn flat
   "`x` printed on one line."
+  [x]
+  (if (and *flat-cache* (coll? x))
+    (or (.get *flat-cache* x)
+        (let [s (flat* x)] (.put *flat-cache* x s) s))
+    (flat* x)))
+
+(defn- flat*
   [x]
   (str (meta-text x)
        (cond
@@ -186,7 +197,7 @@
     (str m header-text
          (apply str (for [[k v] opts] (str "\n" (indent bcol) (flat k) " " (pp v (+ bcol (count (flat k)) 1)))))
          (when (seq members)
-           (str (if (and defclass? (seq opts)) "\n\n" (if (and defclass? (some seq? members)) "\n\n" "\n"))
+           (str (if (and defclass? (seq opts)) "\n\n" "\n")
                 (indent bcol)
                 (str/join (str (if (= 'constants hd) "\n" sep-members) (indent bcol))
                           (map #(pp % bcol) members))))
@@ -278,16 +289,17 @@
         (let [m (meta-text x) c (+ col (count m) 1)]
           (if (every? #(not (coll? %)) x)
             ;; atoms: fill lines
-            (str m "["
-                 (loop [out "" line-len 0 [a & more :as as] x]
-                   (if (empty? as)
-                     out
-                     (let [t (flat a)]
-                       (cond
-                         (= "" out) (recur t (+ c (count t)) more)
-                         (<= (+ line-len 1 (count t)) width) (recur (str out " " t) (+ line-len 1 (count t)) more)
-                         :else (recur (str out "\n" (indent c) t) (+ c (count t)) more)))))
-                 "]")
+            (let [sb (StringBuilder. (str m "["))]
+              (loop [first? true line-len 0 [a & more :as as] (seq x)]
+                (when as
+                  (let [t (flat a)]
+                    (cond
+                      first? (do (.append sb t) (recur false (+ c (count t)) more))
+                      (<= (+ line-len 1 (count t)) width)
+                      (do (.append sb " ") (.append sb t) (recur false (+ line-len 1 (count t)) more))
+                      :else (do (.append sb "\n") (.append sb (indent c)) (.append sb t)
+                                (recur false (+ c (count t)) more))))))
+              (str (.append sb "]")))
             (str m "[" (pp-seq-lines x c "\n") "]")))
         (map? x) s
         (and (seq? x) (seq x))
@@ -313,4 +325,6 @@
             :else (pp-call x col)))
         :else s))))
 
-(defn form-text [x] (pp x 0))
+(defn form-text [x]
+  (binding [*flat-cache* (java.util.IdentityHashMap.)]
+    (pp x 0)))

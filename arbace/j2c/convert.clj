@@ -82,7 +82,7 @@
        (and (identical? in-scope c) (not (str/blank? simple)))
        (if (pos? dims) (symbol simple (str dims)) (symbol simple))
        (jt/local-class? c) ;; a local class not in scope by name: should not happen
-       (do (note! :warn/local-class-out-of-scope)
+       (do (note! :warn/local-class-out-of-scope) (note! (keyword "dbg" (str (.flatName c))))
            (if (pos? dims) (symbol simple (str dims)) (symbol simple)))
        :else (f/->CRef (jt/binary-name c) dims nil (shadow-set env))))))
 
@@ -127,7 +127,9 @@
             base (class-ref env c)
             self (if args (apply list base (map #(type-form env %) args)) base)]
         (if (and (instance? Type$ClassType outer) (seq (.allparams ^Type outer))
-                 (not (jt/static? c)))
+                 (not (jt/static? c)) (not (jt/local-class? c))
+                 (not (and (identical? (get (:scope env) (str (.getSimpleName c))) c)
+                           (.isSameType jt/*types* outer (.type (.tsym outer))))))
           (list '.. (type-form env outer)
                 (if args
                   (apply list (symbol (str (.getSimpleName c))) (map #(type-form env %) args))
@@ -324,8 +326,10 @@
          :else ;; unboxing
          (let [u (jt/unboxed t)]
            (if u
-             (let [v (unbox-call env form t)]
-               (if (and explicit? (not (same? u target))) (list (widen-op (tag-name target)) v) v))
+             (if (and (not explicit?) (or (same? u target) (jt/widens? u target)))
+               form
+               (let [v (unbox-call env form t)]
+                 (if (and explicit? (not (same? u target))) (list (widen-op (tag-name target)) v) v)))
              ;; from a non-wrapper type: cast to the wrapper of the target
              (let [w (jt/boxed target)]
                (unbox-call env (cast-form env form w) w)))))
@@ -351,7 +355,7 @@
   [env x]
   (let [t (:t x)]
     (if (and (instance? Type t) (not (prim? t)))
-      (coerce env x (bool-type))
+      (coerce env x (bool-type) true)
       (:f x))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -413,9 +417,11 @@
                  (r v tt)))
       "FLOAT" (let [fv (float v)
                     d (Double/parseDouble (Float/toString fv))]
-                (if (= (float d) fv)
+                ;; the shortest decimal when it rounds back to the float, else the float's
+                ;; exact value as a double
+                (if (and (<= (Math/abs d) Float/MAX_VALUE) (= (unchecked-float d) fv))
                   (r (list 'float d) tt)
-                  (r (list 'Float/intBitsToFloat (list 'unchecked-int (Float/floatToRawIntBits fv))) tt)))
+                  (r (list 'float (double fv)) tt)))
       "DOUBLE" (r (double v) tt)
       "CHAR" (let [c (char (int v))]
                (if (Character/isSurrogate c)
@@ -444,8 +450,11 @@
   (if (identical? c (current-class env))
     (or (:this env) (do (note! :warn/no-this) 'this))
     (do (note! :form/outer-this)
-        (when (jt/anonymous? c) (note! :warn/anonymous-outer-this))
-        (member (class-ref env c) "this"))))
+        (if (jt/anonymous? c)
+          (if-let [s (get (:anon-this env) c)]
+            (do (note! :form/anonymous-outer-receiver) s)
+            (do (note! :warn/anonymous-outer-this) (member (class-ref env c) "this")))
+          (member (class-ref env c) "this")))))
 
 (defn- qualifying-class
   "For a member referenced by simple name: the innermost enclosing class of which it is a
@@ -493,7 +502,7 @@
       (= nm "this") (r (or (:this env) 'this) (erasure (.type t)))
       (= nm "super") (r 'super (erasure (.type t)))
       (and (= "VAR" (jt/kind sym)) (local? sym))
-      (r (or (get (:locals env) sym) (do (note! :warn/unknown-local) (symbol nm))) (var-type sym))
+      (r (or (get (:locals env) sym) (do (note! :warn/unknown-local) (note! (keyword "dbg" (str (.owner sym) "." nm))) (symbol nm))) (var-type sym))
       (= "VAR" (jt/kind sym))
       (do (note! :form/field-read)
           (r (field-ref env sym) (var-type sym)))
@@ -878,10 +887,15 @@
         (when-not sym (throw (ex-info (str "no operator for " tg " " pa) {})))
         (list (h env sym) (coerce env a pa) (coerce env b (if shift? pb pb)))))))
 
+(declare has-patterns? pattern-bool cond-form pattern-binds)
+
 (defn- binary [env ^JCTree$JCBinary t]
   (let [tg (str (.getTag t))
         result (erasure (.type t))]
     (note! (keyword "op" tg))
+    (cond
+      (and (#{"AND" "OR"} tg) (has-patterns? t)) (r (pattern-bool env t) result)
+      :else
     (if (and (= tg "PLUS") (jt/string-type? result))
       (do (note! :form/java-str)
           (r (apply list (h env 'java-str)
@@ -893,16 +907,16 @@
              result))
       (r (binary-op env tg (operator-params t) result (ex env (.lhs t)) (ex env (.rhs t)))
          (let [c (.constValue (.type t))]
-           (if (and c (= "INT" (tag-name result)) false) :lit-int result))))))
+           (if (and c (= "INT" (tag-name result)) false) :lit-int result)))))))
 
 (defn- unary-value [env ^JCTree$JCUnary t]
   (let [tg (str (.getTag t))
-        x (ex env (.arg t))
+        x (when-not (and (= tg "NOT") (has-patterns? (.arg t))) (ex env (.arg t)))
         [p] (operator-params t)
         result (erasure (.type t))]
     (note! (keyword "op" tg))
     (case tg
-      "NOT" (r (list (h env 'not) (test-form env x)) result)
+      "NOT" (r (if (has-patterns? (.arg t)) (pattern-bool env t) (list (h env 'not) (test-form env x))) result)
       "POS" (r (coerce env x p) result)
       "NEG" (if (and (number? (:f x)) false)
               x
@@ -1137,7 +1151,7 @@
     (let [v (.var ^JCTree$JCBindingPattern p)
           sym (.sym v)
           nm (str (.name v))
-          s (symbol nm)
+          s (symbol (if (= nm "") "_" nm))
           implicit? (nil? (.vartype v))]
       (note! :form/binding-pattern)
       (swap! penv (fn [e] (-> e (assoc-in [:locals sym] s) (update :names conj nm))))
@@ -1151,23 +1165,98 @@
              (map #(pattern-form env penv %) (.nested rp))))
     :else (throw (ex-info "unknown pattern" {}))))
 
-(defn- instance-of [env ^JCTree$JCInstanceOf t]
-  (let [x (ex env (.expr t))
-        p (.pattern t)]
-    (if (instance? JCTree$JCPattern p)
-      ;; a pattern outside of an if: bind nothing visible after, test only
-      (let [penv (atom env)
-            pf (pattern-form env penv p)]
+(defn- pattern-instanceof? [^JCTree c]
+  (and (instance? JCTree$JCInstanceOf c) (instance? JCTree$JCPattern (.pattern ^JCTree$JCInstanceOf c))))
+
+(defn has-patterns?
+  "True when condition `c` contains a pattern instanceof outside lambdas and classes."
+  [^JCTree c]
+  (letfn [(walk [x]
+            (cond
+              (pattern-instanceof? x) true
+              (or (instance? JCTree$JCLambda x) (instance? JCTree$JCClassDecl x)
+                  (instance? JCTree$JCSwitchExpression x)) false
+              :else (some walk (tree-children x))))]
+    (boolean (walk c))))
+
+(defn- pattern-vars [^JCTree p]
+  (set (for [x (all-trees p) :when (instance? JCTree$JCBindingPattern x)]
+         (.sym (.var ^JCTree$JCBindingPattern x)))))
+
+(defn pattern-binds
+  "{:t vars :f vars}: the pattern variables condition `c` introduces when true and when false
+  (JLS 6.3.1)."
+  [^JCTree c]
+  (let [c (TreeInfo/skipParens c)
+        none {:t #{} :f #{}}]
+    (cond
+      (pattern-instanceof? c) {:t (pattern-vars (.pattern ^JCTree$JCInstanceOf c)) :f #{}}
+      (and (instance? JCTree$JCUnary c) (= "NOT" (str (.getTag c))))
+      (let [{:keys [t f]} (pattern-binds (.arg ^JCTree$JCUnary c))] {:t f :f t})
+      (and (instance? JCTree$JCBinary c) (= "AND" (str (.getTag c))))
+      {:t (into (:t (pattern-binds (.lhs ^JCTree$JCBinary c))) (:t (pattern-binds (.rhs ^JCTree$JCBinary c)))) :f #{}}
+      (and (instance? JCTree$JCBinary c) (= "OR" (str (.getTag c))))
+      {:t #{} :f (into (:f (pattern-binds (.lhs ^JCTree$JCBinary c))) (:f (pattern-binds (.rhs ^JCTree$JCBinary c))))}
+      :else none)))
+
+(defn cond-form
+  "The form testing condition `c` that runs (then-fn env') or (else-fn env') with the pattern
+  variables in scope where Java has them (§5.8 if-instance). A branch may be repeated."
+  [env ^JCTree c then-fn else-fn]
+  (let [c (TreeInfo/skipParens c)
+        tg (str (.getTag c))]
+    (cond
+      (pattern-instanceof? c)
+      (let [io ^JCTree$JCInstanceOf c
+            x (ex env (.expr io))
+            penv (atom env)
+            pf (pattern-form env penv (.pattern io))]
         (note! :form/if-instance)
-        (r (list (h env 'if-instance) [pf (:f x)] true false) (bool-type)))
-      (do (note! :form/instance?)
-          (r (list (h env 'instance?) (erased-form env (.type p)) (:f x)) (bool-type))))))
+        (list (h env 'if-instance) [pf (:f x)] (then-fn @penv) (else-fn env)))
+      (and (= tg "NOT") (has-patterns? (.arg ^JCTree$JCUnary c)))
+      (cond-form env (.arg ^JCTree$JCUnary c) else-fn then-fn)
+      (and (= tg "AND") (has-patterns? c))
+      (do (note! :flow/pattern-and)
+          (cond-form env (.lhs ^JCTree$JCBinary c)
+                     (fn [e] (cond-form e (.rhs ^JCTree$JCBinary c) then-fn else-fn))
+                     else-fn))
+      (and (= tg "OR") (has-patterns? c))
+      (do (note! :flow/pattern-or)
+          (cond-form env (.lhs ^JCTree$JCBinary c) then-fn
+                     (fn [e] (cond-form e (.rhs ^JCTree$JCBinary c) then-fn else-fn))))
+      :else (list 'if (test-form env (ex env c)) (then-fn env) (else-fn env)))))
+
+(defn- pattern-bool
+  "A boolean expression with patterns, as a value."
+  [env ^JCTree c]
+  (let [c (TreeInfo/skipParens c)
+        tg (str (.getTag c))]
+    (cond
+      (pattern-instanceof? c) (cond-form env c (fn [_] true) (fn [_] false))
+      (= tg "NOT") (list (h env 'not) (test-form env (ex env (.arg ^JCTree$JCUnary c))))
+      (= tg "AND")
+      (let [a (.lhs ^JCTree$JCBinary c) b (.rhs ^JCTree$JCBinary c)]
+        (if (has-patterns? a)
+          (cond-form env a (fn [e] (test-form e (ex e b))) (fn [_] false))
+          (list (h env 'and) (test-form env (ex env a)) (test-form env (ex env b)))))
+      (= tg "OR")
+      (let [a (.lhs ^JCTree$JCBinary c) b (.rhs ^JCTree$JCBinary c)]
+        (if (has-patterns? a)
+          (cond-form env a (fn [_] true) (fn [e] (test-form e (ex e b))))
+          (list (h env 'or) (test-form env (ex env a)) (test-form env (ex env b))))))))
+
+(defn- instance-of [env ^JCTree$JCInstanceOf t]
+  (if (instance? JCTree$JCPattern (.pattern t))
+    (r (pattern-bool env t) (bool-type))
+    (let [x (ex env (.expr t))]
+      (note! :form/instance?)
+      (r (list (h env 'instance?) (erased-form env (.type (.pattern t))) (:f x)) (bool-type)))))
 
 (defn- conditional [env ^JCTree$JCConditional t]
   (let [target (erasure (.type t))
-        a (ex env (.truepart t))
-        b (ex env (.falsepart t))
-        c (test-form env (ex env (.cond t)))
+        c (when-not (has-patterns? (.cond t)) (test-form env (ex env (.cond t))))
+        a (when c (ex env (.truepart t)))
+        b (when c (ex env (.falsepart t)))
         branch (fn [x]
                  (if (and (prim? target) (= :lit-int (:t x)) (#{"INT"} (tag-name target)))
                    (:f x)
@@ -1178,8 +1267,10 @@
                        (hint env f target)
                        f))))]
     (note! :form/if)
-    (r (list 'if c (branch a) (branch b))
-       (if (and (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))))
+    (r (if c
+         (list 'if c (branch a) (branch b))
+         (cond-form env (.cond t) (fn [e] (branch (ex e (.truepart t)))) (fn [e] (branch (ex e (.falsepart t))))))
+       (if (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
@@ -1336,6 +1427,10 @@
 
 (def ctx0 {:fall [] :jumps {} :vpos nil})
 
+(def ^:dynamic *predeclared*
+  "Local variables declared in a switch case and used in another case: bound before the switch."
+  #{})
+
 (defn- seq-ctx [ctx] ctx0)
 
 (defn- recur-free
@@ -1434,7 +1529,8 @@
   #{})
 
 (defn- local-sym [env ^Symbol$VarSymbol sym]
-  (symbol (str (.name sym))))
+  (let [n (str (.name sym))]
+    (symbol (if (= n "") "_" n))))
 
 (defn- add-local [env ^Symbol$VarSymbol sym s]
   (-> env
@@ -1526,13 +1622,13 @@
     @found))
 
 (defn- cond-chain-form [env pairs ^Type decl]
-  (let [conv (fn [e] (coerce env (ex env e) decl))]
-    (reduce (fn [else [c e]]
-              (list 'if (test-form env (ex env c)) (conv e) else))
-            (conv (second (last pairs)))
-            (reverse (butlast pairs)))))
+  (let [[[c e] & more] pairs
+        conv (fn [env e] (coerce env (ex env e) decl))]
+    (if (nil? c)
+      (conv env e)
+      (cond-form env c (fn [env'] (conv env' e)) (fn [env'] (cond-chain-form env' more decl))))))
 
-(declare local-class-binding foldable-if?)
+(declare local-class-binding foldable-if? cond-form)
 
 (defn stmts
   "Convert the statement sequence `ss` in `ctx` to a vector of forms."
@@ -1543,6 +1639,16 @@
       (let [s (first ss)
             more (subvec ss 1)]
         (cond
+          ;; a local declared in one switch case and used in another: declared before the
+          ;; switch, assigned here
+          (and (instance? JCTree$JCVariableDecl s) (contains? *predeclared* (.sym ^JCTree$JCVariableDecl s)))
+          (let [d ^JCTree$JCVariableDecl s
+                sym (.sym d)
+                x (get-in env [:locals sym])]
+            (into (if (.init d)
+                    [(list 'set! x (coerce env (ex env (.init d)) (erasure (.type sym))))]
+                    [])
+                  (stmts env ctx more)))
           ;; local variables: a let over the rest of the block
           (instance? JCTree$JCVariableDecl s)
           (let [d ^JCTree$JCVariableDecl s
@@ -1578,15 +1684,32 @@
                 [(apply list (h env 'letclass) (into [bind] bv) bbody)])
               [(apply list (h env 'letclass) [bind] (if (empty? body) [nil] body))]))
           (empty? more) (stmt env ctx s)
+          ;; if whose pattern variables are in scope in the rest of the block
+          (and (instance? JCTree$JCIf s) (has-patterns? (.cond ^JCTree$JCIf s))
+               (let [{:keys [t f]} (pattern-binds (.cond ^JCTree$JCIf s))]
+                 (some (fn [v] (some #(refs-sym? % v) more)) (concat t f))))
+          (let [i ^JCTree$JCIf s
+                {:keys [t]} (pattern-binds (.cond i))
+                into-then? (some (fn [v] (some #(refs-sym? % v) more)) t)
+                a (.thenpart i) b (.elsepart i)]
+            (note! :flow/pattern-scope)
+            [(if into-then?
+               (cond-form env (.cond i)
+                          (fn [e] (do-form (stmts e ctx (into [a] more))))
+                          (fn [e] (do-form (stmts e ctx (if b [b] [])))))
+               (cond-form env (.cond i)
+                          (fn [e] (do-form (stmts e ctx [a])))
+                          (fn [e] (do-form (stmts e ctx (if b (into [b] more) more))))))])
           ;; if whose one branch ends in a jump that the rest makes implicit
           (and (instance? JCTree$JCIf s) (foldable-if? ctx s))
           (let [i ^JCTree$JCIf s
-                c (test-form env (ex env (.cond i)))
                 a (.thenpart i) b (.elsepart i)]
             (note! :flow/folded-if)
             (if (not (cn? a))
-              [(list 'if c (do-form (stmts env ctx [a])) (do-form (stmts env ctx (if b (into [b] more) more))))]
-              [(list 'if c (do-form (stmts env ctx (into [a] more))) (do-form (stmts env ctx [b])))]))
+              [(cond-form env (.cond i) (fn [e] (do-form (stmts e ctx [a])))
+                          (fn [e] (do-form (stmts e ctx (if b (into [b] more) more)))))]
+              [(cond-form env (.cond i) (fn [e] (do-form (stmts e ctx (into [a] more))))
+                          (fn [e] (do-form (stmts e ctx [b]))))]))
           :else
           (into (stmt env ctx0 s) (stmts env ctx more)))))))
 
@@ -1617,7 +1740,7 @@
   [env ctx t]
   (do-form (stmts env ctx [t])))
 
-(declare loop-stmt switch-stmt try-stmt)
+(declare loop-stmt switch-stmt try-stmt switch-stmt-1)
 
 (defn stmt
   "Convert statement `t` in `ctx` to a vector of forms (including ctx's :fall where `t` can
@@ -1632,12 +1755,16 @@
     JCTree$JCSkip (vec (:fall ctx))
     JCTree$JCExpressionStatement (into (with-hoisting env (.expr ^JCTree$JCExpressionStatement t) :after ex-stmt)
                                        (:fall ctx))
-    JCTree$JCIf (let [i ^JCTree$JCIf t
-                      c (test-form env (ex env (.cond i)))
-                      a (stmt-body env ctx (.thenpart i))
-                      b (if (.elsepart i) (stmt-body env ctx (.elsepart i)) (do-form (:fall ctx)))]
+    JCTree$JCIf (let [i ^JCTree$JCIf t]
                   (note! :form/if)
-                  [(if (nil? b) (list (h env 'when) c a) (list 'if c a b))])
+                  (if (has-patterns? (.cond i))
+                    [(cond-form env (.cond i)
+                                (fn [e] (stmt-body e ctx (.thenpart i)))
+                                (fn [e] (if (.elsepart i) (stmt-body e ctx (.elsepart i)) (do-form (:fall ctx)))))]
+                    (let [c (test-form env (ex env (.cond i)))
+                          a (stmt-body env ctx (.thenpart i))
+                          b (if (.elsepart i) (stmt-body env ctx (.elsepart i)) (do-form (:fall ctx)))]
+                      [(if (nil? b) (list (h env 'when) c a) (list 'if c a b))])))
     JCTree$JCThrow (do (note! :form/throw)
                        [(list 'throw (coerce env (ex env (.expr ^JCTree$JCThrow t)) (erasure (.type (.expr ^JCTree$JCThrow t)))))])
     JCTree$JCAssert (let [a ^JCTree$JCAssert t]
@@ -1715,12 +1842,21 @@
   (into [(wrap-label env t form)] (when (cn? t) (:fall ctx))))
 
 (defn- while-loop [env ctx ^JCTree$JCWhileLoop t]
+  (if (has-patterns? (.cond t))
+    (let [li {:tree t :kind :recur :args []}
+          rec '(recur)
+          bctx {:fall [rec] :jumps {[:continue t] [rec] [:break t] []} :vpos nil}]
+      (note! :form/loop)
+      (loop-done env ctx t (list (h env 'loop) []
+                                 (cond-form env (.cond t)
+                                            (fn [e] (do-form (stmts (push-loop e li) bctx [(.body t)])))
+                                            (fn [_] nil)))))
   (let [li {:tree t :kind :while :update []}
         env' (push-loop env li)
         c (test-form env (ex env (.cond t)))
         body (stmts env' {:fall [] :jumps {[:continue t] []} :vpos nil} [(.body t)])]
     (note! :form/while)
-    (loop-done env ctx t (apply list (h env 'while) c body))))
+    (loop-done env ctx t (apply list (h env 'while) c body)))))
 
 (defn- do-loop [env ctx ^JCTree$JCDoWhileLoop t]
   (let [li {:tree t :kind :do}
@@ -1928,7 +2064,7 @@
   (let [x (ex env sel)
         t (:t x)]
     (if (and (not pattern?) (instance? Type t) (not (prim? t)) (jt/unboxed t))
-      (coerce env x (jt/unboxed t))
+      (coerce env x (jt/unboxed t) true)
       (coerce env x (erasure (.type sel))))))
 
 (def match-exception-default
@@ -1968,7 +2104,32 @@
     (note! :form/switch)
     form))
 
+(defn- cross-case-locals
+  "The local declarations at the top level of one case of switch `t` that another case uses."
+  [^JCTree$JCSwitch t]
+  (let [cases (vec (.cases t))]
+    (for [[i ^JCTree$JCCase c] (map-indexed vector cases)
+          d (.stats c)
+          :when (instance? JCTree$JCVariableDecl d)
+          :let [sym (.sym ^JCTree$JCVariableDecl d)]
+          :when (some (fn [[j ^JCTree$JCCase c2]]
+                        (and (not= i j) (some #(refs-sym? % sym) (.stats c2))))
+                      (map-indexed vector cases))]
+      d)))
+
 (defn switch-stmt [env ctx ^JCTree$JCSwitch t]
+  (let [pre (cross-case-locals t)]
+    (if (seq pre)
+      (let [[bv env'] (reduce (fn [[bv env] ^JCTree$JCVariableDecl d]
+                                (let [[sf init env'] (binding-for env d nil)]
+                                  [(conj bv sf init) env']))
+                              [[] env] pre)]
+        (note! :switch/predeclared-local)
+        (binding [*predeclared* (into *predeclared* (map #(.sym ^JCTree$JCVariableDecl %) pre))]
+          [(apply list (h env 'let) bv (switch-stmt-1 env' ctx t))]))
+      (switch-stmt-1 env ctx t))))
+
+(defn- switch-stmt-1 [env ctx ^JCTree$JCSwitch t]
   (label-kw! env t "switch")
   (let [form (switch-stmt* env ctx t)]
     (if (and (label-used? env t) (seq (:fall ctx)))
@@ -2118,6 +2279,8 @@
             owner (if (instance? Type$ArrayType qt) qt qt)
             overloaded? (> (count (methods-named env owner (str (.name m)) (boolean ctor?))) 1)
             msym (cond
+                   (and (not ctor?) (jt/class-sym? (.tsym qt)) (jt/anonymous? (.tsym qt)))
+                   (do (note! :form/method-ref-anonymous) (symbol (str "." (.name m))))
                    ctor? (member (class-ref env (.tsym qt)) "new")
                    (= kind "STATIC") (member (class-ref env (.tsym qt)) (str (.name m)))
                    (instance? Type$ArrayType qt) (member (erased-form env qt) (str "." (.name m)))
@@ -2234,8 +2397,15 @@
         compact? (jt/has-flag? m Flags/COMPACT_RECORD_CONSTRUCTOR)
         env (method-env env m)
         omit? (or ctor? (omit-object-tags? c m))
+        ;; the receiver of an anonymous class's method that a nested class refers to gets
+        ;; its own name, since the class has none to write Outer/this with
+        recv (if (and (not static?) (jt/anonymous? c) (.body md)
+                      (some #(instance? JCTree$JCClassDecl %) (all-trees (.body md))))
+               (symbol (str "this" (count (filter jt/anonymous? (:classes env)))))
+               'this)
+        env (if (= recv 'this) env (assoc-in env [:anon-this c] recv))
         [pv env'] (if compact? [[] env] (param-forms env md omit?))
-        pv (if static? pv (into ['this] pv))
+        pv (if static? pv (into [recv] pv))
         rt (.getReturnType (.type m))
         mods (concat (modifier-items env (.mods md)) [(deprecated-item m (.mods md))]
                      (when compact? [:compact]))
@@ -2252,9 +2422,9 @@
                        (note! :form/annotation-default)
                        [:default (attr-value env d nil)]))
         void? (or ctor? (jt/void? rt))
-        env' (cond-> (assoc env' :this (when-not static? 'this) :ret (when-not void? (erasure rt))
+        env' (cond-> (assoc env' :this (when-not static? recv) :ret (when-not void? (erasure rt))
                             :loops () :yield-type nil)
-               (not static?) (update :names conj "this"))
+               (not static?) (update :names conj (name recv)))
         compact-env (if compact?
                       (reduce (fn [e ^Symbol$VarSymbol p] (add-local e p (symbol (str (.name p))))) env' (.params m))
                       env')
@@ -2518,6 +2688,10 @@
                          :else (let [[_ c2 a2 b2] b] (if (nil? b2) [c2 a2] [c2 a2 :else b2])))]
               (keep-meta y (apply list 'cond c a tail)))
             :else y))
+        (and (if-head? y 'when) (seq? (second y)) (= 'not (first (second y))) (= 2 (count (second y))))
+        (keep-meta y (apply list 'when-not (second (second y)) (drop 2 y)))
+        (and (if-head? y 'if-instance) (= 4 (count y)) (nil? (nth y 3)))
+        (keep-meta y (apply list 'when-instance (second y) (splice (nth y 2))))
         (and (if-head? y 'if) (= 3 (count y)))
         (let [[_ c a] y] (keep-meta y (apply list 'when c (splice a))))
         (and (if-head? y 'when-not) (seq? (second y)) (= 'nil? (first (second y))))

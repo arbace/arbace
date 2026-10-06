@@ -72,7 +72,9 @@
                      (for [cu units
                            :let [src (.getName (.getSourceFile ^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu))]]
                        (try
-                         (assoc (cv/convert-unit cu {}) :source src)
+                         (let [t0 (System/nanoTime)
+                               u (cv/convert-unit cu {})]
+                           (assoc u :source src :ms (quot (- (System/nanoTime) t0) 1000000)))
                          (catch Throwable e
                            {:failure true :source src
                             :error (str (.getName (class e)) ": " (.getMessage e))
@@ -140,6 +142,38 @@
       (run! #(run! walk (:forms %)) units))
     @counts))
 
+(defn finish
+  "Write the converted units, check them, print and write the report."
+  [out files units failures errors stats check t0]
+  (let [written (write-output out units)
+        reads (when check (vec (pmap (fn [{:keys [path text]}] (assoc (readable text) :path path)) written)))
+        unreadable (vec (filter :core reads))
+        edn-errors (frequencies (keep :edn reads))
+        secs (/ (- (System/nanoTime) t0) 1e9)]
+    (doseq [e (take 20 errors)] (println "javac:" e))
+    (doseq [u (take 5 (sort-by :ms > units))] (println "slowest:" (:ms u) "ms" (:source u)))
+    (doseq [f failures] (println "FAILED" (:source f) (:error f)) (run! #(println "   " %) (:trace f)))
+    (doseq [u unreadable] (println "UNREADABLE" (:path u) (:core u)))
+    (when (seq edn-errors)
+      (println "clojure.edn/read errors by kind:"
+               (frequencies (map #(cond (re-find #"Invalid token: .*/[0-9]+$" %) "array class symbol"
+                                        (re-find #"Metadata must be" %) "param-tags metadata"
+                                        :else %)
+                                 (keep :edn reads)))))
+    (println (format "%d Java files, %d converted, %d failed, %d javac errors, %d files written to %s%s in %.1fs"
+                     (count files) (count units) (count failures) (count errors) (count written) out
+                     (if check (format ", %d unreadable" (count unreadable)) "")
+                     secs))
+    (when check
+      (let [report {:files (count files) :converted (count units)
+                    :failures (mapv #(select-keys % [:source :error]) failures)
+                    :javac-errors (count errors) :unreadable unreadable
+                    :edn-errors edn-errors
+                    :stats (into (sorted-map) stats)
+                    :heads (into (sorted-map) (head-symbols units))}]
+        (spit (io/file out "j2c-report.edn") (with-out-str (pp/pprint report)))))
+    {:failures failures :unreadable unreadable :errors errors}))
+
 (defn convert
   [out root paths {:keys [rename javac-opts check]}]
   (let [root (.getCanonicalPath (io/file root))
@@ -148,28 +182,62 @@
                 [root])
         files (java-files paths)
         t0 (System/nanoTime)
-        {:keys [units failures errors stats]} (convert-units files (into ["-sourcepath" root] javac-opts) rename)
-        written (write-output out units)
-        reads (when check (vec (pmap (fn [{:keys [path text]}] (assoc (readable text) :path path)) written)))
-        unreadable (vec (filter :core reads))
-        edn-errors (frequencies (keep :edn reads))
-        secs (/ (- (System/nanoTime) t0) 1e9)]
-    (doseq [e (take 20 errors)] (println "javac:" e))
-    (doseq [f failures] (println "FAILED" (:source f) (:error f)) (run! #(println "   " %) (:trace f)))
-    (doseq [u unreadable] (println "UNREADABLE" (:path u) (:core u)))
-    (when (seq edn-errors) (println "clojure.edn/read errors (count by message):" edn-errors))
-    (println (format "%d Java files, %d converted, %d failed, %d javac errors, %d files written to %s%s in %.1fs"
-                     (count files) (count units) (count failures) (count errors) (count written) out
-                     (if check (format ", %d unreadable" (count unreadable)) "")
-                     secs))
-    (when check
-      (let [report {:files (count files) :converted (count units) :failures (mapv #(select-keys % [:source :error]) failures)
-                    :javac-errors (count errors) :unreadable unreadable
-                    :edn-errors edn-errors
-                    :stats (into (sorted-map) stats)
-                    :heads (into (sorted-map) (head-symbols units))}]
-        (spit (io/file out "j2c-report.edn") (with-out-str (pp/pprint report)))))
-    {:failures failures :unreadable unreadable :errors errors}))
+        {:keys [units failures errors stats]} (convert-units files (into ["-sourcepath" root] javac-opts) rename)]
+    (finish out files units failures errors stats check t0)))
+
+(defn- chunks
+  "The files grouped by directory (package), the groups packed into chunks of about n files."
+  [files n]
+  (let [groups (vals (group-by #(.getParent (io/file %)) files))]
+    (loop [[g & more :as gs] (sort-by count > groups) out [] cur []]
+      (cond
+        (empty? gs) (if (seq cur) (conj out cur) out)
+        (and (seq cur) (> (+ (count cur) (count g)) n)) (recur gs (conj out cur) [])
+        :else (recur more out (into cur g))))))
+
+(defn jdk
+  "Convert a sample of the JDK's sources: for module directory `module-src` (e.g.
+  /root/jdk26u/src/java.base/share/classes) and `paths` below it, attribute the files as
+  part of module `module` against the running JDK's compiled classes. The files are copied
+  into patch directories under .tmp, one per chunk of packages, so javac takes everything else
+  from the system image; the chunks are converted in parallel."
+  [out module module-src paths {:keys [javac-opts check] :as opts}]
+  (let [src (.getCanonicalPath (io/file module-src))
+        files (remove #(re-find #"/snippet-files/" %)
+                      (java-files (map #(str src "/" %) (or (seq paths) ["."]))))
+        t0 (System/nanoTime)
+        [mi others] ((juxt filter remove) #(str/ends-with? % "/module-info.java") files)
+        _ (when (seq mi) (println "skipped (a module-info cannot be patched):" (str/join " " mi)))
+        files others
+        work (map-indexed vector (chunks others 150))
+        pool (java.util.concurrent.Executors/newFixedThreadPool
+              (Integer/parseInt (or (System/getenv "J2C_THREADS") "12")))
+        task (fn [[i fs]]
+               (let [patch (io/file ".tmp/j2c-patch" (str module "-" i))]
+                 (when (.exists patch)
+                   (doseq [^File f (reverse (file-seq patch))] (.delete f)))
+                 (let [copies (vec (for [f fs]
+                                     (let [rel (subs f (inc (count src)))
+                                           c (io/file patch rel)]
+                                       (io/make-parents c)
+                                       (io/copy (io/file f) c)
+                                       (.getPath c))))]
+                   (try
+                    (convert-units copies
+                                  (into ["--patch-module" (str module "=" (.getCanonicalPath patch))
+                                         "-implicit:none" "--enable-preview" "-source" "26"]
+                                        javac-opts)
+                                  (:rename opts))
+                    (catch Throwable e
+                      {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)})))))
+        futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
+        results (mapv deref futures)
+        _ (.shutdown pool)
+        units (vec (mapcat :units results))
+        failures (vec (mapcat :failures results))
+        errors (vec (mapcat :errors results))
+        stats (apply merge-with + (map :stats results))]
+    (finish out files units failures errors stats check t0)))
 
 (defn- parse-opts [args]
   (loop [args args opts {:rename {} :javac-opts []} pos []]
@@ -185,5 +253,7 @@
 (defn -main [cmd & args]
   (case cmd
     "convert" (let [[opts [out root & paths]] (parse-opts args)]
-                (convert out root paths opts)))
+                (convert out root paths opts))
+    "jdk" (let [[opts [out module src & paths]] (parse-opts args)]
+            (jdk out module src paths opts)))
   (shutdown-agents))
