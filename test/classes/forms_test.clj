@@ -175,3 +175,24 @@
             (.readObject i))]
     (is (= 42 (.getAsInt f)))
     (is (= 42 (.getAsInt g)))))
+
+(deftest javac-options
+  ;; -XDstringConcat=inline and -parameters, as the JDK build uses them for some modules
+  (let [java {"Opt" "public class Opt {
+                       final int k;
+                       Opt(int k) { this.k = k; }
+                       static String f(String a, int b, char c, Object o, long l) { return a + b + \"-\" + c + o + l + null; }
+                       class In { int g(final int x) { return x + k; } }
+                       enum E { A }
+                     }"}
+        forms '[(^:public Opt
+                  (field ^:final ^int k)
+                  (constructor [this ^int k] (set! (.-k this) k))
+                  (method ^:static f ^String [^String a ^int b ^char c ^Object o ^long l] (java-str a b "-" c o l nil))
+                  (defclass In (method g ^int [this ^:final ^int x] (unchecked-add-int x k)))
+                  (defclass ^:enum E (constants A)))]
+        ds (shape-diffs (javac-classes 'classes.forms-test java :options ["-XDstringConcat=inline" "-parameters"])
+                        (binding [arbace.classes.emit/*string-concat* :inline
+                                  arbace.classes.emit/*method-parameters* true]
+                          (forms-classes 'classes.forms-test forms)))]
+    (is (empty? ds) (with-out-str (doseq [d ds] (prn d))))))

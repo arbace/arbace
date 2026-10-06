@@ -11,6 +11,15 @@
   "The class file version: the running JDK's by default."
   (+ 44 (.feature (Runtime/version))))
 
+(def ^:dynamic *string-concat*
+  "How java-str compiles: :indy (javac's default) or :inline (javac's -XDstringConcat=inline,
+  a StringBuilder, as the JDK builds java.base with)."
+  :indy)
+
+(def ^:dynamic *method-parameters*
+  "true: MethodParameters with names for all methods, as javac's -parameters."
+  false)
+
 (defn fail [msg] (a/fail msg))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1070,8 +1079,8 @@
                (for [b (:captures @(:state d))] [(str "val$" (:sym b)) (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC)]))
         all (concat extra params caps)
         flagged (some #(has? (second %) (bit-or Opcodes/ACC_SYNTHETIC Opcodes/ACC_MANDATED)) all)]
-    (when (and (seq all) (or names? flagged))
-      (mapv (fn [[nm fl]] [(when names? nm) fl]) all))))
+    (when (and (seq all) (or names? flagged *method-parameters*))
+      (mapv (fn [[nm fl]] [(when (or names? *method-parameters*) nm) fl]) all))))
 
 (defn- emit-derived-code [^MethodVisitor mv d m]
   (let [n (:name d)
@@ -1184,7 +1193,7 @@
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
-(declare assertion-clinit emit-lambda-method emit-deserialize-lambda clj-constants-clinit)
+(declare assertion-clinit emit-lambda-method emit-deserialize-lambda clj-constants-clinit emit-indy-concat)
 
 (defmulti emit-clinit-node (fn [gen node] (:op node)))
 (defmethod emit-clinit-node :default [gen node] (emit gen node :stmt))
@@ -1337,7 +1346,37 @@
                 "Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
            false))
 
+(defn- emit-inline-concat
+  "javac's StringConcat.Inline: new StringBuilder, an append per operand, toString."
+  [gen node]
+  (let [m (mv gen)
+        ops (:operands node)
+        app-type (fn [n] (let [t (a/value-type (:type n))]
+                           (cond (#{"Z" "C" "J" "F" "D"} t) t
+                                 (t/int-like? t) "I"
+                                 (= t t/string-desc) t
+                                 :else t/object-desc)))
+        temps (when (some #(unsafe? gen %) ops)
+                (doall (for [n ops]
+                         (let [ty (a/value-type (:type n)) ty (if (= ty :null) t/object-desc ty)
+                               s (alloc-slot gen ty)]
+                           (emit gen n :expr) (xstore gen ty s) [ty s]))))]
+    (.visitTypeInsn m Opcodes/NEW "java/lang/StringBuilder")
+    (insn gen Opcodes/DUP)
+    (.visitMethodInsn m Opcodes/INVOKESPECIAL "java/lang/StringBuilder" "<init>" "()V" false)
+    (doseq [[i n] (map-indexed vector ops)]
+      (if temps (let [[ty s] (nth temps i)] (xload gen ty s)) (emit gen n :expr))
+      (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/StringBuilder" "append"
+                        (str "(" (app-type n) ")Ljava/lang/StringBuilder;") false))
+    (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/StringBuilder" "toString" "()Ljava/lang/String;" false)))
+
 (defmethod emit-extra :java-str [gen node ctx]
+  (if (= :inline *string-concat*)
+    (do (emit-inline-concat gen node)
+        (when (= ctx :stmt) (insn gen Opcodes/POP)))
+    (emit-indy-concat gen node ctx)))
+
+(defn- emit-indy-concat [gen node ctx]
   (let [parts (:parts node)
         dyn (filter :node parts)]
     ;; operands: a valueOf call converts eagerly, as javac
