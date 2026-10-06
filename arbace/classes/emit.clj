@@ -142,7 +142,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; expressions
 
-(declare emit emit-cond load-binding)
+(declare emit emit-cond load-binding write-local-type-annotations write-insn-type-annotations emit-let)
 
 (defmulti emit-extra
   "Emission of the later forms (switch, lambdas...): (emit-extra gen node ctx)."
@@ -250,6 +250,7 @@
         [lead trail] (ctor-extra-args gen cn (:outer node))
         before (fn []
                  (.visitTypeInsn (mv gen) Opcodes/NEW cn)
+                 (write-insn-type-annotations gen arbace.asm.TypeReference/NEW nil (:type-anns node))
                  (insn gen Opcodes/DUP)
                  (when (:outer node)
                    (when-not (a/decl cn) nil))
@@ -416,7 +417,9 @@
                         (insn gen Opcodes/POP))
       :cast (do (emit gen (:expr node) :expr)
                 (when-not (= :none (:type (:expr node)))
-                  (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal (:class node)))))
+                  (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal (:class node)))
+                  (write-insn-type-annotations gen arbace.asm.TypeReference/CAST (or (:type-arg node) 0)
+                                               (:type-anns node))))
       (:compare :not :nil? :identical? :instance? :bool=) (emit-bool-value gen node)
       (:and :or) (emit-value-and-or gen node)
       :if (let [els (Label.) end (Label.) t (a/value-type (:type node))]
@@ -428,14 +431,7 @@
             (.visitLabel m end))
       :do (do (doseq [s (:statements node)] (emit gen s :stmt))
               (emit gen (:ret node) :expr))
-      :let (let [saved @(:next gen)]
-             (doseq [[b init] (:bindings node)]
-               (emit-to gen init (:type b))
-               (let [s (alloc-slot gen (:type b))]
-                 (swap! (:slots gen) assoc (:id b) s)
-                 (when-not (= :none (:type init)) (xstore gen (:type b) s))))
-             (emit gen (:body node) :expr)
-             (reset! (:next gen) saved))
+      :let (emit-let gen node :expr)
       :loop (emit-loop gen node :expr)
       :label (emit-label gen node :expr)
       :try (emit-try gen node :expr)
@@ -457,6 +453,27 @@
 
 (def ^:private pure-ops #{:const :local :this-path :class-lit})
 
+(defn emit-let
+  "let: each local gets a slot (freed after the body); type annotations of the locals cover
+  their scope."
+  [gen node ctx]
+  (let [saved @(:next gen)
+        opened (doall
+                 (for [[b init] (:bindings node)]
+                   (do (emit-to gen init (:type b))
+                       (let [s (alloc-slot gen (:type b))]
+                         (swap! (:slots gen) assoc (:id b) s)
+                         (when-not (= :none (:type init)) (xstore gen (:type b) s))
+                         (when (seq (:type-anns b))
+                           (let [l (Label.)] (.visitLabel (mv gen) l) [b l s]))))))]
+    (emit gen (:body node) ctx)
+    (when (some some? opened)
+      (let [end (Label.)]
+        (.visitLabel (mv gen) end)
+        (doseq [[b start s] (remove nil? opened)]
+          (write-local-type-annotations gen b start end s))))
+    (when-not (= ctx :return) (reset! (:next gen) saved))))
+
 (defn emit
   "Emits node in context ctx: :expr leaves its value (void gives nil), :stmt leaves nothing,
   :return returns it from the method."
@@ -471,12 +488,7 @@
             (emit gen (:else node) :return))
       :do (do (doseq [s (:statements node)] (emit gen s :stmt))
               (emit gen (:ret node) :return))
-      :let (do (doseq [[b init] (:bindings node)]
-                 (emit-to gen init (:type b))
-                 (let [s (alloc-slot gen (:type b))]
-                   (swap! (:slots gen) assoc (:id b) s)
-                   (when-not (= :none (:type init)) (xstore gen (:type b) s))))
-               (emit gen (:body node) :return))
+      :let (emit-let gen node :return)
       :loop (emit-loop gen node :return)
       (:break :recur :return :throw) (emit gen node :expr)
       (let [ret (:ret gen)]
@@ -490,14 +502,7 @@
       (:const :local :this-path :class-lit) nil
       :do (do (doseq [s (:statements node)] (emit gen s :stmt))
               (emit gen (:ret node) :stmt))
-      :let (let [saved @(:next gen)]
-             (doseq [[b init] (:bindings node)]
-               (emit-to gen init (:type b))
-               (let [s (alloc-slot gen (:type b))]
-                 (swap! (:slots gen) assoc (:id b) s)
-                 (when-not (= :none (:type init)) (xstore gen (:type b) s))))
-             (emit gen (:body node) :stmt)
-             (reset! (:next gen) saved))
+      :let (emit-let gen node :stmt)
       :if (let [els (Label.) end (Label.)]
             (emit-cond gen (:test node) false els)
             (emit gen (:then node) :stmt)
@@ -575,6 +580,7 @@
                       (.visitJumpInsn m (if jump-if Opcodes/IF_ACMPEQ Opcodes/IF_ACMPNE) label))
       :instance? (do (emit gen (:expr node) :expr)
                      (.visitTypeInsn m Opcodes/INSTANCEOF (t/desc->internal (:class node)))
+                     (write-insn-type-annotations gen arbace.asm.TypeReference/INSTANCEOF nil (:type-anns node))
                      (.visitJumpInsn m (if jump-if Opcodes/IFNE Opcodes/IFEQ) label))
       :bool= (do (spill-operands gen (:args node) ["Z" "Z"])
                  (.visitJumpInsn m (if jump-if Opcodes/IF_ICMPEQ Opcodes/IF_ICMPNE) label))
@@ -859,6 +865,31 @@
   [visit-fn anns]
   (doseq [{:keys [ref path type visible values]} (force anns)]
     (let [^AnnotationVisitor av (visit-fn (int ref) (when (seq path) (arbace.asm.TypePath/fromString path)) type visible)]
+      (doseq [[k v] values] (write-ann-value av k v))
+      (.visitEnd av))))
+
+(defn write-insn-type-annotations
+  "Type annotations of the instruction just emitted (cast, instanceof, new)."
+  [gen sort type-arg anns]
+  (doseq [[path {:keys [type visible values]}] anns]
+    (let [ref (if type-arg (arbace.asm.TypeReference/newTypeArgumentReference sort type-arg)
+                  (arbace.asm.TypeReference/newTypeReference sort))
+          ^AnnotationVisitor av (.visitInsnAnnotation (mv gen) (.getValue ref)
+                                                      (when (seq path) (arbace.asm.TypePath/fromString path))
+                                                      type visible)]
+      (doseq [[k v] values] (write-ann-value av k v))
+      (.visitEnd av))))
+
+(defn write-local-type-annotations
+  "Type annotations of a local variable live from start to end in slot."
+  [gen b start end slot]
+  (doseq [[path {:keys [type visible values]}] (:type-anns b)]
+    (let [^AnnotationVisitor av (.visitLocalVariableAnnotation
+                                  (mv gen) (.getValue (arbace.asm.TypeReference/newTypeReference
+                                                        arbace.asm.TypeReference/LOCAL_VARIABLE))
+                                  (when (seq path) (arbace.asm.TypePath/fromString path))
+                                  (into-array Label [start]) (into-array Label [end]) (int-array [slot])
+                                  type visible)]
       (doseq [[k v] values] (write-ann-value av k v))
       (.visitEnd av))))
 

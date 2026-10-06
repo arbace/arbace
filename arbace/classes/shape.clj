@@ -25,6 +25,13 @@
     (swap! store update kind (fnil conj #{}) [d visible s])
     (ann-visitor s)))
 
+(defn- add-type-ann
+  "A type annotation with its type reference (sort and arguments, not code offsets) and path."
+  [store kind ref path d visible]
+  (add-ann store kind (str (Integer/toHexString (bit-and (int ref) (if (>= (bit-shift-right (int ref) 24) 0x40) (unchecked-int 0xFF0000FF) -1)))
+                           ":" path ":" d)
+           visible))
+
 (defn- realize-anns [m]
   (into {} (for [[k v] m]
              [k (if (set? v) (set (map (fn [[d vis s]] [d vis (realize s)]) v)) v)])))
@@ -75,7 +82,7 @@
              (visitOuterClass [o n d] (swap! c assoc :enclosing-method [o n d]))
              (visitInnerClass [n o s f] (swap! c update :inner-classes (fnil conj #{}) [n o s f]))
              (visitAnnotation [d vis] (add-ann c :annotations d vis))
-             (visitTypeAnnotation [r p d vis] (add-ann c :type-annotations d vis))
+             (visitTypeAnnotation [r p d vis] (add-type-ann c :type-annotations r p d vis))
              (visitRecordComponent [n d sig]
                (swap! c update :record (fnil conj []) [n d sig])
                nil)
@@ -85,7 +92,7 @@
                  (swap! fields assoc [name desc] f)
                  (proxy [FieldVisitor] [Opcodes/ASM9]
                    (visitAnnotation [d vis] (add-ann f :annotations d vis))
-                   (visitTypeAnnotation [r p d vis] (add-ann f :type-annotations d vis)))))
+                   (visitTypeAnnotation [r p d vis] (add-type-ann f :type-annotations r p d vis)))))
              (visitMethod [access name desc sig excs]
                (let [m (atom {:flags access :signature sig :exceptions (set excs)})
                      syms (atom #{})
@@ -95,7 +102,11 @@
                  (proxy [MethodVisitor] [Opcodes/ASM9 (when code cs)]
                    (visitParameter [n fl] (swap! m update :parameters (fnil conj []) [n fl]))
                    (visitAnnotation [d vis] (add-ann m :annotations d vis))
-                   (visitTypeAnnotation [r p d vis] (add-ann m :type-annotations d vis))
+                   (visitTypeAnnotation [r p d vis] (add-type-ann m :type-annotations r p d vis))
+                   (visitInsnAnnotation [r p d vis] (add-type-ann m :code-type-annotations r p d vis))
+                   (visitLocalVariableAnnotation [r p starts ends idx d vis]
+                     (add-type-ann m :code-type-annotations r p d vis))
+                   (visitTryCatchAnnotation [r p d vis] (add-type-ann m :code-type-annotations r p d vis))
                    (visitParameterAnnotation [i d vis]
                      (let [s (atom {})]
                        (swap! m update :param-annotations (fnil conj #{}) [i d vis s])

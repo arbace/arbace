@@ -925,7 +925,7 @@
 
 (declare accessorize)
 
-(declare outer-super-call)
+(declare outer-super-call code-type-anns)
 
 (declare clj-constant clj-collection clj-var-field)
 
@@ -1299,6 +1299,23 @@
 (defn- lambda-form? [f]
   (and (seq? f) (symbol? (first f)) (#{"lambda" "lambda*" "method-ref" "method-ref*"} (name (first f)))))
 
+(declare annotations-now annotation-targets)
+
+(defn- local-type-anns
+  "Type annotations of a local variable: TYPE_USE annotations on the binding symbol and those
+  inside its tag."
+  [actx sym]
+  (let [m (meta sym)
+        sc (scope-of actx)
+        tn (when-let [tg (:tag m)] (parse-type sc tg))]
+    (vec (concat
+           (for [a (annotations-now sc (into {} (filter (comp symbol? key) m)))
+                 :let [ts (annotation-targets (t/desc->internal (:type a)))]
+                 :when (and ts (ts "TYPE_USE"))]
+             [(if tn (t/element-path tn) "") a])
+           (when tn
+             (for [[path anns] (t/type-anns tn) a (annotations-now sc anns)] [path a]))))))
+
 (defn- binding-type
   "The type of a let/loop local: its tag, else its initializer's type (Clojure's loop widens
   untagged int and float)."
@@ -1334,7 +1351,8 @@
                         init-node (bind-init actx sym init-node type)
                         cval (when (and (:const m) (= :const (:op init-node))) init-node)
                         b (make-binding actx sym type :mutable (boolean (:mutable m)) :cval cval
-                                        :loop-local loop?)]
+                                        :loop-local loop?
+                                        :type-anns (local-type-anns actx sym))]
                     (when (and (:const m) (not cval))
                       (fail (str "^:const local needs a constant initializer: " sym)))
                     [(with-local actx b) (conj bs [b init-node])]))
@@ -1679,6 +1697,15 @@
         mname (name member)
         param-tags (:param-tags (meta member))]
     (cond
+      (= mname "super")
+      ;; (.super o args): Java's o.super(args), the superclass constructor of an inner superclass
+      (let [_ (when-not (:in-ctor actx) (fail ".super outside a constructor"))
+            sup (:super (decl! (:class actx)))
+            _ (when-not (needs-outer-instance? sup)
+                (fail (str (str/replace sup "/" ".") " is not an inner class")))
+            on (analyze actx target)]
+        (ctor-call-node actx sup args :super :outer {:op :null-checked :expr on :type (:type on)}))
+
       (and (= mname "new") (seq args) (symbol? (first args)))
       ;; (.new o Inner args): Java's o.new Inner(args)
       (let [on (analyze actx target)
@@ -1790,9 +1817,10 @@
         (when-let [cd (decl cn)]
           (when (= :local (:nesting cd))
             (doseq [b (:captures @(:state cd))] (local-ref actx b))))
-        (ctor-call-node actx cn args :new
-                        :outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
-                        :param-tags (:param-tags (meta cls)))))))
+        (assoc (ctor-call-node actx cn args :new
+                               :outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
+                               :param-tags (:param-tags (meta cls)))
+               :type-anns (code-type-anns actx cls))))))
 
 ;; arrays, tests -----------------------------------------------------------------------------------
 
@@ -1816,24 +1844,32 @@
     {:op :aset :array an :index (operand (analyze actx (last idxs)) "I")
      :val (convert-node (analyze actx v) et :what "array element") :type et}))
 
+(defn code-type-anns
+  "Type annotations of a type form in code, for the instruction it types: [[path ann] ...]."
+  [actx form]
+  (vec (for [[path anns] (t/type-anns (parse-type (scope-of actx) form))
+             a (annotations-now (scope-of actx) anns)]
+         [path a])))
+
 (defn- analyze-instance? [actx [_ cls x]]
   (let [cd (actx-desc actx cls)
         xn (analyze actx x)]
     (when-not (t/ref? cd) (fail "instance? needs a class"))
     (when-not (t/ref? (value-type (:type xn))) (fail "instance? of a primitive"))
-    {:op :instance? :class cd :expr xn :type "Z"}))
+    {:op :instance? :class cd :expr xn :type "Z" :type-anns (code-type-anns actx cls)}))
 
 (defn- analyze-cast [actx [_ cls x]]
   (let [xn (analyze actx x)]
     (if (and (seq? cls) (= '& (first cls)))
-      (reduce (fn [n c] {:op :cast :class (actx-desc actx c) :expr n :type (actx-desc actx c)})
-              xn (rest cls))
+      (reduce (fn [n [i c]] {:op :cast :class (actx-desc actx c) :expr n :type (actx-desc actx c)
+                             :type-anns (code-type-anns actx c) :type-arg i})
+              xn (map-indexed vector (rest cls)))
       (let [cd (actx-desc actx cls)]
         (cond
           (t/prim? cd) (analyze-conversion actx cd x true)
           (not (t/ref? (value-type (:type xn))))
           (convert-node xn cd)
-          :else {:op :cast :class cd :expr xn :type cd})))))
+          :else {:op :cast :class cd :expr xn :type cd :type-anns (code-type-anns actx cls) :type-arg 0})))))
 
 (defn- ref-node [actx x what]
   (let [n (analyze actx x)]
@@ -2059,7 +2095,7 @@
         body (if (= "V" (:ret m)) body (convert-node body (:ret m) :what (str "value of method " (:name m))))]
     {:params bs :body body :recv (get-in actx [:locals (:recv m)])}))
 
-(defn- ctor-call-form? [f] (and (seq? f) (#{'super. 'this.} (first f))))
+(defn- ctor-call-form? [f] (and (seq? f) (#{'super. 'this. '.super} (first f))))
 
 (defn- implicit-super-call [actx n]
   (let [d (decl! n)]

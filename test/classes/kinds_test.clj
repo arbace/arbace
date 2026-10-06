@@ -266,3 +266,24 @@
         (field ^SN s)
         (defclass ^:interface I (method m :throws [java.io.IOException] ^void [this]))
         (defclass ^:static Impl :implements [I] (method ^:public m ^void [this])))]))
+
+(deftest type-annotations-in-code
+  (same-shapes? 'classes.kinds-test
+    {"NC" "import java.lang.annotation.*; @Target({ElementType.TYPE_USE}) @Retention(RetentionPolicy.RUNTIME) @interface NC {}"
+     "TC" "import java.util.*;
+     class TC {
+       Object f(Object o) {
+         @NC String s = (@NC String) o;
+         List<@NC String> l = new @NC ArrayList<>();
+         boolean b = o instanceof @NC String;
+         return s;
+       }
+     }"}
+    '[(^:annotation ^{java.lang.annotation.Target [java.lang.annotation.ElementType/TYPE_USE]
+                      java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME} NC)
+      (TC
+        (method f [this ^Object o]
+          (let [^{NC true} ^String s (cast ^{NC true} String o)
+                ^{:tag (java.util.List ^{NC true} String)} l (new ^{NC true} java.util.ArrayList)
+                ^boolean b (instance? ^{NC true} String o)]
+            s)))]))

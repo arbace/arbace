@@ -126,3 +126,13 @@
         (field ^{:tag (java.util.Vector Object)} values (java.util.Vector.))
         (defclass VE (field ^{:tag (java.util.Enumeration Object)} list) (constructor [this] (set! list (.elements values))))
         (method get [this] (VE.)))]))
+
+(deftest qualified-super-constructor-call
+  (same-shapes? 'classes.nested-test
+    {"QS" "public class QS {
+       class In { In(int x) {} }
+       static class Sub extends QS.In { Sub(QS o) { o.super(5); } }
+     }"}
+    '[(^:public QS
+        (defclass In (constructor [this ^int x]))
+        (defclass ^:static Sub :extends In (constructor [this ^QS o] (.super o 5))))]))
