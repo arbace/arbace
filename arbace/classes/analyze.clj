@@ -927,6 +927,8 @@
 
 (declare outer-super-call)
 
+(declare clj-constant clj-collection clj-var-field)
+
 (declare analyze analyze-body analyze-invoke analyze-new analyze-dot analyze-op analyze-class-form
          analyze-symbol coerce-hint needs-outer-instance? ctor-call-node)
 
@@ -956,6 +958,12 @@
                    (instance? Float form) (const-node "F" form)
                    (instance? Short form) (const-node "S" form)
                    (instance? Byte form) (const-node "B" form)
+                   ;; Clojure data (§5.13): needs the Clojure runtime
+                   (keyword? form) (clj-constant actx form)
+                   (vector? form) (clj-collection actx "vector" "Lclojure/lang/IPersistentVector;" (seq form))
+                   (map? form) (clj-collection actx "map" "Lclojure/lang/IPersistentMap;" (mapcat identity form))
+                   (set? form) (clj-collection actx "set" "Lclojure/lang/IPersistentSet;" (seq form))
+                   (instance? clojure.lang.BigInt form) (const-node :bigint form)
                    :else (fail (str "Not supported in class bodies at stage 0: " (pr-str form)
                                     " (" (.getName (class form)) ")")))]
         (let [node (accessorize actx node)]
@@ -1053,7 +1061,8 @@
       (class-lit actx (t/internal->desc (str/replace (name sym) "." "/")))
 
       (resolve-var actx sym)
-      {:op :var-deref :var (resolve-var actx sym) :type t/object-desc}
+      {:op :var-deref :var (resolve-var actx sym) :field (clj-var-field actx (resolve-var actx sym))
+       :owner (:class actx) :type t/object-desc}
 
       :else (fail (str "Unable to resolve symbol: " sym)))))
 
@@ -1230,6 +1239,13 @@
   (let [n (unboxed (analyze actx arg))
         from (:type n)]
     (cond
+      ;; (unchecked-long 0x8000000000000000): a big literal as Java's long or int literal
+      (= from :bigint)
+      (if checked?
+        (fail (str "Literal out of range: " (:val n)))
+        (let [l (.longValue ^Number (:val n))]
+          (const-node to (case to "I" (unchecked-int l) "J" l "S" (unchecked-short l) "B" (unchecked-byte l)
+                               "C" (unchecked-char l) "F" (unchecked-float l) "D" (unchecked-double l)))))
       (= from to) n
       (not (t/prim? from)) (fail (str "Cannot convert " (pr-str from) " to " to))
       (and (= :const (:op n)) (t/prim? from) (not= from "Z"))
@@ -1884,7 +1900,7 @@
               quote (let [v (second form)]
                       (if (or (string? v) (number? v) (boolean? v) (nil? v) (char? v))
                         (analyze actx v)
-                        (fail "Quoted data needs the Clojure runtime; not supported at stage 0")))
+                        (clj-constant actx v)))
               set! (analyze-set! actx form)
               . (analyze-dot actx form)
               new (analyze-new actx form)
@@ -1977,7 +1993,8 @@
           (let [ex (macroexpand1 actx form)]
             (if (identical? ex form)
               (if-let [v (resolve-var actx op)]
-                {:op :var-invoke :var v :args (mapv #(analyze actx %) (rest form)) :type t/object-desc}
+                {:op :var-invoke :var v :field (clj-var-field actx v) :owner (:class actx)
+                 :args (mapv #(analyze actx %) (rest form)) :type t/object-desc}
                 (fail (str "Unable to resolve: " op)))
               (analyze actx ex))))))))
 
@@ -3045,3 +3062,41 @@
                             (.visitInsn mv (if (= "V" r) Opcodes/RETURN (xop r Opcodes/IRETURN)))))]
     {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
      :args (into [on] (convert-args m arg-nodes va)) :type r}))
+
+;; ---------------------------------------------------------------------------------------------
+;; Clojure data and vars in class bodies (§5.13): constants in private static synthetic fields
+;; initialized in <clinit>, as deftype has them
+
+(defn- constant-field!
+  "A static field of the current class holding a Clojure constant: returns {:owner :name :desc}."
+  [actx k desc init]
+  (let [cls (:class actx)
+        st (state cls)
+        existing (get-in @st [:clj-consts k])]
+    (or existing
+        (let [i (count (:clj-consts @st))
+              f {:owner cls :name (str "const__" i) :desc desc :init init}]
+          (swap! st update :clj-consts (fnil assoc (array-map)) k f)
+          f))))
+
+(defn clj-constant
+  "A keyword or quoted datum as a constant node (read at class initialization)."
+  [actx v]
+  (let [desc (cond (keyword? v) "Lclojure/lang/Keyword;"
+                   (symbol? v) "Lclojure/lang/Symbol;"
+                   :else t/object-desc)
+        f (constant-field! actx [:const v] desc {:kind :read :text (binding [*print-meta* true] (pr-str v))})]
+    {:op :get-static :field (assoc f :flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)) :owner (:owner f) :type desc}))
+
+(defn clj-var-field [actx v]
+  (constant-field! actx [:var v] "Lclojure/lang/Var;"
+                   {:kind :var :ns (str (ns-name (.ns ^clojure.lang.Var v))) :name (str (.sym ^clojure.lang.Var v))}))
+
+(defn clj-collection
+  "A collection literal: built by clojure.lang.RT/vector, map or set from its boxed elements."
+  [actx fname desc elems]
+  (let [ns (mapv #(analyze actx %) elems)]
+    {:op :invoke :kind :static :owner "clojure/lang/RT" :itf false :name fname
+     :desc (str "([Ljava/lang/Object;)" desc)
+     :args [{:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) ns)}]
+     :type desc}))

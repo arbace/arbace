@@ -134,3 +134,14 @@
     (is (= 43 (call 'tryExpr "42")))
     (is (= 0 (call 'tryExpr "x")))
     (is (= ["yes" "no" "no" "yes"] (map #(call 'truth %) [1 nil false true])))))
+
+(defn twice [x] (* 2 x))
+
+(deftest clojure-in-class-bodies
+  (let [[C] (load-forms 'classes.code-test
+              '[(^:public ClojureData
+                  (method ^:public ^:static data [^int n]
+                    {:n n :kw :foo :sym 'bar :vec [1 "two" n] :set #{:a} :twice (twice n)
+                     :quoted '(1 (2 3) {:x [y]})}))])]
+    (is (= {:n 3 :kw :foo :sym 'bar :vec [1 "two" 3] :set #{:a} :twice 6 :quoted '(1 (2 3) {:x [y]})}
+           (clojure.lang.Reflector/invokeStaticMethod C "data" (object-array [(int 3)]))))))

@@ -442,14 +442,11 @@
       :monitor (emit-monitor gen node :expr)
       (:break :recur :return) (emit-jump gen node)
       :throw (do (emit gen (:expr node) :expr) (insn gen Opcodes/ATHROW))
-      :var-deref (do (.visitLdcInsn m (str (ns-name (.ns ^clojure.lang.Var (:var node)))))
-                     (.visitLdcInsn m (str (.sym ^clojure.lang.Var (:var node))))
-                     (.visitMethodInsn m Opcodes/INVOKESTATIC "clojure/lang/RT" "var"
-                                       "(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;" false)
+      :var-deref (do (.visitFieldInsn m Opcodes/GETSTATIC (:owner (:field node)) (:name (:field node)) "Lclojure/lang/Var;")
                      (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "clojure/lang/Var" "deref" "()Ljava/lang/Object;" false))
       :var-invoke (let [args (:args node)]
                     (when (> (count args) 20) (fail "Too many arguments for a var call"))
-                    (spill-operands gen (cons {:op :var-deref :var (:var node) :type t/object-desc} args)
+                    (spill-operands gen (cons {:op :var-deref :var (:var node) :field (:field node) :type t/object-desc} args)
                                     (cons "Lclojure/lang/IFn;" (repeat t/object-desc))
                                     nil)
                     (.visitMethodInsn m Opcodes/INVOKEINTERFACE "clojure/lang/IFn" "invoke"
@@ -1143,7 +1140,7 @@
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
-(declare assertion-clinit emit-lambda-method emit-deserialize-lambda)
+(declare assertion-clinit emit-lambda-method emit-deserialize-lambda clj-constants-clinit)
 
 (defmulti emit-clinit-node (fn [gen node] (:op node)))
 (defmethod emit-clinit-node :default [gen node] (emit gen node :stmt))
@@ -1152,6 +1149,7 @@
   (let [st @(:state d)
         nodes (:clinit st)
         extra (cond->> (:clinit-extra st)
+                (seq (:clj-consts st)) (cons (clj-constants-clinit (:clj-consts st)))
                 (:uses-assert st) (cons (assertion-clinit (:name d)))
                 (:interface-assert st)
                 (cons (fn [gen]
@@ -1272,6 +1270,10 @@
     (when (:uses-assert st)
       (.visitEnd (.visitField cw (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC)
                               "$assertionsDisabled" "Z" nil nil)))
+    (doseq [[_ f] (:clj-consts st)]
+      (.visitEnd (.visitField cw (bit-or (if (env/interface? n) Opcodes/ACC_PUBLIC Opcodes/ACC_PRIVATE)
+                                         Opcodes/ACC_STATIC Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC)
+                              (:name f) (:desc f) nil nil)))
     (doseq [f (:extra-fields st)]
       (.visitEnd (.visitField cw (:flags f) (:name f) (:desc f) nil nil)))
     (doseq [m (:methods d)] (emit-method cw d m))
@@ -1842,3 +1844,21 @@
    :inner-flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC)
    :super "java/lang/Object" :interfaces [] :fields [] :methods [] :members [] :member-classes {}
    :state (atom {:captures [] :uses-assert true})})
+
+(defn clj-constants-clinit
+  "<clinit> code initializing the Clojure constants of a class (vars, keywords, quoted data)."
+  [consts]
+  (fn [gen]
+    (let [m (mv gen)]
+      (doseq [[_ {:keys [owner name desc init]}] consts]
+        (case (:kind init)
+          :var (do (.visitLdcInsn m (:ns init))
+                   (.visitLdcInsn m (:name init))
+                   (.visitMethodInsn m Opcodes/INVOKESTATIC "clojure/lang/RT" "var"
+                                     "(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;" false))
+          :read (do (.visitLdcInsn m (:text init))
+                    (.visitMethodInsn m Opcodes/INVOKESTATIC "clojure/lang/RT" "readString"
+                                      "(Ljava/lang/String;)Ljava/lang/Object;" false)
+                    (when-not (= desc t/object-desc)
+                      (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal desc)))))
+        (.visitFieldInsn m Opcodes/PUTSTATIC owner name desc)))))

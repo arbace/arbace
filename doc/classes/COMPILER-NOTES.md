@@ -100,9 +100,9 @@ Some mechanisms:
 
 ## Stage-0 limits
 
-- Class bodies compile the Java subset (§5.13) plus vars: a symbol naming a var reads it and a
-  call of a var invokes its function (`clojure.lang.RT/var`, `IFn.invoke`). Keywords, collection
-  literals, `fn`, `case`, `letfn` are errors in class bodies.
+- Class bodies compile the Java subset (§5.13) plus some Clojure: a symbol naming a var reads
+  it and a call of a var invokes its function, keywords, quoted data and collection literals
+  work (they need the Clojure runtime). `fn`, `case` and `letfn` are errors in class bodies.
 - `anon`, `letclass`, `lambda`, `switch` and the other new code forms work inside class bodies
   only (the frozen compiler does not know their special forms).
 - `defclass` must be evaluated (it compiles at macroexpansion time); a top-level `do` of class
@@ -200,7 +200,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.clj` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
-| §5.13 Clojure in class bodies | partial: vars (read and call); keywords, collection literals, `fn` todo |
+| §5.13 Clojure in class bodies | partial: vars (read and call), keywords, quoted data, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`); `fn`, `letfn`, `case` todo |
 | §5.6 reflection is an error | done (unresolved members are compile errors; there is no reflective fallback) |
 | `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
