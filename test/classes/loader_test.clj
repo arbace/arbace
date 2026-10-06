@@ -42,3 +42,21 @@
     (is (= 22 (clojure.lang.Reflector/invokeStaticMethod ping "ping" (object-array [(int 4)]))))
     ;; Pong/BASE, a constant of a class entered from source, is inlined
     (is (= 42 (.get (.getDeclaredField ping "LIMIT") nil)))))
+
+(deftest repl-session
+  ;; SPEC §10, typed into a REPL; then a redefinition, which old instances survive
+  (let [input "(require 'arbace.classes.boot)
+(defclass ^:public Counter
+  (field ^:private ^int n)
+  (method ^:public inc ^int [this] (set! n (unchecked-inc-int n))))
+(def c1 (Counter.))
+(let [c (Counter.)] (.inc c) (.inc c))
+(defclass ^:public Counter
+  (field ^:private ^int n)
+  (method ^:public inc ^int [this] (set! n (unchecked-add-int n 10))))
+(.inc (Counter.))
+(.inc c1)
+"
+        r (sh/sh "java" "-cp" (System/getProperty "java.class.path") "clojure.main" :in input)]
+    (is (= 0 (:exit r)) (:err r))
+    (is (re-find #"(?s)user=> user\.Counter\n.*user=> 2\n.*user=> user\.Counter\n.*user=> 10\nuser=> 1\n" (:out r)) (:out r))))
