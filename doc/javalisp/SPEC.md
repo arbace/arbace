@@ -2,8 +2,9 @@
 
 javalisp is a transcription of Java 26 source into s-expressions. Its text reads as plain
 data with `clojure.edn/read` and with `clojure.core/read`, and it maps back to Java exactly.
-The tool lives in `arbace/javalisp/` (namespaces `arbace.javalisp.*`). It follows the
-example of go-lisp (`../go-lisp/golisp/DESIGN.md`, `SPEC.md`), which does the same for Go.
+javalisp files have the suffix `.jls`. The tool lives in `arbace/javalisp/` (namespaces
+`arbace.javalisp.*`). It follows the example of go-lisp (`../go-lisp/golisp/DESIGN.md`,
+`SPEC.md`), which does the same for Go.
 
 The long-term aim is a second parser inside a vendored javac that reads javalisp and
 compiles it to the same class files as the Java it came from, byte for byte. So the
@@ -189,9 +190,9 @@ for one.
 ## 7. The tool
 
 ```sh
-bin/javalisp -m arbace.javalisp.main java2clj X.java       # Java -> javalisp, to stdout
-bin/javalisp -m arbace.javalisp.main clj2java X.clj        # javalisp -> Java, to stdout
-bin/javalisp -m arbace.javalisp.main transcribe DIR OUT    # every .java under DIR -> OUT/**.clj
+bin/javalisp -m arbace.javalisp.main java2jls X.java       # Java -> javalisp, to stdout
+bin/javalisp -m arbace.javalisp.main jls2java X.jls        # javalisp -> Java, to stdout
+bin/javalisp -m arbace.javalisp.main transcribe DIR OUT    # every .java under DIR -> OUT/**.jls
 bin/javalisp -m arbace.javalisp.main check [-v] [-o] PATH... # round-trip check
 bin/javalisp -m arbace.javalisp.main classes PATH...       # compile together, compare class bytes
 bin/javalisp -m arbace.javalisp.main classes-each PATH...  # compile file by file, compare class bytes

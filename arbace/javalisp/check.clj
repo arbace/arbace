@@ -77,7 +77,7 @@
     (when out-dir
       (doseq [{:keys [file clj java]} results]
         (when clj
-          (let [o (io/file out-dir (str (str/replace file #"^/+" "") ".clj"))]
+          (let [o (io/file out-dir (str (str/replace file #"^/+" "") ".jls"))]
             (io/make-parents o)
             (spit o clj)))
         (when java
@@ -96,7 +96,7 @@
                 show (fn [label ls]
                        (doseq [l (range (max 1 (dec lo)) (inc hi))]
                          (println (format "   %-5s %5d| %s" label l (get ls (dec l) "")))))]
-            (show "java" src) (show "clj" (lines clj)) (show "rt" (lines java))))))
+            (show "java" src) (show "jls" (lines clj)) (show "rt" (lines java))))))
     (println (format "%d files, %d ok, %d failed %s" (count files) (- (count files) (count bad))
                      (count bad) (pr-str (frequencies (map :stage bad)))))
     bad))
