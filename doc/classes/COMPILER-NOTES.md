@@ -119,6 +119,17 @@ shape-identical to javac, `clojure/asm` 36 of 36, `clojure/asm/signature` 3 of 3
 `clojure/asm/commons` 4 of 5, `clojure/java/api` 1 of 1, after patching two converter issues by
 hand (notes for the converter, below); the two remaining differences are converter issues too.
 
+### Running the converted runtime
+
+The same converted files, compiled to class files (812 classes, as many as the baseline has),
+replace the baseline's `clojure/**/*.class`: Clojure starts from them and loads `clojure.core`
+with the converted `Compiler`. Clojure's upstream test suite on that runtime
+(`CLOJURE_TESTS_RUN=stage0 CLOJURE_SRC=<classes>:<repo> bin/clojure-tests`) has no regressions
+against the baseline: 83 namespaces, 809 tests, 20,718 of 20,750 assertions (the same 32
+spec-message failures as the baseline), test.generative 27 of 27 (2026-10-06). The scratch steps,
+in `.tmp/` of the worktree: copy the converter's output, patch it as notes 1 and 2 below say, compile
+every file with `arbace.classes.compiler/compile-forms` and `write-classes!`, run the suite.
+
 ## Coverage (§8)
 
 Status: **done** (implemented and tested), ≡ (compared with javac's classes in the tests),
@@ -145,7 +156,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping) |
 | `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert` in classes; `java-assert` in interfaces todo) |
 | `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
-| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls); `Outer/super` calls and javac's `access$` methods todo; `(.super o args)` todo |
+| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls, `C/super` calls and javac's `access$` accessors); `(.super o args)` todo |
 | `NEW_ARRAY`, `ARRAY_ACCESS` | done ≡ |
 | `ASSIGNMENT`, compound assignments, increments | done ≡ |
 | unary and binary operators | done ≡ (`-int`, long, `-float`, double; bit and shift operators; comparisons; `not`, `and`, `or`, `identical?`, `nil?`, `some?`) |
@@ -191,7 +202,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | §10 REPL: package loaders, generations | done (tested) |
 | §5.13 Clojure in class bodies | partial: vars (read and call); keywords, collection literals, `fn` todo |
 | §5.6 reflection is an error | done (unresolved members are compile errors; there is no reflective fallback) |
-| `access$NNN` accessors, `Outer/super` | todo (unused in the baseline) |
+| `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
 ## Notes for the converter
 

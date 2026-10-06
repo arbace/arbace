@@ -21,9 +21,14 @@
         src (io/file dir "src") out (io/file dir "out")]
     (.mkdirs out)
     (let [files (doall (for [[n s] sources]
-                         (let [f (io/file src pkg (str n ".java"))]
+                         (let [f (io/file src (if (str/starts-with? s "package ")
+                                                (str/replace (second (re-find #"package ([\w.]+);" s)) "." "/")
+                                                pkg)
+                                          (str n ".java"))]
                            (io/make-parents f)
-                           (spit f (str "package " (str/replace pkg "/" ".") ";\n" s))
+                           (spit f (if (str/starts-with? s "package ")
+                                     s
+                                     (str "package " (str/replace pkg "/" ".") ";\n" s)))
                            (.getPath f))))
           javac (javax.tools.ToolProvider/getSystemJavaCompiler)
           err (java.io.ByteArrayOutputStream.)

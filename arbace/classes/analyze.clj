@@ -5,7 +5,7 @@
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p])
-  (:import (arbace.asm Opcodes)))
+  (:import (arbace.asm Opcodes Type MethodVisitor ClassWriter)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; compilation unit
@@ -789,6 +789,10 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; analysis
 
+(declare accessorize)
+
+(declare outer-super-call)
+
 (declare analyze analyze-body analyze-invoke analyze-new analyze-dot analyze-op analyze-class-form
          analyze-symbol coerce-hint needs-outer-instance? ctor-call-node)
 
@@ -820,9 +824,10 @@
                    (instance? Byte form) (const-node "B" form)
                    :else (fail (str "Not supported in class bodies at stage 0: " (pr-str form)
                                     " (" (.getName (class form)) ")")))]
-        (if-let [tag (and (instance? clojure.lang.IMeta form) (:tag (meta form)))]
-          (coerce-hint actx node tag)
-          node)))))
+        (let [node (accessorize actx node)]
+          (if-let [tag (and (instance? clojure.lang.IMeta form) (:tag (meta form)))]
+            (coerce-hint actx node tag)
+            node))))))
 
 (defn coerce-hint
   "A tag on an expression gives its static type, as in Clojure; a checkcast keeps the
@@ -1537,10 +1542,11 @@
       (and (symbol? target) (namespace target) (= "super" (name target)))
       (let [cn (or (resolve-class actx (symbol (namespace target))) (fail (str "Unknown class " target)))
             d (decl! (:class actx))]
-        (if (some #{cn} (:interfaces d))
+        (cond
+          (some #{cn} (:interfaces d))
           (analyze-method-call actx (assoc (this-node actx) :type (t/internal->desc cn)) mname args
                                :special true :param-tags param-tags)
-          (fail "Outer.super calls are not supported yet")))
+          :else (outer-super-call actx cn mname args param-tags)))
 
       (receiver-class actx target)
       (let [cn (receiver-class actx target)]
@@ -1996,6 +2002,9 @@
                         (swap! init conj {:op :set-field :field f :owner n :target (this-node actx)
                                           :val v :type (:desc f)})))))))
             :init (swap! init conj (analyze-body iactx (:body mb)))
+            ;; member classes are analyzed in place, as javac translates them (accessor numbers)
+            :class (when-let [mc (get (:member-classes d) (name (second (:form mb))))]
+                     (analyze-class! mc))
             :clinit (swap! clinit conj (analyze-body sactx (:body mb)))
             :method (let [m (methods-by-member (:mid mb))]
                       (when (:has-body mb)
@@ -2669,3 +2678,113 @@
           (doseq [c new] (resolve-header! c))
           (doseq [c new] (resolve-members! c))
           (when (decl n) n))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; access$NNN accessors (§5.6, §6): protected members of a superclass in another package used
+;; from a nested class, and Outer/super calls, go through a static synthetic method of the
+;; enclosing class, named as javac names them
+
+(defn- xop [d base] (.getOpcode (Type/getType (if (keyword? d) t/object-desc d)) (int base)))
+
+(defn- add-accessor!
+  "Registers accessor method code (emitted with the class); returns its name."
+  [o code desc emit-body]
+  (let [anum (dec (get (swap! (state o) update :access-count (fnil inc 0)) :access-count))
+        nm (str "access$" anum (quot code 10) (mod code 10))]
+    (swap! (state o) update :extra-methods (fnil conj [])
+           (fn [^ClassWriter cw]
+             (let [mv (.visitMethod cw (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC) nm desc nil nil)]
+               (.visitCode mv)
+               (emit-body mv)
+               (.visitMaxs mv 0 0)
+               (.visitEnd mv))))
+    nm))
+
+(defn- load-params [^MethodVisitor mv descs start]
+  (loop [[d & more] descs slot start]
+    (when d
+      (.visitVarInsn mv (xop d Opcodes/ILOAD) slot)
+      (recur more (+ slot (t/size d))))))
+
+(defn- accessor-owner
+  "The enclosing class of the current class through which protected member m is accessible,
+  when the current class itself cannot access it; else nil."
+  [actx m]
+  (let [c (:class actx)
+        owner (:owner m)]
+    (when (and m (has? (:flags m) Opcodes/ACC_PROTECTED)
+               (not= (t/package-of owner) (t/package-of c))
+               (not (env/subclass? c owner)))
+      (loop [o (:outer (decl c))]
+        (when o
+          (if (env/subclass? o owner) o (recur (:outer (decl o)))))))))
+
+(defn accessorize
+  "Rewrites a member access that needs a javac accessor into a call of it."
+  [actx node]
+  (case (:op node)
+    (:get-field :set-field :get-static :set-static)
+    (let [f (:field node)]
+      (if-let [o (accessor-owner actx (assoc f :owner (or (:declarer f) (:owner f))))]
+        (let [static? (static-flag? f)
+              od (t/internal->desc o)
+              fd (:desc f)
+              write? (#{:set-field :set-static} (:op node))
+              ps (cond-> [] (not static?) (conj od) write? (conj fd))
+              desc (t/method-desc ps fd)
+              nm (add-accessor! o (if write? 2 0) desc
+                                (fn [^MethodVisitor mv]
+                                  (load-params mv ps 0)
+                                  (when write?
+                                    (.visitInsn mv (if (= 2 (t/size fd))
+                                                     (if static? Opcodes/DUP2 Opcodes/DUP2_X1)
+                                                     (if static? Opcodes/DUP Opcodes/DUP_X1))))
+                                  (.visitFieldInsn mv (if static?
+                                                        (if write? Opcodes/PUTSTATIC Opcodes/GETSTATIC)
+                                                        (if write? Opcodes/PUTFIELD Opcodes/GETFIELD))
+                                                   o (:name f) fd)
+                                  (.visitInsn mv (xop fd Opcodes/IRETURN))))]
+          {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
+           :args (vec (concat (when-not static? [(:target node)]) (when write? [(:val node)])))
+           :type fd})
+        node))
+
+    :invoke
+    (let [m (:method node)]
+      (if-let [o (and m (not= :special (:kind node)) (accessor-owner actx m))]
+        (let [static? (= :static (:kind node))
+              od (t/internal->desc o)
+              [mps r] (t/parse-method-desc (:desc node))
+              ps (if static? mps (into [od] mps))
+              desc (t/method-desc ps r)
+              nm (add-accessor! o 0 desc
+                                (fn [^MethodVisitor mv]
+                                  (load-params mv ps 0)
+                                  (.visitMethodInsn mv (if static? Opcodes/INVOKESTATIC Opcodes/INVOKEVIRTUAL)
+                                                    o (:name node) (:desc node) false)
+                                  (.visitInsn mv (if (= "V" r) Opcodes/RETURN (xop r Opcodes/IRETURN)))))]
+          {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
+           :args (vec (concat (when-not static? [(:target node)]) (:args node))) :type r})
+        node))
+    node))
+
+(defn outer-super-call
+  "(.m Outer/super args) from a nested class or lambda: javac's access$N01 accessor in Outer."
+  [actx o mname args param-tags]
+  (let [d (decl! o)
+        sup (:super d)
+        on (outer-this-node actx o)
+        arg-nodes (mapv #(analyze actx %) args)
+        cands (->> (env/member-methods sup mname) (remove static-flag?))
+        [m va] (select-method actx cands arg-nodes (str "method " mname) param-tags)
+        [mps r] (t/parse-method-desc (:desc m))
+        od (t/internal->desc o)
+        ps (into [od] mps)
+        desc (t/method-desc ps r)
+        nm (add-accessor! o 1 desc
+                          (fn [^MethodVisitor mv]
+                            (load-params mv ps 0)
+                            (.visitMethodInsn mv Opcodes/INVOKESPECIAL sup mname (:desc m) false)
+                            (.visitInsn mv (if (= "V" r) Opcodes/RETURN (xop r Opcodes/IRETURN)))))]
+    {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
+     :args (into [on] (convert-args m arg-nodes va)) :type r}))
