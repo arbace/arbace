@@ -212,7 +212,9 @@
   name): those without @Target or whose @Target includes it."
   [scope m context]
   (delay (vec (filter #(let [ts (annotation-targets (t/desc->internal (:type %)))]
-                         (or (nil? ts) (ts context)))
+                         (or (nil? ts) (ts context)
+                             ;; an annotation interface is a type too
+                             (and (= context "ANNOTATION_TYPE") (ts "TYPE"))))
                       (annotations-now scope m)))))
 
 (defn type-annotations
@@ -642,7 +644,9 @@
                       [{:name "<init>" :owner n :desc desc :ret "V"
                         :params (mapv (fn [pd] {:desc pd :flags 0}) (first (t/parse-method-desc desc)))
                         :flags (cond (or (= kind :enum) (:enum-body d)) Opcodes/ACC_PRIVATE
-                                     (= :anon (:nesting d)) 0
+                                     ;; an anonymous constructor is variable arity when the
+                                     ;; superclass constructor is (javac)
+                                     (= :anon (:nesting d)) (bit-and (or (:flags (:anon-super-ctor d)) 0) Opcodes/ACC_VARARGS)
                                      :else (class-access d))
                         :derived (if (= :anon (:nesting d)) :anon-ctor :default-ctor)
                         ;; an anonymous constructor throws what the superclass constructor throws
