@@ -332,3 +332,11 @@ Recorded now, at the user's request, so that the current work does not block the
   - Untyped methods: the signature is inferred from a unique inherited method.
   - `cast`: compiled to `checkcast`.
   - Implementation: one, in plain Clojure, used at stage 0 and compiled into stage 1.
+
+## 2026-10-06: Track the baseline's compiled classes
+
+- With the user's consent, the 812 classes of `clojure/` (1.8 MB) are now tracked, through a
+  `!/clojure/**/*.class` exception in `.gitignore`. Fresh checkouts and agent worktrees under
+  `.tmp/worktrees/` then run the baseline Clojure without building it first.
+- They were rebuilt from scratch exactly as `SEED.bash` built them, `javac -g` over every
+  `.java` under `clojure/`, including the two seed fixes. Rebuild them after any further fix.

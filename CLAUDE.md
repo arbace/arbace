@@ -17,7 +17,8 @@ Prior art:
 ## Layout
 
 - `clojure/` is the frozen reference baseline: upstream Clojure and ASM sources as seeded by
-  `SEED.bash` (now only in git history, commit `d21dc91`). Don't modify it, except for bug
+  `SEED.bash` (now only in git history, commit `d21dc91`). Its compiled classes are tracked too,
+  built in place with `javac -g $(find clojure -name '*.java')`; rebuild them after a fix. Don't modify it, except for bug
   fixes the user approves, each recorded in the journal. The rewrite is derived from it but
   lives elsewhere.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
@@ -26,8 +27,7 @@ Prior art:
 - `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`.
   - `arbace/javalisp/` is javalisp: Java source <-> Clojure-readable s-expressions, specified in
     `doc/javalisp/SPEC.md`. Run it with `bin/javalisp -m arbace.javalisp.main ...`, which starts
-    the vendored `clojure/` with access to the JDK's javac internals (it needs the compiled
-    `clojure/**/*.class`, which are gitignored).
+    the vendored `clojure/` with access to the JDK's javac internals.
   - After changing javalisp, rerun its checks. They must stay clean apart from the known limits
     in the spec:
     `check clojure /root/jdk26u/src /root/jdk26u/test`, `classes clojure` and
