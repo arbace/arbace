@@ -88,7 +88,8 @@
                                       {:name (.getName m)
                                        :desc (t/method-desc (map t/class->desc (.getParameterTypes m))
                                                             (t/class->desc (.getReturnType m)))
-                                       :flags (.getModifiers m) :owner n})
+                                       :flags (.getModifiers m) :owner n
+                                       :throws (mapv internal (.getExceptionTypes m))})
                                     (for [^Constructor m (.getDeclaredConstructors c)]
                                       {:name "<init>"
                                        :desc (t/method-desc (map t/class->desc (.getParameterTypes m)) "V")

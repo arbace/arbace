@@ -50,7 +50,7 @@
                   (throw (ex-info (str "Bad class member: " (pr-str f)) {:form f}))))))
           forms))
 
-(declare parse-class)
+(declare parse-class parse-member*)
 
 (defn- parse-params [v]
   (when-not (vector? v) (throw (ex-info (str "Expected a parameter vector: " (pr-str v)) {:form v})))
@@ -59,7 +59,14 @@
      :varargs (boolean rest-param)
      :vmeta (meta v)}))
 
-(defn parse-member [ns f]
+(def ^:private member-ids (atom 0))
+
+(defn parse-member
+  "A parsed member; :mid identifies it (members equal as values may differ in metadata)."
+  [ns f]
+  (assoc (parse-member* ns f) :mid (swap! member-ids inc)))
+
+(defn- parse-member* [ns f]
   (case (first f)
     field (let [[_ nm & init] f]
             {:kind :field :sym nm :name (name nm) :meta (meta nm)

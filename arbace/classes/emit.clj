@@ -975,10 +975,13 @@
     (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s))
     (doseq [p (:prologue ab)] (emit gen p :stmt))
     (emit-ctor-call gen d ab)
+    ;; field initializers read the outer instance and captured values from the fields (javac
+    ;; translates them in the class), the constructor body from the parameters
     (when (:calls-super ab)
-      (doseq [[b _] cap-slots] (swap! (:slots gen) dissoc (:id b))))
-    (when (:calls-super ab)
-      (doseq [i (:init st)] (emit gen i :stmt)))
+      (doseq [[b _] cap-slots] (swap! (:slots gen) dissoc (:id b)))
+      (let [igen (if (this0-field? d) (dissoc gen :outer-slot) gen)]
+        (doseq [i (:init st)] (emit igen i :stmt)))
+      (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s)))
     (when-let [b (:body ab)] (emit gen b :stmt))
     (when (and (= :record (:kind d)) (or (:compact m) (= :record-canonical (:derived m))))
       (emit-assign-fields-from-params gen d (:params ab)))
@@ -1044,7 +1047,10 @@
             (when (and (not= bp tp) (t/ref? tp))
               (.visitTypeInsn mv Opcodes/CHECKCAST (t/desc->internal tp)))
             (recur more (+ slot (t/size bp)))))
-        (.visitMethodInsn mv (if itf Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL) n (:name m) (:desc target) itf)
+        (if (:special m)
+          (.visitMethodInsn mv Opcodes/INVOKESPECIAL (:owner target) (:name m) (:desc target)
+                            (boolean (env/interface? (:owner target))))
+          (.visitMethodInsn mv (if itf Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL) n (:name m) (:desc target) itf))
         (.visitInsn mv (opcode br Opcodes/IRETURN)))
       :record-accessor
       (let [c (:component m)]
@@ -1107,7 +1113,7 @@
       (has? (:flags m) (bit-or Opcodes/ACC_ABSTRACT Opcodes/ACC_NATIVE)) nil
       :else (do (.visitCode mv)
                 (if (= "V" (:ret m)) (.visitInsn mv Opcodes/RETURN)
-                    (fail (str "Method " (:name m) " needs a body")))))
+                    (fail (str "Method " (:name m) (:desc m) " of " n " needs a body")))))
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
@@ -1139,8 +1145,16 @@
         buf (char-array (.getMaxStringLength cr))
         names (java.util.LinkedHashSet.)
         add-desc (fn [^String d]
-                   (doseq [[_ c] (re-seq #"L([^;<>]+)[;<]" d)] (.add names c)))]
+                   ;; class names in descriptors and signatures (Outer<T>.Inner in signatures too)
+                   (doseq [[_ c] (re-seq #"L([^;<>.]+)[;<.]" d)] (.add names c)))]
     (.add names self)
+    ;; descriptors and signatures of the class's own members (javac enters their classes)
+    (.accept cr (proxy [ClassVisitor] [Opcodes/ASM9]
+                  (visit [v a n sig sup ifs] (when sig (add-desc sig)))
+                  (visitField [a n d sig v] (add-desc d) (when sig (add-desc sig)) nil)
+                  (visitMethod [a n d sig ex] (add-desc d) (when sig (add-desc sig)) nil)
+                  (visitRecordComponent [n d sig] (add-desc d) (when sig (add-desc sig)) nil))
+             (bit-or ClassReader/SKIP_CODE ClassReader/SKIP_DEBUG ClassReader/SKIP_FRAMES))
     (doseq [i (range 1 (.getItemCount cr))]
       (let [off (.getItem cr i)]
         (when (pos? off)
@@ -1402,8 +1416,10 @@
   [^ClassWriter cw node]
   (let [cls (:class node)
         inst? (lambda-instance? node)
+        ;; javac gives the lambda method the throws clause of the functional interface's method
+        exc (seq (:throws (:sam node)))
         mv (.visitMethod cw (bit-or Opcodes/ACC_PRIVATE Opcodes/ACC_SYNTHETIC (if inst? 0 Opcodes/ACC_STATIC))
-                         (:name node) (lambda-impl-desc node) nil nil)
+                         (:name node) (lambda-impl-desc node) nil (when exc (into-array String exc)))
         gen (assoc (new-gen mv cls (:ret node) (not inst?)) :lambda? true)]
     (doseq [b @(:captures (:boundary node))]
       (swap! (:slots gen) assoc (:id b) (alloc-slot gen (:type b))))

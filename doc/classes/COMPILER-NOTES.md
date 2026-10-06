@@ -108,38 +108,49 @@ Some mechanisms:
 - `defclass` must be evaluated (it compiles at macroexpansion time); a top-level `do` of class
   forms is seen form by form by the frozen compiler, hence `defclasses` (amendment 1).
 
+## Checking converted code
+
+`bin/class-forms-check DIR [PACKAGE-DIR]` compiles converted files (one file per Java file:
+`in-ns`, `import`, `defclass` forms) without defining anything, and compares the shape of every
+class with the class of the same name on the class path. For `clojure/lang` and `clojure/asm`
+those are the baseline's javac classes. On 2026-10-06 the converter's output for the 183 baseline
+files (read from its work area, not committed) gave: `clojure/lang` 138 of 139 files
+shape-identical to javac, `clojure/asm` 36 of 36, `clojure/asm/signature` 3 of 3,
+`clojure/asm/commons` 4 of 5, `clojure/java/api` 1 of 1, after patching two converter issues by
+hand (notes for the converter, below); the two remaining differences are converter issues too.
+
 ## Coverage (§8)
 
-Status: **done** (implemented and tested, javac comparison where marked ≡), **partial**, **todo**.
+Status: **done** (implemented and tested), ≡ (compared with javac's classes in the tests),
+**partial**, **todo**.
 
 ### Tree kinds (§8.1)
 
 | kinds | status |
 |---|---|
 | `COMPILATION_UNIT`, `PACKAGE`, `IMPORT` | done: namespace package, `ns`/`import`, own-package and `java.lang` fallback; `defpackage` todo |
-| `MODULE` ... | todo (`defmodule`) |
-| `CLASS`, `INTERFACE` | done ≡ (top-level, member, inner, local, anonymous) |
-| `ENUM`, `RECORD`, `ANNOTATION_TYPE` | todo |
-| `METHOD` | done ≡ (instance, static, abstract, native, default, private interface, varargs, throws, overloads) |
-| `VARIABLE` | done: fields ≡, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters |
+| `MODULE`, `REQUIRES`, `EXPORTS`, `OPENS`, `USES`, `PROVIDES` | todo (`defmodule`) |
+| `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION_TYPE` | done ≡ (top-level, member, inner, local, anonymous; enum constant bodies; compact constructors) |
+| `METHOD` | done ≡ (instance, static, abstract, native, default, private interface, varargs, throws, overloads, `deftype`-style untyped signatures) |
+| `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
-| `MODIFIERS`, `ANNOTATION` | done for modifiers ≡; annotations partial (declarations; type annotations todo) |
-| `TYPE_PARAMETER` | partial: `:type-params` and `Signature` (class, method, field) |
-| `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE` | done in declarations; `UNION_TYPE` (multi-catch) done ≡ |
+| `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | todo |
+| `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
+| `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
-| `WHILE_LOOP`, `DO_WHILE_LOOP`, `FOR_LOOP` | done ≡ (`while`, `loop`/`recur`, `dotimes`) |
-| `ENHANCED_FOR_LOOP` | todo (`for-each`) |
-| `LABELED_STATEMENT`, `BREAK`, `CONTINUE`, `RETURN` | done ≡ (also through `finally` and `locking`) |
-| `YIELD`, `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, patterns | todo |
-| `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED` | done ≡; `with-resources` todo |
-| `ASSERT` | todo (`java-assert`) |
-| `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`) |
-| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying type per JLS 13.1, `invokeinterface`, `super` calls, `Iface/super`, inner class creation, `anon`); `(.new o Inner)` todo |
-| `NEW_ARRAY`, `ARRAY_ACCESS` | done ≡ (`(new int/2 n)`, `(new int/1 [..])`, multi-index `aget`) |
-| `ASSIGNMENT`, compound assignments, increments | done ≡ (`set!` of locals, own fields, `(.-f x)`, `C/f`, `aset`) |
+| `WHILE_LOOP`, `DO_WHILE_LOOP`, `FOR_LOOP`, `ENHANCED_FOR_LOOP` | done ≡ (`while`, `loop`/`recur`, `dotimes`, `for-each` over arrays and `Iterable`s) |
+| `LABELED_STATEMENT`, `BREAK`, `CONTINUE`, `RETURN`, `YIELD` | done ≡ (also through `finally` and `locking`) |
+| `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, case labels | done ≡ (int-like, `String`, enums with ordinals or `$SwitchMap$`, `nil`, patterns with guards) |
+| `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping) |
+| `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert` in classes; `java-assert` in interfaces todo) |
+| `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
+| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls); `Outer/super` calls and javac's `access$` methods todo; `(.super o args)` todo |
+| `NEW_ARRAY`, `ARRAY_ACCESS` | done ≡ |
+| `ASSIGNMENT`, compound assignments, increments | done ≡ |
 | unary and binary operators | done ≡ (`-int`, long, `-float`, double; bit and shift operators; comparisons; `not`, `and`, `or`, `identical?`, `nil?`, `some?`) |
-| `INSTANCE_OF`, `TYPE_CAST` | done (`instance?`, `cast` → `checkcast`, primitive `unchecked-*`); `if-instance` todo |
-| `LAMBDA_EXPRESSION`, `MEMBER_REFERENCE` | todo |
+| `INSTANCE_OF`, `TYPE_CAST` | done ≡ |
+| `LAMBDA_EXPRESSION`, `MEMBER_REFERENCE` | done ≡ (`lambda$m$n` methods, captures, instance lambdas, intersection targets with markers, static/bound/unbound/constructor references, `super` references); serializable lambdas (`$deserializeLambda$`) and variable arity method references todo |
 | literals | done ≡ |
 
 ### Access flags (§8.2)
@@ -148,28 +159,57 @@ Status: **done** (implemented and tested, javac comparison where marked ≡), **
 |---|---|
 | `ACC_PUBLIC`, `ACC_PRIVATE`, `ACC_PROTECTED`, `ACC_STATIC`, `ACC_FINAL`, `ACC_SUPER` | done ≡ (with Java's implicit modifiers and the `InnerClasses` mapping) |
 | `ACC_SYNCHRONIZED`, `ACC_VOLATILE`, `ACC_TRANSIENT`, `ACC_VARARGS`, `ACC_NATIVE`, `ACC_ABSTRACT`, `ACC_INTERFACE` | done ≡ |
-| `ACC_SYNTHETIC` | done for derived fields (`this$0`, `val$x`) ≡ |
-| `ACC_BRIDGE` | todo (bridges) |
-| `ACC_ANNOTATION`, `ACC_ENUM`, `ACC_MANDATED`, `ACC_MODULE` | flags computed; tests todo with enums, annotations, modules |
+| `ACC_SYNTHETIC`, `ACC_BRIDGE` | done ≡ (`this$0`, `val$x`, `$VALUES`, `$values`, `$assertionsDisabled`, lambda methods, `$SwitchMap$` holders, bridges) |
+| `ACC_ANNOTATION`, `ACC_ENUM`, `ACC_MANDATED` | done ≡ |
+| `ACC_MODULE` | todo |
 
 ### Attributes (§8.3)
 
 | attribute | status |
 |---|---|
-| `ConstantValue` | done ≡ (static and instance final constant fields) |
+| `ConstantValue` | done ≡ (static and instance final constant fields; constants of loaded classes read from class files) |
 | `Code`, `StackMapTable`, `Exceptions` table | done ≡ |
-| `Exceptions` | done ≡ |
-| `Signature` | done for class, field, method and javac's constructor signatures for captured locals ≡; record components todo |
+| `Exceptions` | done ≡ (`:throws`; lambda methods get their interface method's) |
+| `Signature` | done ≡ |
 | `InnerClasses`, `EnclosingMethod`, `NestHost`, `NestMembers` | done ≡ |
-| `PermittedSubclasses` | implemented, test todo |
-| `Record` | implemented, test todo |
-| `BootstrapMethods` | todo (lambdas, `java-str`, switches; records' `ObjectMethods` implemented) |
-| `Runtime(In)VisibleAnnotations`, parameter annotations | implemented (retention by `@Retention`), test todo |
-| type annotations | todo |
-| `AnnotationDefault` | implemented, test todo |
-| `MethodParameters` | done ≡ for inner, local and anonymous class constructors; enums and records todo |
+| `PermittedSubclasses` | done ≡ (`:permits`, inferred, enums with constant bodies) |
+| `Record` | done ≡ |
+| `BootstrapMethods` | done ≡ (`StringConcatFactory`, `LambdaMetafactory`, `ObjectMethods`, `SwitchBootstraps`) |
+| `Runtime(In)VisibleAnnotations`, parameter annotations, `AnnotationDefault` | done ≡ |
+| `Runtime(In)VisibleTypeAnnotations` | todo |
+| `MethodParameters` | done ≡ (inner, local, anonymous and enum constructors, `valueOf`, canonical record constructors) |
 | `Deprecated` | done ≡ |
 | `Module` | todo |
+
+### Other parts of the spec
+
+| part | status |
+|---|---|
+| §9.1 one namespace per package, files loaded into it | done (converted files compile; `bin/class-forms-check`) |
+| §9.2 class environment: current form, defined classes, class path | done; source path lookup (entering classes from `p/C.clj` without compiling them) todo |
+| §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
+| §10 REPL: package loaders, generations | done (tested) |
+| §5.13 Clojure in class bodies | partial: vars (read and call); keywords, collection literals, `fn` todo |
+| §5.6 reflection is an error | done (unresolved members are compile errors; there is no reflective fallback) |
+| `access$NNN` accessors, `Outer/super` | todo (unused in the baseline) |
+
+## Notes for the converter
+
+Found by compiling the converter's output of the baseline (`bin/class-forms-check`):
+
+1. `void.class` is `Void/TYPE`; a bare `void` is no value (`Compiler.java`).
+2. Calls of signature polymorphic methods (`MethodHandle.invoke`, `invokeExact`, `VarHandle`
+   methods) take the call site descriptor from the param-tags (or the arguments' types) and the
+   result type from a tag on the call form: `^boolean (^[Method Object] MethodHandle/.invoke mh m
+   target)` for Java's `(boolean) mh.invoke(m, target)` (`Reflector.java`).
+3. A static member reached by simple name is qualified by javac with the current class when it is
+   a member of it (inherited or not), and otherwise with its *declaring* class: `trimGenID(...)` in
+   `Compiler.NewInstanceExpr.ReifyParser` is `Compiler$ObjExpr/trimGenID`, not
+   `NewInstanceExpr/trimGenID` (checked with javac on a small example).
+4. A cast of `null` is a `checkcast` in javac's code: keep `(cast String nil)` where Java has
+   `(String) null`, also when param-tags already pick the overload (`GeneratorAdapter.box`).
+5. Method references and lambdas: the instantiated types come from the forms only. Without a
+   signature vector (and its tag) the functional interface method's erased types are used.
 
 ## Proposed spec amendments
 
@@ -192,3 +232,23 @@ Status: **done** (implemented and tested, javac comparison where marked ≡), **
 4. **Tags on `let` bindings with a reference type (§5.3).** When the initializer's static type
    is not assignable to the tag, the binding is a `checkcast` (Clojure's hint, made verifiable),
    rather than an error.
+5. **Enum switches (§5.8, §6).** javac uses ordinals directly only for enums declared in the same
+   top-level class as the switch (`Lower.mapForEnum`: the enum's tree must be in the class being
+   translated), and the `$SwitchMap$` holder otherwise, even for enums compiled in the same javac
+   run. The compiler does the same. Proposed text for §6: "ordinals directly for enums nested in
+   the same top-level class, otherwise ...". The holder is named after all anonymous classes of
+   the top-level class (javac creates it while lowering).
+6. **Integer literals in conditionals (§5.4).** A conditional (`if`, `cond`, `switch`) whose
+   values are all integer literals takes an `int` type where the context needs one (argument of an
+   `int` parameter or `-int` operator, initializer of an `int` local), as Java's `c ? 1 : 0` does.
+   The spec lists "a branch whose other branch is `int`"; this extends it to all-literal
+   conditionals, which the converter produces (`(.substring s (if k 1 0))`).
+7. **Branches of different primitive types (§5.5).** Following Clojure's `if`, branches of
+   different primitive types are boxed each by its own type (`(if c 1.5 2)` gives `Double` or
+   `Long`), not promoted. The converter writes Java's promotions explicitly, as §5.5 says.
+8. **Nested `java-str` (§5.10).** Nested `java-str` forms are flattened into one call site, as
+   javac flattens nested string concatenation.
+9. **Qualifying types of statics by simple name (§7.1)**: see note 3 for the converter; the
+   spec's "the current class for an inherited static called by simple name" holds only when the
+   member belongs to the current class.
+10. **Signature polymorphic calls (§5.6)**: see note 2; the spec does not say how they are written.

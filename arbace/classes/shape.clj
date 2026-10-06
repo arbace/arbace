@@ -39,7 +39,10 @@
       ([op owner name desc itf] (swap! store conj [:method op owner name desc itf])))
     (visitTypeInsn [op t] (swap! store conj [:type op t]))
     (visitMultiANewArrayInsn [d n] (swap! store conj [:type :multianewarray d]))
-    (visitLdcInsn [v] (swap! store conj [:const (if (instance? Type v) (str "class " v) v)]))
+    (visitLdcInsn [v] (swap! store conj [:const (cond (instance? Type v) (str "class " v)
+                                                      (instance? Double v) [:double (str v)]
+                                                      (instance? Float v) [:float (str v)]
+                                                      :else v)]))
     (visitInvokeDynamicInsn [name desc ^Handle bsm bargs]
       (swap! store conj [:indy (if (re-matches #"lambda\$.*" name) name name) desc (str bsm)
                          (mapv str bargs)]))))
