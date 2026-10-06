@@ -130,7 +130,7 @@
    'when-not 1 'while 1 'for-each 1 'with-resources 1 'locking 1 'label 1 'letclass 1
    'if-instance 1 'when-instance 1 'anon 2 'lambda :lambda 'try 0 'do 0 'finally 0
    'initializer 0 'static-initializer 0 'constants 0 'catch 2 'java-assert 1 'dotimes 1
-   'when-some 1 'binding 1})
+   'when-some 1 'binding 1 'defmodule 1})
 
 (def pair-heads #{'cond 'switch})
 

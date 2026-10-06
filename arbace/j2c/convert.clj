@@ -41,7 +41,7 @@
 
 (defn note! [k] (when *stats* (swap! *stats* update k (fnil inc 0))))
 
-(defn- kind-of [^JCTree t] (str (.getKind t)))
+(defn- kind-of [^JCTree t] (try (str (.getKind t)) (catch AssertionError _ (.getSimpleName (class t)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Environment
@@ -82,7 +82,7 @@
        (and (identical? in-scope c) (not (str/blank? simple)))
        (if (pos? dims) (symbol simple (str dims)) (symbol simple))
        (and (jt/local-class? c) (not (jt/anonymous? c))) ;; a local class not in scope by name: should not happen
-       (do (note! :warn/local-class-out-of-scope) (note! (keyword "dbg" (str (.flatName c))))
+       (do (note! :warn/local-class-out-of-scope)
            (if (pos? dims) (symbol simple (str dims)) (symbol simple)))
        :else (do (when (jt/anonymous? c) (note! :warn/anonymous-class-named))
                  (f/->CRef (jt/binary-name c) dims nil (shadow-set env)))))))
@@ -513,7 +513,7 @@
       (= nm "this") (r (or (:this env) 'this) (erasure (.type t)))
       (= nm "super") (r 'super (erasure (.type t)))
       (and (= "VAR" (jt/kind sym)) (local? sym))
-      (r (or (get (:locals env) sym) (do (note! :warn/unknown-local) (note! (keyword "dbg" (str (.owner sym) "." nm))) (symbol nm))) (var-type sym))
+      (r (or (get (:locals env) sym) (do (note! :warn/unknown-local) (symbol nm))) (var-type sym))
       (= "VAR" (jt/kind sym))
       (do (note! :form/field-read)
           (r (field-ref env sym) (var-type sym)))
@@ -1183,7 +1183,10 @@
       (prim? from) (let [b (if (= from :lit-int) (int-type) from)]
                      (r (box-call env (:f x) b) (erasure (jt/boxed b))))
       (= from :lit-int) (r (box-call env (:f x) (int-type)) (erasure (jt/boxed (int-type))))
-      (subtype? from te) (if (same? from te) x (r (hint env (:f x) te) te))
+      ;; javac emits no checkcast for an upcast, except to an array type (Gen.visitTypeCast
+      ;; asks asSuper, which arrays answer only for Object and the array interfaces)
+      (and (subtype? from te) (not (and (instance? Type$ArrayType te) (not (same? from te)))))
+      (if (same? from te) x (r (hint env (:f x) te) te))
       :else (r (cast-form env (:f x) te) te))))
 
 (defn- pattern-form
@@ -1339,7 +1342,6 @@
 (defn ex
   "Convert expression tree `t` to a result {:f form :t type}."
   [env ^JCTree t]
-  (note! (keyword "kind" (kind-of t)))
   (condp instance? t
     JCTree$JCParens (ex env (.expr ^JCTree$JCParens t))
     JCTree$JCLiteral (literal env t)
@@ -1814,7 +1816,6 @@
   "Convert statement `t` in `ctx` to a vector of forms (including ctx's :fall where `t` can
   complete normally)."
   [env ctx ^JCTree t]
-  (note! (keyword "kind" (kind-of t)))
   (if (or (instance? JCTree$JCReturn t) (instance? JCTree$JCBreak t)
           (instance? JCTree$JCContinue t) (instance? JCTree$JCYield t))
     (jump-stmt env ctx t)
@@ -2649,6 +2650,11 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Modules and packages (§4.14)
 
+(defn- full-name
+  "A class named by its binary name, as module declarations name them."
+  [^Type t]
+  (symbol (jt/binary-name (.tsym t))))
+
 (defn- module-form [env ^JCTree$JCModuleDecl md]
   (note! :form/defmodule)
   (let [nm (apply m+ (symbol (str (TreeInfo/fullName (.qualId md))))
@@ -2667,10 +2673,10 @@
                  JCTree$JCOpens (let [e ^JCTree$JCOpens d]
                                   (apply list 'opens (name-of (.qualid e))
                                          (when (seq (.moduleNames e)) [:to (mapv name-of (.moduleNames e))])))
-                 JCTree$JCUses (list 'uses (erased-form env (.type (.qualid ^JCTree$JCUses d))))
+                 JCTree$JCUses (list 'uses (full-name (.type (.qualid ^JCTree$JCUses d))))
                  JCTree$JCProvides (let [p ^JCTree$JCProvides d]
-                                     (list 'provides (erased-form env (.type (.serviceName p)))
-                                           :with (mapv #(erased-form env (.type ^JCTree %)) (.implNames p))))))]
+                                     (list 'provides (full-name (.type (.serviceName p)))
+                                           :with (mapv #(full-name (.type ^JCTree %)) (.implNames p))))))]
     (apply list 'defmodule nm dirs)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -2680,9 +2686,20 @@
   {:classes () :scope {} :locals {} :names #{} :fields #{} :this nil :ret nil :loops ()
    :lbl (atom {}) :counter (atom 0)})
 
+(defn- count-kinds!
+  "Count the tree kinds of `t` (for the coverage report)."
+  [^JCTree t]
+  (when *stats*
+    (letfn [(walk [x]
+              (when (instance? JCTree x)
+                (when-not (instance? com.sun.tools.javac.tree.JCTree$TypeBoundKind x) (note! (keyword "kind" (kind-of x))))
+                (run! walk (tree-children x))))]
+      (walk t))))
+
 (defn convert-unit
   "Convert compilation unit `cu`. Returns {:package p :forms [..] :file name :classes [names]}."
   [^JCTree$JCCompilationUnit cu opts]
+  (count-kinds! cu)
   (binding [*text* (str (.getCharContent (.getSourceFile cu) true))
             *assigned* (into #{} (mapcat assigned-syms) (.getTypeDecls cu))]
     (let [env (base-env opts)
@@ -2695,6 +2712,9 @@
                         (condp instance? d
                           JCTree$JCClassDecl (class-form env d)
                           JCTree$JCModuleDecl (module-form env d)))))
+          forms (if-let [md (.getModuleDecl cu)]
+                  (into [(simplify (module-form env md))] forms)
+                  forms)
           pkg-anns (when-let [pd (.getPackage cu)]
                      (seq (annotation-items env (.annotations ^JCTree$JCPackageDecl pd))))
           forms (if (and (= file "package-info.java") pkg-anns)

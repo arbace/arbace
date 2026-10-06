@@ -145,6 +145,7 @@ public class Features<T extends Number & Comparable<T>> implements Iterable<T>, 
     return switch (o) {
       case null -> "null";
       case Pair<?, ?>(Integer x, Integer y) -> x + y;
+      case Pair<?, ?>(Long _, var unused) -> "long";
       case Pair<?, ?> p -> p.first();
       default -> o;
     };

@@ -125,6 +125,13 @@
                 (doseq [it (arbace.j2c.forms/items x)]
                   (if (keyword? it) (bump (str "^:" (name it))) (bump (str "^" (name (first it)))))))
               (cond
+                (and (seq? x) (= 'switch (first x)))
+                (let [[_ sel & arms] x]
+                  (bump "switch")
+                  (walk sel)
+                  ;; labels are constants or patterns, not calls
+                  (doseq [[l r :as p] (partition-all 2 arms)]
+                    (if (= 1 (count p)) (walk l) (do (when (vector? l) (run! walk l)) (walk r)))))
                 (seq? x) (do (when-let [hd (first x)]
                                (bump (cond
                                        (instance? arbace.j2c.forms.CRef hd)
