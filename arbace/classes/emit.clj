@@ -1143,7 +1143,7 @@
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
-(declare assertion-clinit emit-lambda-method)
+(declare assertion-clinit emit-lambda-method emit-deserialize-lambda)
 
 (defmulti emit-clinit-node (fn [gen node] (:op node)))
 (defmethod emit-clinit-node :default [gen node] (emit gen node :stmt))
@@ -1274,6 +1274,7 @@
     (doseq [m (:methods d)] (emit-method cw d m))
     (doseq [f (:extra-methods st)] (f cw))
     (doseq [l (:lambda-nodes st)] (emit-lambda-method cw l))
+    (when-let [sn (seq (:serial-nodes st))] (emit-deserialize-lambda cw n sn))
     (emit-clinit cw d)
     (.visitEnd cw)
     (add-inner-classes (.toByteArray cw) n)))
@@ -1418,32 +1419,54 @@
 (defn- emit-indy-lambda [gen node captured-types impl]
   (let [fi (:fi node)
         sam (:sam node)
-        ;; javac: altMetafactory for intersection targets, FLAG_MARKERS | FLAG_BRIDGES, no bridges
-        args (if (seq (:markers node))
+        markers (:markers node)
+        alt? (or (seq markers) (:serializable node))
+        ;; javac: altMetafactory for intersection targets and serializable lambdas, with
+        ;; FLAG_SERIALIZABLE, FLAG_MARKERS and FLAG_BRIDGES (no bridges)
+        args (if alt?
                (object-array (concat [(Type/getMethodType ^String (:desc sam)) impl
                                       (Type/getMethodType ^String (:inst-desc node))
-                                      (Integer/valueOf 6) (Integer/valueOf (count (:markers node)))]
-                                     (map #(Type/getObjectType %) (:markers node))
+                                      (Integer/valueOf (bit-or (if (:serializable node) 1 0) (if (seq markers) 2 0) 4))]
+                                     (when (seq markers)
+                                       (cons (Integer/valueOf (count markers)) (map #(Type/getObjectType %) markers)))
                                      [(Integer/valueOf 0)]))
                (object-array [(Type/getMethodType ^String (:desc sam)) impl
                               (Type/getMethodType ^String (:inst-desc node))]))]
     (.visitInvokeDynamicInsn (mv gen) (:name sam) (t/method-desc captured-types (t/internal->desc fi))
-                             (if (seq (:markers node)) alt-metafactory metafactory) args)
-    ;; the intersection cast of the target type
-    (when (seq (:markers node))
-      (doseq [c (cons fi (:markers node))] (.visitTypeInsn (mv gen) Opcodes/CHECKCAST c)))))
+                             (if alt? alt-metafactory metafactory) args)))
+
+(defn- intersection-casts [gen node]
+  ;; the intersection cast of the target type
+  (doseq [c (:intersection node)] (.visitTypeInsn (mv gen) Opcodes/CHECKCAST c)))
+
+(defn lambda-indy-spec
+  "[captured-types impl-handle impl-kind] of a lambda or method reference node."
+  [node]
+  (case (:op node)
+    :lambda (let [cls (:class node)
+                  inst? (lambda-instance? node)
+                  itf (env/interface? cls)
+                  kind (if inst? (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL) Opcodes/H_INVOKESTATIC)]
+              [(concat (when inst? [(t/internal->desc cls)]) (map :type @(:captures (:boundary node))))
+               (Handle. kind cls (:name node) (lambda-impl-desc node) itf)
+               kind])
+    :method-ref (let [{:keys [kind owner name desc itf]} node
+                      hk (case kind
+                           :static Opcodes/H_INVOKESTATIC
+                           :new Opcodes/H_NEWINVOKESPECIAL
+                           (:bound :unbound) (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL))]
+                  [(when (= kind :bound) [(a/value-type (:type (:recv node)))])
+                   (Handle. hk owner (if (= kind :new) "<init>" name) desc (boolean (and itf (not= kind :new))))
+                   hk])))
 
 (defmethod emit-extra :lambda [gen node ctx]
-  (let [cls (:class node)
-        inst? (lambda-instance? node)
+  (let [inst? (lambda-instance? node)
         caps @(:captures (:boundary node))
-        itf (env/interface? cls)]
+        [ctypes h] (lambda-indy-spec node)]
     (when inst? (.visitVarInsn (mv gen) Opcodes/ALOAD 0))
     (doseq [b caps] (load-binding gen b))
-    (emit-indy-lambda gen node
-                      (concat (when inst? [(t/internal->desc cls)]) (map :type caps))
-                      (Handle. (if inst? (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL) Opcodes/H_INVOKESTATIC)
-                               cls (:name node) (lambda-impl-desc node) itf))
+    (emit-indy-lambda gen node ctypes h)
+    (intersection-casts gen node)
     (when (= ctx :stmt) (insn gen Opcodes/POP))))
 
 (defn emit-lambda-method
@@ -1468,11 +1491,8 @@
 
 (defmethod emit-extra :method-ref [gen node ctx]
   (let [m (mv gen)
-        {:keys [kind owner name desc itf]} node
-        h (case kind
-            :static (Handle. Opcodes/H_INVOKESTATIC owner name desc (boolean itf))
-            :new (Handle. Opcodes/H_NEWINVOKESPECIAL owner "<init>" desc false)
-            (:bound :unbound) (Handle. (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL) owner name desc (boolean itf)))]
+        kind (:kind node)
+        [ctypes h] (lambda-indy-spec node)]
     (when (= kind :bound)
       (emit gen (:recv node) :expr)
       (when (:null-check node)
@@ -1480,8 +1500,77 @@
         (.visitMethodInsn m Opcodes/INVOKESTATIC "java/util/Objects" "requireNonNull"
                           "(Ljava/lang/Object;)Ljava/lang/Object;" false)
         (insn gen Opcodes/POP)))
-    (emit-indy-lambda gen node (when (= kind :bound) [(a/value-type (:type (:recv node)))]) h)
+    (emit-indy-lambda gen node ctypes h)
+    (intersection-casts gen node)
     (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
+;; $deserializeLambda$ (javac's LambdaToMethod.makeDeserializeMethod)
+
+(def ^:private serialized-lambda "java/lang/invoke/SerializedLambda")
+
+(defmethod emit-extra :deser-indy [gen node ctx]
+  (let [ln (:lambda node)
+        [ctypes h] (lambda-indy-spec ln)]
+    (doseq [[i ct] (map-indexed vector ctypes)]
+      (.visitVarInsn (mv gen) Opcodes/ALOAD 0)
+      (emit-const gen "I" i)
+      (.visitMethodInsn (mv gen) Opcodes/INVOKEVIRTUAL serialized-lambda "getCapturedArg" "(I)Ljava/lang/Object;" false)
+      (if (t/prim? ct)
+        (do (.visitTypeInsn (mv gen) Opcodes/CHECKCAST (t/box-of ct))
+            (unbox gen (t/internal->desc (t/box-of ct))))
+        (.visitTypeInsn (mv gen) Opcodes/CHECKCAST (t/desc->internal ct))))
+    (emit-indy-lambda gen ln ctypes h)
+    (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
+(defn- deser-getter [name ret & args]
+  {:op :invoke :kind :virtual :owner serialized-lambda :itf false :name name
+   :desc (t/method-desc (map :type args) ret)
+   :target {:op :param0 :type (t/internal->desc serialized-lambda)} :args (vec args) :type ret})
+
+(defmethod emit-extra :param0 [gen node ctx]
+  (.visitVarInsn (mv gen) Opcodes/ALOAD 0))
+
+(defn- obj-equals [x s]
+  {:op :invoke :kind :virtual :owner "java/lang/Object" :itf false :name "equals"
+   :desc "(Ljava/lang/Object;)Z" :target x :args [(a/const-node t/string-desc s)] :type "Z"})
+
+(defn emit-deserialize-lambda
+  "The private static $deserializeLambda$ method of a class with serializable lambdas."
+  [^ClassWriter cw cls nodes]
+  (let [cases (reduce (fn [m ln]
+                        (let [[_ ^Handle h kind] (lambda-indy-spec ln)
+                              test {:op :and :type "Z"
+                                    :args [{:op :compare :cmp :== :t "I" :type "Z"
+                                            :args [(deser-getter "getImplMethodKind" "I") (a/const-node "I" (int kind))]}
+                                           (obj-equals (deser-getter "getFunctionalInterfaceClass" t/string-desc) (:fi ln))
+                                           (obj-equals (deser-getter "getFunctionalInterfaceMethodName" t/string-desc) (:name (:sam ln)))
+                                           (obj-equals (deser-getter "getFunctionalInterfaceMethodSignature" t/string-desc) (:desc (:sam ln)))
+                                           (obj-equals (deser-getter "getImplClass" t/string-desc) (.getOwner h))
+                                           (obj-equals (deser-getter "getImplMethodSignature" t/string-desc) (.getDesc h))]}
+                              stmt {:op :if :test test :type :null
+                                    :then {:op :return :val {:op :deser-indy :lambda ln :type (t/internal->desc (:fi ln))} :type :none}
+                                    :else (a/const-node :null nil)}]
+                          (update m (.getName h) (fnil conj []) stmt)))
+                      (array-map) nodes)
+        sw {:op :switch :kind :string :sel (deser-getter "getImplMethodName" t/string-desc) :sel-type t/string-desc
+            :cases (vec (for [[nm stmts] cases]
+                          {:labels [{:const nm}] :body {:op :do :statements stmts :ret (a/const-node :null nil) :type :null}}))
+            :default nil :type :null}
+        body {:op :do :statements [sw]
+              :ret {:op :throw :type :none
+                    :expr {:op :new :class "java/lang/IllegalArgumentException"
+                           :ctor {:name "<init>" :desc "(Ljava/lang/String;)V" :owner "java/lang/IllegalArgumentException"}
+                           :args [(a/const-node t/string-desc "Invalid lambda deserialization")]
+                           :type "Ljava/lang/IllegalArgumentException;"}}
+              :type :none}
+        mv (.visitMethod cw (bit-or Opcodes/ACC_PRIVATE Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC)
+                         "$deserializeLambda$" "(Ljava/lang/invoke/SerializedLambda;)Ljava/lang/Object;" nil nil)
+        gen (new-gen mv cls t/object-desc true)]
+    (swap! (:next gen) inc)
+    (.visitCode mv)
+    (emit gen body :return)
+    (.visitMaxs mv 0 0)
+    (.visitEnd mv)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; switch and patterns

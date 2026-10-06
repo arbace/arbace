@@ -1246,6 +1246,9 @@
 
 ;; locals ------------------------------------------------------------------------------------------
 
+(defn- lambda-form? [f]
+  (and (seq? f) (symbol? (first f)) (#{"lambda" "lambda*" "method-ref" "method-ref*"} (name (first f)))))
+
 (defn- binding-type
   "The type of a let/loop local: its tag, else its initializer's type (Clojure's loop widens
   untagged int and float)."
@@ -1276,7 +1279,7 @@
                   (when-not (and (symbol? sym) (nil? (namespace sym)))
                     (fail (str "Bad binding: " sym)))
                   (let [m (meta sym)
-                        init-node (analyze actx init)
+                        init-node (analyze (if (lambda-form? init) (assoc actx :pending-var sym) actx) init)
                         type (binding-type actx sym init-node loop?)
                         init-node (bind-init actx sym init-node type)
                         cval (when (and (:const m) (= :const (:op init-node))) init-node)
@@ -2105,7 +2108,9 @@
                   (when-not (and static? (some? const))
                     (let [v (if (some? const)
                               (const-node (:desc f) const)
-                              (convert-node (analyze actx (:init mb)) (:desc f)
+                              (convert-node (analyze (if (lambda-form? (:init mb)) (assoc actx :pending-var (symbol (:name f))) actx)
+                                                     (:init mb))
+                                            (:desc f)
                                             :what (str "initializer of field " (:name f))))]
                       (if static?
                         (swap! clinit conj {:op :set-static :field f :owner n :val v :type (:desc f)})
@@ -2514,13 +2519,32 @@
                  (pr-str (map :name ms)) ")")))
     (first ms)))
 
+(declare lambda-method-prefix)
+
 (defn- fi-types
-  "[main-interface markers] of a lambda's target type form."
+  "[main-interface markers serializable? intersection] of a lambda's target type form. Serializable
+  is no marker: it makes the lambda serializable."
   [actx form]
-  (let [tn (parse-type (scope-of actx) form)]
-    (if (= :inter (:t tn))
-      [(:name (first (:types tn))) (mapv :name (rest (:types tn)))]
-      [(:name tn) []])))
+  (let [tn (parse-type (scope-of actx) form)
+        names (if (= :inter (:t tn)) (mapv :name (:types tn)) [(:name tn)])
+        ser? (boolean (some #(env/assignable? (t/internal->desc %) "Ljava/io/Serializable;") names))]
+    [(first names) (vec (remove #{"java/io/Serializable"} (rest names))) ser?
+     (when (= :inter (:t tn)) names)]))
+
+(defn- serial-lambda-name!
+  "javac's name for a serializable lambda: a hash of the enclosing method's signature, the
+  functional interface, the variable assigned and the captured locals (LambdaToMethod)."
+  [actx fin sam boundary]
+  (let [cls (:class actx)
+        m (:method (:method-info actx))
+        osig (when (and m (not= :lambda (:kind (:frame actx)))) (or (:sig m) (:desc m)))
+        disam (str (when osig (str osig ":"))
+                   (str/replace (:owner sam) "/" ".") " "
+                   (when-let [pv (:pending-var actx)] (str pv "="))
+                   (apply str (for [b @(:captures boundary)] (str (:type b) " " (:sym b) ","))))
+        base (str "lambda$" (lambda-method-prefix actx) "$" (Integer/toHexString (.hashCode ^String disam)) "$")
+        i (get-in (swap! (state cls) update-in [:lambda-counters base] (fnil inc 0)) [:lambda-counters base])]
+    (str base i)))
 
 (defn- lambda-method-prefix [actx]
   (let [mi (:method-info actx)]
@@ -2538,9 +2562,7 @@
 
 (defn analyze-lambda [actx [_ fi params & body]]
   (when-not (vector? params) (fail "lambda needs a parameter vector"))
-  (let [[fin markers] (fi-types actx fi)
-        _ (when (some #(= "java/io/Serializable" %) (cons fin markers))
-            (fail "Serializable lambdas are not supported yet"))
+  (let [[fin markers ser inter] (fi-types actx fi)
         sam (find-sam fin)
         [sps sret] (t/parse-method-desc (:desc sam))
         _ (when-not (= (count sps) (count params))
@@ -2548,20 +2570,23 @@
         ps (mapv (fn [p sp] (if-let [tg (:tag (meta p))] (actx-desc actx tg) sp)) params sps)
         ret (if-let [tg (:tag (meta params))] (actx-desc actx tg) sret)
         cls (:class actx)
-        lname (lambda-name! actx)
+        lname (when-not ser (lambda-name! actx))
         boundary {:kind :lambda :captures (atom []) :uses-this (atom false)}
         f (assoc (new-frame :lambda cls (:frame actx) boundary) :static (:static actx))
-        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue))
+        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue :pending-var))
         [lactx bs] (reduce (fn [[a bs] [p t]]
                              (let [b (make-binding a p t :mutable (boolean (:mutable (meta p))) :param true)]
                                [(with-local a b) (conj bs b)]))
                            [lactx []] (map vector params ps))
         bn (analyze-body lactx body)
         bn (if (= "V" ret) bn (convert-node bn ret :what "lambda value"))
-        node {:op :lambda :fi fin :markers markers :sam sam :inst-desc (t/method-desc ps ret)
+        lname (or lname (serial-lambda-name! actx fin sam boundary))
+        node {:op :lambda :fi fin :markers markers :serializable ser :intersection inter
+              :sam sam :inst-desc (t/method-desc ps ret)
               :params bs :body bn :boundary boundary :name lname :class cls :ret ret
               :type (t/internal->desc fin)}]
     (swap! (state cls) update :lambda-nodes (fnil conj []) node)
+    (when ser (swap! (state cls) update :serial-nodes (fnil conj []) node))
     node))
 
 (defn- arg-stub [d] {:op :local :type d :b {:id -1 :type d}})
@@ -2579,7 +2604,7 @@
         [recv msym] (case (count more) 1 [nil (first more)] 2 more
                       (fail "method-ref takes FI, an optional signature, an optional receiver and a method"))
         _ (when-not (and (symbol? msym) (namespace msym)) (fail (str "Bad method in method-ref: " msym)))
-        [fin markers] (fi-types actx fi)
+        [fin markers ser inter] (fi-types actx fi)
         sam (find-sam fin)
         [sps sret] (t/parse-method-desc (:desc sam))
         ps (if sig (mapv #(actx-desc actx %) sig) sps)
@@ -2587,8 +2612,14 @@
         cn (or (resolve-class actx (symbol (namespace msym))) (fail (str "Unknown class " (namespace msym))))
         mname (name msym)
         param-tags (:param-tags (meta msym))
-        base {:op :method-ref :fi fin :markers markers :sam sam :inst-desc (t/method-desc ps ret)
-              :type (t/internal->desc fin)}]
+        base {:op :method-ref :fi fin :markers markers :serializable ser :intersection inter
+              :sam sam :inst-desc (t/method-desc ps ret) :class (:class actx)
+              :type (t/internal->desc fin)}
+        register (fn [node]
+                   (when (and ser (= :method-ref (:op node)))
+                     (swap! (state (:class actx)) update :serial-nodes (fnil conj []) node))
+                   node)]
+    (register
     (cond
       (= recv 'super)
       ;; javac makes a lambda method for super::m
@@ -2630,7 +2661,7 @@
             [m va] (select-method actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
         (if va
           (ref-as-lambda actx fi ps ret (fn [args] (list* '. (symbol (str/replace cn "/" ".")) (with-meta (symbol mname) {:param-tags param-tags}) args)))
-        (assoc base :kind :static :owner (:owner m) :name mname :desc (:desc m) :itf (env/interface? (:owner m))))))))
+        (assoc base :kind :static :owner (:owner m) :name mname :desc (:desc m) :itf (env/interface? (:owner m)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; patterns and switch (§5.8)

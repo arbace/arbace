@@ -143,3 +143,35 @@
     '[(^:public V
         (method ^:static f []
           (let [f (method-ref java.util.function.BiFunction ^String [String Object] String/format)] f)))]))
+
+(deftest serializable-lambdas
+  (same-shapes? 'classes.forms-test
+    {"SL" "import java.io.Serializable;
+     import java.util.function.*;
+     public class SL {
+       static Object a(String x) {
+         Runnable r = (Runnable & Serializable) () -> System.out.println(x);
+         return r;
+       }
+       Object b() { return (Supplier<String> & Serializable) this::toString; }
+     }"}
+    '[(^:public SL
+        (method ^:static a [^String x]
+          (let [r (lambda (& Runnable java.io.Serializable) [] (.println System/out x))] r))
+        (method b [this]
+          (method-ref (& java.util.function.Supplier java.io.Serializable) ^String [] this Object/.toString)))]))
+
+(deftest serializable-lambda-round-trip
+  (let [[C] (load-forms 'classes.forms-test
+              '[(^:public SL2
+                  (method ^:public ^:static make ^java.util.function.IntSupplier [^int k]
+                    (lambda (& java.util.function.IntSupplier java.io.Serializable) [] (unchecked-add-int k 1))))])
+        f (clojure.lang.Reflector/invokeStaticMethod C "make" (object-array [(int 41)]))
+        bytes (let [bo (java.io.ByteArrayOutputStream.)]
+                (with-open [o (java.io.ObjectOutputStream. bo)] (.writeObject o f))
+                (.toByteArray bo))
+        g (with-open [i (proxy [java.io.ObjectInputStream] [(java.io.ByteArrayInputStream. bytes)]
+                          (resolveClass [desc] (Class/forName (.getName desc) false (.getClassLoader C))))]
+            (.readObject i))]
+    (is (= 42 (.getAsInt f)))
+    (is (= 42 (.getAsInt g)))))

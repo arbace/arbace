@@ -161,7 +161,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `ASSIGNMENT`, compound assignments, increments | done ≡ |
 | unary and binary operators | done ≡ (`-int`, long, `-float`, double; bit and shift operators; comparisons; `not`, `and`, `or`, `identical?`, `nil?`, `some?`) |
 | `INSTANCE_OF`, `TYPE_CAST` | done ≡ |
-| `LAMBDA_EXPRESSION`, `MEMBER_REFERENCE` | done ≡ (`lambda$m$n` methods, captures, instance lambdas, intersection targets with markers, static/bound/unbound/constructor references, `super` references); serializable lambdas (`$deserializeLambda$`) and variable arity method references todo |
+| `LAMBDA_EXPRESSION`, `MEMBER_REFERENCE` | done ≡ (`lambda$m$n` methods, captures, instance lambdas, intersection targets with markers, static/bound/unbound/constructor references, `super` references); serializable lambdas and references (javac's hashed names, `altMetafactory` flags, `$deserializeLambda$`; a serialization round trip is tested), variable arity references through lambda methods |
 | literals | done ≡ |
 
 ### Access flags (§8.2)
