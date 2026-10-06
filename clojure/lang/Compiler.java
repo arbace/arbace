@@ -9629,7 +9629,7 @@ public static class CaseExpr implements Expr, MaybePrimitiveExpr{
 static IPersistentCollection emptyVarCallSites(){return PersistentHashSet.EMPTY;}
 
     static public ClassWriter classWriter() {
-	return new ClassWriter(ClassWriter.COMPUTE_MAXS + ClassWriter.COMPUTE_FRAMES) {
+	ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS + ClassWriter.COMPUTE_FRAMES) {
 			protected String getCommonSuperClass (final String type1, final String type2) {
 				return "java/lang/Object";
 //					if (!(type1.equals("java/lang/Object") || type2.equals("java/lang/Object"))) {
@@ -9640,5 +9640,8 @@ static IPersistentCollection emptyVarCallSites(){return PersistentHashSet.EMPTY;
 //				}
 				}
 		};
+	// arbace: Clojure's bundled ASM had no limits on frame computation; the seeded ASM does
+	cw.setComputeLimits(Integer.MAX_VALUE, Long.MAX_VALUE);
+	return cw;
     }
 }

@@ -53,9 +53,6 @@ public static void main(String[] args) throws IOException, ClassNotFoundExceptio
     else if("warn-on-boxed".equals(uncheckedMathProp))
         uncheckedMath = Keyword.intern("warn-on-boxed");
 
-    // force load to avoid transitive compilation during lazy load
-    RT.load("clojure/core/specs/alpha");
-
 	try
 		{
                Var.pushThreadBindings(RT.map(compile_path, path,

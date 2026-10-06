@@ -280,3 +280,33 @@ Recorded now, at the user's request, so that the current work does not block the
   fall-through; the names of the new forms; implicit boxing; REPL loaders; `float` operators;
   keyword labels; `deftype`-style signature inference; reusing `cast`; one or two
   implementations of the class forms across the stages.
+
+## 2026-10-06: Reference run of Clojure's test suite; two seed fixes
+
+- `bin/clojure-tests` (helper `test/run_clojure_tests.clj`) runs upstream Clojure's test suite at
+  `98d735fab02f` against a Clojure (the baseline by default) and checks the results against
+  `test/baseline-results.edn`. It writes only under `.tmp/clojure-tests/`.
+  - The suite is fetched into `.tmp/` from `test/clojure`, `test/java` and `src/script`.
+  - Test libraries come from Maven Central, checked by SHA-1: test.generative 1.1.1,
+    tools.namespace 1.5.1, java.classpath 1.1.1, tools.reader 1.6.0, data.generators 1.1.1 and
+    test.check 1.1.3. spec.alpha and core.specs.alpha are left out because the baseline stubs
+    spec, and jaxws-api because only Java 8 to 10 use it.
+  - Adaptations: the Clojure under test is AOT-compiled with direct linking, as upstream does,
+    since the AOT test fixtures need it. Each namespace runs in its own JVM, in parallel. Each
+    JVM first loads every test namespace in upstream's order, because several test namespaces
+    rely on others having loaded `clojure.test-helper` or `clojure.pprint`.
+  - Control run: upstream's own build of the same revision, on the same JDK 26, passes all of
+    it. That is 83 namespaces, 809 tests, 20,750 assertions and 27 test.generative specs. To
+    reproduce it, with `C=.tmp/clojure-tests/control`:
+    `CLOJURE_TESTS_RUN=upstream CLOJURE_SRC="$C/build:$C/clj:$C/lib/spec.alpha-0.6.249.jar:$C/lib/core.specs.alpha-0.6.133-alpha10.jar" bin/clojure-tests`
+- The run found two baseline bugs from the seed. The user approved fixing them in `clojure/`:
+  - Upstream ASM (`0460f74ba642`) caps stack-map frame computation per method at 10 MB and 100M
+    operations. Clojure's bundled ASM has no cap. Compiling `data_structures.clj:1586`
+    (`missing-directive`) threw `LimitExceededException`. Fix: `Compiler.classWriter()`, through
+    which every ClassWriter is made (`core_proxy.clj` and `genclass.clj` included), calls
+    `setComputeLimits(Integer.MAX_VALUE, Long.MAX_VALUE)`. The vendored ASM stays untouched.
+  - `clojure.lang.Compile` still did `RT.load("clojure/core/specs/alpha")`, which the spec stub
+    removed, so AOT compilation with it failed. Fix: the line is dropped.
+- With both fixes the baseline matches upstream apart from the 32 assertions that expect spec's
+  error messages: 83 namespaces, 809 tests, 20,718 of 20,750 assertions pass, and 27 of 27
+  test.generative specs pass. The harness's empty `clojure.core.specs.alpha` stand-in is gone.
