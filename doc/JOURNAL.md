@@ -198,3 +198,33 @@ Recorded now, at the user's request, so that the current work does not block the
     system javac's, both without and with `--release 26`.
   - The vendored javac compiling its own 346 sources gives 1,588 classes byte-identical to the
     system javac's build of them.
+
+## 2026-10-06: Drop the vendored javac; new direction: classes in idiomatic Clojure
+
+- The user changed course: instead of a javac that reads javalisp, Arbace's own Clojure compiler
+  should compile Java's classfile constructs, written as idiomatic Clojure forms in ordinary
+  `.clj` sources (classes definable from the REPL). The end state has no `.java` and no `.jls`.
+  The `.jls` pathfinder (javalisp, `arbace/javalisp/`) stays as a tool.
+- The vendored javac (`600f4ed`) was removed from the tree: `arbace/javac/`, `bin/build-javac`,
+  `bin/javac`, and jdk26u's license texts in `LICENSE.md`. It remains in git history, recorded
+  in the entry above, should it be needed again. An unfinished, never committed `.jls` parser
+  for it (`arbace/javac/parser/Javalisp{Parser,Prec,Reader}.java`, about 3,700 lines, a port of
+  `reader.clj`, `prec.clj` and `l2j.clj`) was discarded.
+- That supersedes the earlier decision that the vendored javac would also be rewritten. The
+  `arbace.*` renaming and dropping `version.properties` stand.
+- Decisions for the new language, taken with the user:
+  - Goal: every classfile construct javac can produce is expressible and compiles to equivalent
+    classes. Comments, line numbers, debug info and byte-identical output do not matter.
+  - Idiomatic Clojure vocabulary (metadata for modifiers and type hints, interop forms, `set!`)
+    extended with new forms the compiler knows: a class-defining special form, mutable locals,
+    and the missing control flow.
+  - Control flow: `return`, `break` and `continue` (with labels) exist, but the Java → Clojure
+    converter prefers restructuring into `if`/`when`/`cond`/`loop` wherever that is
+    straightforward.
+  - Java primitive arithmetic is written with explicit Clojure operators (`unchecked-*-int`,
+    `bit-*` and the like, adding the missing ones), so `+` never changes meaning.
+  - The converter needs javac's attributed trees (name resolution, overloads, implicit
+    conversions). It uses the JDK's own javac as a conversion-time tool only.
+  - Bootstrap: the frozen `clojure/` (stage 0, plus a bootstrap library that compiles the new
+    forms) compiles `arbace/**/*.clj` into stage 1, stage 1 compiles them again into stage 2,
+    and stage 2 must reproduce itself. The `arbace.*` names keep the stages apart.
