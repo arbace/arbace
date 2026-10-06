@@ -1764,6 +1764,9 @@ public final class Shapes {
 
 ## 12. Open questions
 
+**Settled (2026-10-06):** the user accepted every recommendation below. They are now part of
+the spec, and where the text above leaves a choice open, the recommendation applies.
+
 Each with the recommendation the spec follows.
 
 1. **Receiver parameter.** Explicit `this` as the first parameter, as `deftype`, `reify` and

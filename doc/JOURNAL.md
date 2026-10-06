@@ -310,3 +310,25 @@ Recorded now, at the user's request, so that the current work does not block the
 - With both fixes the baseline matches upstream apart from the 32 assertions that expect spec's
   error messages: 83 namespaces, 809 tests, 20,718 of 20,750 assertions pass, and 27 of 27
   test.generative specs pass. The harness's empty `clojure.core.specs.alpha` stand-in is gone.
+
+## 2026-10-06: Class forms spec settled
+
+- The user reviewed `doc/classes/SPEC.md` and accepted all 17 recommendations of its §12. In
+  brief:
+  - Receiver: an explicit `this` parameter.
+  - Default access: Java's package access.
+  - Declarations: one `defclass`, with the kind as metadata.
+  - Generic types: written `^{:tag (List T)}`.
+  - Converted code: one namespace per Java package.
+  - Cyclic references: a class environment plus a source path.
+  - Reflection in class bodies: an error, with a `:warn` escape.
+  - Bridge methods: derived by the compiler.
+  - `switch` fall-through: the shared code is repeated.
+  - Names of the new forms: the spec's.
+  - Boxing: implicit, as javac does it.
+  - REPL: one class loader per Java package, a new generation when a class is redefined.
+  - Arithmetic: new `-float` operators.
+  - Labels: keywords.
+  - Untyped methods: the signature is inferred from a unique inherited method.
+  - `cast`: compiled to `checkcast`.
+  - Implementation: one, in plain Clojure, used at stage 0 and compiled into stage 1.

@@ -18,8 +18,8 @@ The current state of the work. This file is rewritten as things change. For the 
 1. Spec: map every construct javac can emit to Clojure forms. **Drafted** as
    [classes/SPEC.md](classes/SPEC.md) ("class forms": `defclass` and its members, the new code
    forms, what the compiler derives as javac does, what the converter makes explicit, coverage
-   tables, compilation model, REPL, worked examples). **Next: review with the user**, in
-   particular its 17 open questions (§12), before any code.
+   tables, compilation model, REPL, worked examples). Reviewed: the user accepted all 17
+   recommendations of §12.
 2. Bootstrap compiler for the new forms, running on the frozen `clojure/` (stage 0) and emitting
    bytecode with `clojure.asm`, with tests per construct, including defining classes at the REPL.
 3. Converter (Java → Clojure) on javac's attributed trees. Convert the 183 baseline files and
