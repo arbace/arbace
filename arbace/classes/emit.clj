@@ -741,13 +741,14 @@
 
 (defn emit-try [gen node ctx]
   (let [m (mv gen)
+        nfin (:normal-finally node)
         fin (:finally node)
         t (a/value-type (:type node))
         expr? (and (= ctx :expr) (not= t :none))
         rt (if (= t :null) t/object-desc t)
         rslot (when expr? (alloc-slot gen rt))
-        cl {:kind :finally :node fin :segments (atom [])}
-        gen-body (if fin (update gen :cleanups conj cl) gen)
+        cl {:kind :finally :node (or fin nfin) :segments (atom [])}
+        gen-body (if (or fin nfin) (update gen :cleanups conj cl) gen)
         end (Label.)
         complete (fn [n] (not= :none (:type n)))]
     ;; the body; a jump out of it runs the finally code inline, outside the handled ranges
@@ -757,7 +758,7 @@
     (let [body-segs @(:segments cl)]
       (when (complete (:body node))
         (when expr? (xstore gen rt rslot))
-        (when fin (emit gen fin :stmt))
+        (when (or fin nfin) (emit gen (or fin nfin) :stmt))
         (.visitJumpInsn m Opcodes/GOTO end))
       (let [handlers
             (doall
@@ -769,7 +770,8 @@
                   (swap! (:slots gen) assoc (:id b) s)
                   (swap! (:segments cl) conj [h nil])
                   (xstore gen (:type b) s)
-                  (if expr? (emit-to gen-body (:body c) rt) (emit gen-body (:body c) :stmt))
+                  (if expr? (emit-to (if nfin gen gen-body) (:body c) rt)
+                      (emit (if nfin gen gen-body) (:body c) :stmt))
                   (close-segment! gen cl)
                   (when (complete (:body c))
                     (when expr? (xstore gen rt rslot))
@@ -1102,13 +1104,16 @@
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
+(declare assertion-clinit emit-lambda-method)
+
 (defmulti emit-clinit-node (fn [gen node] (:op node)))
 (defmethod emit-clinit-node :default [gen node] (emit gen node :stmt))
 
 (defn- emit-clinit [^ClassWriter cw d]
   (let [st @(:state d)
         nodes (:clinit st)
-        extra (:clinit-extra st)]
+        extra (cond->> (:clinit-extra st)
+                (:uses-assert st) (cons (assertion-clinit (:name d))))]
     (when (or (seq nodes) (seq extra))
       (let [mv (.visitMethod cw Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)
             gen (new-gen mv (:name d) "V" true)]
@@ -1205,10 +1210,215 @@
       (doseq [b (:captures st)]
         (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) (str "val$" (:sym b))
                                 (:type b) nil nil))))
+    (when (:uses-assert st)
+      (.visitEnd (.visitField cw (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC)
+                              "$assertionsDisabled" "Z" nil nil)))
     (doseq [f (:extra-fields st)]
       (.visitEnd (.visitField cw (:flags f) (:name f) (:desc f) nil nil)))
     (doseq [m (:methods d)] (emit-method cw d m))
     (doseq [f (:extra-methods st)] (f cw))
+    (doseq [l (:lambda-nodes st)] (emit-lambda-method cw l))
     (emit-clinit cw d)
     (.visitEnd cw)
     (add-inner-classes (.toByteArray cw) n)))
+
+;; ---------------------------------------------------------------------------------------------
+;; java-str, java-assert, for-each
+
+(def string-concat-bsm
+  (Handle. Opcodes/H_INVOKESTATIC "java/lang/invoke/StringConcatFactory" "makeConcatWithConstants"
+           (str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+                "Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
+           false))
+
+(defmethod emit-extra :java-str [gen node ctx]
+  (let [parts (:parts node)
+        dyn (filter :node parts)]
+    ;; operands: a valueOf call converts eagerly, as javac
+    (let [last-unsafe (last (keep-indexed (fn [i p] (when (unsafe? gen (:node p)) i)) dyn))
+          emit-part (fn [p]
+                      (emit gen (:node p) :expr)
+                      (when (:eager p)
+                        (.visitMethodInsn (mv gen) Opcodes/INVOKESTATIC "java/lang/String" "valueOf"
+                                          "(Ljava/lang/Object;)Ljava/lang/String;" false)))]
+      (if (nil? last-unsafe)
+        (doseq [p dyn] (emit-part p))
+        (let [temps (doall (for [p (take (inc last-unsafe) dyn)]
+                             (let [ty (:type p) s (alloc-slot gen ty)]
+                               (emit-part p) (xstore gen ty s) [ty s])))]
+          (doseq [[ty s] temps] (xload gen ty s))
+          (doseq [p (drop (inc last-unsafe) dyn)] (emit-part p)))))
+    (let [recipe (apply str (map (fn [p] (cond (:node p) "\u0001" (:tag-const p) "\u0002" :else (:literal p))) parts))
+          consts (keep :tag-const parts)]
+      (.visitInvokeDynamicInsn (mv gen) "makeConcatWithConstants"
+                               (t/method-desc (map :type dyn) t/string-desc)
+                               string-concat-bsm (object-array (cons recipe consts))))
+    (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
+(defn- outermost [n] (loop [n n] (if-let [o (:outer (a/decl n))] (recur o) n)))
+
+(defmethod emit-extra :assert [gen node ctx]
+  (let [m (mv gen) end (Label.)]
+    (.visitFieldInsn m Opcodes/GETSTATIC (:class node) "$assertionsDisabled" "Z")
+    (.visitJumpInsn m Opcodes/IFNE end)
+    (emit-cond gen (:test node) true end)
+    (.visitTypeInsn m Opcodes/NEW "java/lang/AssertionError")
+    (insn gen Opcodes/DUP)
+    (if-let [mn (:msg node)]
+      (do (emit-to gen mn (:msg-desc node))
+          (.visitMethodInsn m Opcodes/INVOKESPECIAL "java/lang/AssertionError" "<init>"
+                            (str "(" (:msg-desc node) ")V") false))
+      (.visitMethodInsn m Opcodes/INVOKESPECIAL "java/lang/AssertionError" "<init>" "()V" false))
+    (insn gen Opcodes/ATHROW)
+    (.visitLabel m end)
+    (when (= ctx :expr) (insn gen Opcodes/ACONST_NULL))))
+
+(defn assertion-clinit
+  "The <clinit> prefix of a class with java-assert: $assertionsDisabled from the outermost class."
+  [n]
+  (fn [gen]
+    (let [m (mv gen) l1 (Label.) l2 (Label.)]
+      (.visitLdcInsn m (Type/getObjectType (outermost n)))
+      (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "java/lang/Class" "desiredAssertionStatus" "()Z" false)
+      (.visitJumpInsn m Opcodes/IFNE l1)
+      (insn gen Opcodes/ICONST_1)
+      (.visitJumpInsn m Opcodes/GOTO l2)
+      (.visitLabel m l1)
+      (insn gen Opcodes/ICONST_0)
+      (.visitLabel m l2)
+      (.visitFieldInsn m Opcodes/PUTSTATIC n "$assertionsDisabled" "Z"))))
+
+(defn- bind-hidden! [gen b]
+  (let [s (alloc-slot gen (:type b))] (swap! (:slots gen) assoc (:id b) s) s))
+
+(defmethod emit-extra :for-each [gen node ctx]
+  (let [m (mv gen)
+        saved @(:next gen)
+        test (Label.) upd (Label.) end (Label.) exit (Label.)
+        h (:hidden node)
+        tg {:start upd :end end :depth (count (:cleanups gen)) :ctx (if (= ctx :expr) :expr :stmt)
+            :type :null :slots [] :types []}
+        gen2 (update gen :targets assoc (:id (:target node)) tg)
+        b (:b node)]
+    (if (:array node)
+      (let [arr (bind-hidden! gen (:arr h)) len (bind-hidden! gen (:len h)) i (bind-hidden! gen (:i h))]
+        (emit gen (:coll node) :expr)
+        (.visitVarInsn m Opcodes/ASTORE arr)
+        (.visitVarInsn m Opcodes/ALOAD arr)
+        (insn gen Opcodes/ARRAYLENGTH)
+        (.visitVarInsn m Opcodes/ISTORE len)
+        (insn gen Opcodes/ICONST_0)
+        (.visitVarInsn m Opcodes/ISTORE i)
+        (.visitLabel m test)
+        (.visitVarInsn m Opcodes/ILOAD i)
+        (.visitVarInsn m Opcodes/ILOAD len)
+        (.visitJumpInsn m Opcodes/IF_ICMPGE exit)
+        (emit gen (:elem node) :expr)
+        (xstore gen (:type b) (bind-hidden! gen b))
+        (emit gen2 (:body node) :stmt)
+        (.visitLabel m upd)
+        (.visitIincInsn m i 1)
+        (.visitJumpInsn m Opcodes/GOTO test))
+      (let [it (bind-hidden! gen (:it h))]
+        (emit gen (:iterator node) :expr)
+        (.visitVarInsn m Opcodes/ASTORE it)
+        (.visitLabel m upd)
+        (.visitVarInsn m Opcodes/ALOAD it)
+        (.visitMethodInsn m Opcodes/INVOKEINTERFACE "java/util/Iterator" "hasNext" "()Z" true)
+        (.visitJumpInsn m Opcodes/IFEQ exit)
+        (emit gen (:elem node) :expr)
+        (xstore gen (:type b) (bind-hidden! gen b))
+        (emit gen2 (:body node) :stmt)
+        (.visitJumpInsn m Opcodes/GOTO upd)))
+    ;; the loop's normal end gives nil; a break arrives at end with its value
+    (.visitLabel m exit)
+    (when (= ctx :expr) (insn gen Opcodes/ACONST_NULL))
+    (.visitLabel m end)
+    (reset! (:next gen) saved)))
+
+;; ---------------------------------------------------------------------------------------------
+;; lambdas and method references
+
+(def metafactory
+  (Handle. Opcodes/H_INVOKESTATIC "java/lang/invoke/LambdaMetafactory" "metafactory"
+           (str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+                "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)"
+                "Ljava/lang/invoke/CallSite;")
+           false))
+
+(def alt-metafactory
+  (Handle. Opcodes/H_INVOKESTATIC "java/lang/invoke/LambdaMetafactory" "altMetafactory"
+           (str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+                "[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
+           false))
+
+(defn- lambda-instance? [node] @(:uses-this (:boundary node)))
+
+(defn- lambda-impl-desc [node]
+  (let [[ps r] (t/parse-method-desc (:inst-desc node))]
+    (t/method-desc (concat (map :type @(:captures (:boundary node))) ps) r)))
+
+(defn- emit-indy-lambda [gen node captured-types impl]
+  (let [fi (:fi node)
+        sam (:sam node)
+        ;; javac: altMetafactory for intersection targets, FLAG_MARKERS | FLAG_BRIDGES, no bridges
+        args (if (seq (:markers node))
+               (object-array (concat [(Type/getMethodType ^String (:desc sam)) impl
+                                      (Type/getMethodType ^String (:inst-desc node))
+                                      (Integer/valueOf 6) (Integer/valueOf (count (:markers node)))]
+                                     (map #(Type/getObjectType %) (:markers node))
+                                     [(Integer/valueOf 0)]))
+               (object-array [(Type/getMethodType ^String (:desc sam)) impl
+                              (Type/getMethodType ^String (:inst-desc node))]))]
+    (.visitInvokeDynamicInsn (mv gen) (:name sam) (t/method-desc captured-types (t/internal->desc fi))
+                             (if (seq (:markers node)) alt-metafactory metafactory) args)
+    ;; the intersection cast of the target type
+    (when (seq (:markers node))
+      (doseq [c (cons fi (:markers node))] (.visitTypeInsn (mv gen) Opcodes/CHECKCAST c)))))
+
+(defmethod emit-extra :lambda [gen node ctx]
+  (let [cls (:class node)
+        inst? (lambda-instance? node)
+        caps @(:captures (:boundary node))
+        itf (env/interface? cls)]
+    (when inst? (.visitVarInsn (mv gen) Opcodes/ALOAD 0))
+    (doseq [b caps] (load-binding gen b))
+    (emit-indy-lambda gen node
+                      (concat (when inst? [(t/internal->desc cls)]) (map :type caps))
+                      (Handle. (if inst? (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL) Opcodes/H_INVOKESTATIC)
+                               cls (:name node) (lambda-impl-desc node) itf))
+    (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
+(defn emit-lambda-method
+  "The synthetic method of a lambda."
+  [^ClassWriter cw node]
+  (let [cls (:class node)
+        inst? (lambda-instance? node)
+        mv (.visitMethod cw (bit-or Opcodes/ACC_PRIVATE Opcodes/ACC_SYNTHETIC (if inst? 0 Opcodes/ACC_STATIC))
+                         (:name node) (lambda-impl-desc node) nil nil)
+        gen (assoc (new-gen mv cls (:ret node) (not inst?)) :lambda? true)]
+    (doseq [b @(:captures (:boundary node))]
+      (swap! (:slots gen) assoc (:id b) (alloc-slot gen (:type b))))
+    (doseq [b (:params node)]
+      (swap! (:slots gen) assoc (:id b) (alloc-slot gen (:type b))))
+    (.visitCode mv)
+    (emit gen (:body node) :return)
+    (.visitMaxs mv 0 0)
+    (.visitEnd mv)))
+
+(defmethod emit-extra :method-ref [gen node ctx]
+  (let [m (mv gen)
+        {:keys [kind owner name desc itf]} node
+        h (case kind
+            :static (Handle. Opcodes/H_INVOKESTATIC owner name desc (boolean itf))
+            :new (Handle. Opcodes/H_NEWINVOKESPECIAL owner "<init>" desc false)
+            (:bound :unbound) (Handle. (if itf Opcodes/H_INVOKEINTERFACE Opcodes/H_INVOKEVIRTUAL) owner name desc (boolean itf)))]
+    (when (= kind :bound)
+      (emit gen (:recv node) :expr)
+      (when (:null-check node)
+        (insn gen Opcodes/DUP)
+        (.visitMethodInsn m Opcodes/INVOKESTATIC "java/util/Objects" "requireNonNull"
+                          "(Ljava/lang/Object;)Ljava/lang/Object;" false)
+        (insn gen Opcodes/POP)))
+    (emit-indy-lambda gen node (when (= kind :bound) [(a/value-type (:type (:recv node)))]) h)
+    (when (= ctx :stmt) (insn gen Opcodes/POP))))

@@ -1593,6 +1593,7 @@
 ;; dispatch ------------------------------------------------------------------------------------------
 
 (declare analyze-anon analyze-letclass analyze-ctor-call analyze-java-str analyze-java-assert
+         analyze-with-resources
          analyze-for-each analyze-switch analyze-lambda analyze-method-ref analyze-if-instance)
 
 (defn- method-sugar
@@ -1663,6 +1664,7 @@
               java-str* (analyze-java-str actx form)
               java-assert* (analyze-java-assert actx form)
               for-each* (analyze-for-each actx form)
+              with-resources* (analyze-with-resources actx form)
               switch* (analyze-switch actx form)
               lambda* (analyze-lambda actx form)
               method-ref* (analyze-method-ref actx form)
@@ -2059,12 +2061,7 @@
     (analyze-body actx2 body)))
 
 (defn- not-yet [what] (fn [& _] (fail (str what " is not implemented yet"))))
-(def analyze-java-str (not-yet "java-str"))
-(def analyze-java-assert (not-yet "java-assert"))
-(def analyze-for-each (not-yet "for-each"))
 (def analyze-switch (not-yet "switch"))
-(def analyze-lambda (not-yet "lambda"))
-(def analyze-method-ref (not-yet "method-ref"))
 (def analyze-if-instance (not-yet "if-instance"))
 
 (defn analyze-enum-body
@@ -2082,3 +2079,275 @@
     (update-decl! cn assoc :anon-super-ctor ector :anon-ctor-desc (:desc ector))
     (process-classes! from)
     cn))
+
+;; ---------------------------------------------------------------------------------------------
+;; java-str (§5.10): javac's StringConcat.IndyConstants
+
+(defn const-string
+  "Java's string conversion of a constant."
+  [t v]
+  (cond (nil? v) "null"
+        (= t "C") (str (char v))
+        (= t "Z") (str (boolean v))
+        (= t "F") (str (float v))
+        (= t "D") (str (double v))
+        :else (str v)))
+
+(defn- accessible-class? [actx n]
+  (let [i (env/info n)]
+    (or (nil? i) (has? (:flags i) Opcodes/ACC_PUBLIC)
+        (= (t/package-of n) (t/package-of (:class actx))))))
+
+(defn- sharpest-accessible [actx d]
+  (cond
+    (t/array? d) (t/array-of (sharpest-accessible actx (t/elem-type d)))
+    (t/class-desc? d) (loop [n (t/desc->internal d)]
+                        (if (or (accessible-class? actx n) (nil? (:super (env/info n))))
+                          (t/internal->desc n)
+                          (recur (:super (env/info n)))))
+    :else d))
+
+(defn analyze-java-str [actx [_ & args]]
+  (let [nodes (mapv #(analyze actx %) args)]
+    (if (every? #(= :const (:op %)) nodes)
+      (const-node t/string-desc (apply str (map #(const-string (:type %) (:val %)) nodes)))
+      (let [parts (vec (for [n nodes
+                             :let [ty (value-type (:type n))]
+                             :when (not (and (= :const (:op n)) (= "" (:val n))))]
+                         (cond
+                           (= :const (:op n))
+                           (let [sv (const-string ty (:val n))]
+                             (if (or (str/includes? sv "\u0001") (str/includes? sv "\u0002"))
+                               {:tag-const sv}
+                               {:literal sv}))
+                           (= ty "V") (fail "java-str of a void expression")
+                           :else
+                           (let [eager (and (not (t/prim? ty)) (not (t/unbox-of ty)) (not= ty t/string-desc))]
+                             {:node n :type (if eager t/string-desc (sharpest-accessible actx ty))
+                              :eager eager}))))]
+        {:op :java-str :parts parts
+         :args (vec (keep :node parts))
+         :type t/string-desc}))))
+
+;; java-assert (§5.9)
+
+(defn analyze-java-assert [actx [_ c msg :as form]]
+  (let [cn (analyze actx c)
+        mn (when (> (count form) 2) (analyze actx msg))
+        cls (:class actx)]
+    (when (#{:interface :annotation} (:kind (decl! cls)))
+      (fail "java-assert in an interface is not supported yet"))
+    (swap! (state cls) assoc :uses-assert true)
+    {:op :assert :test cn :msg mn :class cls
+     :msg-desc (when mn
+                 (let [mt (value-type (:type mn))]
+                   (case mt ("I" "S" "B") "I" "Z" "Z" "C" "C" "J" "J" "F" "F" "D" "D" t/object-desc)))
+     :type "V"}))
+
+;; for-each (§5.7)
+
+(defn analyze-for-each [actx [_ [sym coll :as bv] & body]]
+  (when-not (and (vector? bv) (= 2 (count bv)) (symbol? sym))
+    (fail "for-each needs a binding vector [x coll]"))
+  (let [cn (analyze actx coll)
+        ct (value-type (:type cn))
+        array? (t/array? ct)
+        _ (when-not (or array? (and (t/ref? ct) (env/assignable? ct "Ljava/lang/Iterable;")))
+            (fail (str "for-each over a value of type " (pr-str ct) ", neither an array nor Iterable")))
+        tag (:tag (meta sym))
+        bt (cond tag (actx-desc actx tag) array? (t/elem-type ct) :else t/object-desc)
+        aux (fn [nm ty] (make-binding actx (gensym nm) ty))
+        hidden (if array?
+                 {:arr (aux "arr$" ct) :len (aux "len$" "I") :i (aux "i$" "I")}
+                 {:it (aux "i$" "Ljava/util/Iterator;")})
+        b (make-binding actx sym bt :mutable (boolean (:mutable (meta sym))))
+        target {:id (next-id) :kind :loop :bindings [] :breaks (atom [])}
+        iter-m (when-not array?
+                 (let [ms (filter #(empty? (first (t/parse-method-desc (:desc %))))
+                                  (env/member-methods (t/desc->internal ct) "iterator"))]
+                   (invoke-node actx nil ct (first ms) cn [] false)))
+        elem (if array?
+               {:op :aget :array {:op :local :b (:arr hidden) :type ct}
+                :index {:op :local :b (:i hidden) :type "I"} :type (t/elem-type ct)}
+               {:op :invoke :kind :interface :owner "java/util/Iterator" :itf true :name "next"
+                :desc "()Ljava/lang/Object;" :target {:op :local :b (:it hidden) :type "Ljava/util/Iterator;"}
+                :args [] :type t/object-desc})
+        elem (cond
+               (or array? (= bt t/object-desc)) (convert-node elem bt :what "for-each element")
+               (t/prim? bt) (convert-node {:op :cast :class (boxed-desc bt) :expr elem :type (boxed-desc bt)} bt)
+               :else {:op :cast :class bt :expr elem :type bt})
+        bactx (cond-> (-> actx (with-local b) (assoc :loop target :break-target target) (dissoc :label-loop))
+                (:label-loop actx) (assoc-in [:labels (:label-loop actx) :loop] target))
+        bn (analyze-body bactx body)]
+    {:op :for-each :array array? :coll cn :hidden hidden :b b :elem elem :iterator iter-m
+     :target target :body bn :type (if (seq @(:breaks target)) (unify-nodes (cons (const-node :null nil) @(:breaks target))) :null)}))
+
+;; with-resources (§5.9): javac's desugaring of try-with-resources
+
+(defn analyze-with-resources [actx [_ bindings & body]]
+  (when-not (and (vector? bindings) (even? (count bindings)) (seq bindings))
+    (fail "with-resources needs a vector of resource bindings"))
+  (if (> (count bindings) 2)
+    (analyze-with-resources actx (list 'with-resources* (subvec bindings 0 2)
+                                       (list* 'with-resources* (subvec bindings 2) body)))
+    (let [[sym init] bindings
+          in (analyze actx init)
+          ty (binding-type actx sym in false)
+          in (bind-init actx sym in ty)
+          rb (make-binding actx sym ty)
+          ractx (with-local actx rb)
+          bn (analyze-body ractx body)
+          null-check? (not= :new (:op in))
+          close (analyze ractx (list '. sym 'close))
+          tsym (gensym "t$") xsym (gensym "x$")
+          tb (make-binding actx tsym "Ljava/lang/Throwable;")
+          cactx (with-local ractx tb)
+          cbody (analyze cactx
+                         (list 'do
+                               (if null-check?
+                                 (list 'if (list 'clojure.core/some? sym)
+                                       (list 'try (list '. sym 'close)
+                                             (list 'catch 'java.lang.Throwable xsym (list '. tsym 'addSuppressed xsym))))
+                                 (list 'try (list '. sym 'close)
+                                       (list 'catch 'java.lang.Throwable xsym (list '. tsym 'addSuppressed xsym))))
+                               (list 'throw tsym)))
+          normal (if null-check?
+                   {:op :if :test {:op :not :expr {:op :nil? :expr {:op :local :b rb :type ty} :type "Z"} :type "Z"}
+                    :then close :else (const-node :null nil) :type (unify (:type close) :null)}
+                   close)]
+      {:op :let :bindings [[rb in]]
+       :body {:op :try :body bn :catches [{:classes ["java/lang/Throwable"] :b tb :body cbody}]
+              :normal-finally normal :type (:type bn)}
+       :type (:type bn)})))
+
+;; ---------------------------------------------------------------------------------------------
+;; lambda and method-ref (§5.12)
+
+(def ^:private object-methods #{"equals(Ljava/lang/Object;)" "hashCode()" "toString()"})
+
+(defn find-sam
+  "The single abstract method of functional interface n: {:name :desc}."
+  [n]
+  (when-not (env/interface? n) (fail (str (str/replace n "/" ".") " is not an interface")))
+  (let [seen (atom #{})
+        ms (for [c (env/all-supertypes n)
+                 :when (not= c "java/lang/Object")
+                 m (:methods (env/info! c))
+                 :let [k (str (:name m) (subs (:desc m) 0 (inc (.indexOf ^String (:desc m) ")"))))]
+                 :when (not (object-methods k))
+                 :when (not (contains? @seen k))
+                 :let [_ (swap! seen conj k)]
+                 :when (has? (:flags m) Opcodes/ACC_ABSTRACT)
+                 :when (not (has? (:flags m) Opcodes/ACC_STATIC))]
+             m)
+        ms (vec ms)]
+    (when-not (= 1 (count ms))
+      (fail (str (str/replace n "/" ".") " is not a functional interface (abstract methods: "
+                 (pr-str (map :name ms)) ")")))
+    (first ms)))
+
+(defn- fi-types
+  "[main-interface markers] of a lambda's target type form."
+  [actx form]
+  (let [tn (parse-type (scope-of actx) form)]
+    (if (= :inter (:t tn))
+      [(:name (first (:types tn))) (mapv :name (rest (:types tn)))]
+      [(:name tn) []])))
+
+(defn- lambda-method-prefix [actx]
+  (let [mi (:method-info actx)]
+    (cond (nil? mi) (if (:static actx) "static" "new")
+          (= "<init>" (:name mi)) "new"
+          (= "<clinit>" (:name mi)) "static"
+          :else (:name mi))))
+
+(defn- lambda-name! [actx]
+  (let [cls (:class actx)
+        prefix (lambda-method-prefix actx)
+        i (dec (get-in (swap! (state cls) update-in [:lambda-counters prefix] (fnil inc 0))
+                       [:lambda-counters prefix]))]
+    (str "lambda$" prefix "$" i)))
+
+(defn analyze-lambda [actx [_ fi params & body]]
+  (when-not (vector? params) (fail "lambda needs a parameter vector"))
+  (let [[fin markers] (fi-types actx fi)
+        _ (when (some #(= "java/io/Serializable" %) (cons fin markers))
+            (fail "Serializable lambdas are not supported yet"))
+        sam (find-sam fin)
+        [sps sret] (t/parse-method-desc (:desc sam))
+        _ (when-not (= (count sps) (count params))
+            (fail (str "lambda for " (:name sam) " needs " (count sps) " parameters")))
+        ps (mapv (fn [p sp] (if-let [tg (:tag (meta p))] (actx-desc actx tg) sp)) params sps)
+        ret (if-let [tg (:tag (meta params))] (actx-desc actx tg) sret)
+        cls (:class actx)
+        lname (lambda-name! actx)
+        boundary {:kind :lambda :captures (atom []) :uses-this (atom false)}
+        f (assoc (new-frame :lambda cls (:frame actx) boundary) :static (:static actx))
+        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue))
+        [lactx bs] (reduce (fn [[a bs] [p t]]
+                             (let [b (make-binding a p t :mutable (boolean (:mutable (meta p))) :param true)]
+                               [(with-local a b) (conj bs b)]))
+                           [lactx []] (map vector params ps))
+        bn (analyze-body lactx body)
+        bn (if (= "V" ret) bn (convert-node bn ret :what "lambda value"))
+        node {:op :lambda :fi fin :markers markers :sam sam :inst-desc (t/method-desc ps ret)
+              :params bs :body bn :boundary boundary :name lname :class cls :ret ret
+              :type (t/internal->desc fin)}]
+    (swap! (state cls) update :lambda-nodes (fnil conj []) node)
+    node))
+
+(defn- arg-stub [d] {:op :local :type d :b {:id -1 :type d}})
+
+(defn analyze-method-ref [actx [_ fi & more]]
+  (let [[sig more] (if (vector? (first more)) [(first more) (rest more)] [nil more])
+        [recv msym] (case (count more) 1 [nil (first more)] 2 more
+                      (fail "method-ref takes FI, an optional signature, an optional receiver and a method"))
+        _ (when-not (and (symbol? msym) (namespace msym)) (fail (str "Bad method in method-ref: " msym)))
+        [fin markers] (fi-types actx fi)
+        sam (find-sam fin)
+        [sps sret] (t/parse-method-desc (:desc sam))
+        ps (if sig (mapv #(actx-desc actx %) sig) sps)
+        ret (if-let [tg (and sig (:tag (meta sig)))] (actx-desc actx tg) sret)
+        cn (or (resolve-class actx (symbol (namespace msym))) (fail (str "Unknown class " (namespace msym))))
+        mname (name msym)
+        param-tags (:param-tags (meta msym))
+        base {:op :method-ref :fi fin :markers markers :sam sam :inst-desc (t/method-desc ps ret)
+              :type (t/internal->desc fin)}]
+    (cond
+      (= recv 'super)
+      ;; javac makes a lambda method for super::m
+      (let [args (vec (map #(with-meta (gensym "a$") {:tag (symbol (t/desc->class-name %))}) ps))]
+        (analyze actx (list 'lambda* fi (with-meta args {:tag (symbol (if (t/prim? ret) (t/prim-desc->name ret) (t/desc->class-name ret)))})
+                            (list* '. 'super (symbol (subs mname (if (str/starts-with? mname ".") 1 0))) args))))
+
+      (= mname "new")
+      (let [[m va] (select-method actx (filter #(env/accessible? (:class actx) %) (env/constructors cn))
+                                  (mapv arg-stub ps) (str "constructor of " cn) param-tags)]
+        (when va (fail "Variable arity constructor references are not supported yet"))
+        (assoc base :kind :new :owner cn :name "<init>" :desc (:desc m)))
+
+      recv
+      (let [rn (analyze actx recv)
+            rt (value-type (:type rn))
+            mn (if (str/starts-with? mname ".") (subs mname 1) mname)
+            cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
+            [m va] (select-method actx cands (mapv arg-stub ps) (str "method " mn) param-tags)]
+        (when va (fail "Variable arity method references are not supported yet"))
+        (assoc base :kind :bound :owner (qualifying-owner (t/internal->desc cn) m) :name mn :desc (:desc m)
+               :itf (env/interface? cn) :recv rn
+               :null-check (not (or (= :this-path (:op rn)) (:receiver (:b rn))))))
+
+      (str/starts-with? mname ".")
+      (let [mn (subs mname 1)
+            cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
+            [m va] (select-method actx cands (mapv arg-stub (rest ps)) (str "method " mn) param-tags)]
+        (when (empty? ps) (fail "An unbound method reference needs the receiver as first parameter"))
+        (when va (fail "Variable arity method references are not supported yet"))
+        (assoc base :kind :unbound :owner (qualifying-owner (t/internal->desc cn) m) :name mn :desc (:desc m)
+               :itf (env/interface? cn)))
+
+      :else
+      (let [cands (->> (env/member-methods cn mname) (filter static-flag?) (filter #(env/accessible? (:class actx) %)))
+            [m va] (select-method actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
+        (when va (fail "Variable arity method references are not supported yet"))
+        (assoc base :kind :static :owner cn :name mname :desc (:desc m) :itf (env/interface? cn))))))
