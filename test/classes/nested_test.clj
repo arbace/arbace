@@ -180,3 +180,8 @@
           (super.)
           (let [^Object p this]
             (set! r (anon Runnable [] (method ^:public run ^void [a] (.hashCode p)))))))]))
+
+(deftest inner-subclass-of-inner-class
+  (same-shapes? 'classes.nested-test
+    {"IS" "public class IS { class A { } class B extends A { } }"}
+    '[(^:public IS (defclass A) (defclass B :extends A))]))

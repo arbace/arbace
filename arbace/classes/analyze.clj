@@ -2276,8 +2276,9 @@
             nil))
         ;; derived constructors call super too
         (doseq [m (:methods d) :when (and (= "<init>" (:name m)) (#{:default-ctor :anon-ctor :record-canonical} (:derived m)))]
-          (let [actx (assoc (body-actx n :method false bounds {:name "<init>" :method m} "V") :in-ctor true
-                            :ctor-prologue true)
+          (let [actx (-> (body-actx n :method false bounds {:name "<init>" :method m} "V")
+                         (assoc-in [:frame :ctor] true)
+                         (assoc :in-ctor true :ctor-prologue true))
                 [actx bs] (bind-params actx n (assoc m :recv 'this__))]
             (swap! bodies assoc ["<init>" (:desc m)]
                    {:params bs :prologue [] :call (implicit-super-call actx n) :body nil
