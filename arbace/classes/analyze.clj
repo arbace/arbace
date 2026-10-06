@@ -316,7 +316,7 @@
       (fail (str "Class defined twice in one form: " n)))
     (swap! env/*compile-set* assoc n
            (merge parsed
-                  {:name n :outer (:outer ctx) :nesting nesting
+                  {:name n :outer (:outer ctx) :nesting nesting :creation-bounds (:bounds ctx)
                    :outer-instance? outer-instance?
                    :enclosing-method (:enclosing-method ctx)
                    :local-classes (:local-classes ctx)
@@ -332,11 +332,13 @@
     n))
 
 (defn- bounds-of-scope
-  "Type variable bounds visible in class n: its own and, unless static, its outer classes'."
+  "Type variable bounds visible in class n: its own, those of the method creating a local or
+  anonymous class, and, unless static, its outer classes'."
   [n]
   (let [d (decl! n)]
     (merge (when (and (:outer d) (or (:outer-instance? d) (#{:local :anon} (:nesting d))))
              (:bounds (decl (:outer d))))
+           (:creation-bounds d)
            (:own-bounds d))))
 
 (defn resolve-header!
@@ -1560,7 +1562,7 @@
     (if param-tags
       (let [m (first cands)]
         (when-not m (fail (str "No method matches the param-tags of " what)))
-        [m (and (varargs? m) (not (and (= n (count (pdescs m))) (applicable? :loose args (pdescs m)))))])
+        [m (and (varargs? m) (not (and (= n (count (pdescs m))) (applicable? :literal args (pdescs m)))))])
       (or (when-let [m (pick (filter #(applicable? :strict args (pdescs %)) fixed) pdescs)] [m false])
           (when-let [m (pick (filter #(applicable? :loose args (pdescs %)) fixed) pdescs)] [m false])
           (let [vs (filter #(and (varargs? %) (>= n (dec (count (pdescs %))))
@@ -2052,11 +2054,12 @@
           (when-let [s (method-sugar actx form)]
             (if (= ::qualified-instance (first s))
               (let [[_ cn mname [tgt & margs]] s
-                    tn (analyze actx tgt)]
+                    tn (if (= 'super tgt) (super-node actx) (analyze actx tgt))]
                 (analyze-method-call actx (if (env/assignable? (value-type (:type tn)) (t/internal->desc cn))
                                             (assoc tn :type (t/internal->desc cn))
                                             {:op :cast :class (t/internal->desc cn) :expr tn :type (t/internal->desc cn)})
                                      (name mname) margs :param-tags (:param-tags (meta mname))
+                                     :special (= 'super tgt)
                                      :ret-tag (:tag (meta form))))
               (analyze actx s)))
           (let [ex (macroexpand1 actx form)]
@@ -2295,6 +2298,7 @@
      :supers (cons (:super-t d) (:interfaces-t d))
      :methods (for [m (:methods d) :when (not= "<init>" (:name m)) :when (not (:bridge-of m))]
                 {:name (:name m) :desc (:desc m) :flags (:flags m) :throws (:throws m)
+                 :annotations (:annotations m) :param-annotations (:param-annotations m)
                  :params (mapv #(or (:tn %) (t/desc->tnode (:desc %))) (:params m))
                  :bounds (:bounds (:scope m))})}
     (when-let [c ^Class (env/load-class n)]
@@ -2382,8 +2386,10 @@
                     :bridge-of (assoc impl :owner (:impl-owner impl))
                     :special (not= n (:impl-owner impl))
                     :derived :bridge
-                    ;; javac's bridge has the erased type of the overridden method, throws included
+                    ;; javac's bridge has the erased type of the overridden method, throws included,
+                    ;; and the implementation's annotations
                     :throws (vec (:throws meth))
+                    :annotations (:annotations impl) :param-annotations (:param-annotations impl)
                     :ret (second (t/parse-method-desc (:desc meth)))
                     :params (mapv (fn [pd] {:desc pd :flags 0}) bps)
                     :flags (bit-or (bit-and (:flags impl) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED Opcodes/ACC_PRIVATE))
@@ -2450,7 +2456,7 @@
         parsed (-> (p/parse-class {:ns (:ns actx) :nesting :anon :outer (decl cur)} (cons 'anon members))
                    (assoc :simple nil :anon-super stn))
         ;; before the superclass constructor call there is no instance yet: a static context
-        _ (declare-class! {:nesting :anon :outer cur :name n
+        _ (declare-class! {:nesting :anon :outer cur :name n :bounds (:bounds actx)
                            :static-context (boolean (or (:static actx) (:ctor-prologue actx)))
                            :local-classes (:local-classes actx)
                            :enclosing-method (:method-info actx)} parsed)
@@ -2495,7 +2501,7 @@
                         n (local-class-name cur (:simple parsed))
                         lc (assoc (:local-classes actx) (symbol (:simple parsed)) n)
                         actx (assoc actx :local-classes lc)]
-                    (declare-class! {:nesting :local :outer cur :name n
+                    (declare-class! {:nesting :local :outer cur :name n :bounds (:bounds actx)
                                      :static-context (boolean (or (:static actx) (:ctor-prologue actx)))
                                      :local-classes lc :enclosing-method (:method-info actx)}
                                     parsed)

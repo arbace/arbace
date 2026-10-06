@@ -306,3 +306,12 @@
         (method ^:public f ^void [this]) (method ^:public ^:final g ^void [this])
         (method ^:public ^:abstract h ^void [this]) (method p ^void [this]) (method ^:public ^:static s ^void []))
       (^:public PB :extends NPB (method ^:public h ^void [this]))]))
+
+(deftest bridge-annotations
+  (same-shapes? 'classes.kinds-test
+    {"BA1" "import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @interface BA1 {}"
+     "BA2" "abstract class BA2 { abstract Object m(int x); }"
+     "BA3" "class BA3 extends BA2 { @BA1 String m(@BA1 int x) { return null; } }"}
+    '[(^:annotation ^{java.lang.annotation.Retention java.lang.annotation.RetentionPolicy/RUNTIME} BA1)
+      (^:abstract BA2 (method ^:abstract m ^Object [this ^int x]))
+      (BA3 :extends BA2 (method ^{BA1 true} m ^String [this ^{BA1 true} ^int x] nil))]))
