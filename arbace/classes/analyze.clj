@@ -2423,9 +2423,13 @@
         ;; first (mandated) constructor parameter, and has no outer instance of its own (javac)
         super-outer (when (and sctor (needs-outer-instance? sname))
                       (let [o (outer-instance-for actx sname)]
-                        (update-decl! n assoc :outer-instance? false
-                                      :super-outer (t/internal->desc (:outer (env/info sname))))
-                        o))
+                        (if (and (:outer-instance? (decl n)) (= :this-path (:op o)) (empty? (:path o)))
+                          ;; the creating instance is both the anonymous class's outer instance and
+                          ;; its superclass's: one parameter (javac)
+                          (do (update-decl! n assoc :super-outer-is-outer true) nil)
+                          (do (update-decl! n assoc :outer-instance? false
+                                            :super-outer (t/internal->desc (:outer (env/info sname))))
+                              o))))
         _ (update-decl! n assoc :anon-super-ctor sctor :anon-ctor-desc (if iface? "()V" (:desc sctor)))
         _ (process-classes! from)
         d (decl! n)

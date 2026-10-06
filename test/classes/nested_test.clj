@@ -155,3 +155,15 @@
                      (^:interface I (method g ^int [this]))
                      (C :implements [I] (method ^:public g ^int [this] k))]
             (P. (.ordinal E/Y) (.g (C.))))))]))
+
+(deftest anonymous-subclass-of-inner-class-using-outer
+  (same-shapes? 'classes.nested-test
+    {"A2" "public class A2 {
+       int f = 1;
+       class In { In(int x) {} int g() { return 0; } }
+       Object g() { return new In(2) { int g() { return f; } }; }
+     }"}
+    '[(^:public A2
+        (field ^int f 1)
+        (defclass In (constructor [this ^int x]) (method g ^int [this] 0))
+        (method g [this] (anon In [2] (method g ^int [a] f))))]))

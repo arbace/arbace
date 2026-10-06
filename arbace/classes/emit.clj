@@ -986,6 +986,7 @@
             (.visitInsn m Opcodes/POP))
           (.visitVarInsn m Opcodes/ALOAD 0)
           (when-let [s (:super-outer-slot gen)] (.visitVarInsn m Opcodes/ALOAD s))
+          (when (:super-outer-is-outer d) (.visitVarInsn m Opcodes/ALOAD (:outer-slot gen)))
           (when (:enum-slot gen)
             (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
             (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))
