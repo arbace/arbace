@@ -219,7 +219,7 @@
   [lead-thunks trail-thunks]: the outer instance and captured locals."
   [gen cn outer-node]
   (let [d (a/decl cn)]
-    [(when (and d (:outer-instance? d))
+    [(when (:outer-instance? (env/info cn))
        [(fn [] (if outer-node (emit gen outer-node :expr)
                    (fail (str "No outer instance for " cn))))])
      (when (and d (#{:local :anon} (:nesting d)))
@@ -230,9 +230,14 @@
   [cn m]
   (let [d (a/decl cn)]
     (if-not d
-      (:desc m)
+      (let [i (env/info cn)]
+        (if (:outer-instance? i)
+          (let [[ps _] (t/parse-method-desc (:desc m))]
+            (t/method-desc (cons (t/internal->desc (:outer i)) ps) "V"))
+          (:desc m)))
       (let [[ps _] (t/parse-method-desc (:desc m))]
         (t/method-desc (concat (when (:outer-instance? d) [(t/internal->desc (:outer d))])
+                               (when-let [so (:super-outer d)] [so])
                                (when (or (= :enum (:kind d)) (:enum-body d)) ["Ljava/lang/String;" "I"])
                                ps
                                (when (#{:local :anon} (:nesting d))
@@ -249,6 +254,7 @@
                  (when (:outer node)
                    (when-not (a/decl cn) nil))
                  (doseq [f lead] (f))
+                 (when-let [so (:super-outer node)] (emit gen so :expr))
                  (when-let [ec (:enum-const node)]
                    (emit-const gen t/string-desc (:name ec))
                    (emit-const gen "I" (:ordinal ec))))]
@@ -920,7 +926,16 @@
           (.visitMethodInsn m Opcodes/INVOKESPECIAL "java/lang/Enum" "<init>" "(Ljava/lang/String;I)V" false))
 
       (:anon-args call)
-      (do (.visitVarInsn m Opcodes/ALOAD 0)
+      (do (when-let [s (:super-outer-slot gen)]
+            ;; javac null-checks the superclass's outer instance again
+            (.visitVarInsn m Opcodes/ALOAD s)
+            (.visitInsn m Opcodes/DUP)
+            (.visitMethodInsn m Opcodes/INVOKESTATIC "java/util/Objects" "requireNonNull"
+                              "(Ljava/lang/Object;)Ljava/lang/Object;" false)
+            (.visitInsn m Opcodes/POP)
+            (.visitInsn m Opcodes/POP))
+          (.visitVarInsn m Opcodes/ALOAD 0)
+          (when-let [s (:super-outer-slot gen)] (.visitVarInsn m Opcodes/ALOAD s))
           (when (:enum-slot gen)
             (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
             (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))
@@ -954,6 +969,7 @@
         gen (new-gen mv n "V" false)
         st @(:state d)
         gen (if (:outer-instance? d) (assoc gen :outer-slot (alloc-slot gen t/object-desc)) gen)
+        gen (if (:super-outer d) (assoc gen :super-outer-slot (alloc-slot gen t/object-desc)) gen)
         gen (if (or (= :enum (:kind d)) (:enum-body d))
               (let [s (alloc-slot gen t/string-desc)] (alloc-slot gen "I") (assoc gen :enum-slot s))
               gen)
@@ -1004,6 +1020,7 @@
         names? (and ctor? (= :record (:kind d)) (:canonical m))
         extra (when ctor?
                 (concat (when (:outer-instance? d) [["this$0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
+                        (when (:super-outer d) [["x0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
                         (when (or (= :enum (:kind d)) (:enum-body d)) [["$enum$name" Opcodes/ACC_SYNTHETIC]
                                                    ["$enum$ordinal" Opcodes/ACC_SYNTHETIC]])))
         params (or (:mparams m)

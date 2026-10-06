@@ -222,6 +222,15 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
 5. Method references and lambdas: the instantiated types come from the forms only. Without a
    signature vector (and its tag) the functional interface method's erased types are used.
 
+6. Variable arity calls of generic methods: javac creates the argument array with the inferred
+   element type (`Arrays.asList("a", "b")` makes a `String[]`), the compiler with the erased one
+   (`Object[]`). Where they differ, write the array: `(Arrays/asList (new String/1 ["a" "b"]))`,
+   and for method references that need variable arity adaptation, the lambda javac makes.
+7. A field read or assigned by simple name in a nested class resolves, in Java, to an inherited
+   field before an enclosing class's field; in the forms only own and enclosing fields are in scope
+   by name, so inherited ones must be written `(.-f this)` (seen in the converted JDK, e.g.
+   `SingleNodeCounter`).
+
 ## Proposed spec amendments
 
 1. **Top-level `do` at stage 0 (§9.2).** The frozen compiler evaluates the forms of a top-level
@@ -263,3 +272,10 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    spec's "the current class for an inherited static called by simple name" holds only when the
    member belongs to the current class.
 10. **Signature polymorphic calls (§5.6)**: see note 2; the spec does not say how they are written.
+11. **`this` in instance initializers (§4.5, §4.7).** Field initializers and `initializer`
+    bodies have no receiver parameter. The compiler binds `this` there to the instance (besides
+    `C/this`), which is what the converter writes for Java's `this` in them.
+12. **Anonymous subclasses of inner classes (§4.8).** `(anon Inner [args] ...)` passes the
+    implicit outer instance of `Inner` as javac does (a mandated first constructor parameter, no
+    outer instance of the anonymous class itself). Java's `o.new Inner(args) { ... }` has no form
+    yet; a possible one is `(anon Inner [args] :outer o ...)`.

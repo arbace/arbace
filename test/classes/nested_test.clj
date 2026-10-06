@@ -104,3 +104,13 @@
         (defclass ^:public In (method ^:public g ^int [this] f))
         (method ^:static make ^In [^Q q] (.new q In))
         (method self ^In [this] (.new this In)))]))
+
+(deftest anonymous-subclass-of-inner-class
+  (same-shapes? 'classes.nested-test
+    {"A" "public class A {
+       class In { In(int x) {} }
+       Object g() { return new In(2) { int y; }; }
+     }"}
+    '[(^:public A
+        (defclass In (constructor [this ^int x]))
+        (method g [this] (anon In [2] (field ^int y))))]))

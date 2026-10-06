@@ -809,8 +809,8 @@
 (defn- local-ref [actx b]
   (cond
     (:cval b) (:cval b)
-    (identical? (:frame b) (:frame actx)) {:op :local :b b :type (:type b)}
     (:receiver b) (outer-this-node actx (:receiver b))
+    (identical? (:frame b) (:frame actx)) {:op :local :b b :type (:type b)}
     :else
     (do
       (when (:mutable b)
@@ -944,7 +944,8 @@
       (= d (:type node)) node
       (t/prim? d) node
       (#{:null :none} (:type node)) node
-      (and (t/ref? (:type node)) (env/assignable? (:type node) d)) node
+      ;; the tag gives the static type, also a supertype (Clojure's hint)
+      (and (t/ref? (:type node)) (env/assignable? (:type node) d)) (assoc node :type d)
       (t/ref? (:type node)) {:op :cast :class d :expr node :type d}
       :else node)))
 
@@ -1390,7 +1391,7 @@
 
 ;; set! -----------------------------------------------------------------------------------------------
 
-(declare analyze-field-access)
+(declare analyze-field-access super-node)
 
 (defn- analyze-set! [actx [_ target v]]
   (cond
@@ -1420,7 +1421,7 @@
 
     (and (seq? target) (let [h (first target)] (and (symbol? h) (str/starts-with? (name h) ".-"))))
     (let [fname (subs (name (first target)) 2)
-          tn (analyze actx (second target))]
+          tn (if (= 'super (second target)) (super-node actx) (analyze actx (second target)))]
       (analyze-field-access actx tn fname (fn [f owner]
                                             {:op :set-field :field f :owner owner :target tn
                                              :val (convert-node (analyze actx v) (:desc f)) :type (:desc f)})))
@@ -1703,13 +1704,13 @@
           {:op :new-array :type tdesc :dims (mapv #(operand (analyze actx %) "I") args)}))))
 
 (defn- needs-outer-instance? [cn]
-  (when-let [d (decl cn)]
+  (when-let [d (env/info cn)]
     (:outer-instance? d)))
 
 (defn outer-instance-for
   "The implicit outer instance node for creating class cn from actx."
   [actx cn]
-  (let [d (decl cn)]
+  (let [d (env/info cn)]
     (cond
       (and d (#{:local :anon} (:nesting d)))
       (outer-this-node actx (:outer d))
@@ -1813,8 +1814,8 @@
       (list* 'new (with-meta (symbol (subs s 0 (dec (count s)))) (meta op)) args)
 
       (and (namespace op) (not (contains? (:locals actx) op))
-           (resolve-class actx (symbol (namespace op)))
-           (not (resolve-var actx op)))
+           (not (resolve-var actx op))
+           (resolve-class actx (symbol (namespace op))))
       (let [c (symbol (namespace op))]
         (cond
           (= s "new") (list* 'new (with-meta c (meta op)) args)
@@ -2084,6 +2085,9 @@
       (let [bounds (:bounds d)
             sactx (body-actx n :class-init true bounds nil nil)
             iactx (body-actx n :class-init false bounds nil nil)
+            ;; field initializers and initializer bodies have no receiver parameter: `this` names
+            ;; the instance there
+            iactx (with-local iactx (make-binding iactx 'this (t/internal->desc n) :receiver n))
             fields-by-member (into {} (keep (fn [f] (when (:member f) [(:mid (:member f)) f])) (:fields d)))
             methods-by-member (into {} (keep (fn [m] (when (:member m) [(:mid (:member m)) m])) (:methods d)))
             clinit (atom []) init (atom []) bodies (atom {})]
@@ -2142,7 +2146,7 @@
     {:tparams (mapv :sym (:tparams d))
      :supers (cons (:super-t d) (:interfaces-t d))
      :methods (for [m (:methods d) :when (not= "<init>" (:name m)) :when (not (:bridge-of m))]
-                {:name (:name m) :desc (:desc m) :flags (:flags m)
+                {:name (:name m) :desc (:desc m) :flags (:flags m) :throws (:throws m)
                  :params (mapv #(or (:tn %) (t/desc->tnode (:desc %))) (:params m))
                  :bounds (:bounds (:scope m))})}
     (when-let [c ^Class (env/load-class n)]
@@ -2153,6 +2157,7 @@
                   {:name (.getName m)
                    :desc (t/method-desc (map t/class->desc (.getParameterTypes m)) (t/class->desc (.getReturnType m)))
                    :flags (.getModifiers m)
+                   :throws (mapv #(str/replace (.getName ^Class %) "." "/") (.getExceptionTypes m))
                    :params (mapv t/reflect->tnode (.getGenericParameterTypes m))
                    :bounds (into {} (for [^java.lang.reflect.TypeVariable tv (.getTypeParameters m)]
                                       [(symbol (.getName tv)) (mapv t/reflect->tnode (.getBounds tv))]))})})))
@@ -2229,6 +2234,7 @@
                     :bridge-of (assoc impl :owner (:impl-owner impl))
                     :special (not= n (:impl-owner impl))
                     :derived :bridge
+                    :throws (vec (:throws impl))
                     :ret (second (t/parse-method-desc (:desc meth)))
                     :params (mapv (fn [pd] {:desc pd :flags 0}) bps)
                     :flags (bit-or (bit-and (:flags impl) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED Opcodes/ACC_PRIVATE))
@@ -2280,8 +2286,13 @@
         [sctor va] (when-not iface?
                      (select-method actx (filter #(env/accessible? n %) (env/constructors sname))
                                     arg-nodes (str "constructor of " sname) nil))
-        _ (when (and sctor (needs-outer-instance? sname))
-            (fail "An anonymous subclass of an inner class is not supported yet"))
+        ;; an anonymous subclass of an inner class takes the superclass's outer instance as its
+        ;; first (mandated) constructor parameter, and has no outer instance of its own (javac)
+        super-outer (when (and sctor (needs-outer-instance? sname))
+                      (let [o (outer-instance-for actx sname)]
+                        (update-decl! n assoc :outer-instance? false
+                                      :super-outer (t/internal->desc (:outer (env/info sname))))
+                        o))
         _ (update-decl! n assoc :anon-super-ctor sctor :anon-ctor-desc (if iface? "()V" (:desc sctor)))
         _ (process-classes! from)
         d (decl! n)
@@ -2289,6 +2300,10 @@
     {:op :new :class n :ctor ctor
      :args (if sctor (convert-args sctor arg-nodes va) [])
      :outer (when (:outer-instance? d) (this-node actx))
+     :super-outer (when super-outer
+                    (if (or (= :this-path (:op super-outer)) (:receiver (:b super-outer)))
+                      super-outer
+                      {:op :null-checked :expr super-outer :type (:type super-outer)}))
      :type (t/internal->desc n)}))
 
 (defn analyze-letclass [actx [_ _ specs & body]]
@@ -2551,7 +2566,15 @@
 
 (defn- arg-stub [d] {:op :local :type d :b {:id -1 :type d}})
 
-(defn analyze-method-ref [actx [_ fi & more]]
+(defn- ref-as-lambda
+  "javac makes a lambda method for references it cannot express as a method handle (variable
+  arity adaptation): the equivalent lambda form."
+  [actx fi ps ret call-fn]
+  (let [args (vec (map-indexed (fn [i p] (with-meta (symbol (str "a$" i)) {:tag (symbol (if (t/prim? p) (t/prim-desc->name p) (t/desc->class-name p)))})) ps))
+        rtag (symbol (if (or (t/prim? ret) (= "V" ret)) (t/prim-desc->name ret) (t/desc->class-name ret)))]
+    (analyze actx (list 'lambda* fi (with-meta args {:tag rtag}) (call-fn args)))))
+
+(defn analyze-method-ref [actx [_ fi & more :as form]]
   (let [[sig more] (if (vector? (first more)) [(first more) (rest more)] [nil more])
         [recv msym] (case (count more) 1 [nil (first more)] 2 more
                       (fail "method-ref takes FI, an optional signature, an optional receiver and a method"))
@@ -2576,8 +2599,9 @@
       (= mname "new")
       (let [[m va] (select-method actx (filter #(env/accessible? (:class actx) %) (env/constructors cn))
                                   (mapv arg-stub ps) (str "constructor of " cn) param-tags)]
-        (when va (fail "Variable arity constructor references are not supported yet"))
-        (assoc base :kind :new :owner cn :name "<init>" :desc (:desc m)))
+        (if va
+          (ref-as-lambda actx fi ps ret (fn [args] (list* 'new (symbol (str/replace cn "/" ".")) args)))
+          (assoc base :kind :new :owner cn :name "<init>" :desc (:desc m))))
 
       recv
       (let [rn (analyze actx recv)
@@ -2585,9 +2609,10 @@
             mn (if (str/starts-with? mname ".") (subs mname 1) mname)
             cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va] (select-method actx cands (mapv arg-stub ps) (str "method " mn) param-tags)]
-        (when va (fail "Variable arity method references are not supported yet"))
-        (assoc base :kind :bound :owner (qualifying-owner (t/internal->desc cn) m) :name mn :desc (:desc m)
-               :itf (env/interface? cn) :recv rn
+        (when va (fail "Bound variable arity method references are not supported yet"))
+        ;; method handles name the declaring class (javac)
+        (assoc base :kind :bound :owner (:owner m) :name mn :desc (:desc m)
+               :itf (env/interface? (:owner m)) :recv rn
                :null-check (not (or (= :this-path (:op rn)) (:receiver (:b rn))))))
 
       (str/starts-with? mname ".")
@@ -2595,15 +2620,17 @@
             cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va] (select-method actx cands (mapv arg-stub (rest ps)) (str "method " mn) param-tags)]
         (when (empty? ps) (fail "An unbound method reference needs the receiver as first parameter"))
-        (when va (fail "Variable arity method references are not supported yet"))
-        (assoc base :kind :unbound :owner (qualifying-owner (t/internal->desc cn) m) :name mn :desc (:desc m)
-               :itf (env/interface? cn)))
+        (if va
+          (ref-as-lambda actx fi ps ret (fn [[r & args]] (list* '. r (with-meta (symbol mn) {:param-tags (:param-tags (meta msym))}) args)))
+        (assoc base :kind :unbound :owner (:owner m) :name mn :desc (:desc m)
+               :itf (env/interface? (:owner m)))))
 
       :else
       (let [cands (->> (env/member-methods cn mname) (filter static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va] (select-method actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
-        (when va (fail "Variable arity method references are not supported yet"))
-        (assoc base :kind :static :owner cn :name mname :desc (:desc m) :itf (env/interface? cn))))))
+        (if va
+          (ref-as-lambda actx fi ps ret (fn [args] (list* '. (symbol (str/replace cn "/" ".")) (with-meta (symbol mname) {:param-tags param-tags}) args)))
+        (assoc base :kind :static :owner (:owner m) :name mname :desc (:desc m) :itf (env/interface? (:owner m))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; patterns and switch (§5.8)
@@ -2756,6 +2783,30 @@
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r)))))))
 
+(defn import-classes!
+  "Imports the classes of an (import ...) form into namespace ns, without evaluating code (which
+  the frozen compiler would compile into ns's package, prohibited for java.*). Returns the class
+  names that could not be imported (a name already mapped to another class)."
+  [ns form]
+  (vec (for [spec (rest form)
+             :let [spec (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)]
+             cname (if (symbol? spec) [(str spec)] (map #(str (first spec) "." %) (rest spec)))
+             :let [ok (try (.importClass ^clojure.lang.Namespace ns (clojure.lang.RT/classForNameNonLoading cname))
+                           true
+                           (catch Throwable _ false))]
+             :when (not ok)]
+         cname)))
+
+(defn eval-ns-form!
+  "Evaluates a namespace form of a class forms file: in-ns and import without compiling code."
+  [f]
+  (case (name (first f))
+    "in-ns" (let [n (second f) n (if (seq? n) (second n) n)]
+              (set! *ns* (create-ns n))
+              (when-not (ns-resolve *ns* 'defclass) (refer 'clojure.core)))
+    "import" (import-classes! *ns* f)
+    (eval f)))
+
 (defn enter-from-source!
   "Looks up the top-level class of internal name n as a source p/C.clj on the class path. Its
   namespace and import forms are evaluated and its class forms entered as declarations only
@@ -2767,18 +2818,35 @@
       (swap! tried conj top)
       (when-let [url (.getResource (clojure.lang.RT/baseLoader) (str top ".clj"))]
         (let [forms (read-source-forms url)
-              ns (binding [*ns* *ns*]
+              ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'clojure.core/in-ns} (first %))) forms))
+              ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
+              class-forms* (for [f forms
+                                 f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                                 :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
+                             (rest f))
+              ;; only a file that declares the class is its source: decided before evaluating anything
+              declares? (and (symbol? ns-name*)
+                             (some (fn [[nm & _ :as cf]]
+                                     (and (symbol? nm)
+                                          (= top (let [s (str nm)
+                                                       pkg (get (apply hash-map (rest (drop-while (complement keyword?) cf))) :package)]
+                                                   (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
+                                                         (str/includes? s ".") (str/replace s "." "/")
+                                                         :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
+                                   class-forms*))
+              ns (when declares?
+                   (binding [*ns* *ns*]
                    (doseq [f forms
                            :when (and (seq? f) (#{'in-ns 'ns 'import 'clojure.core/in-ns 'clojure.core/import}
                                                   (first f)))]
-                     (eval f))
-                   *ns*)
+                     (eval-ns-form! f))
+                   *ns*))
               class-forms (for [f forms
                                 f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
                                 :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
                             (rest f))
               from (count @(:order *unit*))
-              names (doall (for [cf class-forms]
+              names (doall (for [cf (when ns class-forms)]
                              (let [parsed (p/parse-class {:ns ns :nesting :top} cf)
                                    tn (top-name ns parsed)]
                                (when-not (decl tn)

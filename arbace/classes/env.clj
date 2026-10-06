@@ -64,6 +64,10 @@
 
 (def ^:private reflect-cache (java.util.WeakHashMap.))
 
+(defn- inner-member? [^Class c]
+  (boolean (and (.getDeclaringClass c) (not (Modifier/isStatic (.getModifiers c)))
+                (not (.isInterface c)) (not (.isEnum c)) (not (.isRecord c)))))
+
 (defn reflect-info [^Class c]
   (locking reflect-cache
     (or (.get reflect-cache c)
@@ -83,6 +87,8 @@
                                       :const (when (and (Modifier/isStatic fl) (Modifier/isFinal fl)
                                                         (or (t/prim? d) (= d t/string-desc)))
                                                (delay (some->> (get @consts (.getName f)) (coerce-const d))))})))
+                    ;; an inner member class: its constructors take the outer instance first
+                    :outer-instance? (inner-member? c)
                     :methods (vec (concat
                                     (for [^Method m (.getDeclaredMethods c)]
                                       {:name (.getName m)
@@ -92,7 +98,9 @@
                                        :throws (mapv internal (.getExceptionTypes m))})
                                     (for [^Constructor m (.getDeclaredConstructors c)]
                                       {:name "<init>"
-                                       :desc (t/method-desc (map t/class->desc (.getParameterTypes m)) "V")
+                                       :desc (t/method-desc (map t/class->desc (cond->> (seq (.getParameterTypes m))
+                                                                                  (inner-member? c) rest))
+                                                            "V")
                                        :flags (.getModifiers m) :owner n})))
                     :class c}]
           (.put reflect-cache c info)

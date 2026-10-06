@@ -133,3 +133,13 @@
     (is (= 0 (.applyAsInt (.adder o 2) -3)))
     (is (= ["a" "b" "c"] (vec (clojure.lang.Reflector/invokeStaticMethod C "sorted" (object-array [["c" "a" "b"]])))))
     (is (= ["X" "Y"] (vec (clojure.lang.Reflector/invokeStaticMethod C "upper" (object-array [["x" "y"]])))))))
+
+(deftest varargs-method-refs
+  (same-shapes? 'classes.forms-test
+    {"V" "import java.util.function.*;
+     public class V {
+       static Object f() { BiFunction<String, Object, String> f = String::format; return f; }
+     }"}
+    '[(^:public V
+        (method ^:static f []
+          (let [f (method-ref java.util.function.BiFunction ^String [String Object] String/format)] f)))]))
