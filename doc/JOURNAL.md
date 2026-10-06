@@ -228,3 +228,55 @@ Recorded now, at the user's request, so that the current work does not block the
   - Bootstrap: the frozen `clojure/` (stage 0, plus a bootstrap library that compiles the new
     forms) compiles `arbace/**/*.clj` into stage 1, stage 1 compiles them again into stage 2,
     and stage 2 must reproduce itself. The `arbace.*` names keep the stages apart.
+
+## 2026-10-06: Spec of the class forms (agenda step 1)
+
+- Wrote `doc/classes/SPEC.md`, a proposal for review: Java's class file constructs written as
+  idiomatic Clojure ("class forms"), within the decisions of the previous entry. No code yet.
+- Method: enumerated the constructs from javac's `Tree.Kind`, the JVMS class file structure (access
+  flags, attributes) and the attributes javac's `ClassWriter` writes, and javac's desugarings
+  (`Lower`, `TransTypes`, `TransPatterns`, `LambdaToMethod`, `StringConcat`), all at jdk26u
+  `baf63fbe42b8`, `src/jdk.compiler/share/classes`. Studied Clojure's existing forms and limits at
+  `98d735fab02f` (`clojure/`): `Compiler.java` (special forms, `LocalBinding`, `LetExpr`,
+  `QualifiedMethodExpr` and param-tags, array class symbols, `FISupport`, `NewInstanceExpr`),
+  `Intrinsics.java`, `DynamicClassLoader.java`, `RT.makeClassLoader`, `core.clj`,
+  `core_deftype.clj`, `genclass.clj`, `core_proxy.clj`. The spec ends with coverage tables
+  (tree kinds, flags, attributes) and its sources.
+- Main decisions proposed:
+  - Guiding rule: existing Clojure forms keep their meaning; new meaning only for new names (vars
+    in `arbace.core` over new starred special forms such as `class*`, `label*`, `switch*`) and
+    for forms that are errors today (`^int` on a local with a primitive initializer, `set!` of a
+    local, list `:tag`s, `recur` out of tail position, `new` of an array class).
+  - One `defclass` for all kinds (`^:interface`, `^:enum`, `^:record`, `^:annotation`), header
+    options `:extends`, `:implements`, `:permits`, `:type-params`, and member forms `field`,
+    `method`, `constructor`, `initializer`, `static-initializer`, nested `defclass`,
+    `constants` (enums). Modifiers and annotations are metadata (Clojure's annotation syntax);
+    Java's defaults apply (no modifier is package access). Explicit receiver parameter as in
+    `deftype`. Generic types as data in `:tag` (`^{:tag (List T)}`), used only for `Signature`;
+    the compiler works on erasures.
+  - Code: `^:mutable` locals with `set!`, exact primitive locals by tag, `^:const` locals;
+    Java arithmetic with `unchecked-*`/`bit-*` operators plus new ones (`-float` family,
+    `unchecked-divide`, `unchecked-remainder`, `bit-*-int`, `bit-shift-*-int`); keyword labels with
+    `label`, `break`, `continue` (non-tail `recur`), `return`; `switch` with Java constants and
+    patterns, `if-instance`/`when-instance`; `for-each`, `with-resources`, `java-str`,
+    `java-assert`, `anon`, `letclass`, `lambda`, `method-ref`; `Outer/this`, `super`,
+    `(super. ...)`, `(this. ...)`, `(.new o Inner ...)`; arrays as `(new int/1 n)`.
+  - The compiler derives what javac derives (bridges, enum and record members, captures, nest
+    attributes, switch translations, lambda methods, string concatenation by `invokedynamic`),
+    with javac's names. The converter writes erasure casts, narrowing, overload pins
+    (param-tags, decided by running the compiler's own resolution), evaluation-order temporaries
+    and implicit qualifications.
+  - Equivalence is defined over class shapes plus the symbolic content of code (§3).
+  - Compilation: a class environment entered from the current top-level form and from sources on
+    a source path (javac's `-sourcepath` behaviour) handles the cyclic references of Java
+    classes; one namespace per Java package with one loaded file per Java file. REPL: one class
+    loader per Java package, with a new generation on redefinition, so package access works
+    across forms.
+- Alternatives considered are recorded in the spec next to each choice (§12 lists the names
+  considered for every new form).
+- Open questions for the user, each with a recommendation in §12: explicit vs implicit `this`;
+  default access; one `defclass` vs a macro per kind; the spelling of generic types; namespace
+  layout; handling of cycles; reflection as an error; derived vs explicit bridges; switch
+  fall-through; the names of the new forms; implicit boxing; REPL loaders; `float` operators;
+  keyword labels; `deftype`-style signature inference; reusing `cast`; one or two
+  implementations of the class forms across the stages.
