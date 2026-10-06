@@ -1,0 +1,49 @@
+#!/bin/bash
+# Checks of the Java -> class forms converter (arbace.j2c). Writes only under .tmp/j2c-check/.
+#
+# Usage: bin/j2c-check [--suite]
+#   1. converts the baseline's 183 Java files (clojure/) with --check: no failures, every file
+#      read by clojure.core/read;
+#   2. compiles the converted baseline with the class forms compiler (arbace.classes) and
+#      compares every class's shape with javac's (bin/class-forms-check);
+#   3. converts test/j2c/java (the language features the baseline does not use) and compares
+#      the compiled classes with javac's the same way;
+#   4. with --suite: compiles the converted baseline into class files and runs Clojure's test
+#      suite on them (bin/clojure-tests, run "converted"), which must show no regressions.
+# Exit status: 0 when all checks pass.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+work=.tmp/j2c-check
+rm -rf "$work"
+mkdir -p "$work"
+status=0
+
+echo "== 1. convert the baseline"
+bin/j2c -m arbace.j2c.main convert --check "$work/baseline" . clojure | grep -v '^slowest' | tee "$work/convert.log"
+grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/convert.log" || status=1
+
+echo "== 2. compile the converted baseline and compare with javac's classes"
+for d in clojure clojure/lang clojure/asm clojure/asm/signature clojure/asm/commons clojure/java/api; do
+  out=$(bin/class-forms-check "$work/baseline" "$d" 2>&1)
+  echo "$d: $(echo "$out" | grep '^files')"
+  echo "$out" | grep -q "errors 0 diffs 0" || { echo "$out" | tail -20; status=1; }
+done
+
+echo "== 3. language features (test/j2c/java)"
+javac -d "$work/sample-classes" $(find test/j2c/java -name '*.java') || status=1
+bin/j2c -m arbace.j2c.main convert --check "$work/sample" test/j2c/java | grep -v '^slowest'
+for d in $(cd test/j2c/java && find . -mindepth 1 -type d | sed 's|^\./||'); do
+  ALL=1 java -cp ".:$work/sample-classes" clojure.main test/classes/check_converted.clj "$work/sample" "$d" 2>&1 | tail -20
+done
+
+if [ "${1:-}" = "--suite" ]; then
+  echo "== 4. Clojure's test suite on the converted baseline"
+  bin/j2c -m arbace.j2c.build "$work/baseline" "$work/run/classes" || status=1
+  mkdir -p "$work/run/src"
+  (find clojure -type f ! -name '*.java' ! -name '*.class' | while read -r f; do
+     mkdir -p "$work/run/src/$(dirname "$f")"; cp "$f" "$work/run/src/$f"; done)
+  CLOJURE_SRC="$root/$work/run/classes:$root/$work/run/src" CLOJURE_TESTS_RUN=converted \
+    bin/clojure-tests -j "${J2C_TEST_JOBS:-16}" | tail -6 || status=1
+fi
+exit $status

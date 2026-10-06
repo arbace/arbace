@@ -163,7 +163,7 @@
               :else (recur (inc i))))]
     (if i (inc i) (count args))))
 
-(defn- class-body? [x] (= 'defclass (head-sym x)))
+(defn- class-body? [x] (or (= 'defclass (head-sym x)) (and (seq? x) (:class-body? (meta x)))))
 
 (defn- pp-body-form
   "Head, n header args on the first line, then the body at col+2."
@@ -186,8 +186,11 @@
                                    (+ c 1 (count t)))
                                  more))))
         bcol (+ col0 2)
-        defclass? (= hd 'defclass)
-        ;; defclass: options (keyword value pairs) each on its own line, then members
+        defclass? (or (= hd 'defclass) (:class-body? (meta x)))
+        ;; defclass: record components on the first line, options (keyword value pairs) each
+        ;; on its own line, then members
+        [comps body] (if (and defclass? (vector? (first body))) [(first body) (rest body)] [nil body])
+        header-text (if comps (str header-text " " (pp comps (+ (count (last (str/split-lines header-text))) col0 1))) header-text)
         [opts members] (if defclass?
                          (let [v (vec body)
                                n (loop [i 0] (if (and (< i (count v)) (keyword? (v i))) (recur (+ i 2)) i))]
@@ -308,6 +311,7 @@
                   ;; lay out the bindings vector specially
                   x x)]
           (cond
+            (:class-body? (meta x)) (pp-body-form x col 0)
             (= h 'if) (pp-if x col)
             (pair-heads h) (pp-pairs x col)
             (binding-heads h)
