@@ -188,6 +188,17 @@
 
 (defn- arg-types [m] (first (t/parse-method-desc (:desc m))))
 
+(defn- outer-level
+  "How many enclosing instances class o has (javac's nesting level of the outer type)."
+  [o]
+  (let [i (env/info o)]
+    (if (and i (:outer-instance? i)) (inc (outer-level (:outer i))) 0)))
+
+(defn this0-name
+  "javac's name of class n's outer instance field: this$N, N the outer class's nesting level."
+  [n]
+  (str "this$" (outer-level (:outer (a/decl! n)))))
+
 (defn- this-field-path [gen path]
   (loop [[c & more] path first? true]
     (when c
@@ -195,7 +206,7 @@
             od (t/internal->desc (:outer d))]
         (if (and first? (:outer-slot gen) (= c (:class gen)))
           (.visitVarInsn (mv gen) Opcodes/ALOAD (:outer-slot gen))
-          (.visitFieldInsn (mv gen) Opcodes/GETFIELD c "this$0" od))
+          (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (this0-name c) od))
         (recur more false)))))
 
 (defn- emit-this-path [gen node]
@@ -1044,7 +1055,7 @@
                             "(Ljava/lang/Object;)Ljava/lang/Object;" false)
           (.visitInsn mv Opcodes/POP)
           (when store?
-            (.visitFieldInsn mv Opcodes/PUTFIELD n "this$0" (t/internal->desc (:outer d)))))))
+            (.visitFieldInsn mv Opcodes/PUTFIELD n (this0-name n) (t/internal->desc (:outer d)))))))
     ;; before the superclass constructor call captured values come from the parameters, after
     ;; it from the val$ fields, as javac does
     (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s))
@@ -1070,7 +1081,7 @@
   (let [ctor? (= "<init>" (:name m))
         names? (and ctor? (= :record (:kind d)) (:canonical m))
         extra (when ctor?
-                (concat (when (:outer-instance? d) [["this$0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
+                (concat (when (:outer-instance? d) [[(this0-name (:name d)) (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
                         (when (:super-outer d) [["x0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
                         (when (or (= :enum (:kind d)) (:enum-body d)) [["$enum$name" Opcodes/ACC_SYNTHETIC]
                                                    ["$enum$ordinal" Opcodes/ACC_SYNTHETIC]])))
@@ -1315,7 +1326,7 @@
         (write-type-annotations #(.visitTypeAnnotation fv %1 %2 %3 %4) (:type-annotations f))
         (.visitEnd fv)))
     (when (this0-field? d)
-      (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) "this$0"
+      (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) (this0-name n)
                               (t/internal->desc (:outer d)) nil nil)))
     (when (#{:local :anon} (:nesting d))
       (doseq [b (:captures st)]

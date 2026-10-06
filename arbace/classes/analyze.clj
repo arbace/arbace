@@ -2069,6 +2069,18 @@
 
 ;; the forms of later steps are filled in below or in the next sections
 
+(def ^:private non-constant-heads
+  '#{anon letclass lambda method-ref switch new class* lambda* method-ref* switch* fn fn* letfn})
+
+(defn- may-be-constant?
+  "Can form be a constant expression? Those declaring classes or lambdas cannot, and analyzing
+  them would declare those (an anonymous class number would be taken)."
+  [form]
+  (cond (seq? form) (and (not (and (symbol? (first form)) (non-constant-heads (symbol (name (first form))))))
+                         (every? may-be-constant? form))
+        (coll? form) (every? may-be-constant? form)
+        :else true))
+
 (defn analyze-const-form
   "Analyzes a form expected to be a constant of type desc; returns the const node or nil."
   ([scope form desc] (analyze-const-form scope form desc false))
@@ -2076,7 +2088,8 @@
    (let [actx {:class (:class scope) :ns (:ns scope) :local-classes (:local-classes scope)
                :bounds (:bounds scope) :static true :locals {}
                :frame (new-frame :class-init (:class scope) nil nil) :const-only true}
-         n (try (analyze actx form) (catch Exception e (if lenient nil (throw e))))]
+         n (when (or (not lenient) (may-be-constant? form))
+             (try (analyze actx form) (catch Exception e (if lenient nil (throw e)))))]
      (when (and n (= :const (:op n)))
        (let [c (conversion n (:type n) desc)]
          (cond (= c :none) (if (= desc t/string-desc) n (const-node desc (const-of-type desc (:val n))))
@@ -2237,7 +2250,8 @@
                   (when-not (and static? (some? const))
                     (let [v (if (some? const)
                               (const-node (:desc f) const)
-                              (convert-node (analyze (if (lambda-form? (:init mb)) (assoc actx :pending-var (symbol (:name f))) actx)
+                              (convert-node (analyze (cond-> (assoc actx :field-name (:name f))
+                                                              (lambda-form? (:init mb)) (assoc :pending-var (symbol (:name f))))
                                                      (:init mb))
                                             (:desc f)
                                             :what (str "initializer of field " (:name f))))]
@@ -2374,6 +2388,31 @@
                     :params (mapv (fn [pd] {:desc pd :flags 0}) bps)
                     :flags (bit-or (bit-and (:flags impl) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED Opcodes/ACC_PRIVATE))
                                    Opcodes/ACC_SYNTHETIC Opcodes/ACC_BRIDGE)})))
+        ;; javac's "reflection" bridges: a public class re-declares the public methods it inherits
+        ;; from a non-public superclass (TransTypes.addBridgeIfNeeded)
+        (when (has? (:flags d) Opcodes/ACC_PUBLIC)
+          (doseq [c (rest chain)
+                  :when (not (has? (:flags (env/info! c)) Opcodes/ACC_PUBLIC))
+                  mm (:methods (env/info! c))
+                  :when (not= "<init>" (:name mm))
+                  :when (has? (:flags mm) Opcodes/ACC_PUBLIC)
+                  :when (not (has? (:flags mm) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_ABSTRACT Opcodes/ACC_FINAL
+                                                      Opcodes/ACC_SYNTHETIC)))
+                  ;; it is the implementation: no class below c declares that signature
+                  :when (not (some (fn [b] (some #(and (= (:name mm) (:name %))
+                                                       (= (first (t/parse-method-desc (:desc mm)))
+                                                          (first (t/parse-method-desc (:desc %)))))
+                                                 (:methods (env/info! b))))
+                                   (take-while #(not= % c) chain)))
+                  :when (not (some #(and (= (:name mm) (:name %)) (= (:desc mm) (:desc %))) @bridges))]
+            (let [[bps _] (t/parse-method-desc (:desc mm))]
+              (swap! bridges conj
+                     {:name (:name mm) :desc (:desc mm) :owner n
+                      :bridge-of (assoc mm :owner c) :special true :derived :bridge
+                      :throws (vec (:throws mm))
+                      :ret (second (t/parse-method-desc (:desc mm)))
+                      :params (mapv (fn [pd] {:desc pd :flags 0}) bps)
+                      :flags (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_SYNTHETIC Opcodes/ACC_BRIDGE)}))))
         (when (seq @bridges)
           (update-decl! n update :methods into @bridges))))))
 
@@ -2515,7 +2554,7 @@
   (let [nodes (mapv #(analyze actx %) args)
         ;; javac flattens nested string concatenation into one call site
         nodes (vec (mapcat #(if (= :java-str (:op %)) (:operands %) [%]) nodes))]
-    (if (every? #(= :const (:op %)) nodes)
+    (if (every? #(and (= :const (:op %)) (some? (:val %))) nodes)   ; null is no constant (JLS 15.29)
       (const-node t/string-desc (apply str (map #(const-string (:type %) (:val %)) nodes)))
       (let [parts (vec (for [n nodes
                              :let [ty (value-type (:type n))]
@@ -2544,6 +2583,7 @@
     ;; in an interface the flag lives in a synthetic holder class of the outermost class (javac)
     (if (#{:interface :annotation} (:kind (decl! cls)))
       (do (swap! (:assert-holders *unit*) assoc (nest-host cls) nil)
+          (swap! (:holder-first *unit*) #(if (contains? % (nest-host cls)) % (assoc % (nest-host cls) :assert)))
           ;; and the interface's <clinit> reads it, so the holder initializes with it
           (swap! (state cls) assoc :interface-assert (nest-host cls)))
       (swap! (state cls) assoc :uses-assert true))
@@ -2685,7 +2725,10 @@
 
 (defn- lambda-method-prefix [actx]
   (let [mi (:method-info actx)]
-    (cond (nil? mi) (if (:static actx) "static" "new")
+    ;; javac names the lambdas it makes from method references in a field initializer after
+    ;; the field (explicit lambdas there are static/new)
+    (cond (and (:ref-lambda actx) (:field-name actx)) (:field-name actx)
+          (nil? mi) (if (:static actx) "static" "new")
           (= "<init>" (:name mi)) "new"
           (= "<clinit>" (:name mi)) "static"
           :else (:name mi))))
@@ -2710,7 +2753,7 @@
         lname (when-not ser (lambda-name! actx))
         boundary {:kind :lambda :captures (atom []) :uses-this (atom false)}
         f (assoc (new-frame :lambda cls (:frame actx) boundary) :static (:static actx))
-        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue :pending-var))
+        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue :pending-var :ref-lambda))
         [lactx bs] (reduce (fn [[a bs] [p t]]
                              (let [b (make-binding a p t :mutable (boolean (:mutable (meta p))) :param true)]
                                [(with-local a b) (conj bs b)]))
@@ -2734,7 +2777,7 @@
   [actx fi ps ret call-fn]
   (let [args (vec (map-indexed (fn [i p] (with-meta (symbol (str "a$" i)) {:tag (symbol (if (t/prim? p) (t/prim-desc->name p) (t/desc->class-name p)))})) ps))
         rtag (symbol (if (or (t/prim? ret) (= "V" ret)) (t/prim-desc->name ret) (t/desc->class-name ret)))]
-    (analyze actx (list 'lambda* fi (with-meta args {:tag rtag}) (call-fn args)))))
+    (analyze (assoc actx :ref-lambda true) (list 'lambda* fi (with-meta args {:tag rtag}) (call-fn args)))))
 
 (defn analyze-method-ref [actx [_ fi & more :as form]]
   (let [[sig more] (if (vector? (first more)) [(first more) (rest more)] [nil more])
@@ -2870,7 +2913,8 @@
   its mapped value."
   [actx e c]
   (let [top (nest-host (:class actx))
-        maps (:switch-maps *unit*)]
+        maps (:switch-maps *unit*)
+        _ (swap! (:holder-first *unit*) #(if (contains? % top) % (assoc % top :switch)))]
     (get-in (swap! maps update-in [top e]
                    (fn [m] (let [m (or m {:values {} :order []})]
                              (if (get (:values m) c) m

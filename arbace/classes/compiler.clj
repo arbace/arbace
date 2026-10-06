@@ -38,22 +38,33 @@
   (binding [env/*compile-set* (atom {})
             a/*unit* {:order (atom []) :counters (atom {}) :switch-maps (atom {})
                       :switch-holders (atom {}) :source-tried (atom #{})
-                      :assert-holders (atom {})}]
+                      :assert-holders (atom {}) :holder-first (atom {})}]
     (let [names (vec (for [f forms]
                        (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))]
       (a/process-classes! 0)
       (infer-permits!)
-      ;; javac's synthetic holder class of the outermost class: $SwitchMap$ arrays and the
-      ;; $assertionsDisabled of interfaces share it; it is named after all anonymous classes
+      ;; javac's synthetic holder classes of the outermost class, named after all anonymous
+      ;; classes: the $assertionsDisabled of interfaces gets a new one, the $SwitchMap$ arrays go
+      ;; into an existing one (Lower.assertionsDisabledClass, outerCacheClass), in the order
+      ;; javac meets them
       (doseq [top (distinct (concat (keys @(:switch-maps a/*unit*)) (keys @(:assert-holders a/*unit*))))]
-        (let [h (a/local-class-name top nil)
-              enums (get @(:switch-maps a/*unit*) top)
-              d (cond-> (e/switch-holder-decl top h (or enums {}))
-                  (contains? @(:assert-holders a/*unit*) top) (update :state #(atom (assoc @% :uses-assert true))))]
-          (swap! env/*compile-set* assoc h d)
-          (swap! (:order a/*unit*) conj h)
-          (when enums (swap! (:switch-holders a/*unit*) assoc top h))
-          (when (contains? @(:assert-holders a/*unit*) top) (swap! (:assert-holders a/*unit*) assoc top h))))
+        (let [enums (get @(:switch-maps a/*unit*) top)
+              asserts? (contains? @(:assert-holders a/*unit*) top)
+              shared? (or (not enums) (not asserts?) (= :assert (get @(:holder-first a/*unit*) top)))
+              add! (fn [d] (swap! env/*compile-set* assoc (:name d) d) (swap! (:order a/*unit*) conj (:name d)))]
+          (if shared?
+            (let [h (a/local-class-name top nil)
+                  d (cond-> (e/switch-holder-decl top h (or enums {}))
+                      asserts? (update :state #(atom (assoc @% :uses-assert true))))]
+              (add! d)
+              (when enums (swap! (:switch-holders a/*unit*) assoc top h))
+              (when asserts? (swap! (:assert-holders a/*unit*) assoc top h)))
+            (let [h1 (a/local-class-name top nil)
+                  _ (add! (e/switch-holder-decl top h1 enums))
+                  h2 (a/local-class-name top nil)]
+              (add! (e/assert-holder-decl top h2))
+              (swap! (:switch-holders a/*unit*) assoc top h1)
+              (swap! (:assert-holders a/*unit*) assoc top h2)))))
       (let [classes (vec (for [c @(:order a/*unit*)
                                :when (not (:declared-only (a/decl c)))]
                            {:name c :bytes (e/emit-class c) :info (a/decl c)}))]

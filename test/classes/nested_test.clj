@@ -167,3 +167,16 @@
         (field ^int f 1)
         (defclass In (constructor [this ^int x]) (method g ^int [this] 0))
         (method g [this] (anon In [2] (method g ^int [a] f))))]))
+
+(deftest anonymous-class-in-constructor
+  (same-shapes? 'classes.nested-test
+    {"AC" "public class AC {
+       Object r;
+       public AC() { super(); Object p = this; r = new Runnable() { public void run() { p.hashCode(); } }; }
+     }"}
+    '[(^:public AC
+        (field r)
+        (constructor ^:public [this]
+          (super.)
+          (let [^Object p this]
+            (set! r (anon Runnable [] (method ^:public run ^void [a] (.hashCode p)))))))]))

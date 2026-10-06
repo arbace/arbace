@@ -297,3 +297,12 @@
       (TC2
         (method f ^int [this ^String s]
           (try (Integer/parseInt s) (catch ^{NC2 true} NumberFormatException e -1))))]))
+
+(deftest reflection-bridges
+  (same-shapes? 'classes.kinds-test
+    {"NPB" "abstract class NPB { public void f() {} public final void g() {} public abstract void h(); void p() {} public static void s() {} }"
+     "PB" "public class PB extends NPB { public void h() {} }"}
+    '[(^:abstract NPB
+        (method ^:public f ^void [this]) (method ^:public ^:final g ^void [this])
+        (method ^:public ^:abstract h ^void [this]) (method p ^void [this]) (method ^:public ^:static s ^void []))
+      (^:public PB :extends NPB (method ^:public h ^void [this]))]))

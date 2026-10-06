@@ -49,6 +49,10 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   path, and a JVM without the compiler can load it (tested).
 - `defclasses` compiles several class forms as one compilation (mutually referring classes).
 - `arbace.classes.compiler/compile-forms` returns the bytes without defining anything.
+- Options (dynamic vars of `arbace.classes.emit`): `*version*`, the class file version (default:
+  the running JDK's); `*string-concat*`, `:indy` (default) or `:inline` for javac's
+  `-XDstringConcat=inline` (a `StringBuilder`, as the JDK build compiles `java.base` and a few other
+  modules); `*method-parameters*`, `true` for javac's `-parameters`.
 
 Tests: `bin/class-forms-tests [namespace...]`, for example `bin/class-forms-tests
 classes.nested-test`. They write only under `.tmp/class-forms-tests/`. Most compare the classes
@@ -114,10 +118,11 @@ Some mechanisms:
 `in-ns`, `import`, `defclass` forms) without defining anything, and compares the shape of every
 class with the class of the same name on the class path. For `clojure/lang` and `clojure/asm`
 those are the baseline's javac classes. On 2026-10-06 the converter's output for the 183 baseline
-files (read from its work area, not committed) gave: `clojure/lang` 138 of 139 files
-shape-identical to javac, `clojure/asm` 36 of 36, `clojure/asm/signature` 3 of 3,
-`clojure/asm/commons` 4 of 5, `clojure/java/api` 1 of 1, after patching two converter issues by
-hand (notes for the converter, below); the two remaining differences are converter issues too.
+files (read from its work area, not committed) first gave 138 of 139 `clojure/lang` files and
+4 of 5 `clojure/asm/commons` ones shape-identical to javac (the others all), after patching two
+converter issues by hand (notes for the converter, below); with the converter's later output all
+files of `clojure/lang` (139), `clojure/asm` (36), `clojure/asm/commons` (5),
+`clojure/asm/signature` (3) and `clojure/java/api` (1) are shape-identical, without patches.
 
 ### Running the converted runtime
 
@@ -223,7 +228,6 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    `(String) null`, also when param-tags already pick the overload (`GeneratorAdapter.box`).
 5. Method references and lambdas: the instantiated types come from the forms only. Without a
    signature vector (and its tag) the functional interface method's erased types are used.
-
 6. Variable arity calls of generic methods: javac creates the argument array with the inferred
    element type (`Arrays.asList("a", "b")` makes a `String[]`), the compiler with the erased one
    (`Object[]`). Where they differ, write the array: `(Arrays/asList (new String/1 ["a" "b"]))`,
@@ -232,6 +236,17 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    field before an enclosing class's field; in the forms only own and enclosing fields are in scope
    by name, so inherited ones must be written `(.-f this)` (seen in the converted JDK, e.g.
    `SingleNodeCounter`).
+8. Overloads: integer literals are `long`, so where javac picks an `int` overload for a literal
+   argument (`new Symbol(id, -1)` with `(int, int)` and `(int, Object)` constructors) the
+   compiler picks another one; the converter can ask the compiler's own resolution
+   (`arbace.classes.analyze/select-method`) and pin with param-tags where they differ, or write
+   `(unchecked-int -1)`.
+9. Captured locals must not be `^:mutable` (Java's effectively final); catch parameters that are
+   assigned need `^:mutable`; locals must not shadow the macros the converted code uses (a local
+   named `cond` or `when`). All seen in the converted JDK.
+10. javac gives the constructor of an anonymous class of an interface that captures locals a
+    `Signature` attribute, except when the Java source used the diamond (`new I<>() {...}`); the
+    forms do not say which was written, and the compiler always emits it.
 
 ## Proposed spec amendments
 
@@ -278,6 +293,10 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
     bodies have no receiver parameter. The compiler binds `this` there to the instance (besides
     `C/this`), which is what the converter writes for Java's `this` in them.
 12. **Anonymous subclasses of inner classes (§4.8).** `(anon Inner [args] ...)` passes the
-    implicit outer instance of `Inner` as javac does (a mandated first constructor parameter, no
-    outer instance of the anonymous class itself). Java's `o.new Inner(args) { ... }` has no form
-    yet; a possible one is `(anon Inner [args] :outer o ...)`.
+    implicit outer instance of `Inner` as javac does: a mandated first constructor parameter that
+    is also the anonymous class's own outer instance when it is created in an instance context.
+    Java's `o.new Inner(args) { ... }` has no form yet; a possible one is
+    `(anon Inner [args] :outer o ...)`.
+13. **javac options (§3).** Equivalence is relative to javac's options: the JDK's own build uses
+    `-XDstringConcat=inline` for some modules and `-parameters` for one. The compiler has both as
+    options (see Use), so such classes can be reproduced too.
