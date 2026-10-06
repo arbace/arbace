@@ -136,3 +136,22 @@
     '[(^:public QS
         (defclass In (constructor [this ^int x]))
         (defclass ^:static Sub :extends In (constructor [this ^QS o] (.super o 5))))]))
+
+(deftest local-records-enums-interfaces
+  (same-shapes? 'classes.nested-test
+    {"LR" "public class LR {
+       Object f(int k) {
+         record P(int a, int b) {}
+         enum E { X, Y }
+         interface I { int g(); }
+         class C implements I { public int g() { return k; } }
+         return new P(E.Y.ordinal(), new C().g());
+       }
+     }"}
+    '[(^:public LR
+        (method f [this ^int k]
+          (letclass [(^:record P [^int a ^int b])
+                     (^:enum E (constants X Y))
+                     (^:interface I (method g ^int [this]))
+                     (C :implements [I] (method ^:public g ^int [this] k))]
+            (P. (.ordinal E/Y) (.g (C.))))))]))
