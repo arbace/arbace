@@ -153,3 +153,33 @@
     (is (= 3 (clojure.lang.Reflector/invokeStaticMethod C "len" (object-array ["abc"]))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (load-forms 'classes.code-test '[(^:public NoRefl (method ^:public ^:static len [o] (.length o)))])))))
+
+(deftest jumps-and-handlers-in-argument-positions
+  (let [[C] (load-forms 'classes.code-test
+              '[(^:public Spill
+                  (method ^:public ^:static a ^int [^String s]
+                    (Integer/sum 1 (try (Integer/parseInt s) (catch NumberFormatException e 0))))
+                  (method ^:public ^:static b ^String [^boolean f]
+                    (.toString (StringBuilder. (label :L (when f (break :L "yes")) "no"))))
+                  (method ^:public ^:static c ^int/1 [^String s]
+                    (new int/1 [1 (try (Integer/parseInt s) (catch NumberFormatException e -1)) 3]))
+                  (method ^:public ^:static d ^String [^int n]
+                    (java-str "n=" n ", sum="
+                              (loop [^int i 0 ^int acc 0]
+                                (if (< i n) (recur (unchecked-inc-int i) (unchecked-add-int acc i)) acc))
+                              ", t=" (try (if (> n 3) (throw (RuntimeException.)) "ok") (catch RuntimeException e "caught"))))
+                  (method ^:public ^:static e ^int [^int/1 xs]
+                    (unchecked-add-int (aget xs 0)
+                                       (label :out
+                                         (for-each [^int x xs] (when (< x 0) (break :out x)))
+                                         0))))])
+        call (fn [m & args] (clojure.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
+    (is (= 3 (call 'a "2")))
+    (is (= 1 (call 'a "x")))
+    (is (= ["yes" "no"] [(call 'b true) (call 'b false)]))
+    (is (= [1 5 3] (vec (call 'c "5"))))
+    (is (= [1 -1 3] (vec (call 'c "?"))))
+    (is (= "n=3, sum=3, t=ok" (call 'd (int 3))))
+    (is (= "n=5, sum=10, t=caught" (call 'd (int 5))))
+    (is (= -2 (call 'e (int-array [1 -3 2]))))
+    (is (= 4 (call 'e (int-array [4 3]))))))
