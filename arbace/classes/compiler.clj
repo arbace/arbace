@@ -17,6 +17,11 @@
   []
   (doseq [n @(:order a/*unit*)]
     (let [d (a/decl n)]
+      ;; an enum with constant bodies is sealed, permitting them (javac)
+      (when (and (= :enum (:kind d)) (some :has-body (:constants d)))
+        (a/update-decl! n assoc :permits-final
+                        (vec (for [c @(:order a/*unit*) :when (:enum-body (a/decl c))
+                                   :when (= n (:super (a/decl c)))] c))))
       (when (:sealed (:meta d))
         (a/update-decl! n assoc :permits-final
                         (if (seq (:permits d))

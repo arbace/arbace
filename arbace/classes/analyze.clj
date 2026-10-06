@@ -142,9 +142,15 @@
     (let [c (analyze-const-form scope v desc)]
       {:const c})))
 
+(declare annotations-now)
+
 (defn annotations
-  "Annotations in metadata m (symbol keys naming annotation types), in scope.
+  "Annotations (delayed, as annotation types of the compilation may not be entered yet) in metadata m (symbol keys naming annotation types), in scope.
   Returns [{:type desc :visible bool :values {name value}}], SOURCE ones dropped."
+  [scope m]
+  (delay (annotations-now scope m)))
+
+(defn annotations-now
   [scope m]
   (vec (for [[k v] m
              :when (symbol? k)
@@ -478,7 +484,7 @@
                       (if explicit
                         (mapv #(if (identical? % explicit) (assoc % :canonical true) %) ctors)
                         (let [base {:name "<init>" :owner n :desc canonical-desc :ret "V"
-                                    :flags (bit-or (if compact (:flags compact) (class-access d)))
+                                    :flags (if compact (:flags compact) (class-access d))
                                     :params (mapv (fn [c] {:sym (:sym c) :desc (:desc c) :tn (:tn c) :flags 0
                                                            :meta (:meta c)}) comps)
                                     :param-annotations (mapv :annotations comps)
@@ -494,7 +500,7 @@
                     (let [desc (or (:anon-ctor-desc d) "()V")]
                       [{:name "<init>" :owner n :desc desc :ret "V"
                         :params (mapv (fn [pd] {:desc pd :flags 0}) (first (t/parse-method-desc desc)))
-                        :flags (cond (= kind :enum) Opcodes/ACC_PRIVATE
+                        :flags (cond (or (= kind :enum) (:enum-body d)) Opcodes/ACC_PRIVATE
                                      (= :anon (:nesting d)) 0
                                      :else (class-access d))
                         :derived (if (= :anon (:nesting d)) :anon-ctor :default-ctor)
@@ -744,7 +750,7 @@
 ;; analysis
 
 (declare analyze analyze-body analyze-invoke analyze-new analyze-dot analyze-op analyze-class-form
-         analyze-symbol coerce-hint)
+         analyze-symbol coerce-hint needs-outer-instance? ctor-call-node)
 
 (defn- with-form-info [form f]
   (try (f)
@@ -1425,6 +1431,20 @@
         mname (name member)
         param-tags (:param-tags (meta member))]
     (cond
+      (and (= mname "new") (seq args) (symbol? (first args)))
+      ;; (.new o Inner args): Java's o.new Inner(args)
+      (let [on (analyze actx target)
+            ot (value-type (:type on))
+            _ (when-not (t/class-desc? ot) (fail ".new needs an outer instance"))
+            isym (first args)
+            cn (let [m (str (t/desc->internal ot) "$" (name isym))]
+                 (if (class-exists? m) m (or (resolve-class actx isym) (fail (str "Unknown class " isym)))))]
+        (when-not (needs-outer-instance? cn)
+          (when-not (some-> (env/info cn) :outer)
+            (fail (str (str/replace cn "/" ".") " is not an inner class"))))
+        (ctor-call-node actx cn (rest args) :new
+                        :outer (if (or (= :this-path (:op on)) (:receiver (:b on))) on {:op :null-checked :expr on :type ot})))
+
       (= target 'super)
       (if (str/starts-with? mname "-")
         (analyze-field-access actx (super-node actx) (subs mname 1))
@@ -1802,7 +1822,10 @@
 (defn- analyze-ctor-body [n m]
   (let [actx (body-actx n :method false (:bounds (or (:scope m) (class-scope n)))
                         {:name "<init>" :method m} "V")
-        [actx bs] (bind-params actx n m)
+        ;; a compact constructor's components are assignable locals
+        [actx bs] (bind-params actx n (if (:compact m)
+                                        (update m :params (fn [ps] (mapv #(assoc-in % [:meta :mutable] true) ps)))
+                                        m))
         actx (assoc actx :in-ctor true)
         forms (get-in m [:member :body])
         idx (first (keep-indexed (fn [i f] (when (ctor-call-form? f) i)) forms))
@@ -1818,6 +1841,31 @@
      :recv (get-in actx [:locals (:recv m)])
      :calls-super (not= :this (:kind call-node))
      :compact-locals (when (:compact m) bs)}))
+
+(declare analyze-enum-body)
+
+(defn- analyze-enum-constants
+  "The <clinit> nodes creating the constants of enum n and $VALUES."
+  [n sactx]
+  (let [d (decl! n)
+        self (t/internal->desc n)
+        ctors (filter #(= "<init>" (:name %)) (:methods d))]
+    (conj
+      (vec (for [[i c] (map-indexed vector (:constants d))]
+             (let [args (mapv #(analyze sactx %) (:args c))
+                   [m va] (select-method sactx ctors args (str "constructor of enum constant " (:name c)) nil)
+                   cls (if (:has-body c) (analyze-enum-body sactx n c m) n)
+                   ctor (if (:has-body c)
+                          (some #(when (= "<init>" (:name %)) %) (:methods (decl! cls)))
+                          m)
+                   f (some #(when (= (:name c) (:name %)) %) (:fields d))]
+               {:op :set-static :field f :owner n :type self
+                :val {:op :new :class cls :ctor ctor :args (convert-args m args va)
+                      :enum-const {:name (:name c) :ordinal i} :type self}})))
+      {:op :set-static :owner n :type (t/array-of self)
+       :field (some #(when (= "$VALUES" (:name %)) %) (:fields d))
+       :val {:op :invoke :kind :static :owner n :itf false :name "$values"
+             :desc (str "()" (t/array-of self)) :args [] :type (t/array-of self)}})))
 
 (defn analyze-class!
   "Analyzes all code of class n, in the textual order of its members (so anonymous classes are
@@ -1835,7 +1883,7 @@
             clinit (atom []) init (atom []) bodies (atom {})]
         ;; enum constants come first, as javac creates them first in <clinit>
         (when (= :enum (:kind d))
-          (swap! clinit conj {:op :enum-constants :class n}))
+          (swap! clinit into (analyze-enum-constants n sactx)))
         (doseq [mb (:members d)]
           (case (:kind mb)
             :field
@@ -1873,6 +1921,83 @@
         (swap! st assoc :clinit @clinit :init @init :bodies @bodies)))
     n))
 
+;; ---------------------------------------------------------------------------------------------
+;; bridges (§6): javac's TransTypes.addBridges on erased signatures, with the supertypes' type
+;; arguments substituted
+
+(defn- class-generics
+  "Generic view of class n: {:tparams [sym] :supers [tnode] :methods [{:name :desc :params [tnode]
+  :bounds {}}]}."
+  [n]
+  (if-let [d (decl n)]
+    {:tparams (mapv :sym (:tparams d))
+     :supers (cons (:super-t d) (:interfaces-t d))
+     :methods (for [m (:methods d) :when (not= "<init>" (:name m)) :when (not (:bridge-of m))]
+                {:name (:name m) :desc (:desc m) :flags (:flags m)
+                 :params (mapv #(or (:tn %) (t/desc->tnode (:desc %))) (:params m))
+                 :bounds (:bounds (:scope m))})}
+    (when-let [c ^Class (env/load-class n)]
+      {:tparams (mapv #(symbol (.getName ^java.lang.reflect.TypeVariable %)) (.getTypeParameters c))
+       :supers (remove nil? (cons (some-> (.getGenericSuperclass c) t/reflect->tnode)
+                                  (map t/reflect->tnode (.getGenericInterfaces c))))
+       :methods (for [^java.lang.reflect.Method m (.getDeclaredMethods c)]
+                  {:name (.getName m)
+                   :desc (t/method-desc (map t/class->desc (.getParameterTypes m)) (t/class->desc (.getReturnType m)))
+                   :flags (.getModifiers m)
+                   :params (mapv t/reflect->tnode (.getGenericParameterTypes m))
+                   :bounds (into {} (for [^java.lang.reflect.TypeVariable tv (.getTypeParameters m)]
+                                      [(symbol (.getName tv)) (mapv t/reflect->tnode (.getBounds tv))]))})})))
+
+(defn- supertype-envs
+  "For every supertype S of class n: S -> substitution of S's type variables in n's terms (nil
+  for raw or non-generic supertypes)."
+  [n]
+  (loop [queue (for [st (:supers (class-generics n)) :when st] [st {}]) out {}]
+    (if-let [[[st env] & more] (seq queue)]
+      (let [st (t/subst env st)
+            s (:name st)
+            g (class-generics s)
+            senv (when (and g (seq (:args st)) (= (count (:tparams g)) (count (:args st))))
+                   (zipmap (:tparams g) (:args st)))]
+        (if (or (nil? g) (contains? out s))
+          (recur more out)
+          (recur (concat more (for [x (:supers g) :when x] [x (or senv {})]))
+                 (assoc out s senv))))
+      out)))
+
+(defn add-bridges!
+  "Adds javac's bridge methods to class n."
+  [n]
+  (let [d (decl! n)]
+    (when-not (#{:interface :annotation} (:kind d))
+      (let [envs (supertype-envs n)
+            declared (set (map (fn [m] [(:name m) (:desc m)]) (:methods d)))
+            bridges (atom [])]
+        (doseq [m (:methods d)
+                :when (not= "<init>" (:name m))
+                :when (not (has? (:flags m) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_PRIVATE Opcodes/ACC_ABSTRACT)))
+                :let [[mps mret] (t/parse-method-desc (:desc m))]
+                [s env] envs
+                m2 (:methods (class-generics s))
+                :when (= (:name m) (:name m2))
+                :when (not (has? (:flags m2) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_PRIVATE Opcodes/ACC_SYNTHETIC)))
+                :when (= (count mps) (count (:params m2)))
+                :let [bounds (merge (:bounds d) (:bounds m2))
+                      sub (mapv #(t/erase bounds (t/subst (or env {}) %)) (:params m2))]
+                :when (= sub mps)
+                :when (not= (:desc m2) (:desc m))
+                :let [[bps _] (t/parse-method-desc (:desc m2))]
+                :when (not (declared [(:name m) (:desc m2)]))
+                :when (not (some #(= (:desc m2) (:desc %)) @bridges))]
+          (swap! bridges conj
+                 {:name (:name m) :desc (:desc m2) :owner n :bridge-of m :derived :bridge
+                  :ret (second (t/parse-method-desc (:desc m2)))
+                  :params (mapv (fn [pd] {:desc pd :flags 0}) bps)
+                  :flags (bit-or (bit-and (:flags m) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED Opcodes/ACC_PRIVATE))
+                                 Opcodes/ACC_SYNTHETIC Opcodes/ACC_BRIDGE)}))
+        (when (seq @bridges)
+          (update-decl! n update :methods into @bridges))))))
+
 (defn process-classes!
   "Resolves headers and members of the classes declared since position `from` of the unit's
   order, then analyzes their code."
@@ -1880,6 +2005,7 @@
   (let [names (subvec @(:order *unit*) from)]
     (doseq [n names] (resolve-header! n))
     (doseq [n names] (resolve-members! n))
+    (doseq [n names] (add-bridges! n))
     (doseq [n names] (analyze-class! n))))
 
 (defn analyze-anon [actx [_ _ super-form args & members]]
@@ -1940,3 +2066,19 @@
 (def analyze-lambda (not-yet "lambda"))
 (def analyze-method-ref (not-yet "method-ref"))
 (def analyze-if-instance (not-yet "if-instance"))
+
+(defn analyze-enum-body
+  "The anonymous class E$n of an enum constant with a body; its constructor takes the enum
+  constructor's parameters (after name and ordinal) and passes them on."
+  [actx n c ector]
+  (let [cn (local-class-name n nil)
+        from (count @(:order *unit*))
+        parsed (-> (p/parse-class {:ns (:ns actx) :nesting :anon :outer (decl n)} (cons 'anon (:body c)))
+                   (assoc :simple nil :anon-super {:t :class :name n :args []} :enum-body true))
+        parsed (merge parsed (p/class-flags (assoc parsed :enum-body true)))]
+    (declare-class! {:nesting :anon :outer n :name cn :static-context true
+                     :local-classes (:local-classes actx) :enclosing-method nil} parsed)
+    (swap! (state cn) assoc :creation-frame (:frame actx) :creation-actx actx)
+    (update-decl! cn assoc :anon-super-ctor ector :anon-ctor-desc (:desc ector))
+    (process-classes! from)
+    cn))

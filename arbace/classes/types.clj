@@ -246,3 +246,42 @@
          ">")))
 
 (defn bounds-map [tps] (into {} (map (fn [{:keys [sym bounds]}] [sym bounds]) tps)))
+
+(defn desc->tnode [d]
+  (cond (prim? d) {:t :prim :desc d}
+        (= d "V") {:t :prim :desc d}
+        (array? d) {:t :array :elem (desc->tnode (elem-type d))}
+        :else {:t :class :name (desc->internal d) :args []}))
+
+(defn reflect->tnode
+  "A parsed type of a java.lang.reflect.Type."
+  [^java.lang.reflect.Type ty]
+  (cond
+    (instance? Class ty) (desc->tnode (class->desc ty))
+    (instance? java.lang.reflect.ParameterizedType ty)
+    (let [pt ^java.lang.reflect.ParameterizedType ty]
+      {:t :class :name (desc->internal (class->desc (.getRawType pt)))
+       :args (mapv reflect->tnode (.getActualTypeArguments pt))})
+    (instance? java.lang.reflect.TypeVariable ty)
+    {:t :tvar :sym (symbol (.getName ^java.lang.reflect.TypeVariable ty))}
+    (instance? java.lang.reflect.GenericArrayType ty)
+    {:t :array :elem (reflect->tnode (.getGenericComponentType ^java.lang.reflect.GenericArrayType ty))}
+    (instance? java.lang.reflect.WildcardType ty)
+    (let [w ^java.lang.reflect.WildcardType ty
+          lo (seq (.getLowerBounds w)) up (seq (.getUpperBounds w))]
+      (cond lo {:t :wild :kind :super :bound (reflect->tnode (first lo))}
+            (and up (not= Object (first up))) {:t :wild :kind :extends :bound (reflect->tnode (first up))}
+            :else {:t :wild :kind nil}))
+    :else {:t :class :name "java/lang/Object" :args []}))
+
+(defn subst
+  "Replaces type variables of a parsed type by the parsed types in env {sym tnode}."
+  [env tn]
+  (case (:t tn)
+    :tvar (get env (:sym tn) tn)
+    :class (cond-> (assoc tn :args (mapv #(subst env %) (:args tn)))
+             (:outer tn) (update :outer #(subst env %)))
+    :array (update tn :elem #(subst env %))
+    :wild (if (:bound tn) (update tn :bound #(subst env %)) tn)
+    :inter (update tn :types #(mapv (partial subst env) %))
+    tn))

@@ -63,8 +63,7 @@
           (anon Object []
             (method ^:public toString ^String [a]
               (.toString (anon Object [] (method ^:public toString ^String [b] x)))))))]
-    ;; javac's Iterator<Integer> anonymous class has a bridge next()Object (later step)
-    :ignore [["classes/nested_test/Outer$2" :methods ["next" "()Ljava/lang/Object;"]]]))
+))
 
 (deftest nested-behaviour
   (let [[O] (load-forms 'classes.nested-test
@@ -91,3 +90,17 @@
     (is (= 6 (aget box 0)))
     (.run (clojure.lang.Reflector/invokeStaticMethod O "ofStatic" (object-array [box (int 10)])))
     (is (= 26 (aget box 0)))))
+
+(deftest qualified-new-shape
+  (same-shapes? 'classes.nested-test
+    {"Q" "public class Q {
+       int f = 1;
+       public class In { public int g() { return f; } }
+       static In make(Q q) { return q.new In(); }
+       In self() { return this.new In(); }
+     }"}
+    '[(^:public Q
+        (field ^int f 1)
+        (defclass ^:public In (method ^:public g ^int [this] f))
+        (method ^:static make ^In [^Q q] (.new q In))
+        (method self ^In [this] (.new this In)))]))

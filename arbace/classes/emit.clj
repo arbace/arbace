@@ -233,7 +233,7 @@
       (:desc m)
       (let [[ps _] (t/parse-method-desc (:desc m))]
         (t/method-desc (concat (when (:outer-instance? d) [(t/internal->desc (:outer d))])
-                               (when (= :enum (:kind d)) ["Ljava/lang/String;" "I"])
+                               (when (or (= :enum (:kind d)) (:enum-body d)) ["Ljava/lang/String;" "I"])
                                ps
                                (when (#{:local :anon} (:nesting d))
                                  (map :type (:captures @(:state d)))))
@@ -403,6 +403,11 @@
       :arith (emit-arith gen node)
       :convert (do (emit gen (:expr node) :expr)
                    (emit-convert gen (:from node) (:to node)))
+      :null-checked (do (emit gen (:expr node) :expr)
+                        (insn gen Opcodes/DUP)
+                        (.visitMethodInsn m Opcodes/INVOKESTATIC "java/util/Objects" "requireNonNull"
+                                          "(Ljava/lang/Object;)Ljava/lang/Object;" false)
+                        (insn gen Opcodes/POP))
       :cast (do (emit gen (:expr node) :expr)
                 (when-not (= :none (:type (:expr node)))
                   (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal (:class node)))))
@@ -845,7 +850,7 @@
     :else (fail (str "Bad annotation value " (pr-str v)))))
 
 (defn write-annotations [visit-fn anns]
-  (doseq [{:keys [type visible values]} anns]
+  (doseq [{:keys [type visible values]} (force anns)]
     (let [^AnnotationVisitor av (visit-fn type visible)]
       (doseq [[k v] values] (write-ann-value av k v))
       (.visitEnd av))))
@@ -901,6 +906,9 @@
 
       (:anon-args call)
       (do (.visitVarInsn m Opcodes/ALOAD 0)
+          (when (:enum-slot gen)
+            (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
+            (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))
           (doseq [b (:params ab)] (load-binding gen b))
           (.visitMethodInsn m Opcodes/INVOKESPECIAL (:class call) "<init>"
                             (ctor-real-desc (:class call) (:ctor call)) false))
@@ -931,7 +939,9 @@
         gen (new-gen mv n "V" false)
         st @(:state d)
         gen (if (:outer-instance? d) (assoc gen :outer-slot (alloc-slot gen t/object-desc)) gen)
-        gen (if (= :enum (:kind d)) (let [s (alloc-slot gen t/string-desc)] (alloc-slot gen "I") (assoc gen :enum-slot s)) gen)
+        gen (if (or (= :enum (:kind d)) (:enum-body d))
+              (let [s (alloc-slot gen t/string-desc)] (alloc-slot gen "I") (assoc gen :enum-slot s))
+              gen)
         _ (when-let [r (:recv ab)] (swap! (:slots gen) assoc (:id r) 0))
         _ (bind-param-slots! gen (:params ab))
         caps (when (#{:local :anon} (:nesting d)) (:captures st))
@@ -975,7 +985,7 @@
         names? (and ctor? (= :record (:kind d)) (:canonical m))
         extra (when ctor?
                 (concat (when (:outer-instance? d) [["this$0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
-                        (when (= :enum (:kind d)) [["$enum$name" Opcodes/ACC_SYNTHETIC]
+                        (when (or (= :enum (:kind d)) (:enum-body d)) [["$enum$name" Opcodes/ACC_SYNTHETIC]
                                                    ["$enum$ordinal" Opcodes/ACC_SYNTHETIC]])))
         params (or (:mparams m)
                    (map (fn [p] [(some-> (:sym p) name) (bit-and (or (:flags p) 0) Opcodes/ACC_FINAL)]) (:params m)))
@@ -1014,6 +1024,20 @@
           (.visitFieldInsn mv Opcodes/GETSTATIC n (:name c) self)
           (.visitInsn mv Opcodes/AASTORE))
         (.visitInsn mv Opcodes/ARETURN))
+      :bridge
+      (let [target (:bridge-of m)
+            [tps tr] (t/parse-method-desc (:desc target))
+            [bps br] (t/parse-method-desc (:desc m))
+            itf (env/interface? n)]
+        (.visitVarInsn mv Opcodes/ALOAD 0)
+        (loop [[[bp tp] & more] (map vector bps tps) slot 1]
+          (when bp
+            (xload gen bp slot)
+            (when (and (not= bp tp) (t/ref? tp))
+              (.visitTypeInsn mv Opcodes/CHECKCAST (t/desc->internal tp)))
+            (recur more (+ slot (t/size bp)))))
+        (.visitMethodInsn mv (if itf Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL) n (:name m) (:desc target) itf)
+        (.visitInsn mv (opcode br Opcodes/IRETURN)))
       :record-accessor
       (let [c (:component m)]
         (.visitVarInsn mv Opcodes/ALOAD 0)
@@ -1043,16 +1067,18 @@
         ;; javac gives constructors with captured locals a Signature of the declared parameters,
         ;; except those of anonymous subclasses of classes
         sig (or (:sig m)
-                (when (and ctor? (#{:local :anon} (:nesting d)) (seq (:captures st))
-                           (or (= :local (:nesting d)) (seq (:interfaces d))))
+                (when (and ctor?
+                           (or (and (#{:local :anon} (:nesting d)) (seq (:captures st))
+                                    (or (= :local (:nesting d)) (seq (:interfaces d))))
+                               (= :enum (:kind d))))
                   (str "(" (apply str (map #(if (:tn %) (t/signature (:tn %)) (:desc %)) (:params m))) ")V")))
         mv (.visitMethod cw (:flags m) (:name m) desc sig exc)
         ab (get (:bodies st) [(:name m) (:desc m)])]
     (when-let [mp (method-parameters d m)]
       (doseq [[nm fl] mp] (.visitParameter mv nm fl)))
     (write-annotations #(.visitAnnotation mv %1 %2) (:annotations m))
-    (when (some seq (:param-annotations m))
-      (let [pas (:param-annotations m)]
+    (when (some (comp seq force) (:param-annotations m))
+      (let [pas (map force (:param-annotations m))]
         (.visitAnnotableParameterCount mv (count pas) true)
         (.visitAnnotableParameterCount mv (count pas) false)
         (doseq [[i anns] (map-indexed vector pas)]

@@ -91,7 +91,7 @@
 
 (defn class-flags
   "Class file access flags and InnerClasses flags of a declaration."
-  [{:keys [kind meta nesting outer-kind constants members]}]
+  [{:keys [kind meta nesting outer-kind constants members] :as decl}]
   (let [m meta
         member? (= nesting :member)
         in-interface? (interface-like? outer-kind)
@@ -107,14 +107,15 @@
         enum-bodies? (some :has-body constants)
         enum-abstract? (and (= kind :enum)
                             (some #(and (= :method (:kind %)) (:abstract (:meta %))) members))
-        final? (or (:final m) (= kind :record)
+        enum-body? (:enum-body decl)
+        final? (or (:final m) (= kind :record) enum-body?
                    (and (= kind :enum) (not enum-bodies?)))
         abstract? (or (:abstract m) (interface-like? kind) (and enum-abstract? enum-bodies?))
         base (bit-or (if final? Opcodes/ACC_FINAL 0)
                      (if abstract? Opcodes/ACC_ABSTRACT 0)
                      (if (interface-like? kind) Opcodes/ACC_INTERFACE 0)
                      (if (= kind :annotation) Opcodes/ACC_ANNOTATION 0)
-                     (if (= kind :enum) Opcodes/ACC_ENUM 0)
+                     (if (or (= kind :enum) enum-body?) Opcodes/ACC_ENUM 0)
                      (if (:synthetic m) Opcodes/ACC_SYNTHETIC 0))
         inner (bit-or base acc (if static? Opcodes/ACC_STATIC 0))
         cls (bit-or base
