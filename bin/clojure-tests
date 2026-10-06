@@ -1,0 +1,194 @@
+#!/bin/bash
+# Run Clojure's upstream test suite against the baseline in clojure/ and compare the outcome
+# with the recorded reference, test/baseline-results.edn. Writes only under .tmp/clojure-tests/.
+#
+# Usage: bin/clojure-tests [-j JOBS] [--no-generative] [NAMESPACE...]
+#   -j JOBS          parallel test JVMs (default: number of CPUs)
+#   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
+#   NAMESPACE...     run only these test namespaces (the totals then cover only them)
+# Environment:
+#   CLOJURE_SRC             class path of the Clojure under test: its Java classes and .clj
+#                           sources (default: the repo root, whose clojure/ is the baseline)
+#   CLOJURE_TESTS_RUN       name of the run, its files go to .tmp/clojure-tests/RUN
+#                           (default: baseline)
+#   CLOJURE_TESTS_EXPECTED  the reference results (default: test/baseline-results.edn)
+#   CLOJURE_TESTS_GEN_MSEC  test.generative run time in ms (default 60000, as upstream)
+#   CLOJURE_TESTS_TIMEOUT   per-JVM timeout in seconds (default 900)
+#
+# Steps, mirroring upstream's build.xml and pom.xml at the pinned revision:
+#   1. fetch     clojure/clojure at $rev into RUN/clojure (only test/ and src/script/ are used)
+#   2. deps      the pure-Clojure test libraries from Maven Central, checked by SHA-1
+#   3. build     AOT-compile the Clojure namespaces of the Clojure under test with direct linking
+#                into RUN/classes (ant compile-clojure). Needed: AOT test fixtures compiled with
+#                direct linking call clojure.core's fn classes, which must exist as class files.
+#   4. fixtures  javac test/java and AOT-compile the fixture namespaces into
+#                RUN/clojure/target/test-classes (ant compile-tests)
+#   5. test      each test namespace in its own JVM (ant test-example), in parallel: each JVM
+#                requires all test namespaces first, as upstream's single JVM does, then runs
+#                the tests of its namespace
+#   6. gen       the test.generative specs (ant test-generative)
+#   7. report    per-namespace counts and totals; regressions against the reference
+# Results: RUN/results.edn (same shape as the reference), logs in RUN/out/.
+# Exit status: 0 when nothing regressed, 1 otherwise.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+base=$root/.tmp/clojure-tests
+run=${CLOJURE_TESTS_RUN:-baseline}
+work=$base/$run
+src=$work/clojure
+rev=98d735fab02f337cee654cb0629bddc09883a75a
+runner=$root/test/run_clojure_tests.clj
+expected=${CLOJURE_TESTS_EXPECTED:-$root/test/baseline-results.edn}
+clojure_src=${CLOJURE_SRC:-$root}
+gen_msec=${CLOJURE_TESTS_GEN_MSEC:-60000}
+timeout_s=${CLOJURE_TESTS_TIMEOUT:-900}
+
+# Test-scoped dependencies of upstream's pom.xml (mvn dependency:tree -Dscope=test), minus:
+# spec.alpha and core.specs.alpha (the baseline stubs spec out), and jaxws-api with its four
+# dependencies (used only by annotations/java_8.clj and java_9.clj, loaded on Java 8 to 10).
+deps="
+org/clojure/test.generative/1.1.1 fd928b91ee8b61ca22396275cdbb69b857c430d1
+org/clojure/tools.namespace/1.5.1 1ae9cc0309598c7df8551d2754f9cb22b922f6fa
+org/clojure/java.classpath/1.1.1 bb1bf2e836a3d387ab1cc7be32a8648f0c7f6448
+org/clojure/tools.reader/1.6.0 f38c62efb86b436661f12b69f0dbe2092ac0df85
+org/clojure/data.generators/1.1.1 15ddedaccca52fbf6c14821c6d04d0a6b3aacc9d
+org/clojure/test.check/1.1.3 6241f491c7bf138d9339ed928bdc2410310817ae
+"
+
+# build.xml compile-clojure.
+core_nss="clojure.core clojure.core.protocols clojure.core.server clojure.main clojure.set
+clojure.edn clojure.xml clojure.zip clojure.inspector clojure.walk clojure.stacktrace
+clojure.template clojure.test clojure.test.tap clojure.test.junit clojure.pprint clojure.java.io
+clojure.repl clojure.java.browse clojure.java.javadoc clojure.java.shell clojure.java.process
+clojure.java.browse-ui clojure.java.basis.impl clojure.java.basis clojure.string clojure.data
+clojure.reflect clojure.datafy clojure.instant clojure.uuid clojure.core.reducers clojure.math
+clojure.tools.deps.interop clojure.repl.deps"
+
+# build.xml compile-tests, plus clojure.test-clojure.compilation.examples: compilation.clj
+# compiles it into target/test-classes when loaded, which every parallel JVM does; compiled once
+# beforehand, the JVMs load the class files instead of all rewriting them at once.
+fixture_nss="clojure.test-clojure.protocols.examples clojure.test-clojure.proxy.examples
+clojure.test-clojure.genclass.examples clojure.test-clojure.compilation.load-ns
+clojure.test-clojure.annotations"
+extra_fixture_nss="clojure.test-clojure.compilation.examples"
+
+jar_of() { echo "$base/lib/$(basename "$(dirname "$1")")-$(basename "$1").jar"; }
+libcp() {
+  local cp="" coord sha
+  while read -r coord sha; do
+    if [ -n "$coord" ]; then cp="$cp$(jar_of "$coord"):"; fi
+  done <<< "$deps"
+  echo "$cp"
+}
+
+# Upstream's test class path: maven.test.classpath (the test libraries), target/test-classes,
+# test, then the build (here: the AOT classes, then the Clojure under test).
+test_cp() { echo "$(libcp)$src/target/test-classes:$src/test:$work/classes:$clojure_src"; }
+
+jvm_props=(-Djava.awt.headless=true -Dclojure.compiler.direct-linking=true
+           -Djava.io.tmpdir="$work/tmp")
+
+# Internal entry point: run one namespace (called in parallel by xargs).
+if [ "${1:-}" = "--run-one" ]; then
+  ns=$2
+  cd "$src"
+  status=0
+  timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" clojure.main "$runner" \
+    run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" > "$work/out/$ns.log" 2>&1 || status=$?
+  printf '%-62s exit %s\n' "$ns" "$status"
+  exit 0
+fi
+
+jobs=$(nproc)
+generative=1
+only=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -j) jobs=$2; shift 2 ;;
+    --no-generative) generative=0; shift ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) only+=("$1"); shift ;;
+  esac
+done
+
+step() { echo "== $*"; }
+
+# 1. fetch
+if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
+  step "fetch clojure/clojure $rev"
+  mkdir -p "$src"
+  git -C "$src" init -q
+  git -C "$src" remote add origin https://github.com/clojure/clojure 2>/dev/null || true
+  git -C "$src" fetch -q --depth 1 origin "$rev"
+  git -C "$src" checkout -q -f FETCH_HEAD
+fi
+# Undo what earlier runs left in the checkout (the tests write under test/).
+git -C "$src" checkout -q -f "$rev"
+git -C "$src" clean -q -f -d test
+
+# 2. deps
+mkdir -p "$base/lib"
+while read -r coord sha; do
+  [ -z "$coord" ] && continue
+  jar=$(jar_of "$coord")
+  if ! echo "$sha  $jar" | sha1sum -c --status 2>/dev/null; then
+    step "download $coord"
+    curl -sfL -o "$jar" "https://repo1.maven.org/maven2/$coord/$(basename "$jar")"
+    echo "$sha  $jar" | sha1sum -c --quiet
+  fi
+done <<< "$deps"
+
+# clojure.lang.Compile loads clojure/core/specs/alpha before compiling, which the baseline (spec
+# stubbed out) lacks; an empty namespace stands in for it, on the compile class paths only, after
+# the Clojure under test so that a real core.specs.alpha there wins.
+mkdir -p "$work/stub/clojure/core/specs"
+echo '(ns clojure.core.specs.alpha) ; empty stand-in, see bin/clojure-tests' \
+  > "$work/stub/clojure/core/specs/alpha.clj"
+
+# 3. build
+step "[$run] AOT-compile the Clojure under test into $work/classes"
+rm -rf "${work:?}/classes" "${src:?}/target" "${work:?}/tmp"
+mkdir -p "$work/classes" "$src/target/test-classes" "$work/tmp"
+# shellcheck disable=SC2086
+java -cp "$work/classes:$clojure_src:$work/stub" -Dclojure.compile.path="$work/classes" \
+  "${jvm_props[@]}" clojure.lang.Compile $core_nss > "$work/build.log" 2>&1 \
+  || { cat "$work/build.log"; exit 1; }
+
+# 4. fixtures
+step "[$run] compile the test fixtures into $src/target/test-classes"
+# shellcheck disable=SC2046
+javac -nowarn -g --release 17 -encoding UTF-8 -cp "$work/classes:$clojure_src" \
+  -d "$src/target/test-classes" $(find "$src/test/java" -name '*.java') > "$work/fixtures.log" 2>&1 \
+  || { cat "$work/fixtures.log"; exit 1; }
+# shellcheck disable=SC2086
+(cd "$src" && java -cp "$(test_cp):$work/stub" -Dclojure.compile.path=target/test-classes \
+  "${jvm_props[@]}" clojure.lang.Compile $fixture_nss $extra_fixture_nss) >> "$work/fixtures.log" 2>&1 \
+  || { cat "$work/fixtures.log"; exit 1; }
+
+# 5. test
+rm -rf "${work:?}/out"
+mkdir -p "$work/out"
+(cd "$src" && java -cp "$(test_cp)" clojure.main "$runner" list test "$expected") > "$work/namespaces.txt"
+if [ ${#only[@]} -gt 0 ]; then
+  printf '%s\n' "${only[@]}" > "$work/selected.txt"
+else
+  cp "$work/namespaces.txt" "$work/selected.txt"
+fi
+step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)"
+export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s
+xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
+
+# 6. gen
+if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
+  step "[$run] run the test.generative specs for ${gen_msec}ms (log in $work/out/generative.log)"
+  status=0
+  (cd "$src" && timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" \
+    -Dclojure.test.generative.msec="$gen_msec" clojure.main "$runner" \
+    generative test "$work/out/generative.edn") > "$work/out/generative.log" 2>&1 || status=$?
+  [ $status = 0 ] || echo "test.generative exit $status"
+fi
+
+# 7. report
+(cd "$src" && java -cp "$(test_cp)" clojure.main "$runner" report "$work/out" "$expected" \
+  "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")")
