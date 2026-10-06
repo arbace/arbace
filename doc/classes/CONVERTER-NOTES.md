@@ -130,9 +130,11 @@ All on 2026-10-06, jdk26u at the system JDK (26.0.2.1).
   converted forms, with the baseline's `.clj` sources: 83 namespaces, 809 tests, 20,718 of
   20,750 assertions pass and 27 of 27 test.generative specs pass, the same as the baseline (the
   32 failures expect spec's messages). No regressions.
-- `test/j2c/java/sample`: 4 of 5 files shape-identical to javac, §11.4 included; `Features`
-  fails to compile only because the compiler does not do serializable lambdas yet. Without that
-  lambda, one difference remains: `d + (z ? 1 : 2)` (amendment 13).
+- `test/j2c/java/sample`: 4 of 5 files shape-identical to javac, §11.4 included. `Features`
+  compiles with three differences, none from the converter's output being wrong: the constants of
+  `d + (z ? 1 : 2)` (amendment 13); the name of a serializable lambda, which javac derives from a
+  hash (`lambda$lambdas$35817b2b$1`, for the compiler and §3.6's exemptions); and javac's merging
+  of record patterns with a common record type into one nested `typeSwitch` (for the compiler).
 - A sample of the JDK conversion compiled the same way (`javax/security/auth/x500`,
   `sun/util/calendar`, `jdk/internal/util`): the differences are javac's string concatenation
   with `StringBuilder` (java.base is built with `-XDstringConcat=inline`), one array upcast
