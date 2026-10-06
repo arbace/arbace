@@ -114,3 +114,15 @@
     '[(^:public A
         (defclass In (constructor [this ^int x]))
         (method g [this] (anon In [2] (field ^int y))))]))
+
+(deftest outer-field-in-inner-constructor
+  (same-shapes? 'classes.nested-test
+    {"BA" "public class BA {
+       java.util.Vector<Object> values = new java.util.Vector<>();
+       class VE { java.util.Enumeration<Object> list; VE() { list = values.elements(); } }
+       Object get() { return new VE(); }
+     }"}
+    '[(^:public BA
+        (field ^{:tag (java.util.Vector Object)} values (java.util.Vector.))
+        (defclass VE (field ^{:tag (java.util.Enumeration Object)} list) (constructor [this] (set! list (.elements values))))
+        (method get [this] (VE.)))]))

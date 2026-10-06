@@ -128,9 +128,8 @@
 
       (symbol? form)
       (if-let [n ((:resolve scope) form)]
-        (if (str/starts-with? n "[")
-          (parse-type scope (symbol (str/replace (subs (str n) 0) "/" ".")))
-          {:t :class :name n :args []})
+        (let [o (when-let [f (:implicit-outer scope)] (f n))]
+          (cond-> {:t :class :name n :args []} o (assoc :outer o)))
         (throw (ex-info (str "Unknown type: " form) {:form form})))
 
       (string? form)                    ; Clojure's string tags for arrays

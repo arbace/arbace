@@ -241,3 +241,28 @@
         (method ^{NN true} m :throws [^{NN true} Exception] ^String [this ^{NN true} ^int x ^{:tag (java.util.List ^{NN true} T)} y] nil)
         (method n :type-params [^{NN true} U] ^void [this])
         (method ^:public compareTo ^int [this ^{:tag (TA T)} o] 0))]))
+
+(deftest implicitly-parameterized-inner-classes
+  (same-shapes? 'classes.kinds-test
+    {"GO" "import java.util.*;
+     public class GO<T> {
+       class In { T x; }
+       class In2<U> { U y; }
+       In f;
+       In2<String> g;
+       In2<T> h(In a) { return null; }
+       static class SN { }
+       SN s;
+       interface I { void m() throws java.io.IOException; }
+       static class Impl implements I { public void m() { } }
+     }"}
+    '[(^:public GO :type-params [T]
+        (defclass In (field ^T x))
+        (defclass In2 :type-params [U] (field ^U y))
+        (field ^In f)
+        (field ^{:tag (In2 String)} g)
+        (method h ^{:tag (In2 T)} [this ^In a] nil)
+        (defclass ^:static SN)
+        (field ^SN s)
+        (defclass ^:interface I (method m :throws [java.io.IOException] ^void [this]))
+        (defclass ^:static Impl :implements [I] (method ^:public m ^void [this])))]))

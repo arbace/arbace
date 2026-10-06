@@ -1234,7 +1234,10 @@
         st @(:state d)
         cw ^ClassWriter (class-writer)]
     (.visit cw *version* (bit-or (:flags d) (if (has? (:meta-flags d) 0) 0 0)
-                                 (if (or (:deprecated (:meta d))) Opcodes/ACC_DEPRECATED 0))
+                                 (if (or (:deprecated (:meta d))
+                                         (some #(and (symbol? %) (#{"Deprecated" "java.lang.Deprecated"} (str %)))
+                                               (keys (:meta d))))
+                                   Opcodes/ACC_DEPRECATED 0))
             n (:signature d) (:super d) (into-array String (:interfaces d)))
     (if (= :top (:nesting d))
       (doseq [c @(:order a/*unit*) :when (and (not= c n) (= n (:nest-host (a/decl c))))]
