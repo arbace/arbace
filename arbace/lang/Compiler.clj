@@ -3503,11 +3503,23 @@
 
     (field ^:public ^:final ^int column)
 
-    (field ^:public ^:final ^int siteIndex)
-
     (field ^:public ^:final ^String source)
 
     (field ^:static ^Type ILOOKUP_TYPE (Type/getType ILookup))
+
+    (field ^:static ^:final ^String BSM_DESC1
+      (java-str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
+                "Ljava/lang/invoke/MethodType;Ljava/lang/Object;)Ljava/lang/Object;"))
+
+    (field ^:static ^:final ^Handle BSM1
+      (Handle. Opcodes/H_INVOKESTATIC "arbace/lang/KeywordInvokeSite" "bootstrap" BSM_DESC1 false))
+
+    (field ^:static ^:final ^Handle BSM2
+      (Handle. Opcodes/H_INVOKESTATIC
+               "arbace/lang/KeywordInvokeSite"
+               "bootstrap"
+               (.replace BSM_DESC1 ";)" ";Ljava/lang/Object;)")
+               false))
 
     (field ^Class jc)
 
@@ -3518,8 +3530,7 @@
       (set! (.-target this) target)
       (set! (.-line this) line)
       (set! (.-column this) column)
-      (set! (.-tag this) tag)
-      (set! (.-siteIndex this) (arbace.lang.Compiler/registerKeywordCallsite (.-k kw))))
+      (set! (.-tag this) tag))
 
     (method ^:public eval [this]
       (try
@@ -3530,43 +3541,24 @@
                 (CompilerException. source line column nil CompilerException/PHASE_EXECUTION e))
               (throw (cast CompilerException e))))))
 
+    ;; Arbace: an invokedynamic site, arbace.lang.KeywordInvokeSite, in place of Clojure's
+    ;; __site__N/__thunk__N static fields and their fault path
     (method ^:public emit ^void [this ^C context ^ObjExpr objx ^GeneratorAdapter gen]
-      (let [endLabel (.newLabel gen)
-            faultLabel (.newLabel gen)]
+      (let [sym (.-sym (.-k kw))]
         (.visitLineNumber gen line (.mark gen))
-        (.getStatic gen
-                    (.-objtype objx)
-                    (.thunkNameStatic objx siteIndex)
-                    ObjExpr/ILOOKUP_THUNK_TYPE)
-        (.dup gen)
         (.emit target C/EXPRESSION objx gen)
         (.visitLineNumber gen line (.mark gen))
-        (.dupX2 gen)
-        (.invokeInterface gen ObjExpr/ILOOKUP_THUNK_TYPE (Method/getMethod "Object get(Object)"))
-        (.dupX2 gen)
-        (.visitJumpInsn gen Opcodes/IF_ACMPEQ faultLabel)
-        (.pop gen)
-        (.goTo gen endLabel)
-        (.mark gen faultLabel)
-        (.swap gen)
-        (.pop gen)
-        (.dup gen)
-        (.getStatic gen
-                    (.-objtype objx)
-                    (.siteNameStatic objx siteIndex)
-                    ObjExpr/KEYWORD_LOOKUPSITE_TYPE)
-        (.swap gen)
-        (.invokeInterface gen
-                          ObjExpr/ILOOKUP_SITE_TYPE
-                          (Method/getMethod "arbace.lang.ILookupThunk fault(Object)"))
-        (.dup gen)
-        (.putStatic gen
-                    (.-objtype objx)
-                    (.thunkNameStatic objx siteIndex)
-                    ObjExpr/ILOOKUP_THUNK_TYPE)
-        (.swap gen)
-        (.invokeInterface gen ObjExpr/ILOOKUP_THUNK_TYPE (Method/getMethod "Object get(Object)"))
-        (.mark gen endLabel)
+        (if (nil? (.-ns sym))
+            (.visitInvokeDynamicInsn gen
+                                     "invoke"
+                                     "(Ljava/lang/Object;)Ljava/lang/Object;"
+                                     BSM1
+                                     (new Object/1 [(.-name sym)]))
+            (.visitInvokeDynamicInsn gen
+                                     "invoke"
+                                     "(Ljava/lang/Object;)Ljava/lang/Object;"
+                                     BSM2
+                                     (new Object/1 [(.-ns sym) (.-name sym)])))
         (when (identical? context C/STATEMENT) (.pop gen))))
 
     (method ^:public hasJavaClass ^boolean [this] (some? tag))
@@ -4403,12 +4395,6 @@
 
     (field ^:static ^:final ^Method readStringMethod (Method/getMethod "Object readString(String)"))
 
-    (field ^:static ^:final ^Type ILOOKUP_SITE_TYPE (Type/getType ILookupSite))
-
-    (field ^:static ^:final ^Type ILOOKUP_THUNK_TYPE (Type/getType ILookupThunk))
-
-    (field ^:static ^:final ^Type KEYWORD_LOOKUPSITE_TYPE (Type/getType KeywordLookupSite))
-
     (field ^:private ^DynamicClassLoader loader)
 
     (field ^:private ^byte/1 bytecode)
@@ -4659,21 +4645,6 @@
                           (recur (unchecked-inc-int i)))
                         (recur (unchecked-inc-int i)))
                     nil))
-              (loop [^int i 0]
-                (when (< i (.count keywordCallsites))
-                  (.visitField cv
-                               (unchecked-add-int Opcodes/ACC_FINAL Opcodes/ACC_STATIC)
-                               (.siteNameStatic this i)
-                               (.getDescriptor KEYWORD_LOOKUPSITE_TYPE)
-                               nil
-                               nil)
-                  (.visitField cv
-                               Opcodes/ACC_STATIC
-                               (.thunkNameStatic this i)
-                               (.getDescriptor ILOOKUP_THUNK_TYPE)
-                               nil
-                               nil)
-                  (recur (unchecked-inc-int i))))
               (let [clinitgen (GeneratorAdapter.
                                 (unchecked-add-int Opcodes/ACC_PUBLIC Opcodes/ACC_STATIC)
                                 (Method/getMethod "void <clinit> ()")
@@ -4683,7 +4654,6 @@
                 (.visitCode clinitgen)
                 (.visitLineNumber clinitgen line (.mark clinitgen))
                 (when (> (.count constants) 0) (.emitConstants this clinitgen))
-                (when (> (.count keywordCallsites) 0) (.emitKeywordCallsites this clinitgen))
                 (when (and (.isDeftype this) (RT/booleanCast (RT/get opts loadNs)))
                   (let [nsname (.getNamespace (cast Symbol (RT/second src)))]
                     (when-not (.equals nsname "arbace.core")
@@ -4708,21 +4678,6 @@
                 (set! bytecode (.toByteArray cw))
                 (when (RT/booleanCast (.deref COMPILE_FILES))
                   (arbace.lang.Compiler/writeClassFile internalName bytecode))))))))
-
-    (method ^:private emitKeywordCallsites ^void [this ^GeneratorAdapter clinitgen]
-      (loop [^int i 0]
-        (when (< i (.count keywordCallsites))
-          (let [k (cast Keyword (.nth keywordCallsites i))]
-            (.newInstance clinitgen KEYWORD_LOOKUPSITE_TYPE)
-            (.dup clinitgen)
-            (.emitValue this k clinitgen)
-            (.invokeConstructor clinitgen
-                                KEYWORD_LOOKUPSITE_TYPE
-                                (Method/getMethod "void <init>(arbace.lang.Keyword)"))
-            (.dup clinitgen)
-            (.putStatic clinitgen objtype (.siteNameStatic this i) KEYWORD_LOOKUPSITE_TYPE)
-            (.putStatic clinitgen objtype (.thunkNameStatic this i) ILOOKUP_THUNK_TYPE)
-            (recur (unchecked-inc-int i))))))
 
     (method ^:protected emitStatics ^void [this ^ClassVisitor gen])
 
@@ -5100,21 +5055,11 @@
 
     (method constantName ^String [this ^int id] (java-str CONST_PREFIX id))
 
-    (method siteName ^String [this ^int n] (java-str "__site__" n))
-
-    (method siteNameStatic ^String [this ^int n]
-      (java-str (.siteName this n) "__"))
-
-    (method thunkName ^String [this ^int n] (java-str "__thunk__" n))
-
     (method cachedClassName ^String [this ^int n]
       (java-str "__cached_class__" n))
 
     (method cachedVarName ^String [this ^int n]
       (java-str "__cached_var__" n))
-
-    (method thunkNameStatic ^String [this ^int n]
-      (java-str (.thunkName this n) "__"))
 
     (method constantType ^Type [this ^int id]
       (let [o (.nth constants id)
@@ -6849,12 +6794,6 @@
             (.set KEYWORDS
                   (RT/assoc keywordsMap keyword (arbace.lang.Compiler/registerConstant keyword))))
           (KeywordExpr. keyword))))
-
-  (method ^:private ^:static registerKeywordCallsite ^int [^Keyword keyword]
-    (let [^:mutable keywordCallsites (cast IPersistentVector (.deref KEYWORD_CALLSITES))]
-      (set! keywordCallsites (.cons keywordCallsites keyword))
-      (.set KEYWORD_CALLSITES keywordCallsites)
-      (unchecked-subtract-int (.count keywordCallsites) 1)))
 
   (method ^:private ^:static registerProtocolCallsite ^int [^Var v]
     (let [^:mutable protocolCallsites (cast IPersistentVector (.deref PROTOCOL_CALLSITES))]

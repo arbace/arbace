@@ -696,6 +696,35 @@ the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
     exists in JDK 26, so `java.lang.SecurityManager` resolves; the class forms compiler's own
     `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
 
+12. **Keyword invoke sites are `invokedynamic`** (`doc/MODERN-COMPILER.md` §4.1; 2026-10-07):
+   `Compiler$KeywordInvokeExpr/emit` (`arbace/lang/Compiler.clj`) emitted Clojure's hand-written
+   inline cache, a `__site__N` (`KeywordLookupSite`) and a `__thunk__N` (`ILookupThunk`) static
+   field per site, set in `<clinit>`, a call of the thunk, an identity test for a miss, and on a
+   miss `fault` and a store of the new thunk (upstream `Compiler.java:3825-3847`). It now emits
+   the target and `invokedynamic invoke (Object)Object`, bootstrapped by
+   `arbace.lang.KeywordInvokeSite/bootstrap` with the keyword's namespace (if any) and name as
+   static arguments. The fields, their `<clinit>` code, `registerKeywordCallsite`,
+   `ObjExpr/emitKeywordCallsites` and the site/thunk name helpers are gone;
+   `KEYWORD_CALLSITES` stays bound as before (it marks code inside a fn, where keyword invokes
+   are sites). The new class `arbace/lang/KeywordInvokeSite.clj` (Arbace's own) holds a
+   `MutableCallSite` whose value is always `(get target :k)`: for its first 256 calls it calls
+   `RT.get`; then it links an inline cache of up to four class guards (`guardWithTest` on the
+   exact class of the target), each bound to what `KeywordLookupSite` would cache for that
+   class: a record's `IKeywordLookup` thunk (its field read), `ILookup.valAt`, or `RT.get`. At a
+   fifth class it becomes `RT.get` for good; `nil` is never cached. `KeywordLookupSite`,
+   `ILookupSite` and `ILookupThunk` stay (records implement `getLookupThunk`, and classes
+   compiled elsewhere may use them). The warm-up threshold keeps launches from paying for
+   method handles: the JDK spins LambdaForm classes for the first `guardWithTest`,
+   `insertArguments` and bootstrap invocation, so linking at the first call made 8 more spun
+   classes at `bin/arbace -e 1` (9 against 1) and the launch 5-8% slower; with the threshold, 1
+   as before. Measured (2026-10-07, loaded 64-core machine): AOT-compiled namespaces 9,449,063
+   → 8,822,445 bytes (-6.6%), static fields 20,568 → 14,432, 1,979 sites; `bin/arbace -e 1`
+   median 301 ms → 301 ms with the AOT cache, 717 → 696 ms without (noise ±15 ms); loading 15
+   test namespaces from source unchanged (5.44 s → 5.54 s median, noise ±0.3 s); a lookup
+   loop (`(:a x)` over 1,000 values, min of 7) records 7.8 → 5.1 ns, array maps 10.6 → 7.3 ns,
+   hash maps 11.4 → 8.2 ns, six classes (records, maps, `java.util.HashMap`, `nil`) at one site
+   18 → 11.5 ns.
+
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.

@@ -27,7 +27,9 @@ covers what.
   class forms (doc/VENDOR-NOTES.md). Each file stays under its source's license: `arbace/asm/`
   and `arbace/asm.clj` under ASM's BSD 3-Clause License (package `arbace.asm`),
   `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
-  `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0.
+  `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0. Files there that are
+  Arbace's own, not derived from `clojure/` (they say so in their header, such as
+  `arbace/lang/KeywordInvokeSite.clj`), are under the Eclipse Public License 1.0 as Arbace.
 - `arbace/spec/` (`arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
   (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse

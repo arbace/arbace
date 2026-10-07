@@ -67,6 +67,20 @@ major version 70.
 
 **Do next, measured, one at a time**
 
+Status (2026-10-07), each measured on its own and kept only if it pays off:
+- Item 4, condy constants: tried and **not kept**. Keywords, vars, symbols and read-back
+  literals as `ldc` of dynamic constants (bootstraps in a new `arbace.lang.Bootstraps`), and no
+  `<clinit>` when nothing is left for it, gave smaller classes (AOT-compiled namespaces -0.8%
+  bytes, 4,237 → 1,238 `<clinit>`s, 20,568 → 12,856 static fields) but no gain in time: `-e 1`
+  with the AOT cache 170 → 171 ms, without it 491 → 499 ms, loading 15 test namespaces from
+  source 5.33 → 5.31 s (medians, all within noise). Condys in a namespace's `__init` class made
+  the launch 8% slower (its constants are each used once, and the bootstrap costs more than the
+  static call it replaces), so they were limited to fn classes. The constants that laziness
+  skips are too few and too cheap to show at a launch, since direct-linked calls need no Var
+  constants. The experiment is on the local branch `condy-item1-experiment`.
+- Item 5, keyword sites: **done**, see `doc/VENDOR-NOTES.md` (hand change 12). Steady-state
+  lookups 28-37% faster, classes 6.6% smaller, launch unchanged.
+
 4. **Constant dynamic (`ldc` of condy) for the compiler's constants**: keywords, vars, symbols
    and read-back literals. These are now 7,350 `RT.var` calls and many `Keyword.intern` calls
    across 2,130 `<clinit>`s, run when each fn class is loaded. Condy makes each lazy and drops

@@ -94,6 +94,7 @@
 (load "lang/Named")
 (load "lang/Keyword")
 (load "lang/KeywordLookupSite")
+(load "lang/KeywordInvokeSite")
 (load "lang/LazilyPersistentVector")
 (load "lang/LazySeq")
 (load "lang/LineNumberingPushbackReader")
