@@ -737,9 +737,12 @@
         rs (doall (map (fn [a t]
                          (let [x0 (ex env a)
                                x (coerce-r env x0 t)
-                               ;; an int conditional of literals widened to a long, float or
-                               ;; double parameter: javac widens the int value
+                               ;; a parenthesized int conditional of literals passed for a long,
+                               ;; float or double parameter: javac widens the int value (without
+                               ;; parentheses the conditional is a poly expression of the
+                               ;; parameter's type, and its constants are of that type)
                                x (if (and (= :lit-int (:t x0)) (seq? (:f x0)) t (prim? t)
+                                          (instance? JCTree$JCParens a)
                                           (#{"LONG" "FLOAT" "DOUBLE"} (tag-name t)))
                                    (assoc x :f (list (widen-op (tag-name t)) (:f x0)) :t t)
                                    x)
