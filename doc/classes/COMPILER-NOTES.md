@@ -369,7 +369,7 @@ there differs with the new output.
 Since 2026-10-07 this is repeatable: `bin/j2c-check --jdk` (about 10 minutes on 64 cores) and
 its report, with javac's classes compiled from the same sources as the reference rather than
 the JDK's own (results and remaining differences in CONVERTER-NOTES.md, "The converted JDK").
-It took the files whose classes are all shape-identical from 11,699 to 12,375 of 12,444, the
+It took the files whose classes are all shape-identical from 11,699 to 12,376 of 12,444, the
 compile errors from 173 to 3. The compiler gaps it found and fixed are listed in the
 commit `Class forms compiler: gaps found by compiling the converted jdk26u` and its follow-up:
 literal narrowing in more contexts, constant instance fields, InnerClasses entries for

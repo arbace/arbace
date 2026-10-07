@@ -192,7 +192,7 @@ the work). Files are converted Java files with class forms; 286 have none (no an
 
 | module | Java files | with class forms | identical before | identical after | differing before | differing after | errors before | errors after |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| java.base | 3,088 | 3,026 | 2,755 | 3,001 | 144 | 24 | 67 | 1 |
+| java.base | 3,088 | 3,026 | 2,755 | 3,002 | 144 | 23 | 67 | 1 |
 | java.desktop | 2,287 | 2,235 | 2,168 | 2,223 | 53 | 12 | 14 | 0 |
 | java.xml | 1,854 | 1,825 | 1,792 | 1,823 | 27 | 2 | 6 | 0 |
 | jdk.hotspot.agent | 837 | 837 | 828 | 836 | 7 | 1 | 2 | 0 |
@@ -218,10 +218,10 @@ the work). Files are converted Java files with class forms; 286 have none (no an
 | jdk.jdeps | 64 | 63 | 54 | 62 | 6 | 1 | 3 | 0 |
 | jdk.jconsole | 63 | 62 | 58 | 60 | 3 | 2 | 1 | 0 |
 | 43 other modules | 925 | 884 | 826 | 884 | 49 | 0 | 9 | 0 |
-| **all 68** | 12,730 | 12,444 | 11,699 | 12,375 | 512 | 66 | 173 | 3 |
+| **all 68** | 12,730 | 12,444 | 11,699 | 12,376 | 512 | 65 | 173 | 3 |
 
 All 12,730 files convert; 24,127 classes compile from the forms. What differs or fails at the
-end (69 files), by cause:
+end (68 files), by cause:
 - **Code duplicated by the forms.** `switch` fall-through repeats the following arms' code
   (SPEC §12 question 9), so a lambda or anonymous class there is made twice (`JavacParser`,
   `GraphUtils`, `PrintingProcessor`, `DeferredAttr`: missing and extra lambda methods and
