@@ -76,6 +76,34 @@
       Intrinsics/IDIV
       "public static int arbace.lang.Numbers.unchecked_int_remainder(int,int)"
       Intrinsics/IREM
+      "public static int arbace.lang.Numbers.andInt(int,int)"
+      Intrinsics/IAND
+      "public static int arbace.lang.Numbers.orInt(int,int)"
+      Intrinsics/IOR
+      "public static int arbace.lang.Numbers.xorInt(int,int)"
+      Intrinsics/IXOR
+      "public static int arbace.lang.Numbers.notInt(int)"
+      (^[Object/1] Intrinsics/oa Intrinsics/ICONST_M1 Intrinsics/IXOR)
+      "public static float arbace.lang.Numbers.unchecked_float_add(float,float)"
+      Intrinsics/FADD
+      "public static float arbace.lang.Numbers.unchecked_float_subtract(float,float)"
+      Intrinsics/FSUB
+      "public static float arbace.lang.Numbers.unchecked_float_multiply(float,float)"
+      Intrinsics/FMUL
+      "public static float arbace.lang.Numbers.unchecked_float_divide(float,float)"
+      Intrinsics/FDIV
+      "public static float arbace.lang.Numbers.unchecked_float_remainder(float,float)"
+      Intrinsics/FREM
+      "public static float arbace.lang.Numbers.unchecked_float_negate(float)"
+      Intrinsics/FNEG
+      "public static long arbace.lang.Numbers.unchecked_divide(long,long)"
+      Intrinsics/LDIV
+      "public static double arbace.lang.Numbers.unchecked_divide(double,double)"
+      Intrinsics/DDIV
+      "public static long arbace.lang.Numbers.unchecked_remainder(long,long)"
+      Intrinsics/LREM
+      "public static double arbace.lang.Numbers.unchecked_remainder(double,double)"
+      Intrinsics/DREM
       "public static long arbace.lang.Numbers.unchecked_add(long,long)"
       Intrinsics/LADD
       "public static double arbace.lang.Numbers.unchecked_add(double,double)"

@@ -320,6 +320,21 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    `Compiler$ClassFormsExpr`, the signal it throws caught by `FnExpr/parse`, `eval` and
    `compile1`, top-level `do` siblings, and signals instead of three errors (a primitive tag on a
    local with a primitive initializer, `set!` of a local, `new` of an array class). Stage 1 needs no `arbace.classes.boot`.
+4. **The §5.4 operators inlined** (SPEC §9.5; `doc/classes/COMPILER-NOTES.md`, "Native class
+   forms"): `arbace/lang/Numbers.clj` gains the static methods the operators' `:inline`
+   expansions call: `andInt`, `orInt`, `xorInt`, `notInt` (`int`), `unchecked_float_add`,
+   `_subtract`, `_multiply`, `_divide`, `_remainder`, `_negate` (`float`), and
+   `unchecked_divide`, `unchecked_remainder` with the nine `long`/`double`/`Object` overloads of
+   Clojure's `add`. `arbace/lang/Intrinsics.clj` maps the primitive ones to `IAND`, `IOR`,
+   `IXOR`, `ICONST_M1 IXOR`, `FADD` ... `FNEG`, `LDIV`, `DDIV`, `LREM`, `DREM`.
+5. **Reproducible AOT output** (needed since `bin/build-arbace` AOT-compiles `arbace.classes`
+   into the stages, which must be byte-identical): `Compiler$LocalBinding` (in
+   `arbace/lang/Compiler.clj`) has a `hashCode` from its index and name (equality stays
+   identity), so a fn's closed-over locals, kept in a hash map, come out as fields and
+   constructor parameters in the same order in every JVM (it was the identity hash); and
+   `generate-proxy` (`arbace/core_proxy.clj`) emits the superclass's constructors sorted by
+   parameter types, not in reflection order (which varies between JVM runs; methods were
+   sorted already).
 
 ## Open decisions for the user
 

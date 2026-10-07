@@ -118,7 +118,9 @@
         (let [f (read {:eof eof} rdr)]
           (if (identical? f eof)
             out
-            (recur (if (and (seq? f) (#{'defmacro 'defn} (first f))) (conj out (second f)) out))))))))
+            (recur (if (and (seq? f) (#{'defmacro 'defn 'defop} (first f)) (not (:private (meta (second f)))))
+                     (conj out (second f))
+                     out))))))))
 
 (defn install!
   "At stage 0, loads the class forms' names (arbace/core_classes.clj) into clojure.core and

@@ -105,7 +105,8 @@ Some mechanisms:
   A conditional whose values are all such literals is an `int` operand of every primitive
   operator, widened like one: `(unchecked-add d (if z 1 2))` loads `int` constants and `i2d`
   (§5.4).
-  Constant expressions fold; constant fields get `ConstantValue` and are inlined.
+  Constant expressions fold (`%` on `float` and `double` exactly as `frem`/`drem`); constant
+  fields get `ConstantValue` and are inlined.
 
 ## Clojure in class bodies
 
@@ -115,7 +116,11 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   instruction when its operands allow it, and otherwise as Clojure compiles it: the var's
   `:inline` expansion (`(+ a b)` on `Object`s is `Numbers.add(Object, Object)`, `(int x)` is
   `RT.intCast`), else a call of the var. The arguments are analyzed once (the expansion binds
-  them as locals).
+  them as locals). In such an expansion a static call that no method is applicable to
+  compiles as Clojure's compiler compiles it when the class has one method of that name and
+  arity: that method, each argument converted as Clojure converts it (`RT.intCast`,
+  `RT.floatCast`, ...). So `(unchecked-add-int x y)` or `(bit-and-int x y)` on `Object`s calls
+  `Numbers.unchecked_int_add(int, int)` or `Numbers.andInt(int, int)`, without reflection.
 - Any value can be called: locals, keywords, collections, fields, expressions (`IFn.invoke`).
 - `fn*`, `letfn*`, `case*`, `def` and `var` are compiled by rewriting them
   (`arbace/classes/lower.clj`): a `fn` is an anonymous subclass of `AFunction` (`RestFn` when
@@ -159,6 +164,41 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   `clojure.X`); there `defclass` and `defclasses` compile at macroexpansion time, as before,
   since the frozen compiler has no `class*` (the macros test `(contains? Compiler/specials
   'class*)`).
+- **The operators.** The operators of §5.4 that Clojure lacks (`bit-and-int` ...
+  `unsigned-bit-shift-right-int`, `unchecked-add-float` ... `unchecked-negate-float`,
+  `unchecked-divide`, `unchecked-remainder`) are defined by `defop` with `:inline` expansions
+  (and `:inline-arities`) to static methods of `arbace.lang.Numbers`, as Clojure's
+  `unchecked-add-int` is: `andInt`, `orInt`, `xorInt`, `notInt`, `shiftLeftInt`,
+  `shiftRightInt`, `unsignedShiftRightInt` (Clojure has these three), `unchecked_float_add`
+  ... `unchecked_float_negate`, and `unchecked_divide`, `unchecked_remainder`. The `int` and
+  `float` ones have one method each, `(int, int)` or `(float, float)`, so the compiler converts
+  any argument as Clojure does for `unchecked-add-int` (`RT.intCast`, `RT.floatCast`; `long` to
+  `int` checked, `double` to `float` by `d2f`), never reflecting; `unchecked_divide` and
+  `unchecked_remainder` have the nine overloads of Clojure's `add` (`long`, `double`, `Object`
+  pairs): `long` operands give `ldiv`/`lrem`, a `double` (or `float`) operand `ddiv`/`drem`,
+  and the `Object` ones decide at run time (a `Double` or `Float` operand makes it `double`).
+  `arbace.lang.Intrinsics` maps the primitive methods to their instructions, so in a primitive
+  context (an operand of another operator, a `^long`/`^double` fn's result, a primitive local)
+  the compiler emits `iand`, `fadd`, `ldiv` ... and no call; where the result is boxed it
+  calls the method, as for Clojure's own operators (`test/native/inline_test.clj` reads the
+  instructions of AOT-compiled fns). At stage 0 `clojure.lang.Numbers` lacks these methods:
+  there `defop` defines plain functions, the fallback of class bodies for operands that fit no
+  instruction.
+- **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
+  namespaces (`compile 'arbace.classes.boot`, not `arbace.j2c`) into each stage with that
+  stage's runtime, after its class forms are built; the libraries they require (`arbace.set`,
+  `arbace.string`, `arbace.java.io`) stay source. So a stage loads the class forms compiler from
+  classes on first use (and the next stage is built by these classes); a source newer than its
+  classes is still loaded from source, as Clojure's `load` decides. The output is
+  reproducible, stage 3 equals stage 2 with them (2,100 files), after two fixes to the vendored
+  runtime (`doc/VENDOR-NOTES.md`, "After vendoring", item 5): closed-over locals in a fixed
+  order, and proxy constructors sorted. The first class form of a session (a `defclass` in a
+  script on stage 1, the time of the `eval`) went from about 1,040 ms to about 255 ms; the
+  second costs 3 ms. What remains is loading and initializing the 1,285 classes of the eight
+  namespaces (`analyze` about 85 ms, `types` 40, `emit` 35) and the first compilation (30 to
+  45 ms). Measured by timing each `require` (the libraries they use are loaded at startup
+  already): before, compiling from source took nearly all of it, `analyze` 470 ms and `emit`
+  290 ms; ASM and the class environment cost nothing measurable.
 - **The special forms.** `class*`, `label*`, `break*`, `continue*`, `return*`, `switch*`,
   `lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`, `with-resources*` and
   `if-instance*` are in `Compiler/specials` (so `special-symbol?` holds and syntax-quote leaves

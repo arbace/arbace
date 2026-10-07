@@ -119,40 +119,60 @@
   `(~'if-instance* ~binding (do ~@body)))
 
 ;; ---------------------------------------------------------------------------------------------
-;; operators (SPEC §5.4): in class bodies single instructions, elsewhere functions with Java's
-;; semantics
+;; operators (SPEC §5.4): in class bodies single instructions; elsewhere functions with Java's
+;; semantics whose :inline expansions call arbace.lang.Numbers, which the compiler emits as
+;; instructions where the operands are primitive, as Clojure's own operators (SPEC §9.5)
 
-(defn bit-and-int {:added "arbace"} [x y] (int (bit-and (int x) (int y))))
-(defn bit-or-int {:added "arbace"} [x y] (int (bit-or (int x) (int y))))
-(defn bit-xor-int {:added "arbace"} [x y] (int (bit-xor (int x) (int y))))
-(defn bit-not-int {:added "arbace"} [x] (int (bit-not (int x))))
-(defn bit-shift-left-int {:added "arbace"} [x n]
+(defmacro ^:private defop
+  "Defines operator `name` (SPEC §5.4) calling arbace.lang.Numbers/`method`, inlined. At stage
+  0 the frozen clojure.lang.Numbers lacks the methods: there it is a plain function of `body`,
+  the fallback of class bodies (arbace.classes) for operands that fit no instruction."
+  [name doc method params body]
+  (if (class-forms-native?)
+    `(defn ~name ~doc
+       {:added "arbace"
+        :inline (fn ~params (list '. 'arbace.lang.Numbers (list '~method ~@params)))
+        :inline-arities #{~(count params)}}
+       ~params (. arbace.lang.Numbers (~method ~@params)))
+    `(defn ~name ~doc {:added "arbace"} ~params ~body)))
+
+(defop bit-and-int "Java's & on int: its operands converted as by `int`." andInt [x y]
+  (int (bit-and (int x) (int y))))
+(defop bit-or-int "Java's | on int: its operands converted as by `int`." orInt [x y]
+  (int (bit-or (int x) (int y))))
+(defop bit-xor-int "Java's ^ on int: its operands converted as by `int`." xorInt [x y]
+  (int (bit-xor (int x) (int y))))
+(defop bit-not-int "Java's ~ on int: its operand converted as by `int`." notInt [x]
+  (int (bit-not (int x))))
+(defop bit-shift-left-int "Java's << on int: x shifted by the low 5 bits of n." shiftLeftInt [x n]
   (unchecked-int (bit-shift-left (int x) (bit-and (long n) 31))))
-(defn bit-shift-right-int {:added "arbace"} [x n]
+(defop bit-shift-right-int "Java's >> on int: x shifted by the low 5 bits of n." shiftRightInt [x n]
   (int (bit-shift-right (int x) (bit-and (long n) 31))))
-(defn unsigned-bit-shift-right-int {:added "arbace"} [x n]
+(defop unsigned-bit-shift-right-int "Java's >>> on int: x shifted by the low 5 bits of n."
+  unsignedShiftRightInt [x n]
   (unchecked-int (unsigned-bit-shift-right (bit-and (long (int x)) 0xffffffff) (bit-and (long n) 31))))
 
-(defn unchecked-divide
-  "Java's / on long (ldiv) or double (ddiv)."
-  {:added "arbace"}
-  [x y]
+(defop unchecked-divide "Java's / on long (ldiv) or, when an operand is a double or float, double (ddiv)."
+  unchecked_divide [x y]
   (if (or (instance? Double x) (instance? Double y) (instance? Float x) (instance? Float y))
     (/ (double x) (double y))
     (quot (long x) (long y))))
 
-(defn unchecked-remainder
-  "Java's % on long (lrem) or double (drem)."
-  {:added "arbace"}
-  [x y]
+(defop unchecked-remainder "Java's % on long (lrem) or, when an operand is a double or float, double (drem)."
+  unchecked_remainder [x y]
   (if (or (instance? Double x) (instance? Double y) (instance? Float x) (instance? Float y))
     (let [x (double x) y (double y)] (- x (* y (double (long (/ x y))))))
     (rem (long x) (long y))))
 
-(defn unchecked-add-float {:added "arbace"} [x y] (float (+ (float x) (float y))))
-(defn unchecked-subtract-float {:added "arbace"} [x y] (float (- (float x) (float y))))
-(defn unchecked-multiply-float {:added "arbace"} [x y] (float (* (float x) (float y))))
-(defn unchecked-divide-float {:added "arbace"} [x y] (float (/ (double (float x)) (double (float y)))))
-(defn unchecked-remainder-float {:added "arbace"} [x y]
+(defop unchecked-add-float "Java's + on float: its operands converted as by `float`." unchecked_float_add [x y]
+  (float (+ (float x) (float y))))
+(defop unchecked-subtract-float "Java's - on float." unchecked_float_subtract [x y]
+  (float (- (float x) (float y))))
+(defop unchecked-multiply-float "Java's * on float." unchecked_float_multiply [x y]
+  (float (* (float x) (float y))))
+(defop unchecked-divide-float "Java's / on float." unchecked_float_divide [x y]
+  (float (/ (double (float x)) (double (float y)))))
+(defop unchecked-remainder-float "Java's % on float." unchecked_float_remainder [x y]
   (float (unchecked-remainder (double (float x)) (double (float y)))))
-(defn unchecked-negate-float {:added "arbace"} [x] (float (- (float x))))
+(defop unchecked-negate-float "Java's unary - on float." unchecked_float_negate [x]
+  (float (- (float x))))

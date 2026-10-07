@@ -1771,4 +1771,100 @@
     (^[double] Math/abs x))
 
   (method ^:public ^:static abs ^Number [x]
-    (.abs (Numbers/ops x) (cast Number x))))
+    (.abs (Numbers/ops x) (cast Number x)))
+
+  ;; The operators of doc/classes/SPEC.md §5.4 that Clojure lacks (Arbace): the :inline
+  ;; expansions of arbace.core's bit-and-int ... unchecked-remainder call these, and the
+  ;; compiler emits the primitive ones as instructions (arbace.lang.Intrinsics). The int and
+  ;; float operators have one method each, so the compiler converts any argument to the
+  ;; parameter type as for unchecked-add-int (RT.intCast, RT.floatCast); unchecked-divide and
+  ;; unchecked-remainder are long or double by their operands, as Java's / and %.
+
+  (method ^:public ^:static andInt ^int [^int x ^int y] (bit-and-int x y))
+
+  (method ^:public ^:static orInt ^int [^int x ^int y] (bit-or-int x y))
+
+  (method ^:public ^:static xorInt ^int [^int x ^int y] (bit-xor-int x y))
+
+  (method ^:public ^:static notInt ^int [^int x] (bit-not-int x))
+
+  (method ^:public ^:static unchecked_float_add ^float [^float x ^float y]
+    (unchecked-add-float x y))
+
+  (method ^:public ^:static unchecked_float_subtract ^float [^float x ^float y]
+    (unchecked-subtract-float x y))
+
+  (method ^:public ^:static unchecked_float_multiply ^float [^float x ^float y]
+    (unchecked-multiply-float x y))
+
+  (method ^:public ^:static unchecked_float_divide ^float [^float x ^float y]
+    (unchecked-divide-float x y))
+
+  (method ^:public ^:static unchecked_float_remainder ^float [^float x ^float y]
+    (unchecked-remainder-float x y))
+
+  (method ^:public ^:static unchecked_float_negate ^float [^float x]
+    (unchecked-negate-float x))
+
+  (method ^:static floating ^boolean [x] (or (instance? Double x) (instance? Float x)))
+
+  (method ^:public ^:static unchecked_divide ^long [^long x ^long y] (unchecked-divide x y))
+
+  (method ^:public ^:static unchecked_divide ^double [^double x ^double y] (unchecked-divide x y))
+
+  (method ^:public ^:static unchecked_divide ^double [^long x ^double y] (unchecked-divide x y))
+
+  (method ^:public ^:static unchecked_divide ^double [^double x ^long y] (unchecked-divide x y))
+
+  (method ^:public ^:static unchecked_divide ^double [^double x y]
+    (unchecked-divide x (RT/doubleCast y)))
+
+  (method ^:public ^:static unchecked_divide ^double [x ^double y]
+    (unchecked-divide (RT/doubleCast x) y))
+
+  (method ^:public ^:static unchecked_divide ^Number [^long x y]
+    (if (Numbers/floating y)
+        (Double/valueOf (unchecked-divide x (RT/doubleCast y)))
+        (Long/valueOf (unchecked-divide x (RT/longCast y)))))
+
+  (method ^:public ^:static unchecked_divide ^Number [x ^long y]
+    (if (Numbers/floating x)
+        (Double/valueOf (unchecked-divide (RT/doubleCast x) y))
+        (Long/valueOf (unchecked-divide (RT/longCast x) y))))
+
+  (method ^:public ^:static unchecked_divide ^Number [x y]
+    (if (or (Numbers/floating x) (Numbers/floating y))
+        (Double/valueOf (unchecked-divide (RT/doubleCast x) (RT/doubleCast y)))
+        (Long/valueOf (unchecked-divide (RT/longCast x) (RT/longCast y)))))
+
+  (method ^:public ^:static unchecked_remainder ^long [^long x ^long y] (unchecked-remainder x y))
+
+  (method ^:public ^:static unchecked_remainder ^double [^double x ^double y]
+    (unchecked-remainder x y))
+
+  (method ^:public ^:static unchecked_remainder ^double [^long x ^double y]
+    (unchecked-remainder x y))
+
+  (method ^:public ^:static unchecked_remainder ^double [^double x ^long y]
+    (unchecked-remainder x y))
+
+  (method ^:public ^:static unchecked_remainder ^double [^double x y]
+    (unchecked-remainder x (RT/doubleCast y)))
+
+  (method ^:public ^:static unchecked_remainder ^double [x ^double y]
+    (unchecked-remainder (RT/doubleCast x) y))
+
+  (method ^:public ^:static unchecked_remainder ^Number [^long x y]
+    (if (Numbers/floating y)
+        (Double/valueOf (unchecked-remainder x (RT/doubleCast y)))
+        (Long/valueOf (unchecked-remainder x (RT/longCast y)))))
+
+  (method ^:public ^:static unchecked_remainder ^Number [x ^long y]
+    (if (Numbers/floating x)
+        (Double/valueOf (unchecked-remainder (RT/doubleCast x) y))
+        (Long/valueOf (unchecked-remainder (RT/longCast x) y))))
+
+  (method ^:public ^:static unchecked_remainder ^Number [x y]
+    (if (or (Numbers/floating x) (Numbers/floating y))
+        (Double/valueOf (unchecked-remainder (RT/doubleCast x) (RT/doubleCast y)))
+        (Long/valueOf (unchecked-remainder (RT/longCast x) (RT/longCast y))))))

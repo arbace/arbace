@@ -1200,6 +1200,15 @@
      :desc "(Ljava/lang/Object;)I" :target nil :args [node] :type "I"}
     (operand node "I")))
 
+(defn- fmod
+  "Java's % on doubles (drem: the remainder of the truncated quotient, exact), for folding."
+  [a b]
+  (let [a (double a) b (double b)]
+    (cond (or (Double/isNaN a) (Double/isNaN b) (Double/isInfinite a) (zero? b)) Double/NaN
+          (or (Double/isInfinite b) (zero? a)) a
+          :else (let [r (.doubleValue (.remainder (java.math.BigDecimal. a) (java.math.BigDecimal. b)))]
+                  (if (zero? r) (Math/copySign 0.0 a) r)))))
+
 (defn- fold-arith [t op a b]
   (try
     (case t
@@ -1223,10 +1232,10 @@
                   :ushr (unsigned-bit-shift-right a (bit-and b 63))))
       "F" (let [a (float a) b (when (some? b) (float b))]
             (case op :add (float (+ a b)) :sub (float (- a b)) :mul (float (* a b))
-                  :div (float (/ (double a) (double b))) :rem (float (Math/IEEEremainder 0 1))
+                  :div (float (/ (double a) (double b))) :rem (float (fmod a b))
                   :neg (float (- a)) nil))
       "D" (let [a (double a) b (when (some? b) (double b))]
-            (case op :add (+ a b) :sub (- a b) :mul (* a b) :div (/ a b)
+            (case op :add (+ a b) :sub (- a b) :mul (* a b) :div (/ a b) :rem (fmod a b)
                   :neg (- a) :inc (inc a) :dec (dec a) nil)))
     (catch ArithmeticException _ nil)))
 
@@ -1788,6 +1797,23 @@
           (let [[m va] (select-method actx cands arg-nodes (str "method " mname) param-tags)]
             (invoke-node actx (when special :special) (or owner-override tt) m target arg-nodes va)))))))
 
+(declare clj-convert)
+
+(defn- clj-single-method
+  "In the :inline expansion of a Clojure function (clj-call-node), a static call no method is
+  applicable to compiles as Clojure's compiler compiles it when the class has one method of
+  that name and arity: that method, each argument converted to its parameter type as Clojure
+  converts it (RT.intCast, RT.floatCast ...). So (bit-and-int x y) on Objects calls
+  Numbers.andInt(int, int), as (unchecked-add-int x y) does in Clojure. Else nil."
+  [actx cands arg-nodes param-tags]
+  (when (and (:clj-inline actx) (nil? param-tags))
+    (let [n (count arg-nodes)
+          ms (filter #(= n (count (first (t/parse-method-desc (:desc %))))) cands)]
+      (when (= 1 (count ms))
+        (let [m (first ms)
+              ps (first (t/parse-method-desc (:desc m)))]
+          [m (mapv (fn [a p] (clj-convert (assoc actx :clojure true) a p "argument")) arg-nodes ps)])))))
+
 (defn analyze-static-call [actx cn mname args & {:keys [param-tags]}]
   (let [arg-nodes (mapv #(analyze actx %) args)]
     (or-reflect
@@ -1795,8 +1821,13 @@
       #(let [cands (static-candidates (:class actx) cn mname)
              _ (when (empty? cands)
                  (fail (str "No accessible static method " mname " in " (str/replace cn "/" "."))))
-             [m va] (select-method actx cands arg-nodes (str "static method " mname) param-tags)]
-         (invoke-node actx nil (t/internal->desc cn) m nil arg-nodes va))
+             [m va args] (try (conj (select-method actx cands arg-nodes (str "static method " mname) param-tags)
+                                    arg-nodes)
+                              (catch arbace.lang.ExceptionInfo e
+                                (if-let [[m args] (and (unresolved? e) (clj-single-method actx cands arg-nodes param-tags))]
+                                  [m false args]
+                                  (throw e))))]
+         (invoke-node actx nil (t/internal->desc cn) m nil args va))
       (fn [why]
         (reflection-warning actx (str "call to static method " mname " on " (str/replace cn "/" ".")) why)
         (reflective-node nil "invokeStaticMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
@@ -2122,7 +2153,7 @@
         inl (:inline m)
         ar (:inline-arities m)]
     (if (and inl (or (nil? ar) (ar (count nodes))))
-      (with-node-locals actx nodes #(apply inl %))
+      (with-node-locals (assoc actx :clj-inline true) nodes #(apply inl %))
       (var-invoke-node actx v nodes))))
 
 (defn- core-op-node

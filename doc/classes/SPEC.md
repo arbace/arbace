@@ -1371,7 +1371,11 @@ new special forms with starred names, which no namespace can shadow, as `let*` a
 `method-ref`, `java-str`, `java-assert`, `for-each`, `with-resources`, `if-instance` and
 `when-instance` expand to them and to existing forms; `with-resources` and the pattern tests need
 no special form of their own. The operators of §5.4 are functions with `:inline` expansions to
-`Numbers` methods that the compiler emits as instructions, as Clojure's intrinsics do.
+`Numbers` methods that the compiler emits as instructions where the operands and the result are
+primitive, as Clojure's intrinsics do (a boxed result is a call of the method). Other operands
+are converted as Clojure converts those of `unchecked-add-int`: to `int` or `float` by `RT`'s
+casts for the `-int` and `-float` operators; `unchecked-divide` and `unchecked-remainder` are
+`long` or `double` by the operands' runtime types, `double` when one is a `Double` or `Float`.
 Extensions of existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recur`) are listed in
 §1.1.
 
@@ -1408,8 +1412,8 @@ compiles it (§5.13). `deftype*` is not supported there; `defclass` is.
   `arbace/**/*.clj` sources work at every stage without qualifying the new names.
 - **Stage 1**: stage 0 compiles `arbace/**/*.clj`. Its classes are self-contained `arbace.*`
   classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among them;
-  `arbace.core` holds the names of §9.5, and the class forms compiler is loaded from source on
-  first use. Clojure-level
+  `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
+  from classes that each stage AOT-compiles into itself (so they too must reproduce). Clojure-level
   namespaces such as `arbace.core` must be compiled by Arbace's own compiler, since the frozen one
   emits references to `clojure.lang`; the order of that is a matter for steps 2 and 4.
 - **Stage 2** recompiles with stage 1, and must reproduce itself.
