@@ -54,8 +54,10 @@ The current state of the work. This file is rewritten as things change. For the 
 - Short term: make Arbace excellent on the JVM.
   - Done: compiled namespaces in every stage, a reproducible jar, the JDK AOT cache and
     `bin/arbace`, which launches in about 0.2 s against about 2 s before (`8c9f2d3`).
-  - Next from the survey: `ClassFile.verify` in the checks, and classfile version 70 in the
-    Clojure compiler. After that, the survey's "do next" items, measured one by one.
+  - Done: the JDK verifier checks every class of stages 1 and 2, and the Clojure compiler emits
+    classfile version 70 (`e8a5e30`). All "do first" items of the survey are done.
+  - Next from the survey, measured one by one: constant dynamic for constants,
+    `invokedynamic` for keyword and reflective call sites, an opt-in virtual-thread executor.
 - g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). Ten open
   questions for the user (§9) before any work starts.
 

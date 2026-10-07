@@ -741,3 +741,27 @@ instead of calling `arbace.classes`'s resolution.
 - Left open: the survey's other two "do first" items (`ClassFile.verify` in the checks,
   classfile version 70 in the Clojure compiler). `bin/arbace` does not notice a jar that is
   stale against edited sources.
+
+## 2026-10-07: The JDK verifier in the build; classfile version 70
+
+- The survey's other two "do first" items, done by a background agent (`e8a5e30`).
+- `arbace.classes.verify` runs `java.lang.classfile.ClassFile/verify` (JEP 484) over a class
+  tree, in parallel. It answers hierarchy questions from the tree itself, then the JDK. It also
+  fails any class whose major version is not the running JDK's. `bin/build-arbace` runs it on
+  stages 1 and 2 and fails the build on any error. The new native test `verify_test` verifies
+  the 50 classes of a compiled sample namespace (fns, protocols, records, `proxy`, `gen-class`,
+  `defclass`, ...) and checks that a broken class is rejected.
+- `arbace/lang/Compiler.clj`: `JVM_BYTECODE_VERSION` is the running JDK's (`44 + feature`, so
+  70), no longer `V17`. Fn classes, deftype and compile stubs, `gen-class`/`gen-interface` and
+  proxies follow it. It is hand change 7 in `doc/VENDOR-NOTES.md`.
+- Gate rerun by the main session on `e8a5e30`:
+  - stages 1 and 2 verify, 5,091 classes each with 0 errors (about 0.9 s each), and all are
+    version 70;
+  - stages 1, 2 and 3 are identical, and the jar equals stage 3's;
+  - native tests: 27 tests, 2,345 assertions;
+  - the suite on stages 1 and 2 shows no regressions;
+  - `bin/class-forms-tests` and `bin/j2c-check --suite` pass.
+- With this, all three "do first" items of `doc/MODERN-COMPILER.md` are done.
+- The user's question on class loading: a REPL `defn` is compiled to bytes and defined by
+  `DynamicClassLoader` in memory. Class files are written only under `*compile-files*`. Hidden
+  classes stay rejected (survey §4.5).
