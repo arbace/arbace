@@ -472,6 +472,37 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    atomics were left: agents and refs are few, and their cost is in the queue and the
    transaction, not in the reference.
 
+9. **An opt-in virtual-thread executor for `send-off`, `future` and `pmap`**
+   (`doc/MODERN-COMPILER.md` §4.12): in `arbace/lang/Agent.clj`, `soloExecutor` (the executor of
+   `send-off`, and through `future-call` of `future`, `pmap`, `pcalls` and `pvalues`) is made by
+   the new private `createSoloExecutor`: upstream's cached pool of platform threads named
+   `arbace-agent-send-off-pool-N`, or, when the system property `arbace.virtual-threads` is
+   `true` at class initialization, `Agent.newVirtualThreadExecutor()`. That new public static
+   method returns `Executors.newThreadPerTaskExecutor` over virtual threads named
+   `arbace-agent-send-off-virtual-N`; `(set-agent-send-off-executor!
+   (arbace.lang.Agent/newVirtualThreadExecutor))` switches at run time. `send` keeps its fixed
+   pool of platform threads (CPU-bound actions gain nothing). The default is unchanged.
+   Behaviour with virtual threads (tested in `test/native/virtual_threads_test.clj`, in process
+   and in a forked JVM with the property): binding conveyance (`binding-conveyor-fn`) and the
+   sends an action makes (held until it ends) work as before; `shutdown-agents` shuts the
+   executor down and later `future` calls throw `RejectedExecutionException`, as with the pool.
+   The difference: virtual threads are daemon threads, so the JVM exits when the main thread
+   ends, without waiting for running futures or `send-off` actions, and without the cached
+   pool's 60 seconds of idle threads keeping it alive when `shutdown-agents` is not called
+   (`bin/arbace -e '@(future 1)'` takes 60.2 s by default, 0.2 s with the property). Measured
+   (jar, `-XX:+UseCompactObjectHeaders`, five rounds in one JVM, first and last round):
+
+   | workload | platform pool | virtual threads |
+   |---|---|---|
+   | 10k futures sleeping 10 ms | 243 → 88 ms, 1,640 threads, 338 MB RSS | 159 → 37 ms, 72 threads, 201 MB |
+   | 10k futures sleeping 100 ms | 653 → 231 ms, 5,501 threads, 814 MB | 249 → 120 ms, 72 threads, 238 MB |
+   | 100k futures sleeping 10 ms | 904 → 477 ms, 2,249 threads, 569 MB | 587 → 152 ms, 72 threads, 770 MB |
+   | 10k futures sleeping 1 s | 2,501 → 1,064 ms, 10,006 threads, 1.36 GB | 1,149 → 1,014 ms, 72 threads, 207 MB |
+   | `pmap` of 20k CPU-bound items (sum of 20k) | 522–660 ms | 467–529 ms |
+
+   (thread counts are the JVM's peak of platform threads; the virtual threads run on the
+   carrier pool.) The JDK AOT cache still applies with the property set.
+
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.

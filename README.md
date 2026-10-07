@@ -40,6 +40,15 @@ we go so that it could be repeated.
 `target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache applies (it is tied
 to the JDK build and the jar), and from the jar alone otherwise.
 
+`send-off`, `future` and `pmap` run on a cached pool of platform threads, as in Clojure. With
+`ARBACE_JAVA_OPTS=-Darbace.virtual-threads=true` they run on virtual threads instead, one per
+task, which suits many blocking tasks (10,000 futures sleeping 100 ms: 120 ms against 230 ms,
+and 72 platform threads against 5,500). At run time,
+`(set-agent-send-off-executor! (arbace.lang.Agent/newVirtualThreadExecutor))` does the same.
+Virtual threads are daemon threads: the JVM exits when the main thread ends, without waiting
+for running futures or actions (nor for the pool's idle threads, which otherwise keep it
+alive for a minute unless `shutdown-agents` is called).
+
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): the current state of the work and what comes next

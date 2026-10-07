@@ -12,6 +12,8 @@
 ;;
 ;; Converted from clojure/lang/Agent.java of Clojure 98d735fab02f by arbace.j2c
 ;; (convert --rename clojure=arbace) and arbace.j2c.rename; see doc/VENDOR-NOTES.md.
+;; Hand change (doc/VENDOR-NOTES.md, "After vendoring: hand changes"): the opt-in virtual-thread
+;; executor for send-off, future and pmap (system property arbace.virtual-threads).
 
 (in-ns 'arbace.lang)
 
@@ -54,9 +56,7 @@
                                     "arbace-agent-send-pool-%d"
                                     sendThreadPoolCounter)))
 
-  (field ^:public ^:static ^:volatile ^ExecutorService soloExecutor
-    (Executors/newCachedThreadPool
-      (Agent/createThreadFactory "arbace-agent-send-off-pool-%d" sendOffThreadPoolCounter)))
+  (field ^:public ^:static ^:volatile ^ExecutorService soloExecutor (Agent/createSoloExecutor))
 
   (field ^:static ^:final ^{:tag (ThreadLocal IPersistentVector)} nested (ThreadLocal.))
 
@@ -68,6 +68,21 @@
           (.setName thread
                     (String/format format (new Object/1 [(.getAndIncrement threadPoolCounter)])))
           thread))))
+
+  ;; The executor of send-off, future and pmap: a cached pool of platform threads, or, with the
+  ;; system property arbace.virtual-threads=true, a virtual thread per task (doc/VENDOR-NOTES.md,
+  ;; "After vendoring: hand changes")
+  (method ^:private ^:static createSoloExecutor ^ExecutorService []
+    (if (Boolean/getBoolean "arbace.virtual-threads")
+        (Agent/newVirtualThreadExecutor)
+        (Executors/newCachedThreadPool
+          (Agent/createThreadFactory "arbace-agent-send-off-pool-%d" sendOffThreadPoolCounter))))
+
+  ;; An executor starting a virtual thread per task, named arbace-agent-send-off-virtual-N:
+  ;; (set-agent-send-off-executor! (arbace.lang.Agent/newVirtualThreadExecutor))
+  (method ^:public ^:static newVirtualThreadExecutor ^ExecutorService []
+    (Executors/newThreadPerTaskExecutor
+      (.factory (.name (Thread/ofVirtual) "arbace-agent-send-off-virtual-" 0))))
 
   (method ^:public ^:static shutdown ^void []
     (.shutdown soloExecutor)
