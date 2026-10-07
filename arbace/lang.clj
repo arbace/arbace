@@ -100,6 +100,7 @@
 (load "lang/LispReader")
 (load "lang/LockingTransaction")
 (load "lang/LongRange")
+(load "lang/Main")
 (load "lang/MapEntry")
 (load "lang/MethodImplCache")
 (load "lang/MultiFn")

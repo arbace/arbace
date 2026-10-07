@@ -16,8 +16,8 @@
 (in-ns 'arbace.lang)
 
 (defclass ^:public ^:interface IProxy
-  (method ^:public __initClojureFnMappings ^void [this ^IPersistentMap m])
+  (method ^:public __initArbaceFnMappings ^void [this ^IPersistentMap m])
 
-  (method ^:public __updateClojureFnMappings ^void [this ^IPersistentMap m])
+  (method ^:public __updateArbaceFnMappings ^void [this ^IPersistentMap m])
 
-  (method ^:public __getClojureFnMappings ^IPersistentMap [this]))
+  (method ^:public __getArbaceFnMappings ^IPersistentMap [this]))

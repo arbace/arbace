@@ -20,7 +20,8 @@
   clojure.test.check, clojure.tools.namespace, clojure.tools.deps, clojure.data.generators,
   clojure.java.classpath, ...; and the suite's own clojure.test-clojure.*), identifiers that
   merely contain the word (clojure-version, *clojure-version*, refer-clojure, CLOJURE_NS,
-  __clojureFnMap, thread names clojure-agent-*), prose and URLs (clojure.org)."
+  __clojureFnMap, thread names clojure-agent-*; some were renamed by hand after vendoring, see
+  doc/VENDOR-NOTES.md), prose and URLs (clojure.org)."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 

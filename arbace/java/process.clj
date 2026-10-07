@@ -132,7 +132,7 @@
     (reify ThreadFactory
       (newThread [_ r]
         (doto (Thread. r)
-          (.setName (str "Clojure Process IO " (swap! counter inc)))
+          (.setName (str "Arbace Process IO " (swap! counter inc)))
           (.setDaemon true))))))
 
 ;; An ExecutorService for cached, daemon threads

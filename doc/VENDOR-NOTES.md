@@ -16,7 +16,7 @@ and stage 2.
 | `arbace/lang.clj`, `arbace/lang/*.clj` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.clj`, `Compiler.clj`, ... |
 | `arbace/asm.clj`, `arbace/asm/**.clj` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
 | `arbace/java/api.clj`, `arbace/java/api/Clojure.clj` | `arbace.java.api` |
-| `arbace.clj` (repository root), `arbace/main_class.clj` | the single-segment package `arbace` of the class `arbace.main` (`clojure/main.java`); `_class` because `arbace/main.clj` is the namespace `arbace.main` (SPEC §9.1) |
+| `arbace/lang/Main.clj` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2c/`, `arbace/javalisp/` | the tools, unchanged in place; no vendored name clashes with them |
 | `arbace/README.md` | origin and licenses, next to the code |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
@@ -48,7 +48,7 @@ seeded, with the two seed fixes of the journal). `bin/vendor-arbace` replays exa
    - `clojure/**/*.clj` (48 files): path and text renamed by the same rules, then two hand edits
      (each checked to apply exactly once): the `version.properties` fold and the server
      property prefix (below).
-3. Copied into the worktree: `cp -r OUT/tree/* .` (giving `arbace.clj` and the vendored files
+3. Copied into the worktree: `cp -r OUT/tree/* .` (giving `arbace.clj`, since removed, and the vendored files
    under `arbace/`).
 
 Check (step 3 of `bin/vendor-arbace`): the Java of `clojure/` renamed by the same rules (plus
@@ -96,7 +96,8 @@ Renamed:
    `clojure.read.eval`, `clojure.main.report`, `clojure.server.*` (socket servers; `server.clj`
    compares the first segment to `"clojure"`, a hand edit), `clojure.basis`. So
    `-Darbace.compiler.direct-linking=true`, `-Darbace.compile.path=...`.
-5. `clojure.jar` in `main.clj`'s usage text (`java -cp arbace.jar arbace.main ...`).
+5. `clojure.jar` in `main.clj`'s usage text (`java -cp arbace.jar arbace.main ...`, now
+   `arbace.lang.Main`).
 
 Left alone (with the reason):
 
@@ -138,15 +139,15 @@ Left alone (with the reason):
 `bin/build-arbace` (about one minute):
 
 - **Stage 0 → stage 1.** The frozen `clojure/` loads `arbace.classes` through
-  `arbace.classes.boot` and runs `arbace.classes.build` over the packages `arbace`,
-  `arbace/lang`, `arbace/asm`, `arbace/asm/commons`, `arbace/asm/signature`, `arbace/java/api`:
+  `arbace.classes.boot` and runs `arbace.classes.build` over the packages
+  (`arbace` until the main class moved, below), `arbace/lang`, `arbace/asm`, `arbace/asm/commons`, `arbace/asm/signature`, `arbace/java/api`:
   183 files → 812 classes in `target/stage1` (20 s). Every class those files declare is entered
   from its source (SPEC §9.2): none exists at stage 0.
-- **Stage 1** is `target/stage1` plus the `.clj` sources: `java -cp target/stage1:. arbace.main`
+- **Stage 1** is `target/stage1` plus the `.clj` sources: `java -cp target/stage1:. arbace.lang.Main`
   starts a REPL (`Clojure 1.13.0-master-SNAPSHOT`, `(class [])` is
   `arbace.lang.PersistentVector`, `#'arbace.core/map`); `arbace.lang.RT` loads `arbace/core.clj`
   with `arbace.lang.Compiler`. With `-verbose:class` no `clojure.*` class is loaded.
-- **Stage 1 → stage 2.** `java -cp target/stage1:. arbace.main -e "(require 'arbace.classes.boot)
+- **Stage 1 → stage 2.** `java -cp target/stage1:. arbace.lang.Main -e "(require 'arbace.classes.boot)
   (arbace.classes.build/-main ...)"`: the compiler, plain Clojure, is compiled by
   `arbace.lang.Compiler` against `arbace.core`, `arbace.string`, `arbace.lang` and `arbace.asm`,
   and compiles the same files into `target/stage2`.
@@ -157,7 +158,7 @@ already equals stage 2: the compiler is deterministic, and every stage sees the 
 environment (below), so the runtime it runs on does not show in its output. There was no
 nondeterminism to fix.
 
-Running a stage: `java -cp target/stageN:. arbace.main` (any `arbace.main` option, e.g. `-e`,
+Running a stage: `java -cp target/stageN:. arbace.lang.Main` (any `arbace.main` option, e.g. `-e`,
 `-m`, a script). The class path needs the repository root for the `.clj` sources.
 
 ## Clojure's test suite on stages 1 and 2
@@ -173,11 +174,13 @@ Running a stage: `java -cp target/stageN:. arbace.main` (any `arbace.main` optio
   renamed the same way (their own namespaces keep their names, their uses of `clojure.core`,
   `clojure.string`, `clojure.lang.*` ... are renamed);
 - the runner `test/run_clojure_tests.clj` is renamed into the run directory; the harness uses
-  `arbace.main`, `arbace.lang.Compile`, `-Darbace.compiler.direct-linking=true`,
+  `arbace.lang.Main`, `arbace.lang.Compile`, `-Darbace.compiler.direct-linking=true`,
   `-Darbace.compile.path`, and AOT-compiles the renamed core namespaces;
 - one renaming artifact is adjusted: `test_pretty.clj`'s expected layouts align continuation
   lines under `[clojure.pprint :only (`; `arbace` is one character shorter, so those lines lose
-  one space (a `sed` in the harness, two assertions).
+  one space (a `sed` in the harness, two assertions);
+- since the renames after vendoring (below), `test-proxy-method-order` lists the `IProxy` methods
+  as `__initArbaceFnMappings` and so on (another `sed`).
 
 ```
 CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage1 CLOJURE_SRC=$PWD/target/stage1:$PWD bin/clojure-tests
@@ -277,15 +280,43 @@ worktree where git wrote `clojure/**/*.java` after the `.class` files a test com
   loaded classes: the class environment is then the same at every stage, which is what makes
   stage 1 equal stage 2.
 
+## After vendoring: hand changes
+
+The user's decisions on the open points of step 4 (2026-10-07), applied by hand to `arbace/`
+(so `bin/vendor-arbace`'s replay no longer equals `arbace/` in these places):
+
+1. **The main class is `arbace.lang.Main`.** The class `clojure.main`, vendored as `arbace.main`
+   in the single-segment package `arbace` (`arbace/main_class.clj`, with the package file
+   `arbace.clj` at the repository root), moved into the package `arbace.lang`, next to
+   `arbace.lang.Compile`, `Repl` and `Script`: `arbace/lang/Main.clj`, loaded by
+   `arbace/lang.clj`. `arbace.clj` is gone; nothing remains at the repository root. The
+   namespace `arbace.main` keeps its name. References updated: `Repl.clj` and `Script.clj`
+   (`Main/legacy_repl`, `Main/legacy_script`), the usage texts of `arbace/main.clj`,
+   `bin/build-arbace` (stage launcher, and the package list loses `arbace`), `bin/clojure-tests`
+   (rename mode runs `arbace.lang.Main`), `CLAUDE.md`, `arbace/README.md`. Launch a stage with
+   `java -cp target/stageN:. arbace.lang.Main`.
+2. **Runtime-visible `clojure` names renamed to `arbace`:**
+
+   | where | before | after |
+   |---|---|---|
+   | `lang/Agent.clj`, agent thread names | `clojure-agent-send-pool-%d`, `clojure-agent-send-off-pool-%d` | `arbace-agent-send-pool-%d`, `arbace-agent-send-off-pool-%d` |
+   | `core_proxy.clj`, generated proxy field | `__clojureFnMap` | `__arbaceFnMap` |
+   | `lang/IProxy.clj`, `core_proxy.clj`, the methods every proxy class has | `__initClojureFnMappings`, `__updateClojureFnMappings`, `__getClojureFnMappings` | `__initArbaceFnMappings`, `__updateArbaceFnMappings`, `__getArbaceFnMappings` |
+   | `main.clj`, error report temp files | prefix `clojure-` | prefix `arbace-` |
+   | `core/server.clj`, socket server thread names | `Clojure Server <name>`, `Clojure Connection <name> <id>` | `Arbace Server ...`, `Arbace Connection ...` |
+   | `java/process.clj`, process I/O thread names | `Clojure Process IO <n>` | `Arbace Process IO <n>` |
+
+   Kept: `clojure-version` and `*clojure-version*` (libraries call them), the REPL banner
+   (`Clojure 1.13.0-master-SNAPSHOT`, printed from `clojure-version`), `refer-clojure`, the class
+   `arbace.java.api.Clojure` (an API class name), the JSR-45 stratum `Clojure` in
+   `SourceDebugExtension` (debuggers look for it), error messages and docstrings naming the
+   language, and `CLOJURE_*` constants (not visible). The suite's `test-proxy-method-order`
+   expects the `IProxy` method names; the harness adjusts it (above).
+
 ## Open decisions for the user
 
-1. **`arbace.clj` at the repository root.** The converter writes the package namespace file of
-   the single-segment package `arbace` (the class `arbace.main`) there, as `arbace/lang.clj` is
-   for `arbace.lang`. Nothing loads it (the build reads `arbace/main_class.clj` directly).
-   Options: keep it (consistent), drop it (one stray file fewer at the root), or move the class
-   `arbace.main` into a package (a change of Clojure's API: `java -cp ... arbace.main`).
-2. **Leftover `clojure` identifiers** listed above (thread names, `__clojureFnMap`, temp file
-   prefix, `clojure-version`): kept; rename any?
+1. (decided, above) `arbace.clj` and the class `arbace.main`.
+2. (decided, above) the leftover `clojure` identifiers.
 3. **`CLAUDE.md`'s layout section** still describes `arbace/` as the tools only; it could name
    the vendored tree and `bin/build-arbace` (left to the main session).
 4. At stage 1 the class forms' names (`defclass`, `switch`, ...) are interned into `arbace.core`

@@ -51,12 +51,12 @@
   (field ^:public ^:static ^:volatile ^ExecutorService pooledExecutor
     (Executors/newFixedThreadPool (unchecked-add-int 2 (.availableProcessors (Runtime/getRuntime)))
                                   (Agent/createThreadFactory
-                                    "clojure-agent-send-pool-%d"
+                                    "arbace-agent-send-pool-%d"
                                     sendThreadPoolCounter)))
 
   (field ^:public ^:static ^:volatile ^ExecutorService soloExecutor
     (Executors/newCachedThreadPool
-      (Agent/createThreadFactory "clojure-agent-send-off-pool-%d" sendOffThreadPoolCounter)))
+      (Agent/createThreadFactory "arbace-agent-send-off-pool-%d" sendOffThreadPoolCounter)))
 
   (field ^:static ^:final ^{:tag (ThreadLocal IPersistentVector)} nested (ThreadLocal.))
 

@@ -10,12 +10,12 @@
 ;;
 ;; Converted from clojure/main.java of Clojure 98d735fab02f by arbace.j2c
 ;; (convert --rename clojure=arbace) and arbace.j2c.rename; see doc/VENDOR-NOTES.md.
+;; The class clojure.main, moved into the package arbace.lang as arbace.lang.Main (the
+;; namespace arbace.main keeps its name; doc/VENDOR-NOTES.md, "After vendoring").
 
-(in-ns 'arbace)
+(in-ns 'arbace.lang)
 
-(import '(arbace.lang RT Symbol Var))
-
-(defclass ^:public main
+(defclass ^:public Main
   (field ^:private ^:static ^:final ^Symbol CLOJURE_MAIN (Symbol/intern "arbace.main"))
 
   (field ^:private ^:static ^:final ^Var REQUIRE (RT/var "arbace.core" "require"))

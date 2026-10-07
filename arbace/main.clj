@@ -567,8 +567,8 @@ by default when a new command-line REPL is started."} repl-requires
   specified the old way"
   [args]
   (println "WARNING: arbace.lang.Repl is deprecated.
-Instead, use arbace.main like this:
-java -cp arbace.jar arbace.main -i init.clj -r args...")
+Instead, use arbace.lang.Main like this:
+java -cp arbace.jar arbace.lang.Main -i init.clj -r args...")
   (let [[inits [sep & args]] (split-with (complement #{"--"}) args)]
     (repl-opt (concat ["-r"] args) (map vector (repeat "-i") inits))))
 
@@ -577,8 +577,8 @@ java -cp arbace.jar arbace.main -i init.clj -r args...")
   specified the old way"
   [args]
   (println "WARNING: arbace.lang.Script is deprecated.
-Instead, use arbace.main like this:
-java -cp arbace.jar arbace.main -i init.clj script.clj args...")
+Instead, use arbace.lang.Main like this:
+java -cp arbace.jar arbace.lang.Main -i init.clj script.clj args...")
   (let [[inits [sep & args]] (split-with (complement #{"--"}) args)]
     (null-opt args (map vector (repeat "-i") inits))))
 
@@ -604,7 +604,7 @@ java -cp arbace.jar arbace.main -i init.clj script.clj args...")
                          ((requiring-resolve 'arbace.pprint/pprint) report)))
           err-path (when (= target "file")
                      (try
-                       (let [f (.toFile (Files/createTempFile "clojure-" ".edn" (into-array FileAttribute [])))]
+                       (let [f (.toFile (Files/createTempFile "arbace-" ".edn" (into-array FileAttribute [])))]
                          (with-open [w (BufferedWriter. (FileWriter. f))]
                            (binding [*out* w] (println report-str)))
                          (.getAbsolutePath f))
@@ -615,7 +615,7 @@ java -cp arbace.jar arbace.main -i init.clj script.clj args...")
           (println (str report-str (System/lineSeparator) message)))))))
 
 (defn main
-  "Usage: java -cp arbace.jar arbace.main [init-opt*] [main-opt] [arg*]
+  "Usage: java -cp arbace.jar arbace.lang.Main [init-opt*] [main-opt] [arg*]
 
   With no options or args, runs an interactive Read-Eval-Print Loop
 

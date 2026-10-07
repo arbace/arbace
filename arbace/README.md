@@ -6,8 +6,9 @@ Arbace's Clojure code. Two kinds of things live here:
   to class forms converter, `arbace.j2c.*`) and `javalisp/` (`arbace.javalisp.*`).
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.clj`), and the Java classes as class
-  forms, one namespace per Java package (`lang.clj`, `asm.clj`, `java/api.clj`, `../arbace.clj`)
-  with one file per Java file (`lang/RT.clj`, `asm/ClassReader.clj`, `main_class.clj`, ...).
+  forms, one namespace per Java package (`lang.clj`, `asm.clj`, `java/api.clj`) with one file per
+  Java file (`lang/RT.clj`, `asm/ClassReader.clj`, ...). Clojure's main class `clojure.main` is
+  `arbace.lang.Main` (`lang/Main.clj`).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` of this repository, that is
 https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a` with ASM

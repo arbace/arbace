@@ -15,8 +15,6 @@
 
 (in-ns 'arbace.lang)
 
-(import '(arbace main))
-
 (defclass ^:public Repl
   (method ^:public ^:static main ^void [^String/1 args]
-    (main/legacy_repl args)))
+    (Main/legacy_repl args)))

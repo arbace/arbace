@@ -104,7 +104,7 @@
     (with-lock lock
       (alter-var-root #'servers assoc name {:name name, :socket socket, :sessions {}}))
     (thread
-      (str "Clojure Server " name) server-daemon
+      (str "Arbace Server " name) server-daemon
       (try
         (loop [client-counter 1]
           (when (not (.isClosed socket))
@@ -114,7 +114,7 @@
                     out (BufferedWriter. (OutputStreamWriter. (.getOutputStream conn)))
                     client-id (str client-counter)]
                 (thread
-                  (str "Clojure Connection " name " " client-id) client-daemon
+                  (str "Arbace Connection " name " " client-id) client-daemon
                   (accept-connection conn name client-id in out (if bind-err out *err*) accept args)))
               (catch SocketException _disconnect))
             (recur (inc client-counter))))

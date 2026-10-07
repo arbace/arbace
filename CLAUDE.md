@@ -31,7 +31,7 @@ Prior art:
     `bin/build-arbace [--suite]` bootstraps it: stage 0 (the frozen `clojure/` plus
     `arbace.classes`) builds `target/stage1`, which builds `target/stage2`, which must rebuild
     itself byte for byte (`target/stage3`). With `--suite` it also runs Clojure's test suite
-    on stages 1 and 2. Run a stage with `java -cp target/stageN:. arbace.main`.
+    on stages 1 and 2. Run a stage with `java -cp target/stageN:. arbace.lang.Main`.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
   - `arbace/j2c/`: the Java → class forms converter.
   - `arbace/javalisp/` is javalisp: Java source <-> Clojure-readable s-expressions, specified in

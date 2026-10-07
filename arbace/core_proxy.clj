@@ -51,7 +51,7 @@
         cname (.replace pname \. \/) ;(str "arbace/lang/" (gensym "Proxy__"))
         ctype (. Type (getObjectType cname))
         iname (fn [^Class c] (.. Type (getType c) (getInternalName)))
-        fmap "__clojureFnMap"
+        fmap "__arbaceFnMap"
         totype (fn [^Class c] (. Type (getType c)))
         to-types (fn [cs] (if (pos? (count cs))
                             (into-array (map totype cs))
@@ -169,7 +169,7 @@
         (. gen (throwException (totype NotSerializableException) pname))
         (. gen (endMethod))))
                                         ;add IProxy methods
-    (let [m (. Method (getMethod "void __initClojureFnMappings(arbace.lang.IPersistentMap)"))
+    (let [m (. Method (getMethod "void __initArbaceFnMappings(arbace.lang.IPersistentMap)"))
           gen (new GeneratorAdapter (. Opcodes ACC_PUBLIC) m nil nil cv)]
       (. gen (visitCode))
       (. gen (loadThis))
@@ -178,7 +178,7 @@
 
       (. gen (returnValue))
       (. gen (endMethod)))
-    (let [m (. Method (getMethod "void __updateClojureFnMappings(arbace.lang.IPersistentMap)"))
+    (let [m (. Method (getMethod "void __updateArbaceFnMappings(arbace.lang.IPersistentMap)"))
           gen (new GeneratorAdapter (. Opcodes ACC_PUBLIC) m nil nil cv)]
       (. gen (visitCode))
       (. gen (loadThis))
@@ -193,7 +193,7 @@
 
       (. gen (returnValue))
       (. gen (endMethod)))
-    (let [m (. Method (getMethod "arbace.lang.IPersistentMap __getClojureFnMappings()"))
+    (let [m (. Method (getMethod "arbace.lang.IPersistentMap __getArbaceFnMappings()"))
           gen (new GeneratorAdapter (. Opcodes ACC_PUBLIC) m nil nil cv)]
       (. gen (visitCode))
       (. gen (loadThis))
@@ -307,7 +307,7 @@
   sets the proxy's fn map.  Returns the proxy."
   {:added "1.0"}
   [^IProxy proxy mappings]
-    (. proxy (__initClojureFnMappings mappings))
+    (. proxy (__initArbaceFnMappings mappings))
     proxy)
 
 (defn update-proxy
@@ -322,14 +322,14 @@
   Returns the proxy."
   {:added "1.0"}
   [^IProxy proxy mappings]
-    (. proxy (__updateClojureFnMappings mappings))
+    (. proxy (__updateArbaceFnMappings mappings))
     proxy)
 
 (defn proxy-mappings
   "Takes a proxy instance and returns the proxy's fn map."
   {:added "1.0"}
   [^IProxy proxy]
-    (. proxy (__getClojureFnMappings)))
+    (. proxy (__getArbaceFnMappings)))
 
 (defmacro proxy
   "class-and-interfaces - a vector of class names

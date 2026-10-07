@@ -15,8 +15,6 @@
 
 (in-ns 'arbace.lang)
 
-(import '(arbace main))
-
 (defclass ^:public Script
   (method ^:public ^:static main ^void [^String/1 args]
-    (main/legacy_script args)))
+    (Main/legacy_script args)))
