@@ -874,3 +874,47 @@ recommended:
 - The main session's check: 2M un-hinted `.length`/`.get` calls take about 4 ms on Arbace,
   against about 3.6 s on the frozen Clojure. `bin/build-arbace` gives a fixpoint at 5,093
   classes, and the native tests (38 tests, 2,722 assertions) pass.
+
+## 2026-10-07: clojure.spec restored (pre-freeze item 2)
+
+- Done by a background agent (`d9ecda7`). The full record is `doc/VENDOR-NOTES.md`, "Spec".
+- **Versions.** Upstream Clojure `98d735fab02f`'s `pom.xml` depends on
+  `org.clojure/spec.alpha 0.6.249` and `org.clojure/core.specs.alpha 0.6.133-alpha10`. Both were
+  fetched from their repositories at those tags, and their `.clj` files equal those in the Maven
+  jars.
+  - https://github.com/clojure/spec.alpha tag `v0.6.249`, commit
+    `3d1efb353b8a95c699b4051ba8273568c21f874e`: `src/main/clojure/clojure/spec/alpha.clj`,
+    `spec/gen/alpha.clj` and `spec/test/alpha.clj` became `arbace/spec/alpha.clj`,
+    `arbace/spec/gen/alpha.clj` and `arbace/spec/test/alpha.clj`.
+  - https://github.com/clojure/core.specs.alpha tag `v0.6.133-alpha10`, commit
+    `75875946b7e827a1cec91ce645d5e1dcfc475e49`: `src/main/clojure/clojure/core/specs/alpha.clj`
+    became `arbace/core/specs/alpha.clj`.
+  - Both are EPL-1.0, recorded in `LICENSE.md`, `doc/ARBACE.md` and an origin comment in each
+    file.
+- **Derivation.** The new `bin/vendor-spec` clones the two tags into `.tmp/vendor-spec/`,
+  checks the commits, and runs the new command `arbace.j2c.rename vendor-lib`. The renaming
+  rules gained `clojure.spec` and `clojure.core.specs.alpha`; `clojure.test.check` keeps its
+  name. One hand edit: `arbace.spec.gen.alpha` excludes `arbace.core/return`, which is a class
+  form.
+- **Un-stubbed in `arbace/`, as upstream has it** (the frozen `clojure/` keeps its stub):
+  - `main.clj` and `repl.clj` require spec, for `*explain-out*`, spec explanations in errors,
+    and `doc`;
+  - `RT.instrumentMacros` reads `arbace.spec.skip-macros`, and `checkSpecAsserts` reads
+    `arbace.spec.check-asserts`;
+  - the Compiler's macro check loads `arbace.spec.alpha` and `arbace.core.specs.alpha`;
+  - `Compile` loads core.specs before compiling, which a seed fix had dropped.
+- **Build.** Each stage compiles the spec namespaces in a second `Compile` run with
+  `-Darbace.spec.skip-macros=true` (as spec.alpha's own build does), then
+  `arbace.core.specs.alpha`. It must be a separate JVM, because `Compile` already loads
+  core.specs, and recompiling spec in that JVM would reload its protocols.
+- **Suite.** The new `test/arbace-results.edn` (everything passing) is the reference in rename
+  mode. `test/baseline-results.edn` stays the frozen baseline's reference, with its 32 spec
+  failures. spec.alpha's own tests pass on stage 2 too (13 tests, 174 assertions).
+- **Main session's check on `d9ecda7`:** stages 1, 2 and 3 are identical at 5,627 classes, and
+  all verify at version 70. The native tests pass (38 tests, 2,722 assertions). **Clojure's
+  suite on stages 1 and 2: 809 tests, 20,750 of 20,750 assertions, test.generative 27 of 27.**
+  `(let [a] a)` fails with spec's "failed: even-number-of-forms?" message.
+- Correction to the class loading answer above: the "temporary external file" the user saw is
+  most likely the error report a non-REPL run writes on an uncaught error (`Full report at:
+  /tmp/arbace-NNN.edn`, Clojure 1.10+'s `clojure.main/report-error`; renamed from `clojure-`).
+  It is a report of the error, not a class file. Compiled fns still never touch the disk.
