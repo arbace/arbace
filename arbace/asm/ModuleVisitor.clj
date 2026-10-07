@@ -1,0 +1,79 @@
+;; // ASM: a very small and fast Java bytecode manipulation framework
+;; // Copyright (c) 2000-2011 INRIA, France Telecom
+;; // All rights reserved.
+;; //
+;; // Redistribution and use in source and binary forms, with or without
+;; // modification, are permitted provided that the following conditions
+;; // are met:
+;; // 1. Redistributions of source code must retain the above copyright
+;; //    notice, this list of conditions and the following disclaimer.
+;; // 2. Redistributions in binary form must reproduce the above copyright
+;; //    notice, this list of conditions and the following disclaimer in the
+;; //    documentation and/or other materials provided with the distribution.
+;; // 3. Neither the name of the copyright holders nor the names of its
+;; //    contributors may be used to endorse or promote products derived from
+;; //    this software without specific prior written permission.
+;; //
+;; // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+;; // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+;; // IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+;; // ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+;; // LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+;; // CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+;; // SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+;; // INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+;; // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+;; // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+;; // THE POSSIBILITY OF SUCH DAMAGE.
+;;
+;; Converted from clojure/asm/ModuleVisitor.java of Clojure 98d735fab02f by arbace.j2c
+;; (convert --rename clojure=arbace) and arbace.j2c.rename; see doc/VENDOR-NOTES.md.
+
+(in-ns 'arbace.asm)
+
+(defclass ^:public ^:abstract ModuleVisitor
+  (field ^:protected ^:final ^int api)
+
+  (field ^:protected ^ModuleVisitor mv)
+
+  (constructor ^:protected [this ^:final ^int api] (this. api nil))
+
+  (constructor ^:protected [this ^:final ^int api ^:final ^ModuleVisitor moduleVisitor]
+    (when (and (and (and (and (and (and (not (== api Opcodes/ASM9)) (not (== api Opcodes/ASM8)))
+                                   (not (== api Opcodes/ASM7)))
+                              (not (== api Opcodes/ASM6)))
+                         (not (== api Opcodes/ASM5)))
+                    (not (== api Opcodes/ASM4)))
+               (not (== api Opcodes/ASM10_EXPERIMENTAL)))
+      (throw (IllegalArgumentException. (java-str "Unsupported api " api))))
+    (when (== api Opcodes/ASM10_EXPERIMENTAL) (Constants/checkAsmExperimental this))
+    (set! (.-api this) api)
+    (set! (.-mv this) moduleVisitor))
+
+  (method ^:public getDelegate ^ModuleVisitor [this] mv)
+
+  (method ^:public visitMainClass ^void [this ^:final ^String mainClass]
+    (when (some? mv) (.visitMainClass mv mainClass)))
+
+  (method ^:public visitPackage ^void [this ^:final ^String packaze]
+    (when (some? mv) (.visitPackage mv packaze)))
+
+  (method ^:public visitRequire ^void [this ^:final ^String module ^:final ^int access
+                                       ^:final ^String version]
+    (when (some? mv) (.visitRequire mv module access version)))
+
+  (method ^:public visitExport ^void [this ^:final ^String packaze ^:final ^int access &
+                                      ^:final ^String/1 modules]
+    (when (some? mv) (.visitExport mv packaze access modules)))
+
+  (method ^:public visitOpen ^void [this ^:final ^String packaze ^:final ^int access &
+                                    ^:final ^String/1 modules]
+    (when (some? mv) (.visitOpen mv packaze access modules)))
+
+  (method ^:public visitUse ^void [this ^:final ^String service]
+    (when (some? mv) (.visitUse mv service)))
+
+  (method ^:public visitProvide ^void [this ^:final ^String service & ^:final ^String/1 providers]
+    (when (some? mv) (.visitProvide mv service providers)))
+
+  (method ^:public visitEnd ^void [this] (when (some? mv) (.visitEnd mv))))

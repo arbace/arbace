@@ -1,9 +1,9 @@
 (ns arbace.classes.shape
   "Class shapes (SPEC §3): what makes two class files equivalent, as data, read with ASM's
   ClassReader. Used by the tests to compare the compiler's classes with javac's."
-  (:require [clojure.string :as str]
-            [clojure.java.io :as io]
-            [clojure.set])
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.set])
   (:import (arbace.asm ClassReader ClassVisitor MethodVisitor FieldVisitor AnnotationVisitor
                        RecordComponentVisitor Opcodes Handle Type Label ConstantDynamic)))
 
@@ -16,7 +16,7 @@
     (visitArray [n] (let [s (atom {})] (swap! store assoc n [:array s]) (ann-visitor s)))))
 
 (defn- realize [v]
-  (cond (instance? clojure.lang.Atom v) (into (sorted-map) (map (fn [[k x]] [(str k) (realize x)]) @v))
+  (cond (instance? arbace.lang.Atom v) (into (sorted-map) (map (fn [[k x]] [(str k) (realize x)]) @v))
         (vector? v) (mapv realize v)
         :else v))
 
@@ -136,5 +136,20 @@
      (vec (mapcat (fn [k] (diff (conj path k) (get a k) (get b k)))
                   (distinct (concat (keys a) (keys b)))))
      (and (set? a) (set? b))
-     [[path (clojure.set/difference a b) (clojure.set/difference b a)]]
+     [[path (arbace.set/difference a b) (arbace.set/difference b a)]]
      :else [[path a b]])))
+
+(defn diff-dirs
+  "Compares the shapes of the classes under two directories: [[relative-path diffs]...] for the
+  classes that differ or are missing in one of them."
+  [a b]
+  (let [classes (fn [root] (set (for [^java.io.File f (file-seq (io/file root))
+                                      :when (str/ends-with? (.getName f) ".class")]
+                                  (subs (str f) (inc (count (str (io/file root))))))))
+        as (classes a) bs (classes b)]
+    (vec (for [p (sort (arbace.set/union as bs))
+               :let [d (cond (not (as p)) [:missing-in a]
+                             (not (bs p)) [:missing-in b]
+                             :else (diff (read-shape (io/file a p)) (read-shape (io/file b p))))]
+               :when (seq d)]
+           [p d]))))

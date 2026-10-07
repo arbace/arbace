@@ -14,6 +14,12 @@
 #   CLOJURE_TESTS_EXPECTED  the reference results (default: test/baseline-results.edn)
 #   CLOJURE_TESTS_GEN_MSEC  test.generative run time in ms (default 60000, as upstream)
 #   CLOJURE_TESTS_TIMEOUT   per-JVM timeout in seconds (default 900)
+#   CLOJURE_TESTS_RENAME    "arbace": the Clojure under test is Arbace's, renamed clojure.* ->
+#                           arbace.* (doc/VENDOR-NOTES.md). The suite, its test libraries, the
+#                           runner, the class and namespace names and the system properties
+#                           used here are renamed alike with arbace.j2c.rename (run on the
+#                           frozen clojure/), into RUN/suite and .tmp/clojure-tests/lib-arbace/.
+#                           The test namespaces keep their names, so the reference applies.
 #
 # Steps, mirroring upstream's build.xml and pom.xml at the pinned revision:
 #   1. fetch     clojure/clojure at $rev into RUN/clojure (only test/ and src/script/ are used)
@@ -37,8 +43,17 @@ base=$root/.tmp/clojure-tests
 run=${CLOJURE_TESTS_RUN:-baseline}
 work=$base/$run
 src=$work/clojure
+rename=${CLOJURE_TESTS_RENAME:-}
+case $rename in
+  "") suite=$src ;;
+  arbace) suite=$work/suite ;;
+  *) echo "CLOJURE_TESTS_RENAME: only arbace is known" >&2; exit 2 ;;
+esac
+# Rename standard input (clojure.* -> arbace.*) in rename mode.
+rn() { if [ -n "$rename" ]; then java -cp "$root" clojure.main -m arbace.j2c.rename stdin; else cat; fi; }
 rev=98d735fab02f337cee654cb0629bddc09883a75a
 runner=$root/test/run_clojure_tests.clj
+[ -n "$rename" ] && runner=$work/run_clojure_tests.clj
 expected=${CLOJURE_TESTS_EXPECTED:-$root/test/baseline-results.edn}
 clojure_src=${CLOJURE_SRC:-$root}
 gen_msec=${CLOJURE_TESTS_GEN_MSEC:-60000}
@@ -74,27 +89,40 @@ clojure.test-clojure.annotations"
 extra_fixture_nss="clojure.test-clojure.compilation.examples"
 
 jar_of() { echo "$base/lib/$(basename "$(dirname "$1")")-$(basename "$1").jar"; }
+# In rename mode a library is its jar extracted and renamed, in lib-arbace/NAME/.
+lib_of() {
+  if [ -n "$rename" ]; then local j; j=$(jar_of "$1"); j=${j##*/}; echo "$base/lib-$rename/${j%.jar}"
+  else jar_of "$1"; fi
+}
 libcp() {
   local cp="" coord sha
   while read -r coord sha; do
-    if [ -n "$coord" ]; then cp="$cp$(jar_of "$coord"):"; fi
+    if [ -n "$coord" ]; then cp="$cp$(lib_of "$coord"):"; fi
   done <<< "$deps"
   echo "$cp"
 }
 
 # Upstream's test class path: maven.test.classpath (the test libraries), target/test-classes,
 # test, then the build (here: the AOT classes, then the Clojure under test).
-test_cp() { echo "$(libcp)$src/target/test-classes:$src/test:$work/classes:$clojure_src"; }
+test_cp() { echo "$(libcp)$suite/target/test-classes:$suite/test:$work/classes:$clojure_src"; }
 
-jvm_props=(-Djava.awt.headless=true -Dclojure.compiler.direct-linking=true
+# The names of the Clojure under test, renamed in rename mode (computed once, passed on to the
+# --run-one processes).
+if [ -z "${CLOJURE_TESTS_NAMES:-}" ]; then
+  CLOJURE_TESTS_NAMES=$(echo "clojure.main clojure.lang.Compile clojure.compiler.direct-linking clojure.compile.path" | rn)
+  export CLOJURE_TESTS_NAMES
+fi
+read -r main_class compile_class direct_prop path_prop <<< "$CLOJURE_TESTS_NAMES"
+
+jvm_props=(-Djava.awt.headless=true -D$direct_prop=true
            -Djava.io.tmpdir="$work/tmp")
 
 # Internal entry point: run one namespace (called in parallel by xargs).
 if [ "${1:-}" = "--run-one" ]; then
   ns=$2
-  cd "$src"
+  cd "$suite"
   status=0
-  timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" clojure.main "$runner" \
+  timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" $main_class "$runner" \
     run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" > "$work/out/$ns.log" 2>&1 || status=$?
   printf '%-62s exit %s\n' "$ns" "$status"
   exit 0
@@ -127,6 +155,22 @@ fi
 git -C "$src" checkout -q -f "$rev"
 git -C "$src" clean -q -f -d test
 
+# Rename mode: the renamed copy of the suite (test/ and src/script/) and of the runner.
+if [ -n "$rename" ]; then
+  step "[$run] rename the suite into $suite"
+  rm -rf "$suite"
+  mkdir -p "$suite/src"
+  cp -r "$src/test" "$suite/"
+  cp -r "$src/src/script" "$suite/src/"
+  find "$src" -maxdepth 1 -type f -exec cp {} "$suite/" \;   # readme.txt, read by a test
+  java -cp "$root" clojure.main -m arbace.j2c.rename tree "$suite" .clj .cljc .java
+  # Renaming artifact: clojure.pprint is one character longer than arbace.pprint, and
+  # test_pretty.clj's expected layouts align continuation lines under "[clojure.pprint :only (".
+  sed -i '/\[arbace\.pprint :only/,/]/ s/^ \(  *[a-z]\)/\1/' \
+    "$suite/test/clojure/test_clojure/pprint/test_pretty.clj"
+  rn < "$root/test/run_clojure_tests.clj" > "$runner"
+fi
+
 # 2. deps
 mkdir -p "$base/lib"
 while read -r coord sha; do
@@ -136,52 +180,62 @@ while read -r coord sha; do
     step "download $coord"
     curl -sfL -o "$jar" "https://repo1.maven.org/maven2/$coord/$(basename "$jar")"
     echo "$sha  $jar" | sha1sum -c --quiet
+    rm -rf "$(lib_of "$coord")"
+  fi
+  lib=$(lib_of "$coord")
+  if [ -n "$rename" ] && [ ! -d "$lib" ]; then
+    step "rename $coord into $lib"
+    mkdir -p "$lib.tmp"
+    (cd "$lib.tmp" && jar xf "$jar")
+    java -cp "$root" clojure.main -m arbace.j2c.rename tree "$lib.tmp" .clj .cljc .java
+    mv "$lib.tmp" "$lib"
   fi
 done <<< "$deps"
 
 # 3. build
 step "[$run] AOT-compile the Clojure under test into $work/classes"
-rm -rf "${work:?}/classes" "${src:?}/target" "${work:?}/tmp"
-mkdir -p "$work/classes" "$src/target/test-classes" "$work/tmp"
+rm -rf "${work:?}/classes" "${suite:?}/target" "${work:?}/tmp"
+mkdir -p "$work/classes" "$suite/target/test-classes" "$work/tmp"
 # shellcheck disable=SC2086
-java -cp "$work/classes:$clojure_src" -Dclojure.compile.path="$work/classes" \
-  "${jvm_props[@]}" clojure.lang.Compile $core_nss > "$work/build.log" 2>&1 \
+java -cp "$work/classes:$clojure_src" -D$path_prop="$work/classes" \
+  "${jvm_props[@]}" $compile_class $(echo $core_nss | rn) > "$work/build.log" 2>&1 \
   || { cat "$work/build.log"; exit 1; }
 
 # 4. fixtures
-step "[$run] compile the test fixtures into $src/target/test-classes"
+step "[$run] compile the test fixtures into $suite/target/test-classes"
 # shellcheck disable=SC2046
 javac -nowarn -g --release 17 -encoding UTF-8 -cp "$work/classes:$clojure_src" \
-  -d "$src/target/test-classes" $(find "$src/test/java" -name '*.java') > "$work/fixtures.log" 2>&1 \
+  -d "$suite/target/test-classes" $(find "$suite/test/java" -name '*.java') > "$work/fixtures.log" 2>&1 \
   || { cat "$work/fixtures.log"; exit 1; }
 # shellcheck disable=SC2086
-(cd "$src" && java -cp "$(test_cp)" -Dclojure.compile.path=target/test-classes \
-  "${jvm_props[@]}" clojure.lang.Compile $fixture_nss $extra_fixture_nss) >> "$work/fixtures.log" 2>&1 \
+(cd "$suite" && java -cp "$(test_cp)" -D$path_prop=target/test-classes \
+  "${jvm_props[@]}" $compile_class $fixture_nss $extra_fixture_nss) >> "$work/fixtures.log" 2>&1 \
   || { cat "$work/fixtures.log"; exit 1; }
 
 # 5. test
 rm -rf "${work:?}/out"
 mkdir -p "$work/out"
-(cd "$src" && java -cp "$(test_cp)" clojure.main "$runner" list test "$expected") > "$work/namespaces.txt"
+(cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" list test "$expected") > "$work/namespaces.txt"
 if [ ${#only[@]} -gt 0 ]; then
   printf '%s\n' "${only[@]}" > "$work/selected.txt"
 else
   cp "$work/namespaces.txt" "$work/selected.txt"
 fi
 step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)"
-export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s
+export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s \
+  CLOJURE_TESTS_RENAME=$rename
 xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
 
 # 6. gen
 if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
   step "[$run] run the test.generative specs for ${gen_msec}ms (log in $work/out/generative.log)"
   status=0
-  (cd "$src" && timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" \
-    -Dclojure.test.generative.msec="$gen_msec" clojure.main "$runner" \
+  (cd "$suite" && timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" \
+    -Dclojure.test.generative.msec="$gen_msec" $main_class "$runner" \
     generative test "$work/out/generative.edn") > "$work/out/generative.log" 2>&1 || status=$?
   [ $status = 0 ] || echo "test.generative exit $status"
 fi
 
 # 7. report
-(cd "$src" && java -cp "$(test_cp)" clojure.main "$runner" report "$work/out" "$expected" \
+(cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" report "$work/out" "$expected" \
   "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")")

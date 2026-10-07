@@ -3,7 +3,7 @@
   forms being compiled, from classes it defined earlier and from the class path (by reflection,
   with constant values read from class files). Member lookup with Java's access rules (§5.6).
   Package class loaders with generations for the REPL (§10)."
-  (:require [clojure.string :as str]
+  (:require [arbace.string :as str]
             [arbace.classes.types :as t])
   (:import (arbace.asm ClassReader ClassVisitor Opcodes)
            (java.lang.reflect Field Method Constructor Modifier)))
@@ -27,14 +27,29 @@
 
 (defn- internal [^Class c] (str/replace (.getName c) "." "/"))
 
+(def ^:dynamic *from-source*
+  "nil, or a predicate on internal names: classes that are compiled from their sources and never
+  taken from the class path, even when a class of that name is loaded (a stage recompiling
+  itself: the runtime's own classes are the ones being compiled, SPEC §9.6)."
+  nil)
+
+(defn from-source? [n] (boolean (and *from-source* (*from-source* n))))
+
+(def source-imports
+  "An atom: namespace name -> {simple name symbol -> internal name}, the imports of classes that
+  are not on the class path (yet) or are compiled from source, which namespaces cannot map."
+  (atom {}))
+
 (defn load-class
-  "The Class of an internal name or array descriptor, without initializing it, or nil."
+  "The Class of an internal name or array descriptor, without initializing it, or nil. nil for
+  classes compiled from source (*from-source*)."
   [n]
-  (try
+  (when-not (from-source? n)
+   (try
     (let [cn (if (str/starts-with? n "[") (str/replace n "/" ".") (str/replace n "/" "."))]
-      (clojure.lang.RT/classForNameNonLoading cn))
+      (arbace.lang.RT/classForNameNonLoading cn))
     (catch ClassNotFoundException _ nil)
-    (catch NoClassDefFoundError _ nil)))
+    (catch NoClassDefFoundError _ nil))))
 
 (defn- read-constants
   "Field name -> ConstantValue of the class file of c, read with ClassReader."
@@ -252,7 +267,7 @@
   package-loaders (atom {}))
 
 (defn- new-loader []
-  (clojure.lang.DynamicClassLoader. (.getClassLoader clojure.lang.RT)))
+  (arbace.lang.DynamicClassLoader. (.getClassLoader arbace.lang.RT)))
 
 (defn define-classes!
   "Defines classes [{:name internal :bytes byte[] :info info}] in their package loaders,
@@ -277,7 +292,7 @@
                     (doseq [s (cons (:super info) (:interfaces info))
                             :when (by-name s)]
                       (define s))
-                    (let [ld ^clojure.lang.DynamicClassLoader (get @package-loaders (t/package-of n))
+                    (let [ld ^arbace.lang.DynamicClassLoader (get @package-loaders (t/package-of n))
                           c (.defineClass ld (str/replace n "/" ".") ^bytes bytes nil)]
                       (swap! defined assoc n (assoc info :class c :loader ld))
                       (swap! done assoc n c)))))]

@@ -2,8 +2,8 @@
   "Compiles class forms (SPEC §9): enters the declarations of one top-level form, analyzes and
   emits all classes, then defines them in package class loaders or, under *compile-files*,
   writes them to *compile-path* as well."
-  (:require [clojure.string :as str]
-            [clojure.java.io :as io]
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p]

@@ -8,6 +8,12 @@ full here.
 - `clojure/asm/`: ASM, https://gitlab.ow2.org/asm/asm at
   `0460f74ba64230e5b846967c81a52628b5dd0596`, under the BSD 3-Clause License. The package is
   renamed from `org.objectweb.asm` to `clojure.asm`.
+- The vendored Clojure under `arbace/` (`arbace.clj`, `arbace/asm/`, `arbace/lang/`,
+  `arbace/java/api/`, `arbace/main_class.clj` and the `.clj` namespaces outside `arbace/classes/`,
+  `arbace/j2c/` and `arbace/javalisp/`) is derived from `clojure/` above, renamed to `arbace.*`
+  and with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). It stays under the
+  same licenses: `arbace/asm/` under ASM's BSD 3-Clause License (package `arbace.asm`), the rest
+  under the Eclipse Public License 1.0.
 
 ## Clojure: Eclipse Public License 1.0
 

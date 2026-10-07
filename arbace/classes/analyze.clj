@@ -1,7 +1,7 @@
 (ns arbace.classes.analyze
   "Entering class declarations (names, supertypes, members, what javac derives) and analyzing
   code into typed nodes for arbace.classes.emit (SPEC §4 to §6)."
-  (:require [clojure.string :as str]
+  (:require [arbace.string :as str]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p])
@@ -46,6 +46,11 @@
   (boolean (or (decl n) (env/load-class n)
                (and *source-lookup* *unit* (enter-from-source! n)))))
 
+(defn- default-import?
+  "Is class c the one namespaces map symbol sym to by default (RT/DEFAULT_IMPORTS)?"
+  [sym c]
+  (identical? c (get arbace.lang.RT/DEFAULT_IMPORTS sym)))
+
 (defn resolve-class-sym
   "Resolves a class name symbol from `scope` {:class internal-name :ns ns :local-classes {}}:
   member classes of the class and its enclosing classes, then the namespace's mappings, then the
@@ -73,12 +78,22 @@
                     (get (:member-classes d) s)
                     (get (:local-classes d) sym)
                     (recur (:outer d)))))
+            ;; Java's order: imports, the class's own package, then the imports on demand
+            ;; (java.lang and Clojure's default imports, RT/DEFAULT_IMPORTS)
             (let [v (when ns (get (ns-map ns) sym))]
-              (when (class? v) (str/replace (.getName ^Class v) "." "/")))
+              (when (and (class? v) (not (default-import? sym v)))
+                (let [n (str/replace (.getName ^Class v) "." "/")]
+                  (if (env/from-source? n) (when (class-exists? n) n) n))))
+            (when-let [n (when ns (get-in @env/source-imports [(ns-name ns) sym]))]
+              (when (class-exists? n) n))
             (let [pkg (cond (:class scope) (t/package-of (:class scope))
                             ns (ns-package ns))
                   n (if (= pkg "") s (str pkg "/" s))]
               (when (class-exists? n) n))
+            (let [v (when ns (get (ns-map ns) sym))]
+              (when (class? v)
+                (let [n (str/replace (.getName ^Class v) "." "/")]
+                  (if (env/from-source? n) (when (class-exists? n) n) n))))
             (let [n (str "java/lang/" s)] (when (class-exists? n) n)))))))
 
 (declare implicit-outer)
@@ -449,7 +464,7 @@
              (force (type-annotations scope (.getValue (TypeReference/newTypeReference TypeReference/METHOD_RETURN))
                                       ret-tn mmeta)))
            (when recv
-             (for [a (annotations-now scope (into {} (filter (comp symbol? key) (clojure.core/meta recv))))
+             (for [a (annotations-now scope (into {} (filter (comp symbol? key) (arbace.core/meta recv))))
                    :let [ts (annotation-targets (t/desc->internal (:type a)))]
                    :when (and ts (ts "TYPE_USE"))]
                (assoc a :ref (.getValue (TypeReference/newTypeReference TypeReference/METHOD_RECEIVER)) :path "")))
@@ -478,7 +493,7 @@
         pinfos (if inferred
                  (let [[ps r] (t/parse-method-desc inferred)]
                    (mapv (fn [s pd] {:sym s :desc pd :tn (parse-type scope (symbol (t/desc->class-name pd)))
-                                     :meta (clojure.core/meta s) :flags 0})
+                                     :meta (arbace.core/meta s) :flags 0})
                          params ps))
                  (mapv #(param-info scope %) params))
         pinfos (if inferred (mapv (fn [pi] (if (t/prim? (:desc pi)) (assoc pi :tn {:t :prim :desc (:desc pi)}) pi)) pinfos) pinfos)
@@ -895,7 +910,7 @@
 ;; macroexpansion
 
 (def clojure-specials
-  '#{def loop* recur if case* let* letfn* do fn* quote var clojure.core/import* . set! deftype*
+  '#{def loop* recur if case* let* letfn* do fn* quote var arbace.core/import* . set! deftype*
      reify* try throw monitor-enter monitor-exit catch finally new &})
 
 (def arbace-specials
@@ -903,7 +918,7 @@
      for-each* with-resources* if-instance* class-literal* super. this.})
 
 (defn- core-var? [v]
-  (and (var? v) (#{"clojure.core" "arbace.classes.core"} (name (ns-name (.ns ^clojure.lang.Var v))))))
+  (and (var? v) (#{(str 'arbace.core) "arbace.classes.core"} (name (ns-name (.ns ^arbace.lang.Var v))))))
 
 (defn resolve-var [actx sym]
   (when (and (symbol? sym) (not (contains? (:locals actx) sym)))
@@ -914,7 +929,7 @@
   "The name of the core var a head symbol resolves to, or nil."
   [actx sym]
   (when-let [v (resolve-var actx sym)]
-    (when (core-var? v) (name (.sym ^clojure.lang.Var v)))))
+    (when (core-var? v) (name (.sym ^arbace.lang.Var v)))))
 
 (defn macroexpand1 [actx form]
   (let [op (first form)]
@@ -940,7 +955,7 @@
 
 (defn- with-form-info [form f]
   (try (f)
-       (catch clojure.lang.ExceptionInfo e
+       (catch arbace.lang.ExceptionInfo e
          (if (or (:line (ex-data e)) (not (:line (meta form))))
            (throw e)
            (throw (ex-info (str (ex-message e) " (line " (:line (meta form)) ")")
@@ -966,14 +981,14 @@
                    (instance? Byte form) (const-node "B" form)
                    ;; Clojure data (§5.13): needs the Clojure runtime
                    (keyword? form) (clj-constant actx form)
-                   (vector? form) (clj-collection actx "vector" "Lclojure/lang/IPersistentVector;" (seq form))
-                   (map? form) (clj-collection actx "map" "Lclojure/lang/IPersistentMap;" (mapcat identity form))
-                   (set? form) (clj-collection actx "set" "Lclojure/lang/IPersistentSet;" (seq form))
-                   (instance? clojure.lang.BigInt form) (const-node :bigint form)
+                   (vector? form) (clj-collection actx "vector" (t/lang-desc "IPersistentVector") (seq form))
+                   (map? form) (clj-collection actx "map" (t/lang-desc "IPersistentMap") (mapcat identity form))
+                   (set? form) (clj-collection actx "set" (t/lang-desc "IPersistentSet") (seq form))
+                   (instance? arbace.lang.BigInt form) (const-node :bigint form)
                    :else (fail (str "Not supported in class bodies at stage 0: " (pr-str form)
                                     " (" (.getName (class form)) ")")))]
         (let [node (accessorize actx node)]
-          (if-let [tag (and (instance? clojure.lang.IMeta form) (:tag (meta form)))]
+          (if-let [tag (and (instance? arbace.lang.IMeta form) (:tag (meta form)))]
             (coerce-hint actx node tag)
             node))))))
 
@@ -1632,12 +1647,12 @@
 
 (defn- reflective-call
   "With ^{:reflection :warn} on the class, a call the compiler cannot resolve goes through
-  clojure.lang.Reflector at run time, with a warning (SPEC §12 question 7)."
+  arbace.lang.Reflector at run time, with a warning (SPEC §12 question 7)."
   [actx target mname arg-nodes why]
   (binding [*out* *err*]
     (println (str "Reflection warning, " (str/replace (:class actx) "/" ".") " - call to method "
                   mname " can't be resolved (" why ").")))
-  {:op :invoke :kind :static :owner "clojure/lang/Reflector" :itf false :name "invokeInstanceMethod"
+  {:op :invoke :kind :static :owner (t/lang-class "Reflector") :itf false :name "invokeInstanceMethod"
    :desc "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
    :target nil
    :args [(convert-node target t/object-desc) (const-node t/string-desc mname)
@@ -1650,7 +1665,7 @@
   (if (and (= :warn (:reflection actx)) (not special))
     (try (analyze-method-call* actx target mname args :param-tags param-tags :owner-override owner-override
                                :ret-tag ret-tag)
-         (catch clojure.lang.ExceptionInfo e
+         (catch arbace.lang.ExceptionInfo e
            (if (and (:arbace/compile-error (ex-data e))
                     (re-find #"^(No accessible method|No matching method|Ambiguous call)" (ex-message e))
                     (t/ref? (value-type (:type target))))
@@ -2036,7 +2051,7 @@
                               (and (= 2 (count args)) (t/numeric? (prim-type a)) (t/numeric? (prim-type b)))
                               (analyze-compare actx "==" nil [a b])
                               :else (fail "= on references needs the Clojure runtime; use .equals or identical?")))
-                  "not=" (analyze actx (list 'clojure.core/not (cons 'clojure.core/= args)))
+                  "not=" (analyze actx (list 'arbace.core/not (cons 'arbace.core/= args)))
                   ("zero?" "pos?" "neg?")
                   (analyze-compare actx ({"zero?" "==" "pos?" ">" "neg?" "<"} cop) [(first args) 0])
                   "instance?" (analyze-instance? actx form)
@@ -2360,7 +2375,8 @@
   not yet present, as javac translates nested classes before adding the outer class's bridges."
   [n]
   (let [d (decl! n)]
-    (when-not (= :annotation (:kind d))
+    (when-not (or (= :annotation (:kind d)) (:bridges-done d))
+      (update-decl! n assoc :bridges-done true)
       (let [envs (supertype-envs n)
             iface? (= :interface (:kind d))
             chain (if iface? [n] (vec (env/superclass-chain n)))
@@ -2703,7 +2719,7 @@
           cbody (analyze cactx
                          (list 'do
                                (if null-check?
-                                 (list 'if (list 'clojure.core/some? sym)
+                                 (list 'if (list 'arbace.core/some? sym)
                                        (list 'try (list '. sym 'close)
                                              (list 'catch 'java.lang.Throwable xsym (list '. tsym 'addSuppressed xsym))))
                                  (list 'try (list '. sym 'close)
@@ -3041,22 +3057,30 @@
 ;; source path (§9.2): declarations of classes from p/C.clj, without compiling their code
 
 (defn- read-source-forms [url]
-  (with-open [r (clojure.lang.LineNumberingPushbackReader.
+  (with-open [r (arbace.lang.LineNumberingPushbackReader.
                   (java.io.InputStreamReader. (.openStream ^java.net.URL url) "UTF-8"))]
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r)))))))
 
 (defn import-classes!
   "Imports the classes of an (import ...) form into namespace ns, without evaluating code (which
-  the frozen compiler would compile into ns's package, prohibited for java.*). Returns the class
-  names that could not be imported (a name already mapped to another class)."
+  the frozen compiler would compile into ns's package, prohibited for java.*). Classes not on the
+  class path or compiled from source (env/*from-source*) go into env/source-imports, as their
+  sources are found by name (§9.2). Returns the class names that could not be imported (a name
+  already mapped to another class)."
   [ns form]
   (vec (for [spec (rest form)
              :let [spec (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)]
              cname (if (symbol? spec) [(str spec)] (map #(str (first spec) "." %) (rest spec)))
-             :let [ok (try (.importClass ^clojure.lang.Namespace ns (clojure.lang.RT/classForNameNonLoading cname))
-                           true
-                           (catch Throwable _ false))]
+             :let [n (str/replace cname "." "/")
+                   c (env/load-class n)
+                   simple (symbol (subs cname (inc (.lastIndexOf ^String cname "."))))
+                   ok (if c
+                        (try (.importClass ^arbace.lang.Namespace ns c)
+                             true
+                             (catch Throwable _ false))
+                        (do (swap! env/source-imports assoc-in [(ns-name ns) simple] n)
+                            true))]
              :when (not ok)]
          cname)))
 
@@ -3066,7 +3090,7 @@
   (case (name (first f))
     "in-ns" (let [n (second f) n (if (seq? n) (second n) n)]
               (set! *ns* (create-ns n))
-              (when-not (ns-resolve *ns* 'defclass) (refer 'clojure.core)))
+              (when-not (ns-resolve *ns* 'defclass) (refer 'arbace.core)))
     "import" (import-classes! *ns* f)
     (eval f)))
 
@@ -3079,9 +3103,12 @@
         tried (or (:source-tried *unit*) (atom #{}))]
     (when (and (:source-tried *unit*) (not (@tried top)))
       (swap! tried conj top)
-      (when-let [url (.getResource (clojure.lang.RT/baseLoader) (str top ".clj"))]
+      ;; the converter names the file of a class p/C that would clash with namespace p.C's file
+      ;; p/C_class.clj (CONVERTER-NOTES, amendment 8)
+      (when-let [url (or (.getResource (arbace.lang.RT/baseLoader) (str top "_class.clj"))
+                         (.getResource (arbace.lang.RT/baseLoader) (str top ".clj")))]
         (let [forms (read-source-forms url)
-              ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'clojure.core/in-ns} (first %))) forms))
+              ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'arbace.core/in-ns} (first %))) forms))
               ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
               class-forms* (for [f forms
                                  f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
@@ -3092,7 +3119,7 @@
                              (some (fn [[nm & _ :as cf]]
                                      (and (symbol? nm)
                                           (= top (let [s (str nm)
-                                                       pkg (get (apply hash-map (rest (drop-while (complement keyword?) cf))) :package)]
+                                                       pkg (get (first (p/split-options (cond-> (rest cf) (vector? (second cf)) rest))) :package)]
                                                    (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
                                                          (str/includes? s ".") (str/replace s "." "/")
                                                          :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
@@ -3100,7 +3127,7 @@
               ns (when declares?
                    (binding [*ns* *ns*]
                    (doseq [f forms
-                           :when (and (seq? f) (#{'in-ns 'ns 'import 'clojure.core/in-ns 'clojure.core/import}
+                           :when (and (seq? f) (#{'in-ns 'ns 'import 'arbace.core/in-ns 'arbace.core/import}
                                                   (first f)))]
                      (eval-ns-form! f))
                    *ns*))
@@ -3118,6 +3145,8 @@
           (doseq [c new] (update-decl! c assoc :declared-only true))
           (doseq [c new] (resolve-header! c))
           (doseq [c new] (resolve-members! c))
+          ;; their bridges too, which subclasses being compiled must see (as in class files)
+          (doseq [c (supertypes-first new)] (add-bridges! c))
           (when (decl n) n))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -3249,21 +3278,21 @@
 (defn clj-constant
   "A keyword or quoted datum as a constant node (read at class initialization)."
   [actx v]
-  (let [desc (cond (keyword? v) "Lclojure/lang/Keyword;"
-                   (symbol? v) "Lclojure/lang/Symbol;"
+  (let [desc (cond (keyword? v) (t/lang-desc "Keyword")
+                   (symbol? v) (t/lang-desc "Symbol")
                    :else t/object-desc)
         f (constant-field! actx [:const v] desc {:kind :read :text (binding [*print-meta* true] (pr-str v))})]
     {:op :get-static :field (assoc f :flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)) :owner (:owner f) :type desc}))
 
 (defn clj-var-field [actx v]
-  (constant-field! actx [:var v] "Lclojure/lang/Var;"
-                   {:kind :var :ns (str (ns-name (.ns ^clojure.lang.Var v))) :name (str (.sym ^clojure.lang.Var v))}))
+  (constant-field! actx [:var v] (t/lang-desc "Var")
+                   {:kind :var :ns (str (ns-name (.ns ^arbace.lang.Var v))) :name (str (.sym ^arbace.lang.Var v))}))
 
 (defn clj-collection
-  "A collection literal: built by clojure.lang.RT/vector, map or set from its boxed elements."
+  "A collection literal: built by arbace.lang.RT/vector, map or set from its boxed elements."
   [actx fname desc elems]
   (let [ns (mapv #(analyze actx %) elems)]
-    {:op :invoke :kind :static :owner "clojure/lang/RT" :itf false :name fname
+    {:op :invoke :kind :static :owner (t/lang-class "RT") :itf false :name fname
      :desc (str "([Ljava/lang/Object;)" desc)
      :args [{:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) ns)}]
      :type desc}))

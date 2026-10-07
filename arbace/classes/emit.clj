@@ -1,6 +1,6 @@
 (ns arbace.classes.emit
   "Bytecode generation for analyzed class declarations, with ASM (SPEC §6)."
-  (:require [clojure.string :as str]
+  (:require [arbace.string :as str]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.analyze :as a])
@@ -458,14 +458,14 @@
       :monitor (emit-monitor gen node :expr)
       (:break :recur :return) (emit-jump gen node)
       :throw (do (emit gen (:expr node) :expr) (insn gen Opcodes/ATHROW))
-      :var-deref (do (.visitFieldInsn m Opcodes/GETSTATIC (:owner (:field node)) (:name (:field node)) "Lclojure/lang/Var;")
-                     (.visitMethodInsn m Opcodes/INVOKEVIRTUAL "clojure/lang/Var" "deref" "()Ljava/lang/Object;" false))
+      :var-deref (do (.visitFieldInsn m Opcodes/GETSTATIC (:owner (:field node)) (:name (:field node)) (t/lang-desc "Var"))
+                     (.visitMethodInsn m Opcodes/INVOKEVIRTUAL (t/lang-class "Var") "deref" "()Ljava/lang/Object;" false))
       :var-invoke (let [args (:args node)]
                     (when (> (count args) 20) (fail "Too many arguments for a var call"))
                     (spill-operands gen (cons {:op :var-deref :var (:var node) :field (:field node) :type t/object-desc} args)
-                                    (cons "Lclojure/lang/IFn;" (repeat t/object-desc))
+                                    (cons (t/lang-desc "IFn") (repeat t/object-desc))
                                     nil)
-                    (.visitMethodInsn m Opcodes/INVOKEINTERFACE "clojure/lang/IFn" "invoke"
+                    (.visitMethodInsn m Opcodes/INVOKEINTERFACE (t/lang-class "IFn") "invoke"
                                       (t/method-desc (repeat (count args) t/object-desc) t/object-desc) true))
       (if-let [f (get-method emit-extra (:op node))]
         (f gen node :expr)
@@ -2028,10 +2028,10 @@
         (case (:kind init)
           :var (do (.visitLdcInsn m (:ns init))
                    (.visitLdcInsn m (:name init))
-                   (.visitMethodInsn m Opcodes/INVOKESTATIC "clojure/lang/RT" "var"
-                                     "(Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;" false))
+                   (.visitMethodInsn m Opcodes/INVOKESTATIC (t/lang-class "RT") "var"
+                                     (str "(Ljava/lang/String;Ljava/lang/String;)" (t/lang-desc "Var")) false))
           :read (do (.visitLdcInsn m (:text init))
-                    (.visitMethodInsn m Opcodes/INVOKESTATIC "clojure/lang/RT" "readString"
+                    (.visitMethodInsn m Opcodes/INVOKESTATIC (t/lang-class "RT") "readString"
                                       "(Ljava/lang/String;)Ljava/lang/Object;" false)
                     (when-not (= desc t/object-desc)
                       (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal desc)))))

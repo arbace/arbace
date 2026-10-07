@@ -5,7 +5,7 @@
   Code generation works on descriptors: \"I\", \"J\", \"Ljava/lang/String;\", \"[I\", \"V\".
   Two pseudo types are keywords: :null (the type of nil) and :none (a form that does not
   complete). Class names are internal names (\"java/lang/String\")."
-  (:require [clojure.string :as str]))
+  (:require [arbace.string :as str]))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; descriptors
@@ -22,6 +22,14 @@
 
 (def object-desc "Ljava/lang/Object;")
 (def string-desc "Ljava/lang/String;")
+
+(def lang
+  "The internal name of the running Clojure's package arbace.lang: clojure/lang at stage 0,
+  where arbace.classes.boot reads arbace.* as clojure.*, arbace/lang from stage 1 on."
+  (str/replace (.getName (.getPackage arbace.lang.RT)) "." "/"))
+
+(defn lang-class "The internal name of class `simple` of arbace.lang." [simple] (str lang "/" simple))
+(defn lang-desc "The descriptor of class `simple` of arbace.lang." [simple] (str "L" lang "/" simple ";"))
 
 (defn prim? [t] (and (string? t) (= 1 (count t)) (not= t "V")))
 (defn void? [t] (= t "V"))

@@ -1,0 +1,62 @@
+#!/bin/bash
+# Build Arbace's bootstrap (doc/classes/SPEC.md §9.6, doc/VENDOR-NOTES.md) into target/
+# (gitignored):
+#   stage 1  target/stage1: the class forms under arbace/ (the vendored arbace.lang, arbace.asm,
+#            arbace.java.api and the class arbace.main) compiled by stage 0, the frozen clojure/
+#            running arbace.classes (through arbace.classes.boot, which reads arbace.* as
+#            clojure.*). With arbace/*.clj on the class path it is a Clojure runtime under
+#            arbace.*: java -cp target/stage1:. arbace.main
+#   stage 2  target/stage2: the same sources compiled by arbace.classes running on stage 1
+#   stage 3  target/stage3: compiled by stage 2; must equal stage 2 byte for byte (fixpoint)
+# Each stage compiles every package from its sources only (arbace.classes.build), so its own
+# loaded classes never stand in for the ones being compiled.
+#
+# Usage: bin/build-arbace [--suite]
+#   --suite  also run Clojure's test suite (bin/clojure-tests, renamed) on stage 1 and stage 2,
+#            runs "stage1" and "stage2"; both must show no regressions against the baseline
+# Exit status: 0 when every stage builds, stage 3 equals stage 2 and (with --suite) the suite
+# passes.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+pkgs="arbace arbace/lang arbace/asm arbace/asm/commons arbace/asm/signature arbace/java/api"
+status=0
+
+# build STAGE: compile the class forms with the previous stage into target/stageSTAGE
+build() {
+  local n=$1 out=target/stage$1 cp main
+  if [ "$n" = 1 ]; then cp=$root; main=clojure.main
+  else cp=$root/target/stage$((n - 1)):$root; main=arbace.main; fi
+  rm -rf "$out"
+  local args="\"$root\" \"$out\""
+  for p in $pkgs; do args="$args \"$p\""; done
+  echo "== stage $n: compiled by stage $((n - 1)) into $out"
+  java -Xss64m ${ARBACE_JVM_OPTS:--Xmx8g} -cp "$cp" $main -e \
+    "(require 'arbace.classes.boot) (arbace.classes.build/-main $args)" || return 1
+  echo "   $(echo '(println "arbace.main:" (clojure-version) (class []) (class (fn [])))' |
+          java -cp "$out:$root" arbace.main - 2>&1 | tail -1)"
+}
+
+same() {
+  if diff -rq "target/stage$1" "target/stage$2" > /dev/null; then
+    echo "== stage $1 and stage $2 are identical ($(find "target/stage$2" -name '*.class' | wc -l) classes)"
+  else
+    echo "== stage $1 and stage $2 differ:"; diff -rq "target/stage$1" "target/stage$2" | head -20
+    return 1
+  fi
+}
+
+build 1 && build 2 && build 3 || status=1
+if [ $status = 0 ]; then
+  same 1 2
+  same 2 3 || status=1
+fi
+
+if [ $status = 0 ] && [ "${1:-}" = "--suite" ]; then
+  for n in 1 2; do
+    echo "== Clojure's test suite on stage $n"
+    CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage$n CLOJURE_SRC="$root/target/stage$n:$root" \
+      bin/clojure-tests -j "${ARBACE_TEST_JOBS:-32}" | tail -6 || status=1
+  done
+fi
+exit $status

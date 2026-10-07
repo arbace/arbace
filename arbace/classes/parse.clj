@@ -1,7 +1,7 @@
 (ns arbace.classes.parse
   "Syntax of the class forms (SPEC §4): a class form becomes a class declaration map, before
   any name is resolved. Access flags follow from the metadata and Java's implicit modifiers."
-  (:require [clojure.string :as str])
+  (:require [arbace.string :as str])
   (:import (arbace.asm Opcodes)))
 
 (def member-heads '#{field method constructor initializer static-initializer defclass constants do})
