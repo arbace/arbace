@@ -601,3 +601,21 @@ instead of calling `arbace.classes`'s resolution.
   tool namespaces that keep their names).
 - Checked: `bin/class-forms-tests` passes; `bin/build-arbace` gives stages 1, 2 and 3 identical
   (815 classes) and the native tests pass.
+
+## 2026-10-07: Survey of modern classfile and platform features (doc/MODERN-COMPILER.md)
+
+- At the user's request a background agent surveyed how Arbace's compilers could use the
+  features added since Java 9, targeting Java 26 (jdk26u `baf63fbe42b8`). The survey is
+  `doc/MODERN-COMPILER.md` (`86befe9`), with sources (JEPs, jdk26u paths) and measurements.
+- Baseline found: Clojure's compiler emits classfile version 61 (Java 17,
+  `clojure/lang/Compiler.java` `JVM_BYTECODE_VERSION = V17`), not pre-Java 9 bytecode. Its only
+  `invokedynamic` is Clojure 1.12's functional-interface adapter. The class forms compiler
+  already emits version 70 with javac's bootstraps. The stages hold no compiled namespaces, so
+  `arbace.core` compiles from source at every launch.
+- Ranked recommendation: first, AOT-compile the namespaces into the stages and use the JDK AOT
+  cache (measured launch 3.27 s → 0.45 s), add `ClassFile.verify` to the checks, emit version
+  70. Next, measured one by one: condy for constants, `invokedynamic` for keyword sites and
+  reflective calls, an opt-in virtual-thread executor. Defer `invokedynamic` Var calls and
+  protocol caches, replacing ASM with `java.lang.classfile`. Avoid `LambdaMetafactory` and
+  hidden classes for fns, preview APIs, `ScopedValue` for bindings, JVM records for `defrecord`.
+- No decision taken yet; it is the user's.
