@@ -17,7 +17,7 @@ and stage 2.
 | `arbace/asm.clj`, `arbace/asm/**.clj` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
 | `arbace/java/api.clj`, `arbace/java/api/Clojure.clj` | `arbace.java.api` |
 | `arbace/lang/Main.clj` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
-| `arbace/classes/`, `arbace/j2c/`, `arbace/javalisp/` | the tools, unchanged in place; no vendored name clashes with them |
+| `arbace/classes/`, `arbace/j2c/` | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
@@ -215,7 +215,7 @@ compiled are the running runtime's own. Changes:
    `arbace.classes.types/lang`, the package of the running `arbace.lang.RT`.
 2. **`arbace.classes.boot` works at every stage.** At stage 0 it reads the compiler's sources
    mapping every `arbace.X` symbol to `clojure.X` (it mapped only `arbace.asm` before), except the
-   tools' own `arbace.classes.*`, `arbace.j2c.*`, `arbace.javalisp.*`. From stage 1 on it just
+   tools' own `arbace.classes.*`, `arbace.j2c.*` (and then `arbace.javalisp.*`). From stage 1 on it just
    requires them. It interns the class forms' names into the running core namespace
    (`clojure.core` or `arbace.core`). The file itself names neither runtime (it finds the running
    core as `(namespace `ns)`).

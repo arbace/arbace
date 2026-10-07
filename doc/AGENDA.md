@@ -10,9 +10,8 @@ The current state of the work. This file is rewritten as things change. For the 
   seed script is kept only in git history (commit `d21dc91`).
 - `LICENSE.md` holds all licenses: Arbace is EPL-1.0, like Clojure; EPL-1.0 for Clojure, BSD-3-Clause for ASM, Apache-2.0 for
   Guava's Murmur3, and which files each covers.
-- javalisp (`arbace/javalisp/`, spec in `doc/javalisp/SPEC.md`, files `.jls`) is the pathfinder: an
-  exact, line-preserving Java ↔ s-expression transcription, verified on `clojure/` and all of
-  jdk26u. It stays as a tool.
+- javalisp, the pathfinder (an exact Java ↔ s-expression transcription), was dropped once the
+  class forms superseded it; it is in git history (last at `959d114`).
 
 ## Next: Java's classfile constructs as idiomatic Clojure
 

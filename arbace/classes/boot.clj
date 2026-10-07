@@ -8,7 +8,7 @@
 ;; `clojure.lang` and `clojure.asm`: the driver then loads the compiler's namespaces itself,
 ;; rewriting every symbol that names a vendored namespace or package, `arbace.X` (also inside
 ;; metadata, such as type hints), to `clojure.X` while it reads them. The tools' own namespaces
-;; (`arbace.classes`, `arbace.j2c`, `arbace.javalisp`) are not rewritten. Then it loads
+;; (`arbace.classes`, `arbace.j2c`) are not rewritten. Then it loads
 ;; arbace/core_classes.clj the same way, so the class forms' names (`defclass`, `switch`, ...)
 ;; are interned into `clojure.core` (at run time; the frozen sources are not touched), and
 ;; refers them into `user`, so class forms can be written without qualifying the new names.
@@ -41,7 +41,7 @@
 
 (def ^:private own
   "Prefixes of the tools' namespaces, which keep their names at stage 0."
-  ["arbace.classes" "arbace.j2c" "arbace.javalisp"])
+  ["arbace.classes" "arbace.j2c"])
 
 (defn- map-name [^String s]
   (if (and (.startsWith s "arbace.")

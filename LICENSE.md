@@ -22,11 +22,11 @@ covers what.
 - `clojure/lang/Murmur3.java`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
   Clojure, under the Apache License 2.0. The MurmurHash3 algorithm it implements was written by
   Austin Appleby and placed in the public domain.
-- `arbace/`: the vendored Clojure in it (everything outside `arbace/classes/`, `arbace/j2c/` and
-  `arbace/javalisp/`) is derived from `clojure/` above, renamed to `arbace.*`, with its Java
-  converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its source's
-  license: `arbace/asm/` and `arbace/asm.clj` under ASM's BSD 3-Clause License (package
-  `arbace.asm`), `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
+- `arbace/`: the vendored Clojure in it (everything outside `arbace/classes/` and `arbace/j2c/`)
+  is derived from `clojure/` above, renamed to `arbace.*`, with its Java converted to Clojure
+  class forms (doc/VENDOR-NOTES.md). Each file stays under its source's license: `arbace/asm/`
+  and `arbace/asm.clj` under ASM's BSD 3-Clause License (package `arbace.asm`),
+  `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
   `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0.
 
 ## Arbace and Clojure: Eclipse Public License 1.0

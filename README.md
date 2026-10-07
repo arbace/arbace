@@ -14,15 +14,17 @@ we go so that it could be repeated.
 
 ## Tools
 
-- [javalisp](doc/javalisp/SPEC.md) (`arbace/javalisp/`) transcribes Java 26 source into
-  s-expressions that Clojure reads as data, and back. The round trip keeps javac's tree and
-  every line javac records, so the classes compile byte for byte the same.
+- Class forms ([spec](doc/classes/SPEC.md)): every construct of a Java classfile written as
+  idiomatic Clojure (`defclass`, `field`, `method`, `switch`, `label`, ...). The class forms
+  compiler (`arbace/classes/`) compiles them; the converter (`arbace/j2c/`, `bin/j2c`) turns
+  Java source into them. Arbace's own Java parts are class forms, and since stage 1 the forms are
+  native to Arbace.
 
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): the current state of the work and what comes next
 - [doc/JOURNAL.md](doc/JOURNAL.md): an append-only log of important decisions and actions
-- [doc/javalisp/SPEC.md](doc/javalisp/SPEC.md): the javalisp forms, layout rules and tool
+- [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
 - [LICENSE.md](LICENSE.md): Arbace is under the Eclipse Public License 1.0, like Clojure; the
   file also holds the licenses of all vendored code
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and the origin of the vendored Clojure

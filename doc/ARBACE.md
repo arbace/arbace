@@ -2,8 +2,8 @@
 
 What `arbace/` holds (all `.clj`): Arbace's Clojure code. Two kinds of things live here:
 
-- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `j2c/` (the Java
-  to class forms converter, `arbace.j2c.*`) and `javalisp/` (`arbace.javalisp.*`).
+- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`) and `j2c/`
+  (the Java to class forms converter, `arbace.j2c.*`).
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.clj`), and the Java classes as class
   forms, one namespace per Java package (`lang.clj`, `asm.clj`, `java/api.clj`) with one file per

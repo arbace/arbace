@@ -585,3 +585,19 @@ instead of calling `arbace.classes`'s resolution.
   covered only the tools (`arbace/classes/`, `arbace/j2c/`, `arbace/javalisp/`, `bin/`), while
   the vendored Clojure in `arbace/` stays EPL 1.0 regardless. New code is written into those
   hand-maintained EPL files, so one license spares tracking a boundary that blurs over time.
+
+## 2026-10-07: javalisp dropped
+
+- At the user's request javalisp is removed: `arbace/javalisp/`, `bin/javalisp` and
+  `doc/javalisp/SPEC.md`. It was the pathfinder for the class forms; nothing depends on it (the
+  converter `arbace.j2c` has its own javac access). Its last tree is `959d114`; its results
+  stay recorded in this journal (exact round trip on `clojure/` and on jdk26u's src and tests).
+- What is given up: a comment- and layout-preserving Java transcription. The class forms keep
+  only each file's leading notice, which is all the rewrite needs; javalisp can be restored from
+  history if exact transcription is ever wanted again.
+- References updated: README (the Tools section now describes the class forms), CLAUDE.md
+  (javalisp's layout entry and its check rule), AGENDA, LICENSE.md, `doc/ARBACE.md`,
+  `doc/VENDOR-NOTES.md`, `bin/vendor-arbace`, and `arbace/classes/boot.clj` (the stage-0 list of
+  tool namespaces that keep their names).
+- Checked: `bin/class-forms-tests` passes; `bin/build-arbace` gives stages 1, 2 and 3 identical
+  (815 classes) and the native tests pass.
