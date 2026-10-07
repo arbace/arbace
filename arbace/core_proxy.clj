@@ -138,7 +138,9 @@
     (. cv (visitField (+ (. Opcodes ACC_PRIVATE) (. Opcodes ACC_VOLATILE))
                       fmap (. imap-type (getDescriptor)) nil nil))
                                         ;add ctors matching/calling super's
-    (doseq [^Constructor ctor (. super (getDeclaredConstructors))]
+    ;; in order of their parameter types, so the class is the same in every JVM (Arbace)
+    (doseq [^Constructor ctor (sort-by (fn [^Constructor c] (into1 [] (map #(.getName ^Class %) (.getParameterTypes c))))
+                                       (. super (getDeclaredConstructors)))]
         (when-not (. Modifier (isPrivate (. ctor (getModifiers))))
           (let [ptypes (to-types (. ctor (getParameterTypes)))
                 m (new Method "<init>" (. Type VOID_TYPE) ptypes)

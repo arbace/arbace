@@ -5629,7 +5629,13 @@
       jc)
 
     (method ^:public getPrimitiveType ^Class [this]
-      (arbace.lang.Compiler/maybePrimitiveType init)))
+      (arbace.lang.Compiler/maybePrimitiveType init))
+
+    ;; equality stays identity; a hash that does not depend on the JVM run, so the order of a
+    ;; fn's closed-over locals (its fields and constructor parameters) is the same in every
+    ;; compilation and AOT output is reproducible (Arbace)
+    (method ^:public hashCode ^int [this]
+      (unchecked-add-int (unchecked-multiply-int 31 idx) (.hashCode name))))
 
   (defclass ^:public ^:static LocalBindingExpr
     :implements [Expr MaybePrimitiveExpr AssignableExpr]
