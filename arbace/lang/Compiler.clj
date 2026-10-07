@@ -430,7 +430,9 @@
   (defclass ^:public ^:enum C
     (constants STATEMENT EXPRESSION RETURN EVAL))
 
-  (field ^:public ^:static ^:final ^int JVM_BYTECODE_VERSION arbace.lang.Compiler/V17)
+  ;; Arbace: the running JDK's class file version, as arbace.classes.emit/*version* (upstream: V17)
+  (field ^:public ^:static ^:final ^int JVM_BYTECODE_VERSION
+    (unchecked-add-int 44 (.feature (Runtime/version))))
 
   (defclass ^:private Recur)
 

@@ -204,6 +204,13 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   `cds` logging off, which would otherwise print the rejection on stdout. `ARBACE_CLASSPATH` is
   appended to the class path (the cache allows appending), `ARBACE_JAVA_OPTS` adds JVM options,
   `ARBACE_AOT=off` skips the cache, `ARBACE_JAR` names another jar.
+- **The verifier** (added later the same day): `bin/build-arbace` runs
+  `arbace.classes.verify` (the JDK's `ClassFile/verify`, see `doc/classes/COMPILER-NOTES.md`)
+  on stages 1 and 2 with the stage's own runtime, and fails on any verify error or a class
+  whose major version is not the running JDK's. `test/native/verify_test.clj` verifies the
+  classes of a sample namespace compiled at run time (fns, `case`, `letfn`, `try`, deftype,
+  defrecord, protocols, `reify`, `proxy`, `gen-class`, `gen-interface`, a multimethod, a
+  `defclass`: 50 classes) and checks that a broken class is rejected.
 - **The suite** (`bin/build-arbace --suite`) runs against the stages' own compiled namespaces,
   as upstream's runs against its build: `bin/clojure-tests` got `CLOJURE_TESTS_PRECOMPILED=1`,
   which skips its step 3 (compiling the namespaces into the run's `classes/`). Result on stages
@@ -413,6 +420,20 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    `Compiler$NewInstanceExpr$DeftypeParser/parse` catches the class forms' signal from a
    method body of `deftype*` and analyzes `nil` in its place after
    `arbace.classes.native/compile-deftype` has compiled and defined the class.
+
+7. **The Clojure compiler emits the running JDK's class file version**
+   (`doc/MODERN-COMPILER.md` §1 item 3, §4.9): `Compiler/JVM_BYTECODE_VERSION` in
+   `arbace/lang/Compiler.clj` was `V17` (major 61, upstream `Compiler.java:347`); it is now
+   `(unchecked-add-int 44 (.feature (Runtime/version)))`, so 70 on JDK 26, as
+   `arbace.classes.emit/*version*`. The field is no longer a compile-time constant: it is set in
+   `Compiler`'s `<clinit>`, and every user reads it at run time (`getstatic`): fn classes,
+   deftype stubs and compile stubs (`Compiler.clj`), `gen-class` and `gen-interface`
+   (`genclass.clj`), proxies (`core_proxy.clj`). No other classfile version constant is used
+   outside `arbace/asm` (the vendored ASM knows up to `V26`). Frames are still ASM's
+   `COMPUTE_FRAMES` with `getCommonSuperClass` answering `java/lang/Object`; the JDK's verifier
+   accepts all classes at 70 as at 61 (no classfile feature or verifier rule changed between
+   61 and 70). The AOT-compiled namespaces of each stage (4,276 classes) and everything compiled
+   at run time now have major version 70; the fixpoint holds as before (5,091 classes).
 
 ## Open decisions for the user
 

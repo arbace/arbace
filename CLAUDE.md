@@ -47,7 +47,8 @@ Prior art:
     `bin/build-arbace [--suite]` bootstraps it: stage 0 (the frozen `clojure/` plus
     `arbace.classes`) builds `target/stage1`, which builds `target/stage2`, which must rebuild
     itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
-    its own runtime. The build then makes `target/arbace.jar` (stage 2, reproducible) and the
+    its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
+    (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2, reproducible) and the
     JDK AOT cache `target/arbace.aot` (training workload `test/aot-training.clj`). With
     `--suite` it also runs Clojure's test suite on stages 1 and 2. Run Arbace with `bin/arbace`
     (the jar, with the cache when it applies), or a stage with

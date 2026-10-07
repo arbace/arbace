@@ -19,6 +19,7 @@ SPEC.md, last section).
 | `arbace/classes/compiler.clj` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
 | `arbace/classes/native.clj` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
 | `arbace/core_classes.clj` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.clj` (formerly `arbace.classes.core`) |
+| `arbace/classes/verify.clj` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.clj` |
 | `arbace/classes/shape.clj` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
 | `test/classes/*_test.clj` | `classes.*-test` | the tests; `test/classes/helpers.clj` compiles Java with javac in-process and compares shapes |
 | `bin/class-forms-tests` | | runs the tests |
@@ -62,6 +63,16 @@ compiled from class forms with javac's for the equivalent Java (in-process `java
 shape: flags, supertypes, signatures, nest and inner class attributes, fields, methods,
 `MethodParameters`, annotations and the symbolic content of code (member and class references,
 call sites, constants). The others load and run the classes.
+
+Verification: `arbace.classes.verify` runs `java.lang.classfile.ClassFile/verify` (the JDK's
+type-checking verifier as a library, JEP 484) over every class file of a tree, in parallel, and
+also requires each class's major version to be the running JDK's (70 on JDK 26). Class
+hierarchy questions (for stack map frames and assignability) are answered by parsing class files
+from the tree first, then the JDK, never from classes loaded in the verifying runtime. From a
+stage: `java -cp target/stageN:. arbace.lang.Main -m arbace.classes.verify DIR [CLASS-DIR...]`
+(exit status 1 on any error, with a report grouped by kind). `bin/build-arbace` runs it on
+stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each, the class forms' and the Clojure
+compiler's, verified in about 0.9 s (1.7 s with the JVM launch).
 
 ## How it works
 

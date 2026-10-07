@@ -60,6 +60,11 @@ link the first time.
    It gains no new classfile feature, since none has been added since Java 17 outside preview,
    but both compilers then agree.
 
+Items 1 to 3 are done (2026-10-07): see `doc/VENDOR-NOTES.md` ("Compiled namespaces, the jar
+and the AOT cache", and hand change 7) and `doc/classes/COMPILER-NOTES.md` (verification).
+`bin/build-arbace` verifies every class of stages 1 and 2 (5,091 each), and both compilers emit
+major version 70.
+
 **Do next, measured, one at a time**
 
 4. **Constant dynamic (`ldc` of condy) for the compiler's constants**: keywords, vars, symbols
