@@ -546,3 +546,10 @@ instead of calling `arbace.classes`'s resolution.
 - Left open: the §5.4 operators have no `:inline` expansions yet; `reify` signatures are
   inferred, not chosen from hints; the first class form costs about 2 s to load
   `arbace.classes`; `bin/vendor-arbace` no longer reproduces `arbace/` where hand changes apply.
+
+## 2026-10-07: arbace/README.md moved to doc/ARBACE.md
+
+- At the user's request, `arbace/` now holds only `.clj` files: its README (what the tree holds,
+  and the origin and licenses of the vendored Clojure) moved to `doc/ARBACE.md`.
+- CLAUDE.md's vendoring rule now says that for `arbace/` the origin record next to the code is
+  `doc/ARBACE.md`, plus each converted file's notice kept as a comment. The root README links it.

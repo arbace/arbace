@@ -18,7 +18,7 @@ and stage 2.
 | `arbace/java/api.clj`, `arbace/java/api/Clojure.clj` | `arbace.java.api` |
 | `arbace/lang/Main.clj` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2c/`, `arbace/javalisp/` | the tools, unchanged in place; no vendored name clashes with them |
-| `arbace/README.md` | origin and licenses, next to the code |
+| `doc/ARBACE.md` (was `arbace/README.md`) | origin and licenses of `arbace/` |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
 | `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): the 812 classes of each stage |

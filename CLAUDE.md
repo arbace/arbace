@@ -51,7 +51,8 @@ Prior art:
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it.
 - When vendoring code from prior art, record its origin (repo, path, revision) and license, both in
-  the journal and next to the vendored code.
+  the journal and next to the vendored code. `arbace/` holds only `.clj` files, so for it the
+  record is `doc/ARBACE.md`, plus each converted file's notice kept as a comment.
 
 ## Working conventions
 
