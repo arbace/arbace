@@ -1412,8 +1412,11 @@ only one with its (munged) name and arity when nothing is hinted, otherwise the 
 parameter types are the hinted classes (`Object` where unhinted), whose return type must be the
 name's hint (`Object` when unhinted); with Clojure's errors ("Must hint overloaded method",
 "Can't find matching overloaded method", "Mismatched return type", "Can't define method not in
-interfaces"). `deftype*` itself is not supported inside class bodies and such fns; `defclass`
-is.
+interfaces"). A `deftype*` (of `deftype` or `defrecord`) inside class bodies and such fns sees
+only its fields, never the enclosing locals, so Arbace's compiler compiles and defines it while
+the enclosing code is analyzed, as anywhere else (handing it over as above when its methods use
+class forms); its value is `nil`. `import*` imports into the current namespace at run time, as
+Clojure's `ImportExpr` does.
 
 ### 9.6 Bootstrap
 

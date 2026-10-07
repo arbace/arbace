@@ -18,6 +18,10 @@
   Object
   (toString [this] (label :l (when (neg? v) (break :l "negative")) (java-str "box" v))))
 
+(defn inner [n]
+  (deftype Inner [^long v] Object (toString [this] (java-str "inner" v)))
+  (switch (int n) 0 nil (str (native.aot_sample.Inner. n))))
+
 (defn result []
   [table (.-a (Pair. 1 2)) (Ping/ping 3) (class kind) (.getClassLoader (class kind))
-   (str (->Box 3)) (.getClassLoader Box)])
+   (str (->Box 3)) (.getClassLoader Box) (inner 4) (.getClassLoader native.aot_sample.Inner)])

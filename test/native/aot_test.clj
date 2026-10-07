@@ -15,6 +15,8 @@
     (is (.exists (io/file dir "native/aot_sample/Pair.class")))
     (is (.exists (io/file dir "native/aot_sample/Ping.class")))
     (is (.exists (io/file dir "native/aot_sample/Box.class")))
+    ;; a deftype inside a handed-over fn, its method handed over too
+    (is (.exists (io/file dir "native/aot_sample/Inner.class")))
     (is (seq (filter #(str/includes? (.getName ^java.io.File %) "kind") (file-seq dir))))
     (let [cp (str dir java.io.File/pathSeparator (System/getProperty "java.class.path"))
           p (-> (ProcessBuilder. ["java" "-cp" cp "arbace.lang.Main" "-e"
@@ -25,5 +27,6 @@
       (.waitFor p)
       (is (str/includes? out "[[:zero :small :big] 1 1 native.aot_sample$kind") out)
       (is (str/includes? out "\"box3\"") out)
+      (is (re-find #"\"inner4\" #object\[jdk.internal.loader.ClassLoaders\$AppClassLoader" out) out)
       ;; loaded from the class path, not compiled again
       (is (re-find #"AppClassLoader|app" out) out))))

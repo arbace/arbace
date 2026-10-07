@@ -56,3 +56,18 @@
     (is (= #'*dyn* (call C "the-var")))
     (is (= 49 (call C "prim" 7)))
     (is (= "cxsyzrange" (call C "overloads")))))
+
+(deftest deftype-in-class-bodies
+  ;; deftype* sees only its fields, so Clojure's compiler defines it while the body is analyzed;
+  ;; import* imports at run time. The deftype macro names the class after *ns*.
+  (let [[C] (binding [*ns* (the-ns 'classes.clojure-test)]
+              (load-forms 'classes.clojure-test
+                        '[(^:public WithTypes
+                           (method ^:public ^:static make [n]
+                             (deftype InBody [^long v w] Object (toString [this] (str "v" v w)))
+                             (defrecord RecInBody [a])
+                             [(str (classes.clojure_test.InBody. (long n) :w))
+                              (classes.clojure_test.RecInBody/getBasis)
+                              (import java.util.UUID)]))]))]
+    (is (= ["v3:w" '[a] java.util.UUID] (call C "make" 3)))
+    (is (= {:a 1} (into {} ((resolve 'classes.clojure-test/->RecInBody) 1))))))

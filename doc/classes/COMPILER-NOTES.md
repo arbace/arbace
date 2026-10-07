@@ -160,9 +160,18 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   declares the chosen method's exceptions. Covariant returns get bridges as for any class
   (`ACC_BRIDGE` and `ACC_SYNTHETIC`, where the compiler sets only `ACC_BRIDGE`, and only for the
   methods implemented).
-- `deftype*`, `monitor-enter`, `monitor-exit` and `import*` are errors there (use `defclass`;
-  `locking` works). A deftype with class forms in its methods is handed over whole instead
-  (below).
+- `deftype*` (of `deftype` and `defrecord`) is compiled and defined while the code is analyzed
+  by Clojure's compiler (`Compiler/analyze`, in a fresh `Compiler/LOADER` as `eval` binds one,
+  with `*ns*` the code's namespace), and is `nil`: its methods see only the fields
+  (`NewInstanceExpr.build` binds `LOCAL_ENV` to them), never the enclosing locals, so nothing
+  of the enclosing code reaches it. One whose methods use the class forms is handed over to
+  `compile-deftype` as anywhere else (below). As in Clojure, the class is named by its full
+  name until the macro's `import` has run. `import*` is Clojure's `ImportExpr`:
+  `Namespace.importClass(RT.classForNameNonLoading(c))` on the namespace current at run time,
+  its value the class. A fn handed over after Clojure's compiler has analyzed a `deftype*` in
+  it defines that class twice (the second, in its own loader, is the one found by name), as it
+  compiles any fn in it twice. `monitor-enter` and `monitor-exit` are errors there (`locking`
+  works).
 
 ## Stage-0 limits
 
@@ -296,16 +305,17 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
     with flags and exceptions, `getBasis`'s metadata).
 - **Limits.** `recur` out of tail position and across `try` stay errors in code the compiler
   compiles (Clojure's test suite holds it to them; `continue` has that meaning). A `deftype*`
-  inside a handed-over fn or a class body is an error (only a deftype whose own methods use the
-  class forms is handed over; `defclass` does what `deftype` does).
+  inside a handed-over fn or a class body is compiled by the compiler while that code is
+  analyzed ("Clojure in class bodies" above).
 - **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.clj`, run by `bin/build-arbace` on
   stage 1): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
   `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
   bodies, extended special forms, primitive signatures, deftypes and records with the class
   forms in their methods (their shape against the compiler's), `reify` methods chosen by hints
-  and Clojure's errors, protocols implemented and extended by such types, and AOT compilation
-  (a handed-over deftype included) loaded by a fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
-  stage 0.
+  and Clojure's errors, protocols implemented and extended by such types, `deftype` and `defrecord` inside
+  handed-over fns and class bodies (`nested_deftype_test`), and AOT compilation
+  (a handed-over deftype and a deftype inside a handed-over fn included) loaded by a fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
+  stage 0 (`deftype` and `defrecord` in them included).
 
 ## Checking converted code
 

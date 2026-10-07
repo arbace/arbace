@@ -2439,13 +2439,13 @@
               switch* (analyze-switch actx form)
               lambda* (analyze-lambda actx form)
               method-ref* (analyze-method-ref actx form)
-              (fn* letfn* case* def var reify*) (analyze-clj-special actx form)
-              (deftype* monitor-enter monitor-exit)
+              (fn* letfn* case* def var reify* deftype*) (analyze-clj-special actx form)
+              (monitor-enter monitor-exit)
               (fail (str op " is not supported in code compiled by the class forms compiler"
-                         " (class bodies, and fns using the class forms; use defclass or anon)"))
+                         " (class bodies, and fns using the class forms; use locking)"))
               nil))
           (when (= 'arbace.core/import* op)
-            (fail "import is not supported in code compiled by the class forms compiler"))
+            (analyze-clj-special actx form))
           (when-let [cop (core-op actx op)]
             (core-op-node actx form cop))
           (when-let [s (method-sugar actx form)]
@@ -2498,12 +2498,28 @@
       (if (identical? e f) f (recur e)))))
 
 (defn analyze-clj-special
-  "Clojure's fn*, letfn*, case*, def and var in code compiled by the class forms compiler,
-  rewritten by arbace.classes.lower (§5.13, §9.5)."
+  "Clojure's fn*, letfn*, case*, def, var, reify*, deftype* and import* in code compiled by the
+  class forms compiler, rewritten by arbace.classes.lower (§5.13, §9.5), or (deftype*) compiled
+  by arbace.lang.Compiler."
   [actx form]
   (case (first form)
     fn* (analyze actx (with-meta (lower/lower-fn form) (meta form)))
     reify* (analyze actx (lower/lower-reify form))
+    ;; its methods see the fields only, never the enclosing locals (NewInstanceExpr.build binds
+    ;; LOCAL_ENV to the fields), so it is compiled and defined now by arbace.lang.Compiler, as
+    ;; wherever that compiler analyzes deftype* (handing it to arbace.classes.native's
+    ;; compile-deftype when its methods use class forms), in a fresh class loader as `eval`
+    ;; binds one; its value is nil
+    deftype* (do (push-thread-bindings {arbace.lang.Compiler/LOADER (arbace.lang.RT/makeClassLoader)
+                                        #'*ns* (:ns actx)})
+                 (try (arbace.lang.Compiler/analyze arbace.lang.Compiler$C/EXPRESSION form)
+                      (finally (pop-thread-bindings)))
+                 (analyze actx nil))
+    ;; ImportExpr: imports the class into the current namespace at run time, its value the class
+    arbace.core/import* (analyze actx (list '. (list 'arbace.core/cast 'arbace.lang.Namespace
+                                                     (list '. 'arbace.lang.RT/CURRENT_NS 'deref))
+                                            'importClass
+                                            (list 'arbace.lang.RT/classForNameNonLoading (second form))))
     letfn* (analyze actx (lower/lower-letfn form #(expand-fully actx %)))
     case* (let [ge (second form)
                 b (when (symbol? ge) (get (:locals actx) ge))
@@ -2529,7 +2545,8 @@
 ;; the forms of later steps are filled in below or in the next sections
 
 (def ^:private non-constant-heads
-  '#{anon letclass lambda method-ref switch new class* lambda* method-ref* switch* fn fn* letfn})
+  '#{anon letclass lambda method-ref switch new class* lambda* method-ref* switch* fn fn* letfn
+     deftype* deftype defrecord})
 
 (defn- may-be-constant?
   "Can form be a constant expression? Those declaring classes or lambdas cannot, and analyzing
