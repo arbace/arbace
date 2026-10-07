@@ -69,11 +69,13 @@
                (cond
                  (keyword? it) (str "^" it " ")
                  (= :tag (first it)) (let [t (second it)]
-                                       (if (or (symbol? t) (instance? CRef t))
+                                       (if (and (or (symbol? t) (instance? CRef t)) (empty? (f/items t)))
                                          (str "^" (flat t) " ")
                                          (str "^{:tag " (flat t) "} ")))
                  (= :ann (first it)) (str "^{" (flat (nth it 1)) " " (flat (nth it 2)) "} ")
                  (= :param-tags (first it)) (str "^" (flat (vec (second it))) " ")
+                 (= :type-args (first it)) (str "^{:type-args " (flat (vec (second it))) "} ")
+                 (= :qualifier (first it)) (str "^{:qualifier " (flat (second it)) "} ")
                  :else (throw (ex-info "bad meta item" {:item it}))))))))
 
 (defn- double-text [^double d]

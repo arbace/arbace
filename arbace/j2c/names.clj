@@ -48,9 +48,11 @@
     (into {}
           (for [[n bins] by-name]
             [n (cond
-                 (contains? di n) (di n)
+                 ;; a class of the package before Clojure's default imports, as Java and the
+                 ;; class forms compiler resolve names (java.lang.String is then written out)
                  (contains? pkg-classes (first (str/split n #"\$")))
                  (str (when (seq pkg) (str pkg ".")) n)
+                 (contains? di n) (di n)
                  :else (let [same (filter #(= pkg (package-of %)) bins)
                              jl (str "java.lang." n)]
                          (cond

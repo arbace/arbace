@@ -97,52 +97,93 @@
   (loop [t t n 0]
     (if (instance? Type$ArrayType t) (recur (.elemtype ^Type$ArrayType t) (inc n)) [t n])))
 
+(declare type-ann-items)
+
+(def ^:dynamic *skip-anns*
+  "Binary names of the TYPE_USE annotations in a declaration's modifiers: javac also puts them
+  on the declared type's element type, which the compiler derives from the declaration (§4.4)."
+  #{})
+
+(defn- annotate [form items]
+  (if (seq items) (apply m+ form items) form))
+
+(defn- type-form*
+  [env ^Type t elem?]
+  (let [tg (tag-name t)
+        anns (type-ann-items env t (and elem? (not (instance? Type$ArrayType t))))]
+    (annotate
+     (cond
+       (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (jt/prim-sym t)
+       (instance? Type$ArrayType t)
+       (let [ef (type-form* env (.elemtype ^Type$ArrayType t) elem?)]
+         (cond
+           (seq (f/items ef)) (list 'array ef)
+           (instance? CRef ef) (update ef :dims inc)
+           (and (symbol? ef) (namespace ef)) (symbol (namespace ef) (str (inc (parse-long (name ef)))))
+           (symbol? ef) (symbol (name ef) "1")
+           :else (list 'array ef)))
+       (instance? Type$CapturedType t) (type-form* env (erasure t) elem?)
+       (instance? Type$TypeVar t) (symbol (str (.getSimpleName (.tsym t))))
+       (instance? Type$WildcardType t)
+       (let [w ^Type$WildcardType t]
+         (condp = (.kind w)
+           BoundKind/UNBOUND '?
+           BoundKind/EXTENDS (list '? 'extends (type-form* env (.type w) false))
+           BoundKind/SUPER (list '? 'super (type-form* env (.type w) false))))
+       (jt/components t) (apply list '& (map #(type-form* env % false) (jt/components t)))
+       (instance? Type$ClassType t)
+       (let [ct ^Type$ClassType t
+             c (.tsym ct)
+             args (seq (.getTypeArguments ct))
+             outer (.getEnclosingType ct)
+             base (class-ref env c)
+             self (if args (apply list base (map #(type-form* env % false) args)) base)]
+         (if (and (instance? Type$ClassType outer) (seq (.allparams ^Type outer))
+                  (not (jt/static? c)) (not (jt/local-class? c))
+                  (not (and (identical? (get (:scope env) (str (.getSimpleName c))) c)
+                            (.isSameType jt/*types* outer (.type (.tsym outer))))))
+           (list '.. (type-form* env outer false)
+                 (annotate (if args
+                             (apply list (symbol (str (.getSimpleName c))) (map #(type-form* env % false) args))
+                             (symbol (str (.getSimpleName c))))
+                           anns))
+           self))
+       :else (do (note! :warn/odd-type) (class-ref env (.tsym (jt/object-type)))))
+     ;; the annotations of an inner type of a generic outer go on its element of (.. ...)
+     (when-not (and (instance? Type$ClassType t) (instance? Type$ClassType (.getEnclosingType ^Type t))
+                    (seq (.allparams ^Type (.getEnclosingType ^Type t)))
+                    (not (jt/static? (.tsym t))) (not (jt/local-class? (.tsym t)))
+                    (not (and (identical? (get (:scope env) (str (.getSimpleName (.tsym t)))) (.tsym t))
+                              (.isSameType jt/*types* (.getEnclosingType ^Type t) (.type (.tsym (.getEnclosingType ^Type t)))))))
+       anns))))
+
 (defn type-form
-  "The declaration form of type `t` (generic where it is)."
+  "The declaration form of type `t` (generic where it is), with its type annotations (§4.4)."
   [env ^Type t]
-  (let [tg (tag-name t)]
-    (cond
-      (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (jt/prim-sym t)
-      (instance? Type$ArrayType t)
-      (let [[el n] (array-dims t)
-            ef (type-form env el)]
-        (cond
-          (instance? CRef ef) (assoc ef :dims n)
-          (symbol? ef) (if (namespace ef)
-                         (list 'array ef)        ; already an array class symbol: cannot happen
-                         (symbol (name ef) (str n)))
-          :else (nth (iterate #(list 'array %) ef) n)))
-      (instance? Type$CapturedType t) (type-form env (erasure t))
-      (instance? Type$TypeVar t) (symbol (str (.getSimpleName (.tsym t))))
-      (instance? Type$WildcardType t)
-      (let [w ^Type$WildcardType t]
-        (condp = (.kind w)
-          BoundKind/UNBOUND '?
-          BoundKind/EXTENDS (list '? 'extends (type-form env (.type w)))
-          BoundKind/SUPER (list '? 'super (type-form env (.type w)))))
-      (jt/components t) (apply list '& (map #(type-form env %) (jt/components t)))
-      (instance? Type$ClassType t)
-      (let [ct ^Type$ClassType t
-            c (.tsym ct)
-            args (seq (.getTypeArguments ct))
-            outer (.getEnclosingType ct)
-            base (class-ref env c)
-            self (if args (apply list base (map #(type-form env %) args)) base)]
-        (if (and (instance? Type$ClassType outer) (seq (.allparams ^Type outer))
-                 (not (jt/static? c)) (not (jt/local-class? c))
-                 (not (and (identical? (get (:scope env) (str (.getSimpleName c))) c)
-                           (.isSameType jt/*types* outer (.type (.tsym outer))))))
-          (list '.. (type-form env outer)
-                (if args
-                  (apply list (symbol (str (.getSimpleName c))) (map #(type-form env %) args))
-                  (symbol (str (.getSimpleName c)))))
-          self))
-      :else (do (note! :warn/odd-type) (class-ref env (.tsym (jt/object-type)))))))
+  (type-form* env t true))
 
 (defn erased-form
   "The form of the erasure of `t`: a primitive symbol, a class or an array class."
   [env t]
   (type-form env (erasure t)))
+
+(defn type-annotated?
+  "Does type `t` carry type annotations anywhere?"
+  [^Type t]
+  (boolean
+   (and t
+        (or (seq (.getAnnotationMirrors t))
+            (and (instance? Type$ArrayType t) (type-annotated? (.elemtype ^Type$ArrayType t)))
+            (and (instance? Type$WildcardType t) (type-annotated? (.type ^Type$WildcardType t)))
+            (and (instance? Type$ClassType t)
+                 (or (some type-annotated? (.getTypeArguments ^Type t))
+                     (let [o (.getEnclosingType ^Type t)] (and (instance? Type$ClassType o) (type-annotated? o)))))))))
+
+(defn code-type-form
+  "The form of type `t` in code (cast, instance?, new, catch): erased, or with its type
+  annotations where it has some (the compiler erases it)."
+  [env ^Type t]
+  (if (type-annotated? t) (type-form env t) (erased-form env t)))
 
 (defn- generic? [^Type t]
   (cond
@@ -153,10 +194,20 @@
     :else false))
 
 (defn decl-tag
-  "The tag item for a declaration of type `t`, or nil for Object when `omit-object?`."
+  "The tag item for a declaration of type `t`, or nil for Object when `omit-object?` (unless
+  annotated)."
   [env ^Type t omit-object?]
-  (when-not (and omit-object? (jt/object? t) (not (instance? Type$TypeVar t)))
-    [:tag (type-form env t)]))
+  (let [f (type-form env t)]
+    (when-not (and omit-object? (jt/object? t) (not (instance? Type$TypeVar t)) (empty? (f/items f)))
+      [:tag f])))
+
+(defn- mods-type-anns
+  "*skip-anns* for a declaration with modifiers `mods`."
+  [^JCTree$JCModifiers mods]
+  (set (for [^JCTree$JCAnnotation a (some-> mods .annotations)
+             :let [c (.attribute a)]
+             :when c]
+         (jt/binary-name (.tsym (.type ^Attribute$Compound c))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Annotations (§4.4)
@@ -188,16 +239,33 @@
             (into {} (for [p vals] [(keyword (str (.name ^Symbol (.fst p)))) (attr-value env (.snd p) nil)]))))
     :else (do (note! :warn/annotation-value) nil)))
 
+(declare compound-item)
+
 (defn annotation-items
   "Metadata items for the annotations `anns` (JCAnnotation trees), leaving out SOURCE ones."
   [env anns]
-  (for [^JCTree$JCAnnotation a anns
-        :let [c ^Attribute$Compound (.attribute a)]
-        :when (and c (not= "SOURCE" (str (retention c))))]
+  (keep (fn [^JCTree$JCAnnotation a] (some->> (.attribute a) (compound-item env))) anns))
+
+(defn type-ann-items
+  "Metadata items for the type annotations of type `t`; at a declaration's element type
+  (`elem?`) without those of the declaration's modifiers (*skip-anns*)."
+  [env ^Type t elem?]
+  (when t
+    (keep (fn [^Attribute$Compound c]
+            (when-not (and elem? (contains? *skip-anns* (jt/binary-name (.tsym (.type c)))))
+              (compound-item env c)))
+          (.getAnnotationMirrors t))))
+
+(defn- compound-item
+  "The metadata item for annotation `c`, nil for a SOURCE one."
+  [env ^Attribute$Compound c]
+  (when (not= "SOURCE" (str (retention c)))
     (let [vals (seq (.values c))
           v (cond
               (empty? vals) true
-              (and (= 1 (count vals)) (= "value" (str (.name ^Symbol (.fst (first vals))))))
+              ;; @A(true) is not the marker ^{A true}
+              (and (= 1 (count vals)) (= "value" (str (.name ^Symbol (.fst (first vals)))))
+                   (not (true? (attr-value env (.snd (first vals)) nil))))
               (attr-value env (.snd (first vals)) nil)
               :else (into {} (for [p vals]
                                [(keyword (str (.name ^Symbol (.fst p)))) (attr-value env (.snd p) nil)])))]
@@ -334,9 +402,13 @@
                form
                (let [v (unbox-call env form t)]
                  (if (and explicit? (not (same? u target))) (list (widen-op (tag-name target)) v) v)))
-             ;; from a non-wrapper type: cast to the wrapper of the target
-             (let [w (jt/boxed target)]
-               (unbox-call env (cast-form env form w) w)))))
+             ;; from a non-wrapper type (a generic result): cast to javac's type when it is
+             ;; a wrapper (TransTypes), else to the wrapper of the target
+             (let [jw (some-> (:jt x) erasure)
+                   w (if (and jw (jt/unboxed jw)) jw (jt/boxed target))
+                   v (unbox-call env (cast-form env form w) w)
+                   u (jt/unboxed w)]
+               (if (and explicit? (not (same? u target))) (list (widen-op (tag-name target)) v) v)))))
        :else ;; reference target
        (cond
          (= t :lit-int) (box-call env form (int-type))
@@ -438,7 +510,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Names: locals, fields, enclosing instances
 
-(declare poly-call? assigned-syms local? simplify ex ex-stmt stmts stmt class-form anon-form lambda-form method-ref-form switch-form
+(declare with-type-args capture-values captured-mutables poly-call? assigned-syms local? simplify ex ex-stmt stmts stmt class-form anon-form lambda-form method-ref-form switch-form
          call-args)
 
 (defn- enclosing-classes [env] (:classes env))
@@ -482,6 +554,8 @@
         classes (enclosing-classes env)
         idx (first (keep-indexed (fn [i c] (when (identical? c owner) i)) classes))]
     (and idx
+         ;; a field inherited by a closer class is that class's member (note 7)
+         (identical? (qualifying-class env sym) owner)
          (not (#{"nil" "true" "false"} nm))
          (not (contains? (:names env) nm))
          ;; no closer class declares a field of that name
@@ -537,6 +611,11 @@
   (let [t (.skipTypeVars jt/*types* (.type q) false)]
     (erasure t)))
 
+(defn- compound-qual?
+  "Is qualifier `q`'s type (through type variables) an intersection?"
+  [^JCTree$JCExpression q]
+  (.isCompound (.skipTypeVars jt/*types* (.type q) false)))
+
 (defn- class-literal [env ^Type t]
   (note! :form/class-literal)
   (if (or (prim? t) (jt/void? t))
@@ -571,7 +650,9 @@
            (var-type sym)))
       :else
       (let [qr (ex env q)
-            qf (coerce env qr (qual-type q))]
+            qf (if (compound-qual? q)
+                 (coerce env (coerce-r env qr (qual-type q)) (erasure (.type (.owner sym))))
+                 (coerce env qr (qual-type q)))]
         (note! :form/instance-field)
         (r (list (symbol (str ".-" nm)) qf) (var-type sym))))))
 
@@ -657,7 +738,7 @@
     (if (and varargs-elem (not loose?))
       (let [nfixed (dec (count (erased-params m)))
             [fixed rest] (split-at nfixed rs)
-            arr-t (last (erased-params m))]
+            arr-t (.makeArrayType jt/*types* (erasure varargs-elem))]
         (note! :form/varargs-packed)
         [(concat (map :f fixed) [(list 'new (erased-form env arr-t) (mapv :f rest))])
          (concat (map :t fixed) [arr-t])
@@ -667,6 +748,20 @@
 
 (defn- only-method-named? [env ^Symbol$MethodSymbol m ^Type site ctor?]
   (= 1 (count (methods-named env site (str (.name m)) ctor?))))
+
+(defn- erased-varargs-elem?
+  "Is the element type of javac's variable arguments array, `varargs-elem` (the inferred one),
+  erased the element type of m's erased last parameter, as the compiler makes the array?"
+  [^Symbol$MethodSymbol m varargs-elem]
+  (.isSameType jt/*types* (erasure varargs-elem)
+               (.elemtype ^Type$ArrayType (last (erased-params m)))))
+
+(defn- loose-varargs?
+  "Are the variable arguments of a call of `m` (javac's array element `ve`, nil when the call
+  is not of variable arity) written unpacked? When m is the only method of its name and the
+  compiler makes javac's array (SPEC note 6 of COMPILER-NOTES)."
+  [env m site ctor? ve]
+  (and ve (only-method-named? env m site ctor?) (erased-varargs-elem? m ve)))
 
 (defn- ret-type ^Type [^Symbol$MethodSymbol m]
   (.getReturnType (.erasure m jt/*types*)))
@@ -682,7 +777,7 @@
       (= nm "<init>")
       (let [callee (str (TreeInfo/name meth))
             site (.type (.owner m))
-            loose? (and ve (only-method-named? env m site true))
+            loose? (loose-varargs? env m site true ve)
             qual (when (instance? JCTree$JCFieldAccess meth) (.selected ^JCTree$JCFieldAccess meth))
             [afs _ nodes] (call-args env m (.type meth) args ve loose?)
             qf (when qual (:f (ex env qual)))
@@ -714,10 +809,15 @@
                   (type-expr? q) [nil (qual-type q) (.tsym (qual-type q))]
                   static? (let [qf (:f (ex env q))]
                             [(when-not (pure? qf) qf) (qual-type q) (.tsym (qual-type q))])
+                  (compound-qual? q)
+                  ;; an intersection-typed qualifier is cast to the member's class (TransTypes)
+                  (let [qt (erasure (.type (.owner m)))
+                        qr (coerce-r env (ex env q) (qual-type q))]
+                    [(coerce env qr qt) qt (.tsym qt)])
                   :else (let [qr (ex env q)
                               qt (qual-type q)]
                           [(coerce env qr qt) qt (.tsym qt)]))))
-            loose? (and ve (only-method-named? env m site false))
+            loose? (loose-varargs? env m site false ve)
             [afs _ nodes] (call-args env m (.type meth) args ve loose?)
             poly? (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m))
             pin? (or poly?
@@ -735,7 +835,7 @@
             rt (if poly? (erasure (.type t)) rt)]
         (when poly? (note! :form/signature-polymorphic))
         (note! (if static? :form/static-call :form/instance-call))
-        (r (cond
+        (update (r (cond
              static?
              (let [head (cond-> (member (class-ref env head-class) nm)
                           pin? (m+ (param-tags env m)))
@@ -752,16 +852,29 @@
              (apply list (m+ (member (class-ref env head-class) (str "." nm)) (param-tags env m))
                     recv afs)
              :else (apply list (symbol (str "." nm)) recv afs))
-           rt)))))
+           rt)
+                :f #(with-type-args env % (.typeargs t)))))))
+
+(defn- with-type-args
+  "Call `form` with the type annotations of its explicit type arguments `targs` (trees) on the
+  method symbol: ^{:type-args [...]} (§8.4)."
+  [env form targs]
+  (if (and (seq? form) (some #(type-annotated? (.type ^JCTree %)) targs))
+    (let [ta [:type-args (mapv #(type-form env (.type ^JCTree %)) targs)]]
+      (note! :form/type-args)
+      (if (= 'do (first form))
+        (apply list (concat (butlast form) [(with-type-args env (last form) targs)]))
+        (apply list (m+ (first form) ta) (rest form))))
+    form))
 
 (defn- new-class [env ^JCTree$JCNewClass t]
   (if (.def t)
-    (anon-form env t)
+    (let [x (anon-form env t)] (assoc x :f (capture-values env (.def t) (:f x))))
     (let [c ^Symbol$ClassSymbol (.tsym (.type t))
           m ^Symbol$MethodSymbol (.constructor t)
           ve (.varargsElement t)
           site (.type c)
-          loose? (and ve (only-method-named? env m site true))
+          loose? (loose-varargs? env m site true ve)
           [afs _ nodes] (call-args env m (.constructorType t) (.args t) ve loose?)
           encl (when (.encl t) (coerce env (ex env (.encl t)) (erasure (.type (.encl t)))))
           pin? (pin-needed? :ctor (current-class env) c m nodes (and ve loose?))
@@ -770,6 +883,9 @@
       (r (cond
            (.encl t) (do (note! :form/qualified-new)
                          (apply list (cond-> '.new pin? (m+ (param-tags env m))) encl cr afs))
+           ;; a class type with type annotations: (new ^{A true} (C ^{B true} T) args)
+           (type-annotated? (.type (.clazz t)))
+           (apply list 'new (cond-> (type-form env (.type (.clazz t))) pin? (m+ (param-tags env m))) afs)
            pin? (apply list (m+ (member cr "new") (param-tags env m)) afs)
            :else (apply list (if (symbol? cr) (symbol (str cr ".")) (member cr ".")) afs))
          (erasure (.type t))))))
@@ -785,8 +901,8 @@
                         (coerce env (ex env e) ety)))
                     (.elems a)))]
       (r (if (.elems t)
-           (list 'new (erased-form env ty) (init t elem))
-           (apply list 'new (erased-form env ty)
+           (list 'new (code-type-form env (.type t)) (init t elem))
+           (apply list 'new (code-type-form env (.type t))
                   (map #(coerce env (ex env %) (int-type)) (.dims t))))
          ty))))
 
@@ -833,13 +949,27 @@
     (vec (.getParameterTypes (.type ^Symbol op)))))
 
 (defn- flatten-concat
-  "Operands of a string concatenation chain."
-  [^JCTree t]
-  (let [t (TreeInfo/skipParens t)]
-    (if (and (instance? JCTree$JCBinary t) (= "PLUS" (str (.getTag t)))
-             (jt/string-type? (.type t)))
-      (concat (flatten-concat (.lhs ^JCTree$JCBinary t)) (flatten-concat (.rhs ^JCTree$JCBinary t)))
-      [t])))
+  "Operands of a string concatenation chain. A constant operand that is itself a
+  concatenation stays one operand (javac's StringConcat takes it as one constant)."
+  ([^JCTree t] (flatten-concat t true))
+  ([^JCTree t top?]
+   (let [t (TreeInfo/skipParens t)]
+     (if (and (instance? JCTree$JCBinary t) (= "PLUS" (str (.getTag t)))
+              (jt/string-type? (.type t))
+              (or top? (nil? (.constValue (.type t)))))
+       (concat (flatten-concat (.lhs ^JCTree$JCBinary t) false) (flatten-concat (.rhs ^JCTree$JCBinary t) false))
+       [t]))))
+
+(defn- concat-operand
+  "The form of string concatenation operand tree `o` converted to result `x`. Operands are
+  converted by their own type (an int literal needs no conversion since its digits are the
+  same); a generic one of type String is cast to String, since javac's operator for it takes a
+  String (TransTypes)."
+  [env ^JCTree o x]
+  (let [t (.type o)]
+    (if (and (jt/string-type? t) (instance? Type (:t x)) (not (jt/string-type? (:t x))))
+      (coerce env x (erasure t))
+      (:f x))))
 
 (defn- float-compare-operand [env x]
   (if (and (#{"INT" "LONG" "SHORT" "BYTE" "CHAR"} (some-> (atype x) tag-name)))
@@ -910,10 +1040,7 @@
     (if (and (= tg "PLUS") (jt/string-type? result))
       (do (note! :form/java-str)
           (r (apply list (h env 'java-str)
-                    (map (fn [o] (let [x (ex env o)]
-                                   ;; operands are converted by their own type; an int literal
-                                   ;; needs no conversion since its digits are the same
-                                   (:f x)))
+                    (map (fn [o] (concat-operand env o (ex env o)))
                          (flatten-concat t)))
              result))
       (r (binary-op env tg (operator-params t) result (ex env (.lhs t)) (ex env (.rhs t)))
@@ -961,6 +1088,30 @@
                 (instance? com.sun.tools.javac.util.List v) (filter #(instance? JCTree %) v)
                 :else [])]
     c))
+
+(declare mutable?)
+
+(defn- captured-mutables
+  "The forms of the ^:mutable locals of env that class or lambda tree `t` refers to (captures)."
+  [env ^JCTree t]
+  (distinct
+   (for [x (tree-seq #(instance? JCTree %) tree-children t)
+         :when (instance? JCTree$JCIdent x)
+         :let [sym (.sym ^JCTree$JCIdent x)]
+         :when (and sym (= "VAR" (jt/kind sym)) (local? sym) (mutable? sym))
+         :let [f (get (:locals env) sym)]
+         :when f]
+     f)))
+
+(defn- capture-values
+  "Java captures only effectively final locals, so a captured local that the forms make
+  ^:mutable (a blank final, assigned once before) is rebound immutably around the capturing
+  `form`: (let [x x] form)."
+  [env ^JCTree t form]
+  (if-let [cs (seq (captured-mutables env t))]
+    (do (note! :form/capture-rebind)
+        (list (h env 'let) (vec (mapcat (fn [c] [(with-meta c nil) c]) cs)) form))
+    form))
 
 (defn- all-trees [^JCTree t]
   (tree-seq #(and (instance? JCTree %) (not (instance? JCTree$JCClassDecl %))) tree-children t))
@@ -1072,6 +1223,21 @@
       (or (same? from to-prim) (jt/widens? from to-prim)) f
       :else (list (narrow-op (tag-name to-prim)) f))))
 
+(defn- literal-branches
+  "A conditional form of integer literal branches with the branches as constants of primitive
+  type `pt` (long, float or double): javac types the constants of a compound assignment's
+  conditional operand by the operator (Gen.visitConditional)."
+  [form ^Type pt]
+  (cond
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ c a b] form] (list 'if c (literal-branches a pt) (literal-branches b pt)))
+    (integer? form) (case (tag-name pt)
+                      "LONG" (list 'long form)
+                      "DOUBLE" (double form)
+                      "FLOAT" (list 'float (double form))
+                      form)
+    :else form))
+
 (defn- assign-op [env ^JCTree$JCAssignOp t]
   (let [tg (str (.getTag t))
         base (str/replace tg "_ASG" "")
@@ -1080,9 +1246,14 @@
         [pa pb] (operator-params t)
         result (.getReturnType (.type ^Symbol (.operator t)))
         rhs (ex env (.rhs t))
+        rhs (if (and (instance? JCTree$JCConditional (TreeInfo/skipParens (.rhs t)))
+                     (#{"LONG" "FLOAT" "DOUBLE"} (tag-name pb))
+                     (= :lit-int (:t rhs)))
+              (assoc rhs :f (literal-branches (:f rhs) pb) :t pb)
+              rhs)
         cur {:f (:get p) :t (:t p)}
         val (if (and (= base "PLUS") (jt/string-type? lt))
-              (list (h env 'java-str) (:get p) (:f rhs))
+              (list (h env 'java-str) (:get p) (concat-operand env (.rhs t) rhs))
               (narrow-to env (binary-op env base [pa pb] (erasure result) cur rhs) (erasure result) lt))]
     (note! (keyword "op" tg))
     (r (with-binds (:binds p) ((:set p) val)) lt)))
@@ -1171,6 +1342,7 @@
       ;; asks asSuper, which arrays answer only for Object and the array interfaces)
       (and (subtype? from te) (not (and (instance? Type$ArrayType te) (not (same? from te)))))
       (if (same? from te) x (r (hint env (:f x) te) te))
+      (type-annotated? target) (r (list (h env 'cast) (code-type-form env target) (:f x)) te)
       :else (r (cast-form env (:f x) te) te))))
 
 (defn- pattern-form
@@ -1186,9 +1358,10 @@
           implicit? (or (nil? (.vartype v)) (.declaredUsingVar v))]
       (note! :form/binding-pattern)
       (swap! penv (fn [e] (-> e (assoc-in [:locals sym] s) (update :names conj nm))))
-      (if implicit?
-        s
-        (tag s (type-form env (.type sym)))))
+      (let [s (if (mutable? sym) (m+ s :mutable) s)]
+        (if implicit?
+          s
+          (tag s (type-form env (.type sym))))))
     (instance? JCTree$JCRecordPattern p)
     (let [rp ^JCTree$JCRecordPattern p]
       (note! :form/record-pattern)
@@ -1298,7 +1471,7 @@
     (r (pattern-bool env t) (bool-type))
     (let [x (ex env (.expr t))]
       (note! :form/instance?)
-      (r (list (h env 'instance?) (erased-form env (.type (.pattern t))) (:f x)) (bool-type)))))
+      (r (list (h env 'instance?) (code-type-form env (.type (.pattern t))) (:f x)) (bool-type)))))
 
 (defn- conditional [env ^JCTree$JCConditional t]
   (let [target (erasure (.type t))
@@ -1324,8 +1497,15 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
 
+(declare ex*)
+
 (defn ex
-  "Convert expression tree `t` to a result {:f form :t type}."
+  "Convert expression tree `t` to a result {:f form :t type}; :jt is javac's type of `t`."
+  [env ^JCTree t]
+  (let [x (ex* env t)]
+    (if (contains? x :jt) x (assoc x :jt (.type t)))))
+
+(defn- ex*
   [env ^JCTree t]
   (condp instance? t
     JCTree$JCParens (ex env (.expr ^JCTree$JCParens t))
@@ -1356,7 +1536,7 @@
     JCTree$JCTypeCast (type-cast env t)
     JCTree$JCInstanceOf (instance-of env t)
     JCTree$JCConditional (conditional env t)
-    JCTree$JCLambda (lambda-form env t)
+    JCTree$JCLambda (let [x (lambda-form env t)] (assoc x :f (capture-values env t (:f x))))
     JCTree$JCMemberReference (method-ref-form env t)
     JCTree$JCSwitchExpression (switch-form env t nil)
     (throw (ex-info (str "unsupported expression " (.getKind t)) {:kind (kind-of t)}))))
@@ -1589,6 +1769,11 @@
       (assoc-in [:locals sym] s)
       (update :names conj (name s))))
 
+(def ^:dynamic *local-names*
+  "The names of the local variables and parameters of the compilation unit being converted:
+  heads that simplify writes are qualified when a local could shadow them."
+  #{})
+
 (def ^:dynamic *assigned*
   "The local variables assigned somewhere in the class being converted (set by class-form)."
   #{})
@@ -1599,15 +1784,18 @@
 (defn- local-tag
   "The tag for a local of declared type `decl` whose initializer has Arbace type `init-t`."
   [env ^JCTree$JCVariableDecl d init-t]
-  (let [decl (.type (.sym d))
+  (binding [*skip-anns* (mods-type-anns (.mods d))]
+   (let [decl (.type (.sym d))
         var? (or (nil? (.vartype d)) (.declaredUsingVar d))]
     (cond
+      ;; a type with type annotations of its own
+      (and (not var?) (seq (f/items (type-form env decl)))) (type-form env decl)
       (or (= init-t :null) (= init-t :lit-int) (nil? init-t)) (if (and (= init-t :lit-int) (= "LONG" (tag-name decl))) nil
                                                                   (type-form env (if var? (erasure decl) decl)))
       (not (same? init-t decl)) (type-form env (if var? (erasure decl) decl))
       (and (not var?) (generic? decl) (not (instance? Type$TypeVar decl))) (type-form env decl)
       (and (not var?) (instance? Type$TypeVar decl)) (type-form env decl)
-      :else nil)))
+      :else nil))))
 
 (defn- binding-for
   "[sym-form init-form env'] for local declaration `d` (with `init` result or nil). In a
@@ -1623,7 +1811,15 @@
         init-t (if init (if (identical? init-f (:f init)) (:t init) decl) nil)
         tg (or (local-tag env d init-t)
                (when (and loop? (prim? decl) (not (#{"LONG" "DOUBLE" "BOOLEAN"} (tag-name decl))))
-                 (jt/prim-sym decl)))
+                 (jt/prim-sym decl))
+               ;; the compiler unifies the branches of a conditional by their class chain
+               ;; only: javac's type (a common interface) is written
+               ;; (and an int switch of literals would be a long)
+               (when (and init (not (jt/object? decl))
+                          (not (#{"LONG" "DOUBLE" "BOOLEAN"} (tag-name decl)))
+                          (let [it (TreeInfo/skipParens (.init d))]
+                            (or (instance? JCTree$JCConditional it) (instance? JCTree$JCSwitchExpression it))))
+                 (if (prim? decl) (jt/prim-sym decl) (type-form env (erasure decl)))))
         sf (apply m+ s (concat (when (and mut? (not const?)) [:mutable])
                                (when const? [:const])
                                (when (jt/has-flag? sym Flags/FINAL) (when-not const? nil))
@@ -1729,11 +1925,17 @@
           ;; local classes: letclass over the rest of the block
           (instance? JCTree$JCClassDecl s)
           (let [[bind env'] (local-class-binding env s)
-                body (stmts env' ctx more)]
+                body (stmts env' ctx more)
+                cs (captured-mutables env s)]
             (note! :form/letclass)
-            (if (and (= 1 (count body)) (seq? (first body)) (= 'letclass (first (first body))))
+            (cond
+              (seq cs)
+              (let [f (apply list (h env 'letclass) [bind] (if (empty? body) [nil] body))]
+                [(capture-values env s f)])
+              (and (= 1 (count body)) (seq? (first body)) (= 'letclass (first (first body))))
               (let [[_ bv & bbody] (first body)]
                 [(apply list (h env 'letclass) (into [bind] bv) bbody)])
+              :else
               [(apply list (h env 'letclass) [bind] (if (empty? body) [nil] body))]))
           (empty? more) (stmt env ctx s)
           ;; if whose pattern variables are in scope in the rest of the block
@@ -2037,8 +2239,10 @@
         vt (.type sym)
         sf (apply m+ s (concat (when (mutable? sym) [:mutable])
                                (annotation-items env (.annotations (.mods d)))
-                               (when-not (jt/object? vt)
-                                 [[:tag (type-form env (if (.declaredUsingVar d) (erasure vt) vt))]])))
+                               (let [tf (binding [*skip-anns* (mods-type-anns (.mods d))]
+                                          (type-form env (if (.declaredUsingVar d) (erasure vt) vt)))]
+                                 (when-not (and (jt/object? vt) (empty? (f/items tf)))
+                                   [[:tag tf]]))))
         coll (coerce env (ex env (.expr t)) (erasure (.type (.expr t))))
         env' (push-loop (add-local env sym s) {:tree t :kind :for-each})
         body (stmts env' {:fall [] :jumps {[:continue t] []} :vpos nil} [(.body t)])]
@@ -2274,8 +2478,8 @@
         s (local-sym env sym)
         vt (.vartype p)
         types (if (instance? com.sun.tools.javac.tree.JCTree$JCTypeUnion vt)
-                (mapv #(erased-form env (.type ^JCTree %)) (.alternatives ^com.sun.tools.javac.tree.JCTree$JCTypeUnion vt))
-                (erased-form env (.type sym)))
+                (mapv #(code-type-form env (.type ^JCTree %)) (.alternatives ^com.sun.tools.javac.tree.JCTree$JCTypeUnion vt))
+                (binding [*skip-anns* (mods-type-anns (.mods p))] (code-type-form env (.type sym))))
         sf (apply m+ s (concat (when (mutable? sym) [:mutable]) (annotation-items env (.annotations (.mods p)))))
         env' (add-local env sym s)]
     (note! (if (vector? types) :form/multi-catch :form/catch))
@@ -2367,7 +2571,8 @@
     (if (= kind "ARRAY_CTOR")
       (let [n (gensym! env "n")]
         (note! :form/array-ctor-ref)
-        (r (list (h env 'lambda) fi (tag [(tag n 'int)] (erased-form env qt)) (list 'new (erased-form env qt) n))
+        (r (list (h env 'lambda) fi (m+ (tag [(tag n 'int)] (erased-form env qt)) :method-ref)
+                 (list 'new (erased-form env qt) n))
            (erasure target)))
       (let [ctor? (#{"IMPLICIT_INNER" "TOPLEVEL"} kind)
             owner (if (instance? Type$ArrayType qt) qt qt)
@@ -2395,6 +2600,12 @@
                        "UNBOUND" (pin-needed? :instance (current-class env) qt m (rest stubs) va)
                        true)))
             msym (if pin? (m+ msym (param-tags env m)) msym)
+            ;; type annotations of the qualifying type and of explicit type arguments (§4.4)
+            qtype (when (#{"STATIC" "UNBOUND" "IMPLICIT_INNER" "TOPLEVEL"} kind) (.type (.expr t)))
+            msym (cond-> msym
+                   (type-annotated? qtype) (m+ [:qualifier (type-form env qtype)])
+                   (some #(type-annotated? (.type ^JCTree %)) (.typeargs t))
+                   (m+ [:type-args (mapv #(type-form env (.type ^JCTree %)) (.typeargs t))]))
             recv (case kind
                    "BOUND" [(coerce env (ex env (.expr t)) qt)]
                    "SUPER" [(:f (ex env (.expr t)))]
@@ -2474,6 +2685,8 @@
   (when (instance? JCTree$JCExpressionStatement s)
     (let [e (.expr ^JCTree$JCExpressionStatement s)]
       (and (instance? JCTree$JCMethodInvocation e)
+           ;; o.super() is never implicit
+           (instance? JCTree$JCIdent (.meth ^JCTree$JCMethodInvocation e))
            (= "super" (str (TreeInfo/name (.meth ^JCTree$JCMethodInvocation e))))
            (empty? (.args ^JCTree$JCMethodInvocation e))
            (let [p (TreeInfo/getStartPos s)]
@@ -2493,7 +2706,9 @@
                     sf (apply m+ s (concat (when (jt/has-flag? sym Flags/FINAL) [:final])
                                            (when (and (mutable? sym) (not (jt/has-flag? sym Flags/FINAL))) [:mutable])
                                            (annotation-items env (.annotations (.mods d)))
-                                           (when-let [tg (decl-tag env pt omit-object?)] [tg])))
+                                           (when-let [tg (binding [*skip-anns* (mods-type-anns (.mods d))]
+                                                           (decl-tag env pt omit-object?))]
+                                             [tg])))
                     pv (if (and varargs? (= i (dec n))) (conj pv '& sf) (conj pv sf))]
                 (when (and (mutable? sym) (not (jt/has-flag? sym Flags/FINAL))) (note! :form/mutable-param))
                 [pv (add-local env sym s)]))
@@ -2526,14 +2741,18 @@
                'this)
         env (if (= recv 'this) env (assoc-in env [:anon-this c] recv))
         [pv env'] (if compact? [[] env] (param-forms env md omit?))
-        pv (if static? pv (into [recv] pv))
+        ;; a receiver parameter's annotations go on the receiver symbol (§4.6)
+        recv-sym (if-let [rp (.recvparam md)]
+                   (apply m+ recv (annotation-items env (.annotations (.mods rp))))
+                   recv)
+        pv (if static? pv (into [recv-sym] pv))
         rt (.getReturnType (.type m))
         mods (concat (modifier-items env (.mods md)) [(deprecated-item m (.mods md))]
                      (when compact? [:compact]))
         pv (if ctor?
              (apply m+ pv mods)
              (if (or (jt/void? rt) (not (and omit? (jt/object? rt))) (instance? Type$TypeVar rt))
-               (m+ pv [:tag (type-form env rt)])
+               (m+ pv [:tag (binding [*skip-anns* (mods-type-anns (.mods md))] (type-form env rt))])
                pv))
         opts (concat (when-let [tp (type-params env (.typarams md))] [:type-params tp])
                      (when (seq (.thrown md))
@@ -2565,7 +2784,7 @@
         env' (assoc env :this (when-not static? 'this) :ret nil :loops ())
         nm (apply m+ (member-name (.owner sym) (str (.name d)))
                   (concat (modifier-items env (.mods d)) [(deprecated-item sym (.mods d))]
-                          [(decl-tag env (.type sym) true)]))]
+                          [(binding [*skip-anns* (mods-type-anns (.mods d))] (decl-tag env (.type sym) true))]))]
     (note! :form/field)
     (if (.init d)
       (list 'field nm (coerce env' (ex env' (.init d)) (erasure (.type sym))))
@@ -2595,9 +2814,10 @@
                                                      [(deprecated-item sym (.mods d))]))
         nc ^JCTree$JCNewClass (.init d)
         m (if (.def nc) (anon-super-ctor (.def nc) (.constructor nc)) (.constructor nc))
-        [afs _ nodes] (call-args env m (.constructorType nc) (.args nc) (.varargsElement nc)
-                                 (and (.varargsElement nc) true))
-        pin? (pin-needed? :ctor (.owner sym) (.owner sym) m nodes (some? (.varargsElement nc)))]
+        ve (.varargsElement nc)
+        loose? (and ve (erased-varargs-elem? m ve))
+        [afs _ nodes] (call-args env m (.constructorType nc) (.args nc) ve loose?)
+        pin? (pin-needed? :ctor (.owner sym) (.owner sym) m nodes loose?)]
     (note! :form/enum-constant)
     (if (or (seq (.args nc)) (.def nc) pin?)
       (apply list nm (cond-> (vec afs) pin? (m+ (param-tags env m))) (when (.def nc)
@@ -2662,7 +2882,14 @@
                        (let [d ^JCTree$JCVariableDecl d]
                          (apply m+ (symbol (str (.name d)))
                                 (concat (annotation-items env (.annotations (.mods d)))
-                                        [(decl-tag env (.type (.sym d)) true)]))))))
+                                        [(binding [*skip-anns* (mods-type-anns (.mods d))]
+                                           (decl-tag env (.type (.sym d)) true))]))))))
+        ;; a variable arity record: & before the last component
+        comps (if (and (seq comps)
+                       (some-> (last (seq (.getRecordComponents ^Symbol$ClassSymbol (.sym cd))))
+                               (.isVarargs)))
+                (conj (pop comps) '& (peek comps))
+                comps)
         opts (concat
               (when (and ext (not (#{"INTERFACE" "ANNOTATION_TYPE"} k)))
                 [:extends (type-form env (.type ^JCTree ext))])
@@ -2705,14 +2932,21 @@
                   (Type$MethodType. (.tail (.getParameterTypes ct)) (.getReturnType ct)
                                     (.getThrownTypes ct) (.tsym ct))
                   ct))
-        [afs _ nodes] (call-args env m ctype (.args t) (.varargsElement t) true)
+        ve (.varargsElement t)
+        loose? (and ve (erased-varargs-elem? m ve))
+        [afs _ nodes] (call-args env m ctype (.args t) ve loose?)
         encl (when (.encl t) (coerce env (ex env (.encl t)) (erasure (.type (.encl t)))))
         pin? (and (not ifaces)
-                  (pin-needed? :ctor c (.tsym (erasure super)) m nodes (some? (.varargsElement t))))
+                  (pin-needed? :ctor c (.tsym (erasure super)) m nodes loose?))
         inner (class-env (assoc env :this nil) c)]
     (note! :form/anon)
     (when encl (note! :form/anon-outer))
-    (r (apply list (h env 'anon) (type-form env super) (cond-> (vec afs) pin? (m+ (param-tags env m)))
+    (r (apply list (h env 'anon)
+              ;; Java's diamond: javac gives the constructor of an anonymous class of an
+              ;; interface no Signature then (§4.8)
+              (cond-> (type-form env super)
+                (and ifaces (TreeInfo/isDiamond t)) (m+ (do (note! :form/anon-diamond) :diamond)))
+              (cond-> (vec afs) pin? (m+ (param-tags env m)))
               (concat (when encl [:outer encl]) (class-body inner cd)))
        (erasure (.type t)))))
 
@@ -2770,7 +3004,12 @@
   [^JCTree$JCCompilationUnit cu opts]
   (count-kinds! cu)
   (binding [*text* (str (.getCharContent (.getSourceFile cu) true))
-            *assigned* (into #{} (mapcat assigned-syms) (.getTypeDecls cu))]
+            *assigned* (into #{} (mapcat assigned-syms) (.getTypeDecls cu))
+            *local-names* (into #{} (for [d (.getTypeDecls cu)
+                                          x (tree-seq #(instance? JCTree %) tree-children d)
+                                          :when (and (instance? JCTree$JCVariableDecl x)
+                                                     (some-> (.sym ^JCTree$JCVariableDecl x) local?))]
+                                      (str (.name ^JCTree$JCVariableDecl x))))]
     (let [env (base-env opts)
           pkg (some-> (.getPackage cu) .packge)
           pkg-name (if pkg (jt/package-name pkg) "")
@@ -2829,16 +3068,25 @@
 
 (defn- if-head? [x s] (and (seq? x) (= s (first x))))
 
+(defn- sh [s]
+  (if (contains? *local-names* (name s))
+    (symbol (if (new-heads (name s)) "arbace.core" "clojure.core") (name s))
+    s))
+
 (defn simplify [x]
   (cond
     (and (seq? x) (seq x))
     (let [y (keep-meta x (apply list (map simplify x)))
           y (if-let [i (body-start y)]
               (let [[pre body] (split-at i y)
+                    ;; a try's catch and finally clauses follow its body
+                    [body clauses] (if (if-head? y 'try)
+                                     (split-with #(not (or (if-head? % 'catch) (if-head? % 'finally))) body)
+                                     [body nil])
                     body (mapcat (fn [b] (if (and (if-head? b 'do) (not (meta b))) (rest b) [b])) body)
                     ;; nils that are not the value
                     body (concat (remove nil? (butlast body)) (when (seq body) [(last body)]))]
-                (keep-meta y (apply list (concat pre body))))
+                (keep-meta y (apply list (concat pre body clauses))))
               y)
           splice (fn [b] (if (and (if-head? b 'do) (not (meta b))) (rest b) [b]))]
       (cond
@@ -2846,30 +3094,30 @@
         (let [[_ c a b] y]
           (cond
             (and (nil? b) (not (if-head? a 'if)))
-            (keep-meta y (apply list (if (and (seq? c) (= 'not (first c))) 'when-not 'when)
+            (keep-meta y (apply list (sh (if (and (seq? c) (= 'not (first c))) 'when-not 'when))
                                 (if (and (seq? c) (= 'not (first c))) (second c) c) (splice a)))
             (nil? a)
             (if (and (seq? c) (= 'nil? (first c)) (= 2 (count c)))
-              (keep-meta y (apply list 'when (list 'some? (second c)) (splice b)))
-              (keep-meta y (apply list 'when-not c (splice b))))
+              (keep-meta y (apply list (sh 'when) (list (sh 'some?) (second c)) (splice b)))
+              (keep-meta y (apply list (sh 'when-not) c (splice b))))
             (or (and (if-head? b 'if) (= 4 (count b))) (if-head? b 'cond)
                 (and (if-head? b 'when) (= 3 (count b))))
             (let [tail (cond
                          (if-head? b 'cond) (rest b)
                          (if-head? b 'when) [(nth b 1) (nth b 2)]
                          :else (let [[_ c2 a2 b2] b] (if (nil? b2) [c2 a2] [c2 a2 :else b2])))]
-              (keep-meta y (apply list 'cond c a tail)))
+              (keep-meta y (apply list (sh 'cond) c a tail)))
             :else y))
         (and (if-head? y 'when) (seq? (second y)) (= 'not (first (second y))) (= 2 (count (second y))))
-        (keep-meta y (apply list 'when-not (second (second y)) (drop 2 y)))
+        (keep-meta y (apply list (sh 'when-not) (second (second y)) (drop 2 y)))
         (and (if-head? y 'if-instance) (= 4 (count y)) (nil? (nth y 3)))
-        (keep-meta y (apply list 'when-instance (second y) (splice (nth y 2))))
+        (keep-meta y (apply list (sh 'when-instance) (second y) (splice (nth y 2))))
         (and (if-head? y 'if) (= 3 (count y)))
-        (let [[_ c a] y] (keep-meta y (apply list 'when c (splice a))))
+        (let [[_ c a] y] (keep-meta y (apply list (sh 'when) c (splice a))))
         (and (if-head? y 'when-not) (seq? (second y)) (= 'nil? (first (second y))))
-        (keep-meta y (apply list 'when (list 'some? (second (second y))) (drop 2 y)))
+        (keep-meta y (apply list (sh 'when) (list (sh 'some?) (second (second y))) (drop 2 y)))
         (and (if-head? y 'when-not) (seq? (second y)) (= 'some? (first (second y))))
-        (keep-meta y (apply list 'when (list 'nil? (second (second y))) (drop 2 y)))
+        (keep-meta y (apply list (sh 'when) (list (sh 'nil?) (second (second y))) (drop 2 y)))
         (and (if-head? y 'do) (= 2 (count y)) (not (meta y))) (second y)
         :else y))
     (vector? x) (keep-meta x (mapv simplify x))

@@ -25,6 +25,8 @@
         ns (create-ns nsname)]
     (binding [*ns* ns]
       (refer 'clojure.core)
+      ;; heads the converter qualifies as arbace.core/... are clojure.core's at stage 0
+      (when-not (find-ns 'arbace.core) (alias 'arbace.core 'clojure.core))
       (doseq [fm forms :when (and (seq? fm) (#{'import 'clojure.core/import} (first fm)))] (eval fm)))
     (let [cforms (for [fm forms :when (and (seq? fm) (= 'defclass (first fm)))] (rest fm))]
       (try
