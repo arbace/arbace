@@ -1,0 +1,76 @@
+# The gate: the checks every change to main must pass (CLAUDE.md, doc/FREEZE.md), on JDK 26.
+#   1. bin/build-arbace --suite   the bootstrap (stages 1, 2, 3 identical, every class verified,
+#                                 native tests, the jar and the AOT cache) and Clojure's test
+#                                 suite on stages 1 and 2
+#   2. bin/class-forms-tests      the class forms compiler's tests on the frozen clojure/
+#   3. bin/j2c-check --suite      the Java -> class forms converter on clojure/ and its samples,
+#                                 and Clojure's suite on the converted, recompiled baseline
+# Run one after the other, as on a workstation. Nothing in the gate needs a path outside the
+# checkout: the jdk26u checks (j2c over /root/jdk26u) are manual and not part of it.
+# Downloads: the clojure/clojure test sources (a shallow git fetch per suite run) and six test
+# libraries from Maven Central (checked by SHA-1), cached here.
+name: gate
+
+on:
+  push:
+    branches: [main, arbace-for-java-26]
+  workflow_dispatch:
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      # Heaps sized for a hosted runner (the scripts' defaults assume a large workstation)
+      ARBACE_JVM_OPTS: -Xmx4g
+      J2C_JVM_OPTS: -Xmx5g
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - name: Tools and machine
+        run: |
+          sudo apt-get install -y -q cpio unzip > /dev/null
+          java -version
+          echo "cores: $(nproc)"; free -g; uptime
+
+      # A checkout leaves clojure/**/*.java newer than their tracked classes, which would make
+      # the in-process javac recompile them (CLAUDE.md, "Working conventions")
+      - name: Date the tracked classes after their sources
+        run: find clojure -name '*.class' -exec touch {} +
+
+      - name: Cache the test libraries
+        uses: actions/cache@v4
+        with:
+          path: .tmp/clojure-tests/lib
+          key: clojure-tests-lib-${{ hashFiles('bin/clojure-tests') }}
+
+      - name: bin/build-arbace --suite
+        run: ARBACE_TEST_JOBS=$(nproc) bin/build-arbace --suite
+
+      - name: bin/class-forms-tests
+        run: bin/class-forms-tests
+
+      - name: bin/j2c-check --suite
+        run: J2C_TEST_JOBS=$(nproc) bin/j2c-check --suite
+
+      - name: Logs of failed suite runs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs
+          path: |
+            target/*.log
+            .tmp/clojure-tests/*/out/
+            .tmp/clojure-tests/*/*.log
+            .tmp/j2c-check/*.log
+          if-no-files-found: ignore
+          retention-days: 7
