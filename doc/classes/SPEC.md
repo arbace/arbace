@@ -1,6 +1,8 @@
 # Class forms: Java's class files written in Clojure
 
-Status: proposal for review (2026-10-06). No code implements it yet.
+Status: accepted (2026-10-06), with the amendments found while implementing it folded in
+(2026-10-07). Implemented at stage 0 by `arbace/classes/` (the compiler) and `arbace/j2c/` (the
+converter).
 
 This spec defines the **class forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary `.clj` sources, and compiled by Arbace's own compiler
@@ -44,7 +46,9 @@ Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 Declarations �
    differently are written out (§7).
 5. **Plain Clojure syntax.** Everything reads with the frozen Clojure 1.12 reader: `^meta`,
    `^[param-tags]`, array class symbols like `String/1`, qualified symbols like `Outer/this`.
-   There are no reader changes.
+   There are no reader changes. Class-form files are Clojure source, read by
+   `clojure.core/read` (Clojure 1.12 and later), not EDN: array class symbols and param-tags
+   are not EDN.
 6. **The Java subset needs no runtime.** A class body that uses only the Java subset compiles to
    bytecode that references nothing of Clojure: no vars, no `clojure.lang.RT`. That is how
    `arbace.lang` itself can be written with these forms.
@@ -116,6 +120,14 @@ byte identity do not matter. Two sets of classes are equivalent when:
 The class file version is the target release, by default the running JDK's (major 70 for JDK 26),
 and configurable. The comparison compiles with javac at the same `--release`. Preview features
 (class files with minor version `0xFFFF`) are out of scope.
+
+Equivalence is relative to javac's options. The compiler has those that change class files in
+the code it must reproduce:
+
+| javac option | compiler option | effect |
+|---|---|---|
+| `-XDstringConcat=inline` (the JDK build, for `java.base` and a few other modules) | string concatenation `:inline` | `java-str` as a `StringBuilder` chain instead of `invokedynamic` (§5.10) |
+| `-parameters` (one JDK module) | method parameters on | `MethodParameters` with names on every method (§8.3) |
 
 ## 4. Declarations
 
@@ -292,6 +304,9 @@ place Java allows annotations:
 - Static initializers run in textual order with the `static-initializer` forms, as `<clinit>`.
   Instance field initializers and `initializer` forms run in textual order in every constructor
   that does not delegate with `this.`, right after the superclass constructor call (§4.7).
+- Instance field initializers and `initializer` bodies have no parameter vector. In them `this`
+  names the instance being initialized (`(.-x this)`, `this` as an argument, `(.m this)`);
+  `C/this` works too.
 - A final field whose initializer is a constant expression of primitive or `String` type gets a
   `ConstantValue` attribute. Reads of static constant fields are inlined, as in javac (§5.6).
 - In a class body the class's own fields, and those of enclosing class bodies, are in scope by
@@ -333,6 +348,10 @@ place Java allows annotations:
   `^:default`), native if `^:native`, and otherwise has an empty body.
 - **Overloads** are separate `method` forms with the same name. Names are used verbatim, not
   munged.
+- **Names that are not symbols.** A member of class `C` may be declared by the qualified symbol
+  `C/name`, which names the member `name`: `(method ^:public ^:static List/nil ...)` declares
+  javac's `List.nil()`, since a bare `nil` reads as the literal. Calls are written as usual,
+  `(List/nil)`. (Locals so named are renamed, `nil_`.)
 
 ### 4.7 Constructors and initializers
 
@@ -355,9 +374,11 @@ place Java allows annotations:
   fields, but not read `this`.
 - `(.super o args)` is Java's `o.super(args)`: a superclass constructor call with an explicit
   outer instance, for a superclass that is an inner class.
+- Param-tags pinning the constructor (§5.6) go on the head symbol: `(^[int] super. x)`,
+  `(^[int] this. x)`, `(^[int] .super o x)`, as on `(^[int] Foo. x)`.
 - Field initializers and `initializer` bodies are folded into each constructor that calls
-  `super.`, after the call, in textual order. `static-initializer` bodies and static field
-  initializers make up `<clinit>`.
+  `super.`, after the call, in textual order; `this` in them is the instance (§4.5).
+  `static-initializer` bodies and static field initializers make up `<clinit>`.
 - Without constructors, the class gets Java's default constructor. An anonymous class's
   constructor passes its arguments to the superclass constructor (§4.8).
 - Enum constructors get the name and ordinal parameters prepended, record and inner class
@@ -382,7 +403,11 @@ Member types inherited from supertypes are not; they are written by binary name 
 `Outer.this` and `Outer/super` Java's `Outer.super` (or `Iface.super` for a direct
 superinterface's default method). Fields of enclosing classes are in scope by name and read
 through the enclosing instance. A local or anonymous class in an instance method can also
-simply use the method's receiver parameter if it has another name, since it is a captured local.
+simply use the method's receiver parameter if it has another name: the receiver of an
+enclosing method is compiled as the enclosing instance (`this$0`), not captured as a `val$`
+field. That is the only way to reach the instance of an enclosing *anonymous* class, which has
+no name for `Outer/this`: the converter names such a method's receiver `this1` (`this2` one
+level deeper) and writes `(.pack this1)` for javac's `this$0.pack()`.
 
 ```clojure
 (.arrayFor PersistentVector/this i)    ; arrayFor(i) called from an anonymous Iterator
@@ -392,12 +417,13 @@ simply use the method's receiver parameter if it has another name, since it is a
 
 **Creating inner class instances.** `(Inner. args)` in an instance context of the outer class
 passes `this` (or the right enclosing instance) implicitly. `(.new o Inner args)` is Java's
-`o.new Inner(args)`.
+`o.new Inner(args)`; param-tags go on its head, `(^[int] .new o Inner x)`.
 
 **Anonymous classes** are expressions:
 
 ```
 (anon Super [ctor-args*] member*)
+(anon Inner [ctor-args*] :outer o member*)
 ```
 
 ```clojure
@@ -407,7 +433,21 @@ passes `this` (or the right enclosing instance) implicitly. `(.new o Inner args)
 ```
 
 `Super` is one class or interface, possibly generic: `(anon (Comparator String) [] ...)`. The
-arguments go to the superclass constructor. Members are any members but constructors.
+arguments go to the superclass constructor; param-tags on the vector pin its overload,
+`(anon C ^[int] [x] ...)`. Members are any members but constructors.
+
+When `Super` is an inner class, its outer instance is passed as javac passes it: as a mandated
+first constructor parameter of the anonymous class, which is also the anonymous class's own
+outer instance when it is created in an instance context of that outer class. `(anon Inner
+[args] ...)` takes the implicit outer instance as `(Inner. args)` does; `(anon Inner [args]
+:outer o ...)` is Java's `o.new Inner(args) { ... }`.
+
+Members of an anonymous class are reached from inside it without naming the class: a method
+reference to its own method is `(method-ref Predicate this .isMemoryManager)` (an unqualified
+`.m`), a pinned call on a receiver of anonymous type names the method's declaring class, and an
+inherited static member is qualified by its declaring class (javac qualifies with the anonymous
+class). Where nothing else can name the class, the converter writes javac's binary name
+(`Type$4/dropMetadata` for a static method declared in an anonymous class).
 
 **Local classes** are bound like local functions in `letfn`:
 
@@ -467,7 +507,8 @@ default with `(.m Iface/super ...)`.
 
 - `(constants ...)` is the first member. Each constant is a name, or a list with constructor
   arguments and optionally a body. A body makes an anonymous subclass `E$1` as in Java.
-  Annotations go on the name.
+  Annotations go on the name, param-tags pinning the constructor on the argument vector:
+  `(NAME ^[int] [x])`.
 - The compiler derives what javac derives: the `public static final` constant fields, the
   private `$VALUES` field and `$values()` method, `values()` and `valueOf(String)` (its parameter
   `MANDATED`, hence a `MethodParameters` attribute), the name and ordinal constructor
@@ -623,12 +664,13 @@ An unqualified symbol in a class body resolves, in order, to:
 Type names (§4.3) resolve to member classes of the class and of enclosing class bodies first,
 then as 3 to 5.
 
-`this` is no keyword: it is the receiver parameter's name. `super` is a reserved name in instance
-code: `(.m super args)` calls the superclass's `m` non-virtually (`invokespecial`) and
-`(.-f super)` reads a field as a member of the superclass. In a class body `C/this` and `C/super`
-are Java's `C.this` and `C.super` (§4.8); a class has no static member named `this` or `super`,
-so these symbols mean nothing today. `(super. ...)` and `(this. ...)` are constructor calls
-(§4.7).
+`this` is no keyword: it is the receiver parameter's name, and in instance field initializers
+and `initializer` bodies, which have no parameters, the name of the instance (§4.5). `super` is
+a reserved name in instance code: `(.m super args)` calls the superclass's `m` non-virtually
+(`invokespecial`) and `(.-f super)` reads a field as a member of the superclass. In a class body
+`C/this` and `C/super` are Java's `C.this` and `C.super` (§4.8); a class has no static member
+named `this` or `super`, so these symbols mean nothing today. `(super. ...)` and `(this. ...)`
+are constructor calls (§4.7).
 
 Methods are never in scope by name. Java's `m(x)` is `(.m this x)` for an instance method,
 `(C/m x)` for a static one and `(.m Outer/this x)` for an outer instance's.
@@ -651,6 +693,12 @@ Methods are never in scope by name. Java's `m(x)` is `(.m this x)` for an instan
   one is never widened. The initializer must convert to the tag's type by an implicit conversion
   (§5.5).
 - A mutable local without tag has its initializer's static type, like Java's `var`.
+- **Reference tags** on bindings are Clojure's hints made verifiable: when the initializer's
+  static type is assignable to the tag, the tag is the local's type; otherwise the binding is a
+  `checkcast` to it, not an error.
+- **Locals across `switch` arms.** A Java local declared in one case and used in a later one is
+  bound before the `switch`, `^:mutable` with its default value, in a `let` around it, and
+  assigned where Java declares it.
 - **Constant variables.** `^:const` marks a local as Java's `final` local with a constant
   initializer: its uses are constant expressions (folded into `java-str`, usable as `switch`
   labels), exactly as for a `final` local in Java. (`^:const` means the same for vars in Clojure.)
@@ -664,7 +712,15 @@ Methods are never in scope by name. Java's `m(x)` is `(.m this x)` for an instan
 
 Java's operators are written with Clojure's unchecked and bit operators, completed where Clojure
 lacks them. `+`, `-`, `*`, `/`, `inc`, `quot`, `rem` keep their Clojure meaning and do not appear
-in converted code for Java arithmetic.
+in converted code for Java arithmetic. In class bodies they compile without the runtime:
+
+| Clojure | on `long` | on `double` (or mixed) |
+|---|---|---|
+| `+`, `-`, `*`, `inc`, `dec` | `Math.addExact`, `subtractExact`, `multiplyExact`, `incrementExact`, `decrementExact` (overflow throws `ArithmeticException`, as in Clojure) | `dadd`, `dsub`, `dmul` (IEEE) |
+| `quot`, `rem` | `ldiv`, `lrem` | an error: Clojure's meaning is not an instruction; use `unchecked-divide`/`-remainder` |
+
+Operands must be primitives (or their wrappers, unboxed); `int` operands are widened to `long`.
+`/` is not among them: it is Clojure's function (ratios) and needs the runtime (§5.13).
 
 | Java | `int` (and `byte`, `short`, `char` operands) | `long` | `float` | `double` |
 |---|---|---|---|---|
@@ -707,10 +763,15 @@ in converted code for Java arithmetic.
 `(unchecked-char 0xD800)`. An integer literal is a `long` in Clojure; it is narrowed at compile
 time where Java's context wants an `int`, `short`, `byte` or `char` and the value fits (a typed
 local, field, parameter, return, array element, operand of an `int` operator, a branch whose
-other branch is `int`). Java's hexadecimal, octal and binary `int` literals above `0x7fffffff` denote
-negative numbers; in Clojure they are large `long`s, so `0x9e3779b9` is written
-`(unchecked-int 0x9e3779b9)`, a constant expression. The same goes for `long` literals above
-`0x7fffffffffffffff`.
+other branch is `int`). A conditional (`if`, `cond`, `switch`, through `do` and `let`) whose
+values are all integer literals that fit is an `int` conditional, as Java's `c ? 1 : 0`: it
+narrows in those contexts (`(.substring s (if k 1 0))`, an argument of an `int` parameter), and
+as an operand of any primitive operator it has type `int`, widened as an `int` operand would be
+(`(unchecked-add d (if z 1 2))` loads `int` constants and `i2d`, as javac compiles
+`d + (z ? 1 : 2)`). Method resolution narrows literals only in its last phase (§5.6). Java's hexadecimal,
+octal and binary `int` literals above `0x7fffffff` denote negative numbers; in Clojure they are
+large `long`s, so `0x9e3779b9` is written `(unchecked-int 0x9e3779b9)`, a constant expression.
+The same goes for `long` literals above `0x7fffffffffffffff`.
 
 **Constant expressions.** The compiler folds Java's constant expressions (JLS 15.29) built from
 literals, constant variables, constant static fields, the operators above, the primitive casts
@@ -737,19 +798,35 @@ where Arbace converts exactly as javac does, and are explicit elsewhere.
 
 - `cast` with a class literal compiles to `checkcast` and has that class as its static type.
   Clojure's `cast` calls `Class.cast`; the effect is the same but for the exception message.
+  The converter writes `cast` where javac emits a `checkcast`, which includes two cases that
+  check nothing: a cast of `null` (`(String) null` is `(cast String nil)`) and a cast to an
+  array type that is an upcast (`(Object[]) strings` is `(cast Object/1 strings)`). Other
+  upcasts are hints (`^Object x`) or nothing (on literals). An intersection cast lists only the
+  bounds the operand is not known to have.
 - Boxing calls `valueOf` of the matching wrapper, as javac does. Clojure today boxes a `long` with
   `Numbers.num`, which returns the same `Long`; only the call changes, not the meaning.
 - **Erasure casts.** javac inserts a `checkcast` where an erased generic type is used at a more
-  specific type (`String s = list.get(0)`). Arbace does not know generic types in code, so the
-  converter writes every such cast: `(cast String (.get list 0))`. Where Java uses the value
-  without a cast (`list.get(0).hashCode()` on `Object`'s method), javac inserts none and neither
-  does the converter. `for-each` is the exception: its typed binding casts as javac does (§5.7).
+  specific type. Arbace does not know generic types in code, so the converter writes the casts
+  javac's `TransTypes` inserts:
+
+  | where | cast to | example |
+  |---|---|---|
+  | a qualifier (receiver, field owner) | the erasure of its static type, whatever member is selected | `list.get(0).hashCode()`: `(.hashCode (cast String (.get list 0)))` |
+  | an argument | the erasure of the *instantiated* parameter type | `m.add(l.get(0))` with `List<String>`s: `(.add m (cast String (.get l 0)))` |
+  | a value assigned or returned | the erasure of the variable or return type | `String s = list.get(0)` |
+
+  A value used where its erased type suffices (`Object o = list.get(0)`) gets none. `for-each`
+  is the exception: its typed binding casts as javac does (§5.7).
 - **Conditions.** `if`, `when`, `and`, `or` and `cond` test Clojure truth. On a primitive
   `boolean` that is Java's test. A `Boolean` test is written `(.booleanValue b)`, which also
   gives Java's `NullPointerException`.
 - **Branches.** Java types `c ? a : b` by its own rules (numeric promotion, boxing, `lub`). The
-  converter writes the conversions so both branches of an `if` (and all arms of a `switch` or
-  `cond`) have the type javac gave the whole: `(if c (long i) 2)`, `(if c (Integer/valueOf 1) nil)`.
+  forms follow Clojure's `if`: branches of the same type give that type, reference branches
+  their least upper bound, and branches of different primitive types are boxed each by its own
+  type, not promoted (`(if c 1.5 2)` is a `Double` or a `Long`); a primitive and a reference
+  branch box the primitive. Integer literals are the exception of §5.4. So the converter writes
+  the conversions so both branches of an `if` (and all arms of a `switch` or `cond`) have the
+  type javac gave the whole: `(if c (long i) 2)`, `(if c (Integer/valueOf 1) nil)`.
 
 ### 5.6 Members: access, overloads, constants
 
@@ -762,21 +839,40 @@ where Arbace converts exactly as javac does, and are explicit elsewhere.
   superclasses, private ones of the nest. Clojure today sees public members only. Where javac
   needs an accessor (a protected member of an outer class's superclass in another package,
   reached from an inner class), the compiler makes javac's `access$NNN` method.
-- **Overload resolution** is Clojure's: candidates by name and arity, matched against the
-  arguments' static types, the most specific one wins; ties are an error in class bodies
-  (Clojure would fall back to reflection). A variable-arity method is chosen, with the extra
-  arguments packed into an array as Java does, only if no fixed-arity method matches (new;
-  today an error). Where Clojure's choice would differ from javac's, the converter pins the
-  method with Clojure 1.12 param-tags: `(^[Object] String/valueOf x)`,
-  `(^[int] StringBuilder/.append sb c)`. The converter runs the compiler's own resolution to know
-  where this is needed.
+- **Overload resolution** follows JLS 15.12.2 on erased types. Candidates are the accessible
+  methods (or constructors) of that name; the phases are tried in order, and the first that
+  finds applicable methods picks the most specific one (ties are an error in class bodies, where
+  Clojure would fall back to reflection):
+
+  | phase | arguments convert by |
+  |---|---|
+  | 1, strict | identity and widening (primitive or reference) |
+  | 2, loose | phase 1 plus boxing and unboxing |
+  | 3, variable arity | phase 2, the extra arguments packed into an array as Java does |
+  | 4, literals | phase 2 plus narrowing of integer literals (and all-literal conditionals, §5.4) to `int`, `short`, `byte` or `char` parameters where the value fits; fixed arity, then variable arity |
+
+  Integer literals are `long`, so Clojure's literals still choose `long` overloads first
+  (`(.append sb 5)` is `append(long)`) and narrow only when no method applies otherwise. Where
+  this choice differs from javac's, the converter pins the method with Clojure 1.12 param-tags:
+  `(^[Object] String/valueOf x)`, `(^[int] StringBuilder/.append sb c)`. Param-tags filter the
+  candidates by their erased parameter types (`_` matches any). Constructor calls take them on
+  the head (`(^[int] Foo. x)`, `(^[int] super. x)`, `(^[int] this. x)`, §4.7), on the argument
+  vector of `anon` (§4.8) and of enum constants (§4.10).
+- **Signature polymorphic methods** (JVMS 2.9.3: `MethodHandle.invoke`, `invokeExact`, the
+  `VarHandle` access methods) take the call site's descriptor from the call: the parameter
+  types from the param-tags, or else from the arguments' static types; the return type from a
+  tag on the call form, `Object` without one. Java's `(boolean) mh.invoke(m, target)` is
+  `^boolean (^[Method Object] MethodHandle/.invoke mh m target)`; a call used as a statement is
+  tagged `^void`.
 - **Reflection** is an error in class bodies (§12, question 7).
 - **Constant fields.** Reading a static final field with a constant initializer is replaced by
   the constant, as in javac (it does not initialize the field's class). For classes loaded
   from class files the compiler reads their `ConstantValue` attributes, which reflection cannot
   see.
 - **Arrays.** `(.clone a)` on an array type is the public array `clone()` returning the array
-  type, as in Java (JLS 10.7). `getClass()` has its usual erased type `Class`.
+  type, as in Java (JLS 10.7): the compiler calls `clone()` on the array class and follows it
+  with a `checkcast` to the array type, as javac does. `getClass()` has its usual erased type
+  `Class`.
 - **Null checks.** Where javac checks a receiver with `Objects.requireNonNull` (a qualified
   `.new`, a bound method reference), so does the compiler.
 
@@ -818,7 +914,9 @@ their Clojure meaning. New:
   body is wrapped: `(loop [] (label :body ... (break :body) ...) (when c (recur)))`.
 - **`for-each`** is Java's enhanced `for`. On an array it loops over the array with an index; on
   an `Iterable` it calls `iterator()`, `hasNext()` and `next()`, casting each element to the
-  binding's type if that is not `Object`, as javac does. (`doseq` stays Clojure's seq loop.)
+  binding's type if that is not `Object`, as javac does. A primitive binding over an `Iterable`
+  (`for (int x : ints)`) casts to the wrapper (`Integer`) and unboxes. (`doseq` stays Clojure's
+  seq loop.)
 - In class bodies `loop` and `try` in expression position compile inline. (Clojure wraps them in
   a `fn` there; Java code has no such classes.)
 
@@ -843,9 +941,11 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
 ```
 
 - Like `case`: pairs of label and result, multiple constants in a list, a trailing default.
-  Unlike `case`, labels are Java's: constant expressions (literals, constant fields like
+  Unlike `case`, labels are Java's: constants (literals, constant fields like
   `Integer/MAX_VALUE`, `^:const` locals), enum constant names of the selector's enum type, `nil`
-  for `case null`, and patterns.
+  for `case null`, and patterns. Since a list means several constants, a label is a literal, a
+  constant symbol or a list of them; any other constant expression is written folded, as its
+  value (`-2147483648`, not `(unchecked-int 0x80000000)`).
 - **Patterns** are vectors: `^T x` is a type pattern, `_` (alone or `^T _`) an unnamed one,
   `(R p*)` a record pattern with nested patterns, and an untyped symbol in a record pattern is
   Java's `var`. `:when` adds a guard.
@@ -858,8 +958,9 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
 - A `switch` is an expression; Java's `yield` from a nested statement is `(break :L v)` with the
   `switch` inside `(label :L ...)`.
 - The compiler translates as javac does: `tableswitch` or `lookupswitch` on `int`-like
-  selectors; `hashCode` and `equals` on strings; an enum's ordinal, through javac's
-  `$SwitchMap$` holder class when the enum is not compiled in the same compilation (§6);
+  selectors; `hashCode` and `equals` on strings; an enum's ordinal, directly for an enum nested
+  in the same top-level class as the switch and otherwise through javac's `$SwitchMap$` holder
+  class (§6);
   `SwitchBootstraps.typeSwitch` and `enumSwitch` with restart indexes for pattern and `null`
   switches; record components read through accessors whose exceptions become
   `MatchException`.
@@ -912,8 +1013,10 @@ The bindings are in scope in `then` only. `if (!(o instanceof String s)) return;
 `(java-str a b ...)` is Java's string concatenation: each operand is converted by its static
 type as Java does (`null` becomes `"null"`, a `char` its character, an `int` its digits), and the
 compiler emits javac's `invokedynamic` to `StringConcatFactory.makeConcatWithConstants`, with
-constant operands folded into the recipe. Constant operands only give a constant. `s += x` is
-`(set! s (java-str s x))`. (`str` stays Clojure's: `nil` gives `""`.)
+constant operands folded into the recipe. Constant operands only give a constant. Nested
+`java-str` forms are flattened into one call site, as javac flattens nested concatenation.
+`s += x` is `(set! s (java-str s x))`. (`str` stays Clojure's: `nil` gives `""`.) With javac's
+`-XDstringConcat=inline` option (§3) it is a `StringBuilder` chain instead.
 
 ### 5.11 Arrays
 
@@ -983,7 +1086,8 @@ The **Java subset** is what converted code uses and what stage 0 must compile:
 - `do`, `let`, `loop`, `recur`, `if`, `when`, `when-not`, `if-not`, `cond`, `and`, `or`, `not`,
   `throw`, `try`, `locking`, `set!`, `new`, `.`, `..`, `doto`, the interop shorthands;
 - `instance?`, `cast`, `identical?`, `nil?`, `some?`, `==`, `<`, `<=`, `>`, `>=`, `=` on
-  primitives, `aget`, `aset`, `alength`, the conversions and operators of §5.4 and §5.5.
+  primitives, `aget`, `aset`, `alength`, the conversions and operators of §5.4 and §5.5,
+  Clojure's `+`, `-`, `*`, `inc`, `dec`, `quot`, `rem` on primitives (§5.4).
 
 Each of these compiles to plain bytecode. In the subset nothing refers to a var at run time.
 
@@ -1013,7 +1117,7 @@ with javac's names. The converter writes none of this.
 | `java-str` | `invokedynamic` to `StringConcatFactory.makeConcatWithConstants` |
 | `lambda`, `method-ref` | `lambda$m$n` methods, `LambdaMetafactory` (`altMetafactory` when serializable or with markers), `$deserializeLambda$`, `BootstrapMethods` |
 | `switch` on strings | `hashCode` `lookupswitch` and `equals`, then a second `switch` |
-| `switch` on enums | ordinals directly for enums of the same compilation, otherwise the synthetic `Outer$1` class with `$SwitchMap$pkg$Enum` arrays |
+| `switch` on enums | ordinals directly for enums nested in the same top-level class as the switch, otherwise the synthetic `Outer$N` holder with `$SwitchMap$pkg$Enum` arrays, numbered after all anonymous classes of the top-level class (javac creates it while lowering) |
 | `switch` with patterns or `nil` | `SwitchBootstraps.typeSwitch` or `enumSwitch`, restart indexes for guards, `ConstantBootstraps` dynamic constants for some labels |
 | record patterns | accessor calls, `Throwable` from them wrapped in `MatchException` |
 | `for-each` | index loop over a copy of the array reference and its length, or `iterator()`/`hasNext()`/`next()` with the element cast |
@@ -1027,10 +1131,11 @@ with javac's names. The converter writes none of this.
 | calls of variable-arity methods with loose arguments | the argument array |
 | `module-info`, `package-info` | `Module` (with `MANDATED` `java.base`), the synthetic `package-info` interface |
 
-Two of these depend on the compilation set rather than on the forms alone, as in javac. Enum
-switches use ordinals only for enums compiled together with the switch, and `PermittedSubclasses`
-is inferred from the same file. For the compiler, "compiled together" means: classes entered
-from source in the same compilation (§9.2), as opposed to classes loaded from class files.
+Two of these depend on more than the class form itself, as in javac. Enum switches use
+ordinals directly only for enums declared in the same top-level class as the switch (javac's
+`Lower.mapForEnum` needs the enum's tree in the class being translated); enums compiled in the
+same compilation but in another top-level class go through the `$SwitchMap$` holder too.
+`PermittedSubclasses` is inferred from the same file.
 
 ## 7. What the converter makes explicit
 
@@ -1039,15 +1144,21 @@ implicit conversion and inferred type. It writes out what Arbace would otherwise
 
 1. **Names.** Every class by simple name with an `:import`, or by binary name; no wildcard or
    static imports. Implicit qualifications become explicit: `(.m this)`, `(C/m)`, `Outer/this`,
-   `(.-f this)` for inherited fields. A static member is qualified by the class javac uses as
-   its qualifying type (the current class for an inherited static called by simple name).
+   `(.-f this)` for inherited fields. A static member reached by simple name is qualified as
+   javac qualifies it: by the current class when the member is a member of it (inherited or
+   not), otherwise by its *declaring* class (`trimGenID` called from
+   `Compiler.NewInstanceExpr.ReifyParser` is `Compiler$ObjExpr/trimGenID`), and by the
+   declaring class also where javac names an anonymous class (§4.8).
 2. **Types of declarations**, generic ones included, and the tags of locals that javac typed
    differently from their initializer (`Object o = s` is `(let [^Object o s] ...)`).
-3. **Overloads.** Param-tags wherever the compiler's resolution (§5.6) would choose differently
-   from javac or not at all. The converter calls the compiler's resolution to decide.
-4. **Conversions**: narrowing, checked casts, erasure casts, unboxing from non-wrapper types,
+3. **Overloads.** Param-tags wherever the compiler's resolution (§5.6, JLS 15.12.2 on erased
+   types) would choose differently from javac or not at all, constructor calls included. The
+   converter calls that resolution (`arbace.classes`) to decide, rather than predicting it.
+4. **Conversions**: narrowing, checked casts (also javac's casts of `null` and to array
+   types), erasure casts as `TransTypes` inserts them, unboxing from non-wrapper types,
    `int`/`long` to `float` promotions in comparisons, branch types (§5.5).
-5. **Constants**: `int` literals that look out of range (§5.4); `^:const` on constant local
+5. **Constants**: `int` literals that look out of range (§5.4); `switch` labels that are
+   constant expressions, folded (§5.8); `^:const` on constant local
    variables.
 6. **Evaluation order**: temporaries for `i++` in expressions, compound assignments with
    side-effecting targets, and wherever restructuring would reorder side effects.
@@ -1056,7 +1167,8 @@ implicit conversion and inferred type. It writes out what Arbace would otherwise
 9. **Switches** with the implicit `MatchException` default, and repeated code for
    fall-through.
 10. **Structure.** Restructured control flow where it is straightforward (§5.7), `let` scopes for
-    Java's block-scoped declarations, `letclass` for local classes.
+    Java's block-scoped declarations (around a `switch` for locals shared by its cases, §5.3),
+    `letclass` for local classes.
 11. **Kept as written:** the declaration order of members, modifiers as Java wrote them (implicit
     ones may be left out, as Java leaves them out), annotations except `SOURCE` ones (which may
     be kept as documentation).
@@ -1176,7 +1288,11 @@ arbace/lang/RT.clj         (in-ns 'arbace.lang) ...
 ```
 
 One file per Java source file, named after its top-level class, holding that file's class
-forms. Same-package classes need no import (§5.2). Java's per-file imports become `import`
+forms. When the source directory also has a `.clj` file of that name, `_class` is appended:
+`clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.clj`, since
+`clojure/main.clj` is the namespace `clojure.main` (and `(load "clojure/main")` would also pick
+up `clojure/main__init.class`). A package with a single segment gets the single-segment
+namespace: package `clojure` is namespace `clojure`. Same-package classes need no import (§5.2). Java's per-file imports become `import`
 calls in the file; when two files import different classes under one simple name, the converter
 writes binary names instead. The alternative, one namespace per class in `gen-class` style
 (`(ns arbace.lang.Keyword)` with `(defclass arbace.lang.Keyword ...)`), is question 5 in §12.
@@ -1192,7 +1308,11 @@ from
 1. classes loaded or loadable from the class path (by reflection, plus reading class files for
    `ConstantValue` and generic signatures),
 2. the class forms of the current top-level form, entered before any body is compiled (so a
-   top-level `do` of mutually dependent class forms works, also at the REPL),
+   top-level `do` of mutually dependent class forms works, also at the REPL). At stage 0 the
+   frozen compiler evaluates the forms of a top-level `do` one by one, so a `defclass` macro
+   cannot see its siblings; there `(defclasses (defclass A ...) (defclass B ...))` compiles
+   class forms together and evaluates to a vector of the classes. Arbace's own compiler treats a
+   top-level `do` as said, and keeps `defclasses` as the explicit form,
 3. **sources**: a class name that resolves to nothing is looked up as `p/C.clj` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
    top-level class forms are entered, declarations only, without compiling their bodies or
@@ -1239,7 +1359,7 @@ part of this spec.
 The new names are vars in `arbace.core`, so code can `:exclude` them. The compiler knows a few
 new special forms with starred names, which no namespace can shadow, as `let*` and `fn*` today:
 `class*` (one for every kind of class), `label*`, `break*`, `continue*`, `return*`, `switch*`,
-`lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`. The macros `defclass`, `anon`,
+`lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`. The macros `defclass`, `defclasses`, `anon`,
 `letclass`, `defmodule`, `defpackage`, `label`, `break`, `continue`, `return`, `switch`, `lambda`,
 `method-ref`, `java-str`, `java-assert`, `for-each`, `with-resources`, `if-instance` and
 `when-instance` expand to them and to existing forms; `with-resources` and the pattern tests need
@@ -1295,8 +1415,8 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   `MethodHandles.Lookup.defineClass`: puts classes into an existing class's loader, so no
   redefinition. Hidden classes: cannot be named, so other code cannot refer to them. Widening
   package access to public at the REPL: changes the classes.
-- **Cycles at the REPL**: wrap the class forms in one `do`, or let source path lookup (§9.2) find
-  the others.
+- **Cycles at the REPL**: wrap the class forms in one `do` (`defclasses` at stage 0), or let
+  source path lookup (§9.2) find the others.
 - AOT-compiled classes are loaded by the application class loader; none of this applies to them.
   A REPL-defined class in the package of an AOT-compiled one has no package access to it, being
   in another loader.
@@ -1767,6 +1887,11 @@ public final class Shapes {
 **Settled (2026-10-06):** the user accepted every recommendation below. They are now part of
 the spec, and where the text above leaves a choice open, the recommendation applies.
 
+**Amendments (2026-10-07):** implementing the compiler and the converter raised 28 proposed
+amendments (13 in `COMPILER-NOTES.md`, 15 in `CONVERTER-NOTES.md`). The user accepted all of
+them; they are folded into the text above (§1, §3, §4.5 to §4.8, §4.10, §5.2 to §5.8, §5.10,
+§6, §7, §9.1, §9.2, §9.5, §10).
+
 Each with the recommendation the spec follows.
 
 1. **Receiver parameter.** Explicit `this` as the first parameter, as `deftype`, `reify` and
@@ -1863,8 +1988,8 @@ Studied for this spec:
     for `-parameters`, mandated or synthetic parameters and canonical record constructors;
     `EnclosingMethod` for local and anonymous classes only).
   - `com/sun/tools/javac/code/Flags.java`, `jvm/ClassFile.java`.
-  - `com/sun/tools/javac/comp/Lower.java` (enum switches: ordinals for enums in the compilation,
-    `$SwitchMap$` otherwise; string switches; enums; assertions; inner classes),
+  - `com/sun/tools/javac/comp/Lower.java` (enum switches: ordinals for enums of the same
+    top-level class, `$SwitchMap$` otherwise; string switches; enums; assertions; inner classes),
     `TransTypes.java` (bridges, erasure casts), `TransPatterns.java` (`typeSwitch`, `enumSwitch`,
     `ConstantBootstraps`), `LambdaToMethod.java`, `jvm/StringConcat.java`.
 - The Java Virtual Machine Specification, chapter 4 (class file format, access flags,

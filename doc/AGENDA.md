@@ -24,8 +24,12 @@ The current state of the work. This file is rewritten as things change. For the 
    `doc/classes/COMPILER-NOTES.md`).
 3. Converter: **done** (`arbace/j2c/`, `bin/j2c`, `bin/j2c-check`,
    `doc/classes/CONVERTER-NOTES.md`). The converted baseline compiles to javac's class shapes,
-   and Clojure's test suite passes on it as on the baseline. **Pending:** the user's decision on
-   the 28 proposed spec amendments, which then go into SPEC.md.
+   and Clojure's test suite passes on it as on the baseline. The 28 spec amendments found while
+   implementing (13 compiler, 15 converter) were accepted and are folded into SPEC.md. Follow-ups
+   where the implementation lags the amended spec: constructor-call param-tags and
+   `(anon Inner [args] :outer o ...)` in the compiler, `int` typing of all-literal conditionals
+   under `long`/`float`/`double` operators, and the converter deciding pins with the compiler's
+   resolution.
 4. Vendor `clojure/` as `arbace/`, renamed to `arbace.*` with `version.properties` folded or
    dropped, and with all of it in `.clj`. Self-host: stage 1 and stage 2, with stage 2
    reproducing itself.

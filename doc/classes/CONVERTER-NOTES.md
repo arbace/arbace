@@ -3,7 +3,7 @@
 The converter of agenda step 3: it turns Java sources into the class forms of [SPEC.md](SPEC.md),
 making explicit what §7 lists. These notes say how it is built and used, what it was checked on,
 how its output compares with the spec's worked examples (§11), and where converting showed that
-the spec should change (proposed amendments, last sections). The compiler side is in
+the spec should change (amendments, accepted and folded into SPEC.md). The compiler side is in
 [COMPILER-NOTES.md](COMPILER-NOTES.md).
 
 ## Layout
@@ -74,7 +74,7 @@ file; Java's comments are not carried over.
 3. **Overloads.** A call is pinned with param-tags unless only one method of that name and arity
    is accessible, or the most specific match is javac's choice under both Java's and Clojure's
    argument rules (literals tried as `int` and as `long`). This is conservative: the compiler's
-   JLS-like resolution (COMPILER-NOTES, amendment 2) would need fewer pins.
+   JLS 15.12.2 resolution (SPEC §5.6) would need fewer pins.
 4. **Statements** convert in a context `{:fall :jumps :vpos}`: the forms that follow when the
    statement completes normally (for example `(recur ...)` at the end of a loop body), the jump
    targets equivalent to completing normally here with what replaces such a jump, and whose value
@@ -198,90 +198,33 @@ and the shape comparison above covers it for the baseline.
   `(if (== ...) (return i) (recur ...))`, the `with-resources` binding untagged (`var` in Java),
   and `(when (< side 0.0) ...)`. All four files compile to javac's shapes.
 
-## Proposed spec amendments
+## Spec amendments (accepted)
 
-1. **§5.5, erasure casts.** "Where Java uses the value without a cast
-   (`list.get(0).hashCode()` on `Object`'s method), javac inserts none" is not what javac does:
-   `TransTypes` casts a qualifier to the erasure of its static type whatever member is selected
-   (`checkcast String` then `String.hashCode()`, checked with javap), and an argument to the
-   erasure of the *instantiated* parameter type (`m.add(l.get(0))` with `List<String>`s casts to
-   `String`). Proposed: "The converter writes the casts javac's `TransTypes` inserts: qualifiers
-   to the erasure of their static type, arguments to the erasure of the instantiated parameter
-   types, values to the erasure of the variable or return type. A value used where its erased
-   type suffices (`Object o = list.get(0)`) gets none."
-2. **§1.5, readers.** Class-form files are read by `clojure.core/read` (Clojure 1.12 and later),
-   not by `clojure.edn`: array class symbols (`int/1`) and param-tags (`^[int]`) are not EDN.
-   Proposed: say so in principle 5.
-3. **§4.5, §4.7, the receiver in initializers.** Field initializers and `initializer` bodies
-   have no parameter vector, yet Java code there uses `this` (`this.x`, `this` as an argument,
-   own methods). The converter writes `this`. Proposed: "In instance field initializers and
-   `initializer` bodies `this` names the instance being initialized."
-4. **§4.8, enclosing anonymous classes.** An anonymous class has no name for `Outer/this`. The
-   converter names the receiver of an anonymous class's method that has nested classes `this1`
-   (`this2` one level deeper) and nested classes use it: `(.pack this1)` for javac's
-   `this$0.pack()`. This relies on the compiler treating an outer method's receiver as the
-   enclosing instance (`this$0`), as COMPILER-NOTES says it does, not as a captured `val$`.
-   Proposed: "A nested class reaches the instance of an enclosing anonymous class through the
-   receiver parameter of the enclosing method, compiled as the enclosing instance."
-   Related, for the same reason: a method reference to a method of an anonymous class is
-   written with an unqualified `.m` (`(method-ref Predicate this .isMemoryManager)`), a pinned
-   call on a receiver of anonymous type names the method's declaring class, and a static member
-   inherited by an anonymous class is qualified with its declaring class (javac qualifies with the
-   anonymous class). Where nothing else can name the class, the converter writes javac's binary
-   name (`Type$4/dropMetadata` for a static method declared in an anonymous class, a lambda
-   returning an anonymous class's type). In the JDK: 7 receivers named, 7 method references, 8
-   statics, 6 pins, 5 binary names; in the baseline none.
-5. **§5.6, pins on constructor calls.** There is no place for param-tags in `(super. ...)`,
-   `(this. ...)`, `(.new o C ...)`, `anon` arguments and enum constant arguments. Proposed:
-   param-tags on the head symbol, `(^[int] super. x)`, `(^[int] this. x)`, and on the argument
-   vector of `anon` and enum constants, `(anon C ^[int] [x] ...)`, `(NAME ^[int] [x])`. The
-   converter's conservative check flags 2 calls in the baseline (`this(421)` in
-   `TransactionalHashMap`, `this(b, 0, b.length)` in `ClassReader`) and 134 in the JDK; the
-   compiler resolves the baseline's ones as javac does.
-6. **§5.8, list labels.** A label that is a list means several constants, so a single constant
-   expression written as a list (`(unchecked-int 0x80000000)`) would be misread. The converter
-   writes such labels as their values; proposed: say that labels are literals, constant symbols
-   or lists of them, and that other constant expressions are written folded.
-7. **§4.6, names that are not symbols.** javac's `List.nil()` is a method named `nil`, which
-   Clojure reads as the literal. The converter writes the declared name qualified by its class,
-   `(method ^:public ^:static List/nil ...)`, and calls as `(List/nil)`, which reads as a symbol;
-   locals named `nil` become `nil_`. Proposed: allow `C/name` as the declared name of a member of
-   `C`.
-8. **§9.1, file names.** `clojure/main.java` (class `clojure.main`) and `clojure/main.clj` (the
-   namespace `clojure.main`) would both be `clojure/main.clj`; `(load "clojure/main")` would
-   also pick up `clojure/main__init.class`. The converter appends `_class` to a class file's name
-   when the source directory has a `.clj` file of that name: `clojure/main_class.clj` (and
-   `arbace/main_class.clj` after renaming). The package `clojure` gets the single-segment
-   namespace `clojure`. Proposed: state the rule.
-9. **§5.7, `for-each` over an `Iterable` with a primitive binding** (`for (int x : ints)`): the
-   compiler casts each element to the wrapper (`Integer`) and unboxes, as javac does. Worth a
-   sentence next to the cast rule.
-10. **§5.6, array `clone()`.** javac follows `[I.clone()` with `checkcast [I`; with
-    `(.clone a)` typed as the array, the compiler should emit that cast (it does).
-11. **§5.5, casts.** Two javac details the converter follows: `(String) null` is a `checkcast`
-    (`(cast String nil)`), and a cast to an array type keeps its `checkcast` even when it is an
-    upcast (`(Object[]) strings`), while other upcasts are hints (`^Object x`) or nothing (on
-    literals). An intersection cast checks only the bounds the operand is not known to have.
-12. **§5.12, signature polymorphic calls**, as COMPILER-NOTES note 2 proposes: param-tags from
-    the call site's argument types, the result type as a tag on the call (`^boolean` from a cast,
-    `^void` as a statement). The converter writes them so.
-13. **§5.4, all-literal conditionals in other numeric contexts.** `d + (z ? 1 : 2)` is an `int`
-    conditional widened to `double` in Java (`iconst`, `i2d`); `(unchecked-add d (if z 1 2))`
-    loads `long` constants. Behaviour is the same; the constants differ. Proposed for the
-    compiler (extending its amendment 6): an `if` whose values are all integer literals that fit
-    an `int` has type `int` when it is an operand of a primitive operator.
-14. **§5.3, cross-case locals.** A local declared in one `switch` case and used in a later case
-    is bound (`^:mutable`, default value) in a `let` around the `switch`, and assigned where Java
-    declares it.
-15. **§7.3, resolution.** The converter does not yet call the compiler's resolution, as §7.3
-    says it should; it predicts it conservatively (534 pins in the baseline). With the compiler
-    now resolving by JLS 15.12.2, the converter should use `arbace.classes` to decide pins.
+All accepted by the user and folded into SPEC.md; the original texts are in git history
+(commit 7229dd9).
+
+1. **§5.5, erasure casts as `TransTypes` inserts them.** Accepted (2026-10-07), folded into SPEC §5.5, §7.4.
+2. **§1.5, readers: `clojure.core/read`, not EDN.** Accepted (2026-10-07), folded into SPEC §1.5.
+3. **§4.5, §4.7, the receiver in initializers.** Accepted (2026-10-07), folded into SPEC §4.5, §4.7, §5.2.
+4. **§4.8, enclosing anonymous classes.** Accepted (2026-10-07), folded into SPEC §4.8, §7.1.
+5. **§5.6, pins on constructor calls.** Accepted (2026-10-07), folded into SPEC §4.7, §4.8, §4.10, §5.6.
+6. **§5.8, list labels.** Accepted (2026-10-07), folded into SPEC §5.8, §7.5.
+7. **§4.6, names that are not symbols (`C/name`).** Accepted (2026-10-07), folded into SPEC §4.6.
+8. **§9.1, file names (`_class`).** Accepted (2026-10-07), folded into SPEC §9.1.
+9. **§5.7, `for-each` over an `Iterable` with a primitive binding.** Accepted (2026-10-07), folded into SPEC §5.7.
+10. **§5.6, array `clone()`.** Accepted (2026-10-07), folded into SPEC §5.6.
+11. **§5.5, casts of `null`, to array types, intersection casts.** Accepted (2026-10-07), folded into SPEC §5.5, §7.4.
+12. **§5.12, signature polymorphic calls.** Accepted (2026-10-07), folded into SPEC §5.6.
+13. **§5.4, all-literal conditionals in other numeric contexts.** Accepted (2026-10-07), folded into SPEC §5.4.
+14. **§5.3, cross-case locals.** Accepted (2026-10-07), folded into SPEC §5.3, §7.10.
+15. **§7.3, resolution.** Accepted (2026-10-07), folded into SPEC §5.6, §7.3.
 
 ## What remains
 
 - Type annotations (`TYPE_ANNOTATION`, `ANNOTATED_TYPE`) are dropped (6 in the JDK).
-- Pins: call the compiler's resolution (amendment 15); syntax for constructor-call pins
-  (amendment 5).
+- Pins: call the compiler's resolution (SPEC §7.3); write constructor-call pins in the syntax
+  of SPEC §5.6 (the stage-0 compiler does not read them on `super.`, `this.`, `.super`, `.new`,
+  `anon` and enum constants yet).
 - Comments are not carried over (§7 says "where easy").
 - Restructurings the spec's examples show and the converter does not do: folding a local
   assigned in a loop into the loop's bindings, computing a later-assigned local with an `if`

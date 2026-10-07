@@ -3,7 +3,8 @@
 The implementation of [SPEC.md](SPEC.md) (agenda step 2): one plain-Clojure compiler of the class
 forms (§12 question 17) that runs on the frozen baseline (stage 0) and emits bytecode with ASM.
 These notes say how it is built, how to use and test it, what it covers (the §8 tables), and
-where implementing the spec suggested changes to it (proposed amendments, last section).
+where implementing the spec suggested changes to it (amendments, accepted and folded into
+SPEC.md, last section).
 
 ## Layout
 
@@ -272,55 +273,21 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
     `Signature` attribute, except when the Java source used the diamond (`new I<>() {...}`); the
     forms do not say which was written, and the compiler always emits it.
 
-## Proposed spec amendments
+## Spec amendments (accepted)
 
-1. **Top-level `do` at stage 0 (§9.2).** The frozen compiler evaluates the forms of a top-level
-   `do` one by one, so a `defclass` macro cannot see its siblings. Stage 0 adds
-   `(defclasses (defclass A ...) (defclass B ...))`, which compiles the class forms together.
-   Arbace's own compiler can treat a top-level `do` as the spec says; `defclasses` can stay as the
-   explicit form.
-2. **Overload resolution (§5.6).** Implemented as JLS 15.12.2 on erased types (phase 1 strict,
-   phase 2 with boxing, phase 3 variable arity, each picking the most specific method), plus a
-   last phase in which integer literals narrow to `int`/`short`/`byte`/`char` parameters. This
-   is close to javac, so the converter needs fewer param-tags than with Clojure's own rules, and
-   Clojure literals still choose `long` overloads first (`(.append sb 5)` is `append(long)`).
-   Proposed text: "Overload resolution follows JLS 15.12.2 on erased types; integer literals
-   are `long` and narrow to a smaller integral parameter only when no method applies otherwise."
-3. **Clojure's arithmetic in class bodies (§5.4).** `+`, `-`, `*`, `inc`, `dec` on primitive
-   `long`s compile to `Math.addExact` and friends and `quot`/`rem` to `ldiv`/`lrem` (Clojure's
-   meaning, overflow throwing `ArithmeticException`); on `double`s to the IEEE instructions. This
-   keeps hand-written class bodies free of the runtime without changing what these mean.
-4. **Tags on `let` bindings with a reference type (§5.3).** When the initializer's static type
-   is not assignable to the tag, the binding is a `checkcast` (Clojure's hint, made verifiable),
-   rather than an error.
-5. **Enum switches (§5.8, §6).** javac uses ordinals directly only for enums declared in the same
-   top-level class as the switch (`Lower.mapForEnum`: the enum's tree must be in the class being
-   translated), and the `$SwitchMap$` holder otherwise, even for enums compiled in the same javac
-   run. The compiler does the same. Proposed text for §6: "ordinals directly for enums nested in
-   the same top-level class, otherwise ...". The holder is named after all anonymous classes of
-   the top-level class (javac creates it while lowering).
-6. **Integer literals in conditionals (§5.4).** A conditional (`if`, `cond`, `switch`) whose
-   values are all integer literals takes an `int` type where the context needs one (argument of an
-   `int` parameter or `-int` operator, initializer of an `int` local), as Java's `c ? 1 : 0` does.
-   The spec lists "a branch whose other branch is `int`"; this extends it to all-literal
-   conditionals, which the converter produces (`(.substring s (if k 1 0))`).
-7. **Branches of different primitive types (§5.5).** Following Clojure's `if`, branches of
-   different primitive types are boxed each by its own type (`(if c 1.5 2)` gives `Double` or
-   `Long`), not promoted. The converter writes Java's promotions explicitly, as §5.5 says.
-8. **Nested `java-str` (§5.10).** Nested `java-str` forms are flattened into one call site, as
-   javac flattens nested string concatenation.
-9. **Qualifying types of statics by simple name (§7.1)**: see note 3 for the converter; the
-   spec's "the current class for an inherited static called by simple name" holds only when the
-   member belongs to the current class.
-10. **Signature polymorphic calls (§5.6)**: see note 2; the spec does not say how they are written.
-11. **`this` in instance initializers (§4.5, §4.7).** Field initializers and `initializer`
-    bodies have no receiver parameter. The compiler binds `this` there to the instance (besides
-    `C/this`), which is what the converter writes for Java's `this` in them.
-12. **Anonymous subclasses of inner classes (§4.8).** `(anon Inner [args] ...)` passes the
-    implicit outer instance of `Inner` as javac does: a mandated first constructor parameter that
-    is also the anonymous class's own outer instance when it is created in an instance context.
-    Java's `o.new Inner(args) { ... }` has no form yet; a possible one is
-    `(anon Inner [args] :outer o ...)`.
-13. **javac options (§3).** Equivalence is relative to javac's options: the JDK's own build uses
-    `-XDstringConcat=inline` for some modules and `-parameters` for one. The compiler has both as
-    options (see Use), so such classes can be reproduced too.
+All accepted by the user and folded into SPEC.md; the original texts are in git history
+(commit 7229dd9).
+
+1. **Top-level `do` at stage 0, `defclasses`.** Accepted (2026-10-07), folded into SPEC §9.2, §9.5, §10.
+2. **Overload resolution as JLS 15.12.2 on erased types, with a literal narrowing phase.** Accepted (2026-10-07), folded into SPEC §5.6.
+3. **Clojure's arithmetic in class bodies (`Math.*Exact`, `ldiv`/`lrem`, IEEE on doubles).** Accepted (2026-10-07), folded into SPEC §5.4, §5.13.
+4. **Reference tags on `let` bindings are a `checkcast`.** Accepted (2026-10-07), folded into SPEC §5.3.
+5. **Enum switches: ordinals only within the same top-level class.** Accepted (2026-10-07), folded into SPEC §5.8, §6.
+6. **Integer literals in conditionals.** Accepted (2026-10-07), folded into SPEC §5.4.
+7. **Branches of different primitive types boxed each by its own type.** Accepted (2026-10-07), folded into SPEC §5.5.
+8. **Nested `java-str` flattened.** Accepted (2026-10-07), folded into SPEC §5.10.
+9. **Qualifying types of statics by simple name.** Accepted (2026-10-07), folded into SPEC §7.1.
+10. **Signature polymorphic calls.** Accepted (2026-10-07), folded into SPEC §5.6.
+11. **`this` in instance initializers.** Accepted (2026-10-07), folded into SPEC §4.5, §4.7, §5.2.
+12. **Anonymous subclasses of inner classes, `:outer`.** Accepted (2026-10-07), folded into SPEC §4.8.
+13. **javac options.** Accepted (2026-10-07), folded into SPEC §3, §5.10.

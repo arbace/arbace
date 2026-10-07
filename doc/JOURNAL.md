@@ -379,3 +379,67 @@ user's rule for agents). They were checked by the main session on `b1bf2c8`.
   - No form yet for `o.new Inner() { ... }`.
   - The converter drops 6 type annotations in the JDK.
   - The converter predicts overloads conservatively instead of asking the compiler.
+
+## 2026-10-07: Spec amendments folded into the class forms spec
+
+The user accepted all 28 spec amendments that implementing the compiler (13, COMPILER-NOTES.md)
+and the converter (15, CONVERTER-NOTES.md) proposed. They are now normative text in
+`doc/classes/SPEC.md`, at the sections they concern, not an appended list; overlapping ones
+were merged (compiler 6 with converter 13, compiler 2 with converter 15, compiler 10 with
+converter 12, compiler 11 with converter 3). The notes keep one line per amendment pointing to
+the SPEC section; the original texts are in commit `7229dd9`. §12 records the amendments next
+to the settled questions.
+
+- Syntax and reading:
+  - Class-form files are read by `clojure.core/read` (Clojure 1.12+), not EDN (§1.5).
+  - `C/name` may declare a member of `C` whose name is no symbol, as `List/nil` (§4.6).
+  - Param-tags on constructor calls: `(^[int] super. x)`, `(^[int] this. x)`, `.super`, `.new`
+    on the head; `(anon C ^[int] [x] ...)` and `(NAME ^[int] [x])` on the argument vector
+    (§4.7, §4.8, §4.10, §5.6).
+  - `(anon Inner [args] :outer o ...)` is `o.new Inner(args) { ... }`; anonymous subclasses of
+    inner classes pass the outer instance as javac does (§4.8).
+  - `switch` labels are literals, constant symbols or lists of them; other constant expressions
+    are written folded (§5.8).
+- Meaning in class bodies:
+  - `this` names the instance in field initializers and `initializer` bodies (§4.5, §4.7, §5.2).
+  - An enclosing method's receiver is the enclosing instance (`this$0`), the way to reach an
+    enclosing anonymous class (`this1`); members of anonymous classes are named without the class
+    or by javac's binary name (§4.8).
+  - Reference tags on `let` bindings are a `checkcast` when not already assignable (§5.3).
+  - Locals shared by `switch` cases are bound mutable around the `switch` (§5.3, §7).
+  - Clojure's `+ - * inc dec` on `long` are `Math.*Exact`, `quot`/`rem` `ldiv`/`lrem`; on
+    `double` IEEE instructions; in the Java subset (§5.4, §5.13).
+  - All-literal conditionals are `int`: they narrow like literals, and are `int` operands of any
+    primitive operator (§5.4).
+  - Branches of different primitive types are boxed each by its own type, as Clojure's `if`
+    (§5.5).
+  - Overload resolution is JLS 15.12.2 on erased types (strict, loose, variable arity), then a
+    phase narrowing integer literals; the converter decides pins with this resolution (§5.6,
+    §7.3).
+  - Signature polymorphic calls take their descriptor from param-tags (or argument types) and a
+    tag on the call (§5.6).
+  - Array `clone()` is followed by a `checkcast` (§5.6); `for-each` with a primitive binding over
+    an `Iterable` casts to the wrapper and unboxes (§5.7).
+  - Nested `java-str` forms flatten into one call site (§5.10).
+- What javac derives and the converter writes:
+  - Enum switches use ordinals directly only for enums of the same top-level class, otherwise
+    the `$SwitchMap$` holder, numbered after the anonymous classes (§5.8, §6).
+  - Erasure casts as javac's `TransTypes`: qualifiers, arguments (instantiated parameter types),
+    values (§5.5, §7).
+  - Casts of `null` and to array types stay `checkcast`s; intersection casts list only the
+    missing bounds (§5.5).
+  - Statics by simple name are qualified by the current class when a member of it, else by the
+    declaring class (§7.1).
+- Compilation:
+  - Equivalence is relative to javac's options; the compiler has `-XDstringConcat=inline` and
+    `-parameters` counterparts (§3, §5.10).
+  - A converted file gets `_class` appended when a `.clj` of that name exists; a single-segment
+    package is a single-segment namespace (§9.1).
+  - `defclasses` compiles class forms together at stage 0, where a top-level `do` cannot (§9.2,
+    §9.5, §10).
+
+Where the implementation lags the amended spec (listed in AGENDA.md): the compiler does not yet
+read constructor-call param-tags on `super.`, `this.`, `.super`, `.new`, `anon` and enum
+constants, nor `:outer` in `anon`; it types all-literal conditionals as `int` only for `int`
+contexts, not under `long`, `float` and `double` operators; the converter still predicts pins
+instead of calling `arbace.classes`'s resolution.
