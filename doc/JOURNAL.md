@@ -812,3 +812,14 @@ recommended:
    hand-maintained source by a recorded decision.
 10. **go-lisp:** its coverage tables, round-trip method and corpus are reused. No `.lgo` back
     end; go-lisp stays a separate tool.
+
+## 2026-10-07: Pre-freeze work chosen
+
+- Asked what remains before freezing `arbace-for-java-26`, the user chose all four proposals:
+  1. compile the converted jdk26u and compare it with javac (j2c had only converted it);
+  2. restore clojure.spec, which the seed stubbed out and which accounts for the suite's 32
+     failing assertions;
+  3. close the remaining todo rows;
+  4. benchmarks against upstream Clojure, CI, and a freeze kit.
+- The first started at once. The others wait for a free agent slot, at about four at a time.
+  Item 4 goes last, so that it measures the final state.

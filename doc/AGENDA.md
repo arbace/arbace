@@ -65,6 +65,16 @@ The current state of the work. This file is rewritten as things change. For the 
   box via gc + TamaGo (B1). No Go libraries on the JVM. Target `GOOS=tamago` amd64/arm64,
   go1.27.1, with the helper under `tools/`. Not started: the JVM work comes first.
 
+- Before the `arbace-for-java-26` freeze (user's choice, 2026-10-07):
+  1. In progress: compile j2c's converted jdk26u (12,730 files) with the class forms compiler,
+     compare with javac's class shapes, and fix the gaps, type annotations included.
+  2. Queued: restore clojure.spec (vendor `spec.alpha` and `core.specs.alpha` as `arbace.*`) so
+     the suite passes in full.
+  3. Queued: the remaining todo rows: `deftype` inside class bodies, covariant bridges,
+     Clojure's full overload matching, and the `SecurityManager` import.
+  4. Queued, last: steady-state benchmarks against upstream Clojure 1.12, a GitHub Actions
+     workflow running the gate on JDK 26, and branch notes plus a tag.
+
 ## Later
 
 - Before breaking away from the JVM and the `.class` format: freeze the JVM state of the art on
