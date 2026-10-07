@@ -7,9 +7,9 @@ the Arbace authors and licensed under the Eclipse Public License 1.0, the same l
 (text below).
 
 Arbace vendors code from the projects below; each part stays under its own license, reproduced in
-full in this file. Source
-files keep the copyright and license notices they came with (EPL 1.0 §3 and the BSD 3-Clause
-License require it); this file is the one place that states which license covers what.
+full in this file. Source files keep the copyright and license notices they came with (EPL 1.0
+§3 and the BSD 3-Clause License require it); this file is the one place that states which license
+covers what.
 
 - `clojure/` other than `clojure/asm/` and `clojure/lang/Murmur3.java`: Clojure,
   https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`, under the
