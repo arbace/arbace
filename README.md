@@ -62,6 +62,7 @@ alive for a minute unless `shutdown-agents` is called).
 - [doc/AGENDA.md](doc/AGENDA.md): the current state of the work and what comes next
 - [doc/JOURNAL.md](doc/JOURNAL.md): an append-only log of important decisions and actions
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
+- [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace against Clojure 1.12 (`bin/arbace-bench`)
 - [LICENSE.md](LICENSE.md): Arbace is under the Eclipse Public License 1.0, like Clojure; the
   file also holds the licenses of all vendored code
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and the origin of the vendored Clojure

@@ -1,0 +1,142 @@
+#!/bin/bash
+# Arbace's benchmark suite (doc/BENCHMARKS.md): Arbace (bin/arbace, target/arbace.jar and its
+# AOT cache) against upstream Clojure 1.12 (the release jar from Maven Central) and the frozen
+# baseline clojure/, all on the java on the PATH. Writes only under .tmp/bench/.
+#
+# The workloads are one Clojure file run unchanged by all three, test/bench/workload.clj; the
+# driver test/bench/driver.clj (run by the frozen clojure/) launches every measured JVM, one at
+# a time, and writes the raw results and the Markdown tables of doc/BENCHMARKS.md.
+#
+# Usage: bin/arbace-bench [OPTION...]
+#   --quick            1 fork, 0.5 s warm-up and measurement, 5 startup runs (a smoke test)
+#   --forks N          forks per steady-state benchmark and implementation (default 3)
+#   --warmup MS        warm-up per fork (default 3000)
+#   --measure MS       measurement per fork (default 3000)
+#   --sections LIST    comma-separated: startup,load,steady (default all)
+#   --only NAMES       comma-separated steady-state benchmarks (default all; see
+#                      `workload.clj list`)
+#   --out FILE         raw results (default .tmp/bench/results-DATE.edn)
+#   report FILE        only print the tables of an earlier run
+# Needs target/arbace.jar (bin/build-arbace). Prepares, once, in .tmp/bench/:
+#   lib/        Clojure 1.12.6 and its dependencies spec.alpha 0.5.238 and core.specs.alpha
+#               0.4.74 (clojure-1.12.6.pom), from Maven Central, checked by SHA-256
+#   baseline-classes/  the frozen clojure/'s namespaces AOT-compiled with direct linking, as
+#               upstream's release build compiles them (build.xml compile-clojure)
+#   clojure-1.12.6.aot  a JDK AOT cache for Clojure 1.12.6, trained like Arbace's on
+#               test/aot-training.clj (renamed to clojure.*, without its defclass), to tell the
+#               JDK's share of Arbace's startup from Arbace's own
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+work=$root/.tmp/bench
+lib=$work/lib
+mkdir -p "$lib"
+
+if [ "${1:-}" = report ]; then
+  exec java -cp "$root" clojure.main test/bench/driver.clj report "$2"
+fi
+
+forks=3 warmup=3000 measure=3000 sections=startup,load,steady only= runs=20 out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --quick) forks=1 warmup=500 measure=500 runs=5; shift ;;
+    --forks) forks=$2; shift 2 ;;
+    --warmup) warmup=$2; shift 2 ;;
+    --measure) measure=$2; shift 2 ;;
+    --sections) sections=$2; shift 2 ;;
+    --only) only=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) echo "unknown option: $1 (see the head of bin/arbace-bench)" >&2; exit 2 ;;
+  esac
+done
+out=${out:-$work/results-$(date -u +%Y%m%dT%H%M%SZ).edn}
+
+[ -f target/arbace.jar ] || { echo "no target/arbace.jar: run bin/build-arbace" >&2; exit 1; }
+
+# Clojure 1.12.6 and the versions of its two dependencies its pom names
+deps="
+org/clojure/clojure/1.12.6 21b578db389a8e74b286ce79c4a7f86ec641e26d88b12f18d69030916b0e18ca
+org/clojure/spec.alpha/0.5.238 94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077
+org/clojure/core.specs.alpha/0.4.74 eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb
+"
+cljcp=
+while read -r coord sha; do
+  [ -z "$coord" ] && continue
+  jar=$lib/$(basename "$(dirname "$coord")")-$(basename "$coord").jar
+  if ! echo "$sha  $jar" | sha256sum -c --status 2>/dev/null; then
+    echo "== download $coord"
+    curl -sfL -o "$jar" "https://repo1.maven.org/maven2/$coord/$(basename "$jar")"
+    echo "$sha  $jar" | sha256sum -c --quiet
+  fi
+  cljcp=$cljcp${cljcp:+:}$jar
+done <<< "$deps"
+
+# The frozen baseline's namespaces, AOT-compiled with direct linking (as bin/clojure-tests'
+# step 3); remade when clojure/ has changed
+base_nss="clojure.core clojure.core.protocols clojure.core.server clojure.main clojure.set
+clojure.edn clojure.xml clojure.zip clojure.inspector clojure.walk clojure.stacktrace
+clojure.template clojure.test clojure.test.tap clojure.test.junit clojure.pprint clojure.java.io
+clojure.repl clojure.java.browse clojure.java.javadoc clojure.java.shell clojure.java.process
+clojure.java.browse-ui clojure.java.basis.impl clojure.java.basis clojure.string clojure.data
+clojure.reflect clojure.datafy clojure.instant clojure.uuid clojure.core.reducers clojure.math
+clojure.tools.deps.interop clojure.repl.deps"
+bc=$work/baseline-classes
+if [ ! -f "$bc/clojure/core__init.class" ] || [ -n "$(find clojure -newer "$bc/clojure/core__init.class" -print -quit)" ]; then
+  echo "== AOT-compile the frozen clojure/ into $bc"
+  rm -rf "$bc"; mkdir -p "$bc"
+  # shellcheck disable=SC2086
+  java -cp "$bc:$root" -Dclojure.compile.path="$bc" -Dclojure.compiler.direct-linking=true \
+    -Djava.awt.headless=true clojure.lang.Compile $base_nss > "$work/baseline-classes.log" 2>&1 ||
+    { cat "$work/baseline-classes.log"; exit 1; }
+fi
+
+# A JDK AOT cache for Clojure 1.12.6, with the options bin/arbace uses
+caot=$work/clojure-1.12.6.aot
+copts="-XX:+UseCompactObjectHeaders"
+if [ ! -f "$caot" ] || [ test/aot-training.clj -nt "$caot" ]; then
+  echo "== train $caot"
+  sed -e 's/arbace\./clojure./g' -e '/^(defclass/,/^(TrainingPing/d' test/aot-training.clj \
+    > "$work/aot-training-clojure.clj"
+  rm -f "$caot"
+  # shellcheck disable=SC2086
+  java $copts -XX:AOTCacheOutput="$caot" -cp "$cljcp" clojure.main < "$work/aot-training-clojure.clj" \
+    > "$work/clojure-aot-train.log" 2>&1
+  [ -s "$caot" ] || { cat "$work/clojure-aot-train.log"; exit 1; }
+fi
+
+edn_list() { local IFS=,; for x in $1; do printf '"%s" ' "$x"; done; }
+kw_list() { local IFS=,; for x in $1; do printf ':%s ' "$x"; done; }
+rev=$(git rev-parse --short HEAD)
+base_rev=98d735f
+java_version=$(java -version 2>&1 | head -1 | sed 's/"/\\"/g')
+cat > "$work/config.edn" <<EOF
+{:root "$root"
+ :impls {:arbace {:label "Arbace $rev (bin/arbace: target/arbace.jar + AOT cache)"
+                  :cmd ["$root/bin/arbace"] :env {} :arbace true}
+         :arbace-nocache {:label "Arbace $rev, jar without the AOT cache (ARBACE_AOT=off)"
+                          :cmd ["$root/bin/arbace"] :env {"ARBACE_AOT" "off"} :arbace true}
+         :clojure {:label "Clojure 1.12.6 (Maven Central jar)"
+                   :cmd ["java" "-cp" "$cljcp" "clojure.main"] :env {}}
+         :clojure-aot {:label "Clojure 1.12.6 + a JDK AOT cache trained like Arbace's"
+                       :cmd ["java" "$copts" "-XX:AOTCache=$caot" "-Xlog:aot*=off" "-Xlog:cds*=off"
+                             "-cp" "$cljcp" "clojure.main"] :env {}}
+         :baseline {:label "frozen clojure/ (1.13 master $base_rev), AOT-compiled with direct linking"
+                    :cmd ["java" "-cp" "$bc:$root" "clojure.main"] :env {}}
+         :baseline-src {:label "frozen clojure/ as the tree is (namespaces from source)"
+                        :cmd ["java" "-cp" "$root" "clojure.main"] :env {}}}
+ :java "$java_version"
+ :sections #{$(kw_list "$sections")}
+ :startup [:arbace :arbace-nocache :clojure :clojure-aot :baseline :baseline-src]
+ :loads [:arbace :clojure :clojure-aot :baseline]
+ :libs ["pprint" "spec.test.alpha" "test" "reflect" "data" "xml"]
+ :skip {:baseline #{"spec.test.alpha"}}
+ :steady [:arbace :clojure :baseline]
+ :steady-opts ["-Xms2g" "-Xmx2g" "-XX:+UseCompactObjectHeaders"]
+ :forks $forks :load-forks $((forks * 3)) :startup-runs $runs :startup-warmup 3
+ :warmup-ms $warmup :measure-ms $measure
+ :only [$(edn_list "$only")]}
+EOF
+echo "== $(java -version 2>&1 | head -1); $(nproc) cores; load average $(cut -d' ' -f1-3 /proc/loadavg)"
+java -cp "$root" clojure.main test/bench/driver.clj run "$work/config.edn" "$out"
+echo "== load average at the end $(cut -d' ' -f1-3 /proc/loadavg)"
+java -cp "$root" clojure.main test/bench/driver.clj report "$out"
