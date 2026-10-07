@@ -694,3 +694,23 @@ instead of calling `arbace.classes`'s resolution.
   read sources with `read`.
 - For uniformity, `arbace.j2c.coverage` now reads `j2c-report.edn` files with `read-string`
   (with `*read-eval*` off) instead of `clojure.edn/read-string`.
+
+## 2026-10-07: Survey and plan for g2c (Go as Arbace forms)
+
+- At the user's request a background agent surveyed a Go → Clojure mechanism analogous to j2c:
+  `doc/G2C-SURVEY.md` (`379a363`, `f5330af`). Research only; nothing under `arbace/` changed.
+- Recommendation:
+  - The front end is a small Go helper on `go/parser` and `go/types` that emits the typed tree
+    for `clojure.core/read`. An experiment (`.tmp/g2c/`, not committed) dumped every package
+    tried, `runtime` included, deterministically.
+  - The first back end prints Go forms back to Go, verified by round-tripping `$GOROOT`.
+  - Phase a (JVM): pure-Go packages plus a hand-written runtime shim, type-checked for
+    `wasip1/wasm`.
+  - Phase b (bare metal): first Go plus TamaGo compiles Arbace-emitted Go forms inside go-whim's
+    KVM/HVF monitor. Then gc is replaced layer by layer.
+- Hard parts: on the JVM, value structs, pointers, byte strings, unsigned arithmetic,
+  structural interfaces, `reflect`, `unsafe`. On an own runtime, what Go's runtime demands of its
+  compiler.
+- Measured: JDK 26 virtual threads match Go for spawning and uncontended channel use but degrade
+  under parallel scheduling, so Go's own channel algorithm would be converted.
+- Ten open questions for the user are in §9 of the document. No decision taken yet.
