@@ -553,3 +553,25 @@ instead of calling `arbace.classes`'s resolution.
   and the origin and licenses of the vendored Clojure) moved to `doc/ARBACE.md`.
 - CLAUDE.md's vendoring rule now says that for `arbace/` the origin record next to the code is
   `doc/ARBACE.md`, plus each converted file's notice kept as a comment. The root README links it.
+
+## 2026-10-07: All licenses in LICENSE.md
+
+- At the user's request, `LICENSE.md` is the one place that states licenses: their full texts and
+  which files each covers. `doc/ARBACE.md` no longer names licenses, and CLAUDE.md now says
+  origins go to the journal and next to the code, licenses to `LICENSE.md`.
+- Source files keep the copyright and license notices they came with. They were not removed,
+  because EPL 1.0 §3 ("may not remove or alter any copyright notices") and the BSD 3-Clause
+  License (retain the notice in source redistributions) require them.
+- Survey of the notices in `clojure/` (`98d735fab02f`): 186 Clojure files under EPL 1.0, 41 ASM
+  files under BSD 3-Clause, and two gaps in the old `LICENSE.md`:
+  - `clojure/lang/Murmur3.java` (→ `arbace/lang/Murmur3.clj`) is Guava's, Copyright (C) 2011
+    The Guava Authors, under the Apache License 2.0; MurmurHash3 itself is Austin Appleby's,
+    public domain. The Apache License 2.0 text (terms and conditions, without the appendix) was
+    added, taken from `APACHE-LICENSE-2.0` of github.com/sergi/go-diff
+    v1.3.2-0.20230802210424-5b0b94c5c0d3 in the local Go module cache.
+  - `clojure/repl.clj` (Copyright (c) Chris Houser) still carries an older header naming the
+    Common Public License 1.0, the EPL's predecessor. Upstream Clojure ships it under the EPL
+    and includes no CPL text; `LICENSE.md` records the fact.
+- The stale `arbace/` paths in `LICENSE.md` (`arbace.clj`, `arbace/main_class.clj`) were
+  replaced by a rule: everything outside `arbace/classes/`, `arbace/j2c/` and `arbace/javalisp/`
+  is vendored, under its source file's license.

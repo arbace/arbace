@@ -15,6 +15,5 @@ https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`
 (https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`, repackaged), with
 the two seed fixes recorded in [JOURNAL.md](JOURNAL.md). It was derived on 2026-10-07 by
 `bin/vendor-arbace` (converter `arbace.j2c`, renaming `arbace.j2c.rename`) and is maintained by
-hand since. Licenses: Eclipse Public License 1.0 for Clojure, BSD 3-Clause for ASM
-(`asm/`, `asm.clj`), both in [LICENSE.md](../LICENSE.md). The converted files keep their Java file's notice as a
-comment. Details, the renaming rules and how to build and run it: [VENDOR-NOTES.md](VENDOR-NOTES.md).
+hand since. The converted files keep their Java file's notice as a comment; which license
+covers which file is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and run it: [VENDOR-NOTES.md](VENDOR-NOTES.md).

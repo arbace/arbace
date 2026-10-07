@@ -23,7 +23,9 @@ Prior art:
   lives elsewhere.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   baseline, and checks the result against `test/baseline-results.edn`.
-- `LICENSE.md` holds the licenses of all vendored code. Extend it when vendoring from a new source.
+- `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
+  stated nowhere else, apart from the notices source files came with, which stay. Extend it when
+  vendoring from a new source.
 - `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.clj`:
   - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang`, `arbace.asm`
     and the rest; the Java parts are class forms). It is now hand-maintained source; its
@@ -50,9 +52,9 @@ Prior art:
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it.
-- When vendoring code from prior art, record its origin (repo, path, revision) and license, both in
-  the journal and next to the vendored code. `arbace/` holds only `.clj` files, so for it the
-  record is `doc/ARBACE.md`, plus each converted file's notice kept as a comment.
+- When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
+  next to the vendored code (for `arbace/`, which holds only `.clj` files: `doc/ARBACE.md`), and
+  its license in `LICENSE.md`.
 
 ## Working conventions
 
