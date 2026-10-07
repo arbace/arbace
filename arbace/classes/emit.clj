@@ -357,6 +357,10 @@
       :const (emit-const gen (:type node) (:val node))
       :local (load-binding gen (:b node))
       :this-path (emit-this-path gen node)
+      :outer-param-path (do (emit gen (:base node) :expr)
+                            (doseq [c (:path node)]
+                              (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (this0-name c)
+                                               (t/internal->desc (:outer (a/decl! c))))))
       :class-lit (let [d (:class node)]
                    (if (t/prim? d)
                      (.visitFieldInsn m Opcodes/GETSTATIC (t/box-of d) "TYPE" "Ljava/lang/Class;")
@@ -1051,6 +1055,7 @@
               (let [s (alloc-slot gen t/string-desc)] (alloc-slot gen "I") (assoc gen :enum-slot s))
               gen)
         _ (when-let [r (:recv ab)] (swap! (:slots gen) assoc (:id r) 0))
+        _ (when-let [ob (:outer-binding ab)] (swap! (:slots gen) assoc (:id ob) (:outer-slot gen)))
         _ (bind-param-slots! gen (:params ab))
         caps (when (#{:local :anon} (:nesting d)) (:captures st))
         cap-slots (doall (for [b caps] (let [s (alloc-slot gen (:type b))] [b s])))]

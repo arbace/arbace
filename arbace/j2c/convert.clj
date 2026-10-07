@@ -734,7 +734,16 @@
   variable arguments into an array unless `loose?`."
   [env ^Symbol$MethodSymbol m mtype args varargs-elem loose?]
   (let [targets (arg-targets m mtype (count args) varargs-elem)
-        rs (doall (map (fn [a t] (let [x (ex env a)] (coerce-r env x t))) args targets))]
+        rs (doall (map (fn [a t]
+                         (let [x (coerce-r env (ex env a) t)
+                               a (TreeInfo/skipParens a)]
+                           ;; the compiler unifies a conditional's branches by their class
+                           ;; chain only: javac's type for it (the parameter's) as a hint
+                           (if (and t (not (prim? t)) (not (jt/object? t)) (seq? (:f x))
+                                    (or (instance? JCTree$JCConditional a) (instance? JCTree$JCSwitchExpression a)))
+                             (assoc x :f (hint env (:f x) t) :t (erasure t))
+                             x)))
+                       args targets))]
     (if (and varargs-elem (not loose?))
       (let [nfixed (dec (count (erased-params m)))
             [fixed rest] (split-at nfixed rs)

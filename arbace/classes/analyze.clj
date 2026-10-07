@@ -995,8 +995,31 @@
           (recur (:parent f))))
       {:op :local :b b :type (:type b) :captured true})))
 
+(declare outer-this-node*)
+
 (defn outer-this-node
-  "Java's T.this from actx: the path of this$0 hops from the current class to class T."
+  "Java's T.this from actx: the path of this$0 hops from the current class to class T. In a
+  lambda in a constructor of an inner class, the constructor's outer instance parameter
+  captured by the lambda, as javac's Lower makes it before LambdaToMethod."
+  [actx target]
+  (let [frames (take-while some? (iterate :parent (:frame actx)))
+        lambdas (take-while #(= :lambda (:kind %)) frames)
+        f (nth frames (count lambdas) nil)
+        b (some-> f :outer-param deref)]
+    (if (and (seq lambdas) f (:ctor f) b (not= (:class f) target))
+      (let [base (local-ref actx b)
+            hops (loop [o (:outer (decl! (:class f))) hops []]
+                   (cond (nil? o) (fail (str "No enclosing instance of type " (str/replace target "/" ".") " in scope"))
+                         (= o target) hops
+                         :else (let [d (decl! o)]
+                                 (when-not (:outer-instance? d)
+                                   (fail (str "No enclosing instance of type " (str/replace target "/" ".") " in scope")))
+                                 (swap! (:state d) assoc :uses-this0 true)
+                                 (recur (:outer d) (conj hops o)))))]
+        {:op :outer-param-path :base base :path hops :type (t/internal->desc target)})
+      (outer-this-node* actx target))))
+
+(defn- outer-this-node*
   [actx target]
   (loop [f (:frame actx) path [] via-lambda false]
     (when-not f
@@ -1119,6 +1142,8 @@
             (coerce-hint actx node tag)
             node))))))
 
+(declare branching-tail? convert-node)
+
 (defn coerce-hint
   "A tag on an expression gives its static type, as in Clojure; a checkcast keeps the
   verifier happy where the type is not already known."
@@ -1133,6 +1158,10 @@
       (assoc node :type d :cast-to d)
       ;; the tag gives the static type, also a supertype (Clojure's hint)
       (and (t/ref? (:type node)) (env/assignable? (:type node) d)) (assoc node :type d)
+      ;; branches that all convert to it (javac's lub can be sharper than theirs): no cast
+      (and (t/ref? d) (branching-tail? node)
+           (try (convert-node node d) true (catch arbace.lang.ExceptionInfo _ false)))
+      (assoc (convert-node node d) :type d)
       (t/ref? (:type node)) {:op :cast :class d :expr node :type d}
       :else node)))
 
@@ -1575,8 +1604,8 @@
       ;; branches whose values all convert (javac's lub can be sharper than the branches'
       ;; unified type): no cast
       (and (t/ref? type) (branching-tail? init)
-           (try (convert-node init type) true (catch clojure.lang.ExceptionInfo _ false)))
-      (convert-node init type)
+           (try (convert-node init type) true (catch arbace.lang.ExceptionInfo _ false)))
+      (assoc (convert-node init type) :type type)
       (and (t/ref? type) (t/ref? (value-type (:type init))))
       {:op :cast :class type :expr init :type type}
       :else (convert-node init type :what (str "initializer of " sym)))))
@@ -1595,6 +1624,9 @@
                         cval (when (and (:const m) (= :const (:op init-node))) init-node)
                         b (make-binding actx sym type :mutable (boolean (:mutable m)) :cval cval
                                         :loop-local loop?
+                                        :sig (when-let [tg (:tag m)]
+                                               (when (or (seq? tg) (contains? (:bounds actx) tg))
+                                                 (t/signature (parse-type (scope-of actx) tg))))
                                         :type-anns (local-type-anns actx sym))]
                     (when (and (:const m) (not cval))
                       (fail (str "^:const local needs a constant initializer: " sym)))
@@ -2428,7 +2460,9 @@
         ;; a local class's captured locals must be available where it is created
         (when-let [cd (decl cn)]
           (when (= :local (:nesting cd))
-            (doseq [b (:captures @(:state cd))] (local-ref actx b))))
+            ;; javac adds them in its freevars order, the reverse of the constructor's
+            ;; (Lower.FreeVarCollector.addFreeVars)
+            (doseq [b (reverse (:captures @(:state cd)))] (local-ref actx b))))
         (let [outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
               arg-nodes (when (reflect? actx) (mapv #(analyze actx %) args))]
          (or-reflect
@@ -2920,7 +2954,7 @@
                actx)]
     (reduce (fn [[actx bs] p]
               (let [b (make-binding actx (:sym p) (:desc p) :mutable (boolean (:mutable (:meta p)))
-                                    :param true)]
+                                    :param true :sig (some-> (:tn p) t/signature))]
                 [(with-local actx b) (conj bs b)]))
             [actx []]
             (:params m))))
@@ -2990,7 +3024,14 @@
 (defn- analyze-ctor-body [n m]
   (let [actx (-> (body-actx n :method false (:bounds (or (:scope m) (class-scope n)))
                             {:name "<init>" :method m} "V")
-                 (assoc-in [:frame :ctor] true))
+                 (assoc-in [:frame :ctor] true)
+                 (assoc-in [:frame :outer-param] (atom nil)))
+        ;; the outer instance parameter, for lambdas in the body (outer-this-node)
+        outer-b (when (:outer-instance? (decl! n))
+                  (let [b (make-binding actx (symbol "this$0") (t/internal->desc (:outer (decl! n)))
+                                        :outer-param true)]
+                    (reset! (get-in actx [:frame :outer-param]) b)
+                    b))
         ;; a compact constructor's components are assignable locals
         [actx bs] (bind-params actx n (if (:compact m)
                                         (update m :params (fn [ps] (mapv #(assoc-in % [:meta :mutable] true) ps)))
@@ -3009,6 +3050,7 @@
             call-node @phase]
         (when (= :prologue call-node) (fail "Constructor call not reached"))
         {:params bs :prologue [] :call call-node :nested-call true :body body
+         :outer-binding outer-b
          :recv (get-in actx [:locals (:recv m)])
          :calls-super (not= :this (:kind call-node))
          :compact-locals (when (:compact m) bs)})
@@ -3018,6 +3060,7 @@
                         (implicit-super-call (assoc actx :ctor-prologue true) n))
             post-node (analyze-body actx post)]
         {:params bs :prologue pre-nodes :call call-node :body post-node
+         :outer-binding outer-b
          :recv (get-in actx [:locals (:recv m)])
          :calls-super (not= :this (:kind call-node))
          :compact-locals (when (:compact m) bs)}))))
@@ -3151,8 +3194,17 @@
       (let [st (t/subst env st)
             s (:name st)
             g (class-generics s)
-            senv (when (and g (seq (:args st)) (= (count (:tparams g)) (count (:args st))))
-                   (zipmap (:tparams g) (:args st)))]
+            ;; with the type arguments of a generic outer type (Outer<A>.Inner<B>)
+            outer-env (fn outer-env [tn]
+                        (when-let [o (:outer tn)]
+                          (let [tps (class-tparams (:name o))]
+                            (merge (outer-env o)
+                                   (when (and (seq (:args o)) (= (count tps) (count (:args o))))
+                                     (zipmap tps (:args o)))))))
+            senv (let [own (when (and g (seq (:args st)) (= (count (:tparams g)) (count (:args st))))
+                             (zipmap (:tparams g) (:args st)))
+                       oe (outer-env st)]
+                   (when (or own (seq oe)) (merge oe own)))]
         (if (or (nil? g) (contains? out s))
           (recur more out)
           (recur (concat more (for [x (:supers g) :when x] [x (or senv {})]))
@@ -3630,7 +3682,8 @@
         disam (str (when osig (str osig ":"))
                    (str/replace (:owner sam) "/" ".") " "
                    (when-let [pv (:pending-var actx)] (str pv "="))
-                   (apply str (for [b @(:captures boundary)] (str (:type b) " " (:sym b) ","))))
+                   ;; captured locals by their generic type (javac's typeSig)
+                   (apply str (for [b @(:captures boundary)] (str (or (:sig b) (:type b)) " " (:sym b) ","))))
         base (str "lambda$" (lambda-method-prefix actx) "$" (Integer/toHexString (.hashCode ^String disam)) "$")
         i (get-in (swap! (state cls) update-in [:lambda-counters base] (fnil inc 0)) [:lambda-counters base])]
     (str base i)))
@@ -3668,7 +3721,7 @@
         lname (when-not ser (lambda-name! actx))
         boundary {:kind :lambda :captures (atom []) :uses-this (atom false)}
         f (assoc (new-frame :lambda cls (:frame actx) boundary) :static (:static actx))
-        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue :ctor-phase :pending-var :ref-lambda))
+        lactx (-> actx (assoc :frame f :ret ret :labels {}) (dissoc :loop :break-target :label-loop :in-ctor :ctor-prologue :ctor-phase :pending-var :ref-lambda :field-name))
         [lactx bs] (reduce (fn [[a bs] [p t]]
                              (let [b (make-binding a p t :mutable (boolean (:mutable (meta p))) :param true)]
                                [(with-local a b) (conj bs b)]))

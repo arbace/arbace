@@ -201,12 +201,19 @@
     :inter true
     :wild true))
 
+(defn- local-class-name?
+  "Is n, a class nested in outer, a local or anonymous one (Outer$1Local)? javac's
+  signatures name those alone, without their generic outer type."
+  [^String n ^String outer]
+  (boolean (and outer (str/starts-with? n (str outer "$"))
+                (re-matches #"[0-9].*" (subs n (inc (count outer)))))))
+
 (defn signature
   "The generic signature string of a parsed type."
   [tn]
   (case (:t tn)
     :prim (:desc tn)
-    :class (if-let [o (:outer tn)]
+    :class (if-let [o (and (not (local-class-name? (:name tn) (some-> (:outer tn) :name))) (:outer tn))]
              (let [os (signature o)]
                (str (subs os 0 (dec (count os))) "." (subs (:name tn) (inc (count (:name o))))
                     (when (seq (:args tn)) (str "<" (apply str (map signature (:args tn))) ">")) ";"))
