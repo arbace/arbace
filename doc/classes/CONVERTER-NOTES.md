@@ -317,8 +317,8 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 
 ## Spec amendments (proposed, 2026-10-07)
 
-Found while compiling the converted JDK; already in SPEC.md, marked "amendment, 2026-10-07",
-for the user's approval:
+Found while compiling the converted JDK; in SPEC.md, marked "amendment, accepted 2026-10-07".
+The user accepted all four on 2026-10-07:
 
 16. **§4.8, `^:diamond`.** javac gives the constructor of an anonymous class of an interface
     that captures locals a `Signature`, except when Java wrote the diamond; the forms say so

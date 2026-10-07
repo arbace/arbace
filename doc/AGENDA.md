@@ -64,8 +64,9 @@ The current state of the work. This file is rewritten as things change. For the 
   go1.27.1, with the helper under `tools/`. Not started: the JVM work comes first.
 
 - Before the `arbace-for-java-26` freeze (user's choice, 2026-10-07):
-  1. In progress: compile j2c's converted jdk26u (12,730 files) with the class forms compiler,
-     compare with javac's class shapes, and fix the gaps, type annotations included.
+  1. Done: the converted jdk26u compiled with the class forms compiler matches javac's class
+     shapes for 12,376 of 12,444 files (99.5%), with 3 compile errors (`bin/j2c-check --jdk`).
+     Small known remainder listed in the journal.
   2. Done: clojure.spec restored (`d9ecda7`). Clojure's suite passes in full on Arbace
      (20,750 of 20,750 assertions).
   3. Done: the remaining todo rows: `deftype` inside class bodies, covariant bridges,

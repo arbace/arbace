@@ -983,3 +983,37 @@ recommended:
 - Agreed plan (in AGENDA): keep it until the freeze and on `arbace-for-java-26` for good. On main
   after the break, replace it, preferably by a Go-style binary seed (the freeze tag's jar,
   pinned by hash), otherwise by a pinned upstream fetch plus patches. Decide at the break.
+
+## 2026-10-07: The converted jdk26u compiled and compared with javac (pre-freeze item 1)
+
+- Done by a background agent (`4261ec6` .. `ee37d61`). Details and the per-module table are in
+  `doc/classes/CONVERTER-NOTES.md`, "The converted JDK".
+- New `bin/j2c-check --jdk [MODULE...]` (about 10 minutes, not in the default gate):
+  - it converts each module of jdk26u `src/*/share/classes` (`baf63fbe42b8`);
+  - it compiles the originals twice with javac as the reference, with the JDK build's options;
+  - it compiles the forms with the class forms compiler and compares every class's shape;
+  - the report is `.tmp/j2c-jdk/report.md`.
+- Before → after: shape-identical files 11,699 → **12,376 of 12,444 (99.5%)**, differing 512 →
+  65, compile errors 173 → 3, classes compiled 22,119 → 24,127.
+- Fixed:
+  - compiler gaps in constants and literals, branch types and lub, the class environment,
+    bridges, InnerClasses, null checks, JEP 513 prologues and `java.lang.Object` itself,
+    lambda, anonymous and local class details, and switches and records;
+  - converter gaps, including a real semantic bug: a `try` used as a value returned the wrong
+    value;
+  - type annotations, which now round-trip (new sample `TypeAnns.java`).
+- Remaining (68 files):
+  - `switch` fall-through duplicating a lambda or anonymous class;
+  - javac's anonymous-class numbering in chained calls;
+  - InnerClasses entries for classes named only in javac's frames;
+  - `this.k` on an inherited constant;
+  - three compile errors (`PackageBuilder`, `Attr`, `ModuleDescriptor`);
+  - module-infos, which are not converted yet but are feasible.
+- Spec amendments 16-19 (§4.8 `^:diamond`, §5.12 `^:method-ref` on a `T[]::new` lambda, §4.11
+  `&` in variable arity records, §4.4 type annotations in code) were **accepted by the user**
+  and are marked so in SPEC.md.
+- The main session checked `ee37d61` with the full gate:
+  - `bin/build-arbace --suite`: stages 1-3 identical at 5,756 classes, the verifier clean,
+    native tests 47/2,780, and the suite 20,750/20,750 on stages 1 and 2;
+  - `bin/class-forms-tests`: 64/133;
+  - `bin/j2c-check --suite`: baseline and samples identical, no regressions.
