@@ -8431,3 +8431,6 @@ fails, attempts to require sym's namespace and retries."
   (when (not (map? m))
     (throw (IllegalArgumentException. "expected a map")))
   (selector-impl m))
+
+;; the class forms' names: defclass, anon, switch, lambda, ... (doc/classes/SPEC.md §9.5)
+(load "core_classes")

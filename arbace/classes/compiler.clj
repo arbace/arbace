@@ -31,16 +31,31 @@
                                      :when (or (= n (:super cd)) (some #{n} (:interfaces cd)))]
                                  c))))))))
 
+(defn- declare-siblings!
+  "Enters sibling class forms (the other class forms of a top-level do, SPEC §9.2) as
+  declarations only, like classes found by source lookup: their headers and members are
+  visible to the code being compiled, their bodies are compiled when their own forms are."
+  [ns siblings]
+  (let [from (count @(:order a/*unit*))]
+    (doseq [f siblings]
+      (let [parsed (p/parse-class {:ns ns :nesting :top} f)]
+        (when-not (a/decl (a/top-name ns parsed))
+          (a/declare-class! {:nesting :top} parsed))))
+    (doseq [c (subvec @(:order a/*unit*) from)]
+      (a/update-decl! c assoc :declared-only true))))
+
 (defn compile-forms
   "Compiles class forms, each the rest of a (defclass ...) form, in namespace ns, as one
-  compilation. Returns {:names [top-level names] :classes [{:name :bytes :info}]}."
-  [ns forms]
+  compilation; the class forms `siblings` are entered as declarations only. Returns
+  {:names [top-level names] :classes [{:name :bytes :info}]}."
+  [ns forms & {:keys [siblings]}]
   (binding [env/*compile-set* (atom {})
             a/*unit* {:order (atom []) :counters (atom {}) :switch-maps (atom {})
                       :switch-holders (atom {}) :source-tried (atom #{})
                       :assert-holders (atom {}) :holder-first (atom {})}]
     (let [names (vec (for [f forms]
                        (a/declare-class! {:nesting :top} (p/parse-class {:ns ns :nesting :top} f))))]
+      (declare-siblings! ns siblings)
       (a/process-classes! 0)
       (infer-permits!)
       ;; javac's synthetic holder classes of the outermost class, named after all anonymous
@@ -80,9 +95,10 @@
 
 (defn compile-and-load!
   "Compiles class forms and defines the classes (also writing them under *compile-files*).
-  Returns [[dotted-name Class] ...] of the top-level classes."
-  [ns forms]
-  (let [{:keys [names classes]} (compile-forms ns forms)]
+  Returns [[dotted-name Class] ...] of the top-level classes. Options: :siblings, as for
+  compile-forms."
+  [ns forms & {:keys [siblings]}]
+  (let [{:keys [names classes]} (compile-forms ns forms :siblings siblings)]
     (when *compile-files*
       (write-classes! *compile-path* classes))
     (let [defined (env/define-classes! classes)]

@@ -2,15 +2,16 @@
 ;;
 ;; The compiler's sources name the runtime they run on as Arbace's: `arbace.core`,
 ;; `arbace.string`, `arbace.lang.RT`, `arbace.asm.ClassWriter`. From stage 1 on that is the
-;; running runtime, and this driver just requires the compiler's namespaces. At stage 0 only the
-;; frozen baseline exists, `clojure.core`, `clojure.lang` and `clojure.asm`: the driver then loads
-;; the compiler's namespaces itself, rewriting every symbol that names a vendored namespace or
-;; package, `arbace.X` (also inside metadata, such as type hints), to `clojure.X` while it reads
-;; them. The tools' own namespaces (`arbace.classes`, `arbace.j2c`, `arbace.javalisp`) are not
-;; rewritten. Then it interns the user-facing macros and functions of `arbace.classes.core` into
-;; the running core namespace (`clojure.core` or `arbace.core`; at run time, the core sources
-;; are not touched) and refers them into the current namespace, so class forms can be written
-;; without qualifying the new names.
+;; running runtime, and this driver just requires the compiler's namespaces; `arbace.core`
+;; itself holds the class forms' names (arbace/core_classes.clj) and `arbace.lang.Compiler` knows
+;; their special forms. At stage 0 only the frozen baseline exists, `clojure.core`,
+;; `clojure.lang` and `clojure.asm`: the driver then loads the compiler's namespaces itself,
+;; rewriting every symbol that names a vendored namespace or package, `arbace.X` (also inside
+;; metadata, such as type hints), to `clojure.X` while it reads them. The tools' own namespaces
+;; (`arbace.classes`, `arbace.j2c`, `arbace.javalisp`) are not rewritten. Then it loads
+;; arbace/core_classes.clj the same way, so the class forms' names (`defclass`, `switch`, ...)
+;; are interned into `clojure.core` (at run time; the frozen sources are not touched), and
+;; refers them into `user`, so class forms can be written without qualifying the new names.
 ;;
 ;; This file itself is read unmapped at every stage, so it names no class or namespace of either
 ;; runtime: only core functions, Java classes and names computed from the running core.
@@ -33,7 +34,7 @@
     arbace.classes.analyze
     arbace.classes.emit
     arbace.classes.compiler
-    arbace.classes.core
+    arbace.classes.native
     arbace.classes.shape
     arbace.classes.build])
 
@@ -105,20 +106,33 @@
       (dosync (commute @(resolve (symbol (str core-ns) "*loaded-libs*")) conj ns)))
     (apply require namespaces)))
 
+(def ^:private core-names-file "arbace/core_classes.clj")
+
+(defn- core-names
+  "The public names that arbace/core_classes.clj defines."
+  []
+  (with-open [rdr (java.io.PushbackReader. (java.io.InputStreamReader. (.openStream ^java.net.URL (resource core-names-file)) "UTF-8"))]
+    (let [eof (Object.)]
+      (loop [out []]
+        (let [f (read {:eof eof} rdr)]
+          (if (identical? f eof)
+            out
+            (recur (if (and (seq? f) (#{'defmacro 'defn} (first f))) (conj out (second f)) out))))))))
+
 (defn install!
-  "Interns the public vars of arbace.classes.core into the running core namespace (as
-  arbace.core will hold them) and refers them into namespace `ns` (default: the current one)."
+  "At stage 0, loads the class forms' names (arbace/core_classes.clj) into clojure.core and
+  refers them into namespace `ns` (default: the current one). From stage 1 on arbace.core has
+  them already: nothing to do."
   ([] (install! *ns*))
   ([ns]
-   (let [core (the-ns core-ns)]
-     (doseq [[sym v] (ns-publics 'arbace.classes.core)]
-       (let [cv (intern core sym @v)]
-         (alter-meta! cv merge (select-keys (meta v) [:macro :arglists :doc :inline :inline-arities]))))
-     (binding [*ns* (the-ns ns)]
-       (doseq [[sym _] (ns-publics 'arbace.classes.core)]
-         (let [cur (ns-resolve *ns* sym)]
-           (when-not (and (var? cur) (not= (:ns (meta cur)) core))
-             (.refer *ns* sym (ns-resolve core sym)))))))))
+   (when stage0?
+     (load-mapped core-names-file)
+     (let [core (the-ns core-ns)]
+       (binding [*ns* (the-ns ns)]
+         (doseq [sym (core-names)]
+           (let [cur (ns-resolve *ns* sym)]
+             (when-not (and (var? cur) (not= (:ns (meta cur)) core))
+               (.refer *ns* sym (ns-resolve core sym))))))))))
 
 (load-compiler!)
 (install! 'user)

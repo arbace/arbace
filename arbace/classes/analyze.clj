@@ -918,7 +918,7 @@
      for-each* with-resources* if-instance* class-literal* super. this.})
 
 (defn- core-var? [v]
-  (and (var? v) (#{(str 'arbace.core) "arbace.classes.core"} (name (ns-name (.ns ^arbace.lang.Var v))))))
+  (and (var? v) (= (str 'arbace.core) (name (ns-name (.ns ^arbace.lang.Var v))))))
 
 (defn resolve-var [actx sym]
   (when (and (symbol? sym) (not (contains? (:locals actx) sym)))
@@ -2498,7 +2498,9 @@
   (let [names (subvec @(:order *unit*) from)]
     (doseq [n names :when (not (:headers-done (decl n)))] (resolve-header! n))
     (doseq [n names] (resolve-members! n))
-    (doseq [n (supertypes-first names) :when (not (:declared-only (decl n)))] (add-bridges! n))
+    ;; declared-only classes too (siblings of a top-level do, §9.2); those entered from source
+    ;; have theirs already (add-bridges! runs once per class)
+    (doseq [n (supertypes-first names)] (add-bridges! n))
     (doseq [n names :when (not (:declared-only (decl n)))] (analyze-class! n))))
 
 (defn analyze-anon

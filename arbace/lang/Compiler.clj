@@ -102,6 +102,9 @@
 
   (field ^:static ^:final ^Symbol REIFY (Symbol/intern "reify*"))
 
+  ;; the class forms' special form for classes (doc/classes/SPEC.md §9.5)
+  (field ^:static ^:final ^Symbol CLASS_STAR (Symbol/intern "class*"))
+
   (field ^:static ^:final ^Symbol LIST (Symbol/intern "arbace.core" "list"))
 
   (field ^:static ^:final ^Symbol HASHMAP (Symbol/intern "arbace.core" "hash-map"))
@@ -194,7 +197,38 @@
             NEW
             (Compiler$NewExpr$Parser.)
             _AMP_
-            nil])))
+            nil
+            ;; the class forms' special forms (doc/classes/SPEC.md §9.5), compiled by arbace.classes
+            CLASS_STAR
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "label*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "break*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "continue*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "return*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "switch*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "lambda*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "method-ref*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "java-str*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "java-assert*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "for-each*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "with-resources*")
+            (Compiler$ClassFormsExpr$Parser.)
+            (Symbol/intern "if-instance*")
+            (Compiler$ClassFormsExpr$Parser.)])))
+
+  ;; the class forms of the top-level do being evaluated or compiled, entered as declarations
+  ;; when one of them is compiled (doc/classes/SPEC.md §9.2)
+  (field ^:public ^:static ^:final ^Var CLASS_FORM_SIBLINGS (.setDynamic (Var/create nil)))
 
   (field ^:private ^:static ^:final ^int MAX_POSITIONAL_ARITY 20)
 
@@ -722,6 +756,78 @@
     (method ^:public hasJavaClass ^boolean [this] true)
 
     (method ^:public getJavaClass ^Class [this] Keyword))
+
+  ;; The class forms' special forms (doc/classes/SPEC.md §9.5) are compiled by the class forms
+  ;; compiler, arbace.classes, loaded on first use: its namespace arbace.classes.native is the
+  ;; boundary. (class* :top form) and (class* :tops forms), from defclass and defclasses, are
+  ;; compiled and defined at analysis time, and analyzed as the imports and the class(es).
+  (defclass ^:public ^:static ClassFormsExpr
+    (field ^:static ^:final ^Keyword TOP (Keyword/intern nil "top"))
+
+    (field ^:static ^:final ^Keyword TOPS (Keyword/intern nil "tops"))
+
+    (defclass ^:static Parser
+      :implements [IParser]
+
+      (method ^:public parse ^Expr [this ^C context frm]
+        (let [form (cast ISeq frm)
+              kind (RT/second form)]
+          (if (and (.equals CLASS_STAR (RT/first form)) (or (.equals TOP kind) (.equals TOPS kind)))
+              (arbace.lang.Compiler/analyze
+                context
+                (.invoke (arbace.lang.Compiler/classForms "compile-top")
+                         (arbace.lang.Compiler/currentNS)
+                         kind
+                         (RT/third form)
+                         (.deref CLASS_FORM_SIBLINGS)))
+              (throw (UnsupportedOperationException.
+                       (java-str (RT/first form) " is only supported in class bodies")))))))
+
+    (method ^:static siblings ^IPersistentVector [^ISeq doForm ^IPersistentVector acc]
+      (let [^:mutable ret acc]
+        (loop [s (RT/next doForm)]
+          (when (some? s)
+            (let [x (RT/first s)]
+              (when (and (instance? ISeq x) (instance? Symbol (RT/first x)))
+                (let [op (cast Symbol (RT/first x))
+                      mac (ClassFormsExpr/macroName op)]
+                  (cond
+                    (.equals DO op) (set! ret (ClassFormsExpr/siblings (cast ISeq x) ret))
+                    (and (.equals CLASS_STAR op) (.equals TOP (RT/second x)))
+                      (set! ret (cast IPersistentVector (RT/conj ret (RT/third x))))
+                    (and (.equals CLASS_STAR op) (.equals TOPS (RT/second x)))
+                      (loop [t (RT/seq (RT/third x))]
+                        (when (some? t)
+                          (set! ret (cast IPersistentVector (RT/conj ret (RT/first t))))
+                          (recur (RT/next t))))
+                    (.equals "defclass" mac) (set! ret (cast IPersistentVector (RT/conj ret (RT/next x))))
+                    (.equals "defclasses" mac)
+                      (loop [t (RT/next x)]
+                        (when (some? t)
+                          (set! ret (cast IPersistentVector (RT/conj ret (RT/next (RT/first t)))))
+                          (recur (RT/next t))))))))
+            (recur (RT/next s))))
+        ret))
+
+    (method ^:static macroName ^String [^Symbol op]
+      (try
+        (let [v (arbace.lang.Compiler/isMacro op)]
+          (if (and (some? v) (.equals "arbace.core" (.-name (.-name (.-ns v)))))
+              (.-name (.-sym v))
+              nil))
+        (catch Throwable e nil)))
+
+    (method ^:static pushSiblings ^boolean [^ISeq doForm]
+      (if (some? (.deref CLASS_FORM_SIBLINGS))
+          false
+          (let [sibs (ClassFormsExpr/siblings doForm PersistentVector/EMPTY)]
+            (if (> (.count sibs) 1)
+                (do (Var/pushThreadBindings (^[Object/1] RT/map CLASS_FORM_SIBLINGS sibs)) true)
+                false)))))
+
+  (method ^:static classForms ^IFn [^String name]
+    (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.classes.native"))
+    (RT/var "arbace.classes.native" name))
 
   (defclass ^:public ^:static ImportExpr
     :implements [Expr]
@@ -6554,11 +6660,14 @@
             (set! form (arbace.lang.Compiler/macroexpand form))
             (cond
               (and (instance? ISeq form) (Util/equals (RT/first form) DO))
-                (let [^:mutable s (RT/next form)]
-                  (while (some? (RT/next s))
+                (let [^:mutable s (RT/next form)
+                      pushed (ClassFormsExpr/pushSiblings (cast ISeq form))]
+                  (try
+                    (while (some? (RT/next s))
+                      (arbace.lang.Compiler/eval (RT/first s) false)
+                      (set! s (RT/next s)))
                     (arbace.lang.Compiler/eval (RT/first s) false)
-                    (set! s (RT/next s)))
-                  (arbace.lang.Compiler/eval (RT/first s) false))
+                    (finally (when pushed (Var/popThreadBindings)))))
               (or (instance? IType form)
                   (and (instance? IPersistentCollection form)
                        (not (and (instance? Symbol (RT/first form))
@@ -6858,6 +6967,8 @@
                                       nil
                                       LOOP_LOCALS
                                       nil
+                                      CLASS_FORM_SIBLINGS
+                                      nil
                                       NEXT_LOCAL_NUM
                                       (Integer/valueOf 0)
                                       RT/READEVAL
@@ -6956,10 +7067,13 @@
       (try
         (set! form (arbace.lang.Compiler/macroexpand form))
         (if (and (instance? ISeq form) (Util/equals (RT/first form) DO))
-            (loop [s (RT/next form)]
-              (when (some? s)
-                (arbace.lang.Compiler/compile1 gen objx (RT/first s))
-                (recur (RT/next s))))
+            (let [pushed (ClassFormsExpr/pushSiblings (cast ISeq form))]
+              (try
+                (loop [s (RT/next form)]
+                  (when (some? s)
+                    (arbace.lang.Compiler/compile1 gen objx (RT/first s))
+                    (recur (RT/next s))))
+                (finally (when pushed (Var/popThreadBindings)))))
             (let [expr (arbace.lang.Compiler/analyze C/EVAL form)]
               (set! (.-keywords objx) (cast IPersistentMap (.deref KEYWORDS)))
               (set! (.-vars objx) (cast IPersistentMap (.deref VARS)))
@@ -6986,6 +7100,8 @@
                                       LOCAL_ENV
                                       nil
                                       LOOP_LOCALS
+                                      nil
+                                      CLASS_FORM_SIBLINGS
                                       nil
                                       NEXT_LOCAL_NUM
                                       (Integer/valueOf 0)

@@ -10,14 +10,15 @@ SPEC.md, last section).
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/classes/boot.clj` | `arbace.classes.boot` | stage-0 driver: loads the others mapping `arbace.asm.*` to `clojure.asm.*`, interns `arbace.classes.core` into `clojure.core` |
+| `arbace/classes/boot.clj` | `arbace.classes.boot` | driver: at stage 0 loads the others mapping `arbace.*` to `clojure.*`, and loads `arbace/core_classes.clj` into `clojure.core`; from stage 1 on just requires them |
 | `arbace/classes/types.clj` | `arbace.classes.types` | type forms (§4.3), descriptors, erasure, `Signature` strings |
 | `arbace/classes/env.clj` | `arbace.classes.env` | class environment (§9.2): class infos from the compilation, from earlier definitions and by reflection (constants from class files); member lookup and access; package class loaders (§10) |
 | `arbace/classes/parse.clj` | `arbace.classes.parse` | syntax of class forms and members, class access flags |
 | `arbace/classes/analyze.clj` | `arbace.classes.analyze` | entering classes (headers, members, derived members), name resolution, code analysis into typed nodes |
 | `arbace/classes/emit.clj` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
 | `arbace/classes/compiler.clj` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
-| `arbace/classes/core.clj` | `arbace.classes.core` | the user-facing macros and operators (what `arbace.core` will hold) |
+| `arbace/classes/native.clj` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
+| `arbace/core_classes.clj` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.clj` (formerly `arbace.classes.core`) |
 | `arbace/classes/shape.clj` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
 | `test/classes/*_test.clj` | `classes.*-test` | the tests; `test/classes/helpers.clj` compiles Java with javac in-process and compares shapes |
 | `bin/class-forms-tests` | | runs the tests |
