@@ -103,3 +103,43 @@
     '[(^:public ND
         (method ^:static f ^String [^Object o]
           (switch o [^String s] s (nil :default) "?")))]))
+
+(deftest merged-record-patterns
+  ;; javac merges consecutive record patterns of one record type into a nested switch
+  (same-shapes? 'classes.switch-test
+    {"MR" "public class MR {
+       record Pair(Object first, Object second) {}
+       static Object f(Object o) {
+         return switch (o) {
+           case null -> \"null\";
+           case Pair(Integer x, Integer y) -> x + y;
+           case Pair(Long l, var unused) -> \"long\";
+           case Pair p -> p.first();
+           default -> o;
+         };
+       }
+     }"}
+    '[(^:public MR
+        (defclass ^:record Pair [first second])
+        (method ^:static f [^Object o]
+          (switch o
+            nil "null"
+            [(Pair ^Integer x ^Integer y)] (Integer/valueOf (unchecked-add-int (.intValue x) (.intValue y)))
+            [(Pair ^Long l unused)] "long"
+            [^Pair p] (.first p)
+            o)))])
+  (let [[C] (load-forms 'classes.switch-test
+              '[(^:public MR2
+                  (defclass ^:public ^:record Pair [first second])
+                  (method ^:public ^:static f [^Object o]
+                    (switch o
+                      nil "null"
+                      [(Pair ^Integer x ^Integer y)] (Integer/valueOf (unchecked-add-int (.intValue x) (.intValue y)))
+                      [(Pair ^Long l unused)] "long"
+                      [^Pair p] (.first p)
+                      o)))])
+        P (Class/forName "classes.switch_test.MR2$Pair" false (.getClassLoader C))
+        pair (fn [a b] (.newInstance (.getConstructor P (into-array Class [Object Object])) (object-array [a b])))
+        f #(clojure.lang.Reflector/invokeStaticMethod C "f" (object-array [%]))]
+    (is (= ["null" 3 "long" "s" "x" 5]
+           [(f nil) (f (pair (int 1) (int 2))) (f (pair 1 "a")) (f (pair "s" "t")) (f "x") (f (pair (int 5) "q"))]))))

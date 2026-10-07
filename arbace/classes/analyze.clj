@@ -1302,8 +1302,13 @@
 
 ;; locals ------------------------------------------------------------------------------------------
 
-(defn- lambda-form? [f]
-  (and (seq? f) (symbol? (first f)) (#{"lambda" "lambda*" "method-ref" "method-ref*"} (name (first f)))))
+(defn- lambda-form?
+  "Is f a lambda or method reference, possibly under casts (javac's pending variable of
+  serializable lambda names sees through them)?"
+  [f]
+  (and (seq? f) (symbol? (first f))
+       (or (#{"lambda" "lambda*" "method-ref" "method-ref*"} (name (first f)))
+           (and (= "cast" (name (first f))) (lambda-form? (nth f 2 nil))))))
 
 (declare annotations-now annotation-targets)
 
@@ -2367,6 +2372,9 @@
                 meth (members s)
                 :when (not= "<init>" (:name meth))
                 :when (not (has? (:flags meth) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_PRIVATE Opcodes/ACC_SYNTHETIC)))
+                ;; only members: a package-private method of another package is not inherited
+                :when (or (has? (:flags meth) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
+                          (= (t/package-of s) (t/package-of n)))
                 :let [mps (erased-params n envs s meth)
                       impl (some (fn [c]
                                    (some (fn [mm]
@@ -2374,6 +2382,8 @@
                                                       (= (count mps) (count (:params mm)))
                                                       (not (has? (:flags mm) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC)))
                                                       (or (= c n) (not (has? (:flags mm) Opcodes/ACC_PRIVATE)))
+                                                      (or (= c n) (has? (:flags mm) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
+                                                          (= (t/package-of c) (t/package-of n)))
                                                       (= mps (erased-params n envs c mm)))
                                              (assoc mm :impl-owner c)))
                                          (members c)))
@@ -2397,9 +2407,12 @@
                                    Opcodes/ACC_SYNTHETIC Opcodes/ACC_BRIDGE)})))
         ;; javac's "reflection" bridges: a public class re-declares the public methods it inherits
         ;; from a non-public superclass (TransTypes.addBridgeIfNeeded)
-        (when (has? (:flags d) Opcodes/ACC_PUBLIC)
+        ;; (public in the source: a protected member class is ACC_PUBLIC only in the class file)
+        (when (has? (if (= :top (:nesting d)) (:flags d) (:inner-flags d)) Opcodes/ACC_PUBLIC)
           (doseq [c (rest chain)
-                  :when (not (has? (:flags (env/info! c)) Opcodes/ACC_PUBLIC))
+                  :when (not (has? (let [ci (env/info! c)]
+                                     (if (and (decl c) (not= :top (:nesting (decl c)))) (:inner-flags ci) (:flags ci)))
+                                   Opcodes/ACC_PUBLIC))
                   mm (:methods (env/info! c))
                   :when (not= "<init>" (:name mm))
                   :when (has? (:flags mm) Opcodes/ACC_PUBLIC)

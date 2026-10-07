@@ -185,3 +185,18 @@
   (same-shapes? 'classes.nested-test
     {"IS" "public class IS { class A { } class B extends A { } }"}
     '[(^:public IS (defclass A) (defclass B :extends A))]))
+
+(deftest method-type-variables-in-anonymous-classes
+  (same-shapes? 'classes.nested-test
+    {"TV" "import java.util.function.*;
+     public class TV {
+       static <X extends RuntimeException> Function<String, X> f(Function<String, X> g) {
+         return new Function<String, X>() { public X apply(String s) { X x = g.apply(s); return x; } };
+       }
+     }"}
+    '[(^:public TV
+        (method ^:static f :type-params [(X extends RuntimeException)]
+          ^{:tag (java.util.function.Function String X)} [^{:tag (java.util.function.Function String X)} g]
+          (anon (java.util.function.Function String X) []
+            (method ^:public apply ^X [this ^String s]
+              (let [^X x (cast RuntimeException (.apply g s))] x)))))]))

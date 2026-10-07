@@ -1859,8 +1859,23 @@
             default-too (some (fn [[ci l]] (when (:default l) ci)) indexed)
             ss (alloc-slot gen st) rs (alloc-slot gen "I")
             loop-l (Label.)
-            case-labels (vec (repeatedly (count labels) #(Label.)))
-            bsm-args (for [[_ l] labels]
+            ;; javac (TransPatterns.processCases) merges consecutive record patterns of one record
+            ;; type whose first components need a test into one case with a nested switch on the
+            ;; first component
+            groupable? (fn [[ci l]]
+                         (let [p (:pattern l) c1 (first (:comps p))]
+                           (and p (= :record (:kind p)) c1 (= 1 (count (:labels (nth cases ci))))
+                                (= :type (:kind (:pattern c1))) (:test (:pattern c1))
+                                (t/ref? (subs (:desc (:accessor c1)) 2)))))
+            entries (reduce (fn [es [ci l :as e]]
+                              (let [prev (peek es)]
+                                (if (and prev (groupable? e) (groupable? (peek prev))
+                                         (= (:class (:pattern l)) (:class (:pattern (second (peek prev))))))
+                                  (conj (pop es) (conj prev e))
+                                  (conj es [e]))))
+                            [] labels)
+            case-labels (vec (repeatedly (count entries) #(Label.)))
+            bsm-args (for [[[_ l]] entries]
                        (cond (:pattern l) (Type/getType ^String (:class (:pattern l)))
                              (:enum l) (:enum l)
                              :else (let [v (:const l)] (if (char? v) (Integer/valueOf (int v)) (if (integer? v) (Integer/valueOf (int v)) v)))))]
@@ -1880,20 +1895,81 @@
                                  (Handle. Opcodes/H_INVOKESTATIC "java/lang/runtime/SwitchBootstraps"
                                           (if enum? "enumSwitch" "typeSwitch") switch-bsm-desc false)
                                  (object-array bsm-args))
-        (emit-switch-insn gen (merge (into {} (map-indexed (fn [i _] [(int i) (nth case-labels i)]) labels))
+        (emit-switch-insn gen (merge (into {} (map-indexed (fn [i _] [(int i) (nth case-labels i)]) entries))
                                      (when null-arm {(int -1) (nth arm-labels null-arm)}))
                           dflt)
-        ;; per label: bind, test nested patterns and the guard, else restart after this label
-        (doseq [[i [ci l]] (map-indexed vector labels)]
+        (doseq [[i entry] (map-indexed vector entries)]
           (.visitLabel m (nth case-labels i))
-          (let [c (nth cases ci)
-                restart (Label.)]
-            (when-let [p (:pattern l)]
-              (emit-pattern gen p st ss restart true))
-            (when-let [g (:guard c)] (emit-cond gen g false restart))
-            (.visitJumpInsn m Opcodes/GOTO (nth arm-labels ci))
-            (when (or (:pattern l) (:guard c))
-              (.visitLabel m restart)
+          (if (= 1 (count entry))
+            ;; one label: bind, test nested patterns and the guard, else restart after this label
+            (let [[ci l] (first entry)
+                  c (nth cases ci)
+                  restart (Label.)]
+              (when-let [p (:pattern l)]
+                (emit-pattern gen p st ss restart true))
+              (when-let [g (:guard c)] (emit-cond gen g false restart))
+              (.visitJumpInsn m Opcodes/GOTO (nth arm-labels ci))
+              (when (or (:pattern l) (:guard c))
+                (.visitLabel m restart)
+                (emit-const gen "I" (inc i))
+                (.visitVarInsn m Opcodes/ISTORE rs)
+                (.visitJumpInsn m Opcodes/GOTO loop-l)))
+            ;; merged record patterns: a nested pattern switch on the first component
+            (let [p0 (:pattern (second (first entry)))
+                  rd (:class p0)
+                  acc (:accessor (first (:comps p0)))
+                  ct (subs (:desc acc) 2)
+                  rec (alloc-slot gen rd) cs (alloc-slot gen ct) rs2 (alloc-slot gen "I")
+                  inner (Label.) inner-dflt (Label.)
+                  member-labels (vec (repeatedly (count entry) #(Label.)))
+                  start (Label.) end (Label.)]
+              (.visitVarInsn m Opcodes/ALOAD ss)
+              (.visitTypeInsn m Opcodes/CHECKCAST (t/desc->internal rd))
+              (.visitVarInsn m Opcodes/ASTORE rec)
+              (.visitVarInsn m Opcodes/ALOAD rec)
+              (.visitLabel m start)
+              (.visitMethodInsn m Opcodes/INVOKEVIRTUAL (:owner acc) (:name acc) (:desc acc) false)
+              (.visitLabel m end)
+              (.visitTryCatchBlock m start end (match-handler gen) "java/lang/Throwable")
+              (xstore gen ct cs)
+              (insn gen Opcodes/ICONST_0)
+              (.visitVarInsn m Opcodes/ISTORE rs2)
+              (.visitLabel m inner)
+              (.visitVarInsn m Opcodes/ALOAD cs)
+              (.visitVarInsn m Opcodes/ILOAD rs2)
+              (.visitInvokeDynamicInsn m "typeSwitch" (str "(" ct "I)I")
+                                       (Handle. Opcodes/H_INVOKESTATIC "java/lang/runtime/SwitchBootstraps"
+                                                "typeSwitch" switch-bsm-desc false)
+                                       (object-array (for [[_ l] entry]
+                                                       (Type/getType ^String (:class (:pattern (first (:comps (:pattern l)))))))))
+              (emit-switch-insn gen (merge (into {} (map-indexed (fn [j _] [(int j) (nth member-labels j)]) entry))
+                                           {(int -1) inner-dflt})
+                                inner-dflt)
+              (doseq [[j [ci l]] (map-indexed vector entry)]
+                (.visitLabel m (nth member-labels j))
+                (let [c (nth cases ci)
+                      [c1 & more] (:comps (:pattern l))
+                      restart (Label.)]
+                  (emit-pattern gen (:pattern c1) ct cs restart true)
+                  (doseq [{:keys [accessor pattern]} more]
+                    (let [ct2 (subs (:desc accessor) 2)
+                          cs2 (alloc-slot gen ct2)
+                          st2 (Label.) en2 (Label.)]
+                      (.visitVarInsn m Opcodes/ALOAD rec)
+                      (.visitLabel m st2)
+                      (.visitMethodInsn m Opcodes/INVOKEVIRTUAL (:owner accessor) (:name accessor) (:desc accessor) false)
+                      (.visitLabel m en2)
+                      (.visitTryCatchBlock m st2 en2 (match-handler gen) "java/lang/Throwable")
+                      (xstore gen ct2 cs2)
+                      (emit-pattern gen pattern ct2 cs2 restart false)))
+                  (when-let [g (:guard c)] (emit-cond gen g false restart))
+                  (.visitJumpInsn m Opcodes/GOTO (nth arm-labels ci))
+                  (.visitLabel m restart)
+                  (emit-const gen "I" (inc j))
+                  (.visitVarInsn m Opcodes/ISTORE rs2)
+                  (.visitJumpInsn m Opcodes/GOTO inner)))
+              ;; no member matched: continue the outer switch after this case
+              (.visitLabel m inner-dflt)
               (emit-const gen "I" (inc i))
               (.visitVarInsn m Opcodes/ISTORE rs)
               (.visitJumpInsn m Opcodes/GOTO loop-l))))

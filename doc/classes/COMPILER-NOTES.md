@@ -124,6 +124,30 @@ converter issues by hand (notes for the converter, below); with the converter's 
 files of `clojure/lang` (139), `clojure/asm` (36), `clojure/asm/commons` (5),
 `clojure/asm/signature` (3) and `clojure/java/api` (1) are shape-identical, without patches.
 
+### The converted JDK
+
+The converter also converted all of jdk26u's modules (13,566 Java files; its work area, not
+committed). The running JDK is built from the same sources, so its own classes are javac's
+reference: `JAVA_OPTS='--add-modules ALL-SYSTEM' bin/class-forms-check <dir> <module>` per module,
+with the javac options the JDK build uses for that module (`make/modules/*/Java.gmk`:
+`CONCAT=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`, `jdk.internal.vm.ci`;
+`PARAMETERS=1 VERSION=69` for `jdk.internal.vm.ci`). The last complete run over all modules
+(2026-10-06, 12,444 files with class forms) gave 11,351 files whose classes are all
+shape-identical to the JDK's (91%), 233 compile errors and 860 files with differences; a later
+partial run after more fixes gave 8,872 of 9,418 (94%). Each round of differences was triaged:
+compiler issues were fixed (bridges, `this$N`, holder classes, outer instances, annotations,
+lambda names, constant folding...), converter issues went into the notes for the converter
+below. What remains is mostly:
+
+- converter output: overloads chosen with `long` literals (note 8), mutable captures and catch
+  parameters (note 9), inherited fields by simple name (note 7), generic varargs arrays (note 6);
+- javac details the forms cannot express: the diamond in anonymous classes (note 10), integer
+  literal types in conditionals of non-`int` contexts (`d + (z ? 1 : 2)`), and `InnerClasses`
+  entries javac adds for classes named only in local variable signatures of its debug
+  information;
+- the converted `java.base` and a few other modules are compared with `-XDstringConcat=inline`
+  and `-parameters` as the JDK build uses them; others need `--add-modules ALL-SYSTEM`.
+
 ### Running the converted runtime
 
 The same converted files, compiled to class files (812 classes, as many as the baseline has),
@@ -160,7 +184,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `WHILE_LOOP`, `DO_WHILE_LOOP`, `FOR_LOOP`, `ENHANCED_FOR_LOOP` | done ≡ (`while`, `loop`/`recur`, `dotimes`, `for-each` over arrays and `Iterable`s) |
 | `LABELED_STATEMENT`, `BREAK`, `CONTINUE`, `RETURN`, `YIELD` | done ≡ (also through `finally` and `locking`) |
 | `SWITCH`, `SWITCH_EXPRESSION`, `CASE`, case labels | done ≡ (int-like, `String`, enums with ordinals or `$SwitchMap$`, `nil`, `(nil :default)`, patterns with guards) |
-| `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping) |
+| `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping; consecutive record patterns of one record merged into a nested switch on the first component, as javac's `TransPatterns.processCases`) |
 | `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert`, in interfaces through javac's holder class) |
 | `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
 | `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls, `C/super` calls and javac's `access$` accessors, `(.super o args)`) |
