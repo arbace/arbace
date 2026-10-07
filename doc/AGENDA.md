@@ -56,8 +56,10 @@ The current state of the work. This file is rewritten as things change. For the 
     `bin/arbace`, which launches in about 0.2 s against about 2 s before (`8c9f2d3`).
   - Done: the JDK verifier checks every class of stages 1 and 2, and the Clojure compiler emits
     classfile version 70 (`e8a5e30`). All "do first" items of the survey are done.
-  - Next from the survey, measured one by one: constant dynamic for constants,
-    `invokedynamic` for keyword and reflective call sites, an opt-in virtual-thread executor.
+  - In progress (user's decisions, each measured): condy constants, `invokedynamic` keyword
+    sites and `StringConcatFactory` for `str`; `invokedynamic` reflective calls; VarHandles in
+    `Atom`, an opt-in virtual-thread executor and a `jlink` image. ASM stays, and Var calls stay
+    indirect.
 - g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). Ten open
   questions for the user (§9) before any work starts.
 

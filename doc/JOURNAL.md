@@ -765,3 +765,19 @@ instead of calling `arbace.classes`'s resolution.
 - The user's question on class loading: a REPL `defn` is compiled to bytes and defined by
   `DynamicClassLoader` in memory. Class files are written only under `*compile-files*`. Hidden
   classes stay rejected (survey §4.5).
+
+## 2026-10-07: Decisions on the modern-compiler survey
+
+The user decided, on the main session's recommendations:
+- Start all four "do next" items. Each is measured on its own and kept only if it pays off:
+  - constant dynamic for the compiler's constants;
+  - `invokedynamic` keyword sites;
+  - `invokedynamic` reflective calls with Reflector's exact choice and messages;
+  - an opt-in virtual-thread executor for `send-off`, `future` and `pmap`.
+- Keep the vendored ASM. The `java.lang.classfile` API is not adopted: ASM is portable Arbace
+  code, and the JDK's verifier already gives the API's main benefit. Vendoring the JDK's
+  implementation through j2c stays a later option.
+- Keep the Var indirection for calls. No `invokedynamic` for Var calls, and no direct linking by
+  default for user code; REPL redefinition stays free.
+- Fold three smaller items into this round: VarHandles in `Atom`, `StringConcatFactory` for
+  `str`, and a `jlink` runtime image.
