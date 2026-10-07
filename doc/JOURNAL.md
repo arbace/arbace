@@ -443,3 +443,40 @@ read constructor-call param-tags on `super.`, `this.`, `.super`, `.new`, `anon` 
 constants, nor `:outer` in `anon`; it types all-literal conditionals as `int` only for `int`
 contexts, not under `long`, `float` and `double` operators; the converter still predicts pins
 instead of calling `arbace.classes`'s resolution.
+
+## 2026-10-07: Vendor clojure/ as arbace/, all .clj, and self-host (agenda step 4)
+
+- Done by a background agent (`af29cc6`); the full record is `doc/VENDOR-NOTES.md`.
+- Derivation:
+  - The baseline's Java was converted with `arbace.j2c` at `7229dd9`, with
+    `--rename clojure=arbace`.
+  - `arbace.j2c.rename` renamed the rest: string literals, and the `.clj` sources.
+  - Two hand edits: `version.properties` folded into `arbace/core.clj` as
+    `"1.13.0-master-SNAPSHOT"`, and `server.clj`'s system property prefix.
+  - The rename rules cover:
+    - the packages and the class `arbace.main`
+    - the vendored namespaces
+    - `clojure.error` keywords
+    - the `clojure.compile.*`, `clojure.server.*` and similar system properties
+  - Other libraries' names (spec, tools.deps, test libraries), identifiers merely containing
+    the word, prose and URLs were left alone.
+  - `bin/vendor-arbace` replays the derivation into `.tmp/vendor/`.
+  - From now on `arbace/` is hand-maintained.
+- Bootstrap (`bin/build-arbace`):
+  - Stage 0 compiles 183 files to 812 classes (`target/stage1`).
+  - Stage 1 loads `arbace.classes` as plain Clojure, against `arbace.core` and `arbace.asm`,
+    and rebuilds everything as stage 2. Stage 2 rebuilds it as stage 3.
+  - Stages 1, 2 and 3 are byte-identical. Stage 1 boots without loading any `clojure.*` class.
+- Clojure's test suite, renamed by the new `CLOJURE_TESTS_RENAME=arbace` mode of
+  `bin/clojure-tests`: on stages 1 and 2, 809 tests, 20,718 of 20,750 assertions and 27 of 27
+  generative specs pass. That is the baseline's result, and the main session checked it.
+- Fixes made along the way to `arbace/classes`:
+  - its sources name `arbace.*`, and runtime class names come from the running runtime
+  - `boot` works at every stage
+  - the packages being built always come from source (`env/*from-source*`)
+  - Java's import order is used for name resolution
+  - `_class` file lookup, and a crash in source lookup
+  - bridge methods for classes entered from source
+- Next: make the class forms native (SPEC §9.5). Open for the user:
+  - `arbace.clj`, the package file of the class `arbace.main`
+  - the leftover `clojure` identifiers
