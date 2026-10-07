@@ -324,7 +324,9 @@
                    ")"))
             (contains? body-heads h)
             (let [n (body-heads h)
-                  n (if (keyword? n) (method-header-count x) n)]
+                  n (if (keyword? n) (method-header-count x) n)
+                  ;; (anon Inner [args] :outer o ...): the outer instance on the first line
+                  n (if (and (= h 'anon) (= :outer (nth x (inc n) nil))) (+ n 2) n)]
               (pp-body-form x col n))
             :else (pp-call x col)))
         :else s))))

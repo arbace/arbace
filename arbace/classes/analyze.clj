@@ -1600,6 +1600,26 @@
           (fail (str "No matching " what " for argument types " (pr-str (mapv (comp value-type :type) args))
                      (when (seq cands) (str "; candidates: " (pr-str (map :desc cands))))))))))
 
+(defn instance-candidates
+  "The candidates of an instance method call (.mname x ...) from class `from` on a receiver of
+  class cn (§5.6)."
+  [from cn mname]
+  (->> (env/member-methods cn mname)
+       (remove static-flag?)
+       (filter #(env/accessible? from %))))
+
+(defn static-candidates
+  "The candidates of a static method call (C/mname ...) from class `from`."
+  [from cn mname]
+  (->> (env/member-methods cn mname)
+       (filter static-flag?)
+       (filter #(env/accessible? from %))))
+
+(defn ctor-candidates
+  "The constructors of class cn accessible from class `from`."
+  [from cn]
+  (filter #(env/accessible? from %) (env/constructors cn)))
+
 (defn convert-args
   "Converts argument nodes to the parameter types of method m (packing variable arity
   arguments into an array)."
@@ -1684,9 +1704,7 @@
     (if (and (t/array? tt) (= mname "clone") (empty? args))
       {:op :invoke :kind :virtual :owner tt :itf false :name "clone" :desc "()Ljava/lang/Object;"
        :target target :args [] :type tt :array-clone true}
-      (let [cands (->> (env/member-methods cn mname)
-                       (remove static-flag?)
-                       (filter #(env/accessible? (:class actx) %)))
+      (let [cands (instance-candidates (:class actx) cn mname)
             _ (when (empty? cands)
                 (fail (str "No accessible method " mname " in " (str/replace cn "/" "."))))
             poly (when (and (= 1 (count cands)) (signature-polymorphic? (first cands))) (first cands))]
@@ -1704,9 +1722,7 @@
 
 (defn analyze-static-call [actx cn mname args & {:keys [param-tags]}]
   (let [arg-nodes (mapv #(analyze actx %) args)
-        cands (->> (env/member-methods cn mname)
-                   (filter static-flag?)
-                   (filter #(env/accessible? (:class actx) %)))
+        cands (static-candidates (:class actx) cn mname)
         _ (when (empty? cands)
             (fail (str "No accessible static method " mname " in " (str/replace cn "/" "."))))
         [m va] (select-method actx cands arg-nodes (str "static method " mname) param-tags)]
@@ -1823,7 +1839,7 @@
   "A call of constructor of class cn with args; kind :new, :super or :this."
   [actx cn args kind & {:keys [outer param-tags]}]
   (let [arg-nodes (mapv #(analyze actx %) args)
-        cands (filter #(env/accessible? (:class actx) %) (env/constructors cn))
+        cands (ctor-candidates (:class actx) cn)
         _ (when (empty? cands) (fail (str "No accessible constructor of " (str/replace cn "/" "."))))
         [m va] (select-method actx cands arg-nodes (str "constructor of " (str/replace cn "/" ".")) param-tags)]
     {:op (case kind :new :new :ctor-call) :kind kind :class cn :ctor m
@@ -2521,7 +2537,7 @@
         _ (when (and outer-node (not (needs-outer-instance? sname)))
             (fail (str "anon: " (str/replace sname "/" ".") " is not an inner class, :outer is not allowed")))
         [sctor va] (when-not iface?
-                     (select-method actx (filter #(env/accessible? n %) (env/constructors sname))
+                     (select-method actx (ctor-candidates n sname)
                                     arg-nodes (str "constructor of " sname) (:param-tags (meta args))))
         ;; an anonymous subclass of an inner class takes the superclass's outer instance as its
         ;; first (mandated) constructor parameter, and has no outer instance of its own (javac)

@@ -3,6 +3,7 @@
   doc/classes/SPEC.md, making explicit what §7 lists."
   (:require [arbace.j2c.forms :as f :refer [m+ tag member cref]]
             [arbace.j2c.jtypes :as jt :refer [erasure prim? ref-type? same? subtype? tag-name]]
+            [arbace.j2c.resolve :as res]
             [clojure.string :as str])
   (:import [arbace.j2c.forms CRef]
            [com.sun.tools.javac.tree JCTree JCTree$JCCompilationUnit JCTree$JCClassDecl
@@ -407,9 +408,9 @@
                   v (long v)]
               (if-let [lv (and rt (read-long rt))]
                 (if (= lv v)
-                  (r (f/raw rt) :lit-int)
+                  (assoc (r (f/raw rt) :lit-int) :vals [v])
                   (r (list 'unchecked-int (f/raw rt)) (int-type)))
-                (r v :lit-int)))
+                (assoc (r v :lit-int) :vals [v])))
       "LONG" (let [tok (try (number-token (TreeInfo/getStartPos t)) (catch Exception _ ""))
                    rt (radix-text tok)
                    v (long v)]
@@ -613,47 +614,17 @@
                  [#{} []])
          second)))
 
-(def clojure-extra
-  "Clojure's own argument matches beyond Java's (Compiler.paramArgTypeMatch)."
-  {"INT" #{"LONG"} "LONG" #{"INT" "SHORT" "BYTE"} "FLOAT" #{"DOUBLE"} "DOUBLE" #{"FLOAT"}})
-
-(defn- arg-matches? [a ^Type p]
-  (let [p (erasure p)]
-    (cond
-      (= a :null) (not (prim? p))
-      (= a :lit-int) (or (and (prim? p) (#{"INT" "LONG" "SHORT" "BYTE" "CHAR" "FLOAT" "DOUBLE"} (tag-name p)))
-                         (and (not (prim? p))
-                              (or (subtype? (jt/boxed (int-type)) p)
-                                  (subtype? (jt/boxed (.longType jt/*syms*)) p))))
-      (prim? a) (if (prim? p)
-                  (or (jt/widens? a p) (contains? (clojure-extra (tag-name p)) (tag-name a)))
-                  (subtype? (jt/boxed a) p))
-      :else (if (prim? p)
-              (let [u (jt/unboxed a)] (and u (or (jt/widens? u p) (same? u p))))
-              (subtype? a p)))))
-
-(defn- more-specific? [m1 m2]
-  (every? true? (map (fn [a b] (if (and (prim? a) (prim? b)) (jt/widens? a b) (subtype? a b)))
-                     (erased-params m1) (erased-params m2))))
-
-(defn- resolves-to?
-  "True when Arbace's resolution, as far as it can be predicted, picks `m` among the methods
-  named like it with the argument types `arg-types`."
-  [env m cands arg-types]
-  (let [n (count arg-types)
-        same-arity (filter #(and (= n (count (erased-params %)))) cands)]
-    (if (<= (count same-arity) 1)
-      (= (sig-key m) (some-> (first same-arity) sig-key))
-      (let [matching (filter (fn [c] (every? true? (map arg-matches? arg-types (erased-params c))))
-                             same-arity)
-            maximal (filter (fn [c] (every? #(or (identical? % c) (more-specific? c %)) matching))
-                            matching)]
-        (and (= 1 (count maximal)) (= (sig-key m) (sig-key (first maximal))))))))
-
-(defn- pin-needed? [env ^Symbol$MethodSymbol m ^Type site arg-types ctor?]
-  (let [cands (methods-named env site (str (.name m)) ctor?)]
-    (not (and (resolves-to? env m cands arg-types)
-              (resolves-to? env m cands (map #(if (= % :lit-int) (.longType jt/*syms*) %) arg-types))))))
+(defn- pin-needed?
+  "Does a call of javac's method `m` need param-tags, that is, does the class forms compiler's
+  resolution (SPEC §5.6, §7.3) choose another method, another arity mode or none without them?
+  `kind` is :instance (receiver of static type `site`), :static (class `site`) or :ctor (of
+  class `site`); `from` the class whose code it is; `nodes` the arguments as the compiler will
+  see them; `varargs?` whether the variable arguments are written unpacked."
+  [kind ^Symbol$ClassSymbol from site ^Symbol$MethodSymbol m nodes varargs?]
+  (note! :pin/decided)
+  (let [need (res/pin-needed? kind from site m nodes varargs?)]
+    (when need (note! (keyword "pin" (name kind))))
+    need))
 
 (defn- param-tags [env ^Symbol$MethodSymbol m]
   (note! :form/param-tags)
@@ -674,21 +645,25 @@
       varargs-elem (concat (map erasure (butlast ps)) (repeat (erasure varargs-elem)))
       :else (map erasure ps))))
 
+(defn- arg-node [x] (res/arg-node (:t x) (:vals x)))
+
 (defn call-args
-  "Convert argument trees to [forms types] for method `m`. Packs variable arguments into an
-  array unless `loose?`."
+  "Convert argument trees to [forms types nodes] for method `m`: the nodes are the arguments
+  as the class forms compiler will see them (for its resolution, `arbace.j2c.resolve`). Packs
+  variable arguments into an array unless `loose?`."
   [env ^Symbol$MethodSymbol m mtype args varargs-elem loose?]
   (let [targets (arg-targets m mtype (count args) varargs-elem)
-        rs (map (fn [a t] (let [x (ex env a)] (coerce-r env x t))) args targets)]
+        rs (doall (map (fn [a t] (let [x (ex env a)] (coerce-r env x t))) args targets))]
     (if (and varargs-elem (not loose?))
       (let [nfixed (dec (count (erased-params m)))
             [fixed rest] (split-at nfixed rs)
             arr-t (last (erased-params m))]
         (note! :form/varargs-packed)
         [(concat (map :f fixed) [(list 'new (erased-form env arr-t) (mapv :f rest))])
-         (concat (map :t fixed) [arr-t])])
+         (concat (map :t fixed) [arr-t])
+         (concat (map arg-node fixed) [(res/arg-node arr-t nil)])])
       (do (when varargs-elem (note! :form/varargs-loose))
-          [(map :f rs) (map :t rs)]))))
+          [(map :f rs) (map :t rs) (map arg-node rs)]))))
 
 (defn- only-method-named? [env ^Symbol$MethodSymbol m ^Type site ctor?]
   (= 1 (count (methods-named env site (str (.name m)) ctor?))))
@@ -708,16 +683,16 @@
       (let [callee (str (TreeInfo/name meth))
             site (.type (.owner m))
             loose? (and ve (only-method-named? env m site true))
-            [afs ats] (call-args env m (.type meth) args ve loose?)
-            qual (when (instance? JCTree$JCFieldAccess meth) (.selected ^JCTree$JCFieldAccess meth))]
+            qual (when (instance? JCTree$JCFieldAccess meth) (.selected ^JCTree$JCFieldAccess meth))
+            [afs _ nodes] (call-args env m (.type meth) args ve loose?)
+            qf (when qual (:f (ex env qual)))
+            pin? (pin-needed? :ctor (current-class env) (.owner m) m nodes (and ve loose?))
+            head (fn [s] (if pin? (m+ s (param-tags env m)) s))]
         (note! (if (= callee "this") :form/this-call :form/super-call))
-        (when (pin-needed? env m site ats true)
-          (note! :warn/ctor-call-ambiguous)
-          (when (System/getenv "J2C_DEBUG") (println "ambiguous constructor call in" (str (current-class env)) (str m))))
         (r (cond
-             (= callee "this") (apply list 'this. afs)
-             qual (apply list '.super (:f (ex env qual)) afs)
-             :else (apply list 'super. afs))
+             (= callee "this") (apply list (head 'this.) afs)
+             qual (apply list (head '.super) qf afs)
+             :else (apply list (head 'super.) afs))
            (jt/object-type)))
       :else
       (let [static? (jt/static? m)
@@ -743,9 +718,12 @@
                               qt (qual-type q)]
                           [(coerce env qr qt) qt (.tsym qt)]))))
             loose? (and ve (only-method-named? env m site false))
-            [afs ats] (call-args env m (.type meth) args ve loose?)
+            [afs _ nodes] (call-args env m (.type meth) args ve loose?)
             poly? (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m))
-            pin? (or poly? (pin-needed? env m site ats false))
+            pin? (or poly?
+                     (if static?
+                       (pin-needed? :static (current-class env) head-class m nodes (and ve loose?))
+                       (pin-needed? :instance (current-class env) site m nodes (and ve loose?))))
             ;; an anonymous class cannot be named: pin with the declaring class, or not at all
             head-class (if (and (not static?) (jt/class-sym? head-class) (jt/anonymous? head-class))
                          (let [o (.owner m)]
@@ -784,14 +762,14 @@
           ve (.varargsElement t)
           site (.type c)
           loose? (and ve (only-method-named? env m site true))
-          [afs ats] (call-args env m (.constructorType t) (.args t) ve loose?)
-          pin? (pin-needed? env m site ats true)
+          [afs _ nodes] (call-args env m (.constructorType t) (.args t) ve loose?)
+          encl (when (.encl t) (coerce env (ex env (.encl t)) (erasure (.type (.encl t)))))
+          pin? (pin-needed? :ctor (current-class env) c m nodes (and ve loose?))
           cr (class-ref env c)]
       (note! :form/new)
       (r (cond
            (.encl t) (do (note! :form/qualified-new)
-                         (when pin? (note! :warn/qualified-new-ambiguous))
-                         (apply list '.new (coerce env (ex env (.encl t)) (erasure (.type (.encl t)))) cr afs))
+                         (apply list (cond-> '.new pin? (m+ (param-tags env m))) encl cr afs))
            pin? (apply list (m+ (member cr "new") (param-tags env m)) afs)
            :else (apply list (if (symbol? cr) (symbol (str cr ".")) (member cr ".")) afs))
          (erasure (.type t))))))
@@ -1162,7 +1140,7 @@
       (prim? te)
       (cond
         (= from :lit-int)
-        (if (= "INT" (tag-name te)) (r (:f x) :lit-int)
+        (if (= "INT" (tag-name te)) (assoc (r (:f x) :lit-int) :vals (:vals x))
             (r (list (narrow-op (tag-name te)) (:f x)) te))
         (prim? from)
         (cond
@@ -1337,10 +1315,11 @@
                        (hint env f target)
                        f))))]
     (note! :form/if)
-    (r (if c
-         (list 'if c (branch a) (branch b))
-         (cond-form env (.cond t) (fn [e] (branch (ex e (.truepart t)))) (fn [e] (branch (ex e (.falsepart t))))))
-       (if (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))))
+    (cond-> (r (if c
+                 (list 'if c (branch a) (branch b))
+                 (cond-form env (.cond t) (fn [e] (branch (ex e (.truepart t)))) (fn [e] (branch (ex e (.falsepart t))))))
+               (if (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))
+      (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) (assoc :vals (concat (:vals a) (:vals b))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions
@@ -2400,7 +2379,22 @@
                    (= kind "STATIC") (member (class-ref env (.tsym qt)) (str (.name m)))
                    (instance? Type$ArrayType qt) (member (erased-form env qt) (str "." (.name m)))
                    :else (member (class-ref env (.tsym qt)) (str "." (.name m))))
-            msym (if overloaded? (m+ msym (param-tags env m)) msym)
+            ;; the compiler resolves the method with the instantiated parameter types (§5.12)
+            pin? (cond
+                   (not overloaded?) false
+                   (or (= kind "SUPER") (instance? Type$ArrayType qt) (not (jt/class-sym? (.tsym qt)))
+                       (and (not ctor?) (jt/anonymous? (.tsym qt))))
+                   true
+                   :else
+                   (let [stubs (map #(res/arg-node % nil) inst-ps)
+                         va (some? (.varargsElement t))]
+                     (case kind
+                       ("IMPLICIT_INNER" "TOPLEVEL") (pin-needed? :ctor (current-class env) (.tsym qt) m stubs va)
+                       "STATIC" (pin-needed? :static (current-class env) (.tsym qt) m stubs va)
+                       "BOUND" (pin-needed? :instance (current-class env) qt m stubs va)
+                       "UNBOUND" (pin-needed? :instance (current-class env) qt m (rest stubs) va)
+                       true)))
+            msym (if pin? (m+ msym (param-tags env m)) msym)
             recv (case kind
                    "BOUND" [(coerce env (ex env (.expr t)) qt)]
                    "SUPER" [(:f (ex env (.expr t)))]
@@ -2577,17 +2571,36 @@
       (list 'field nm (coerce env' (ex env' (.init d)) (erasure (.type sym))))
       (list 'field nm))))
 
+(defn- anon-super-ctor
+  "The superclass constructor that the constructor javac made for anonymous class `cd` calls,
+  else `fallback`."
+  ^Symbol$MethodSymbol [^JCTree$JCClassDecl cd fallback]
+  (or (some (fn [d]
+              (when (and (instance? JCTree$JCMethodDecl d) (= "<init>" (str (.name ^JCTree$JCMethodDecl d)))
+                         (.body ^JCTree$JCMethodDecl d))
+                (some (fn [st]
+                        (when (instance? JCTree$JCExpressionStatement st)
+                          (let [e (.expr ^JCTree$JCExpressionStatement st)]
+                            (when (instance? JCTree$JCMethodInvocation e)
+                              (let [s (TreeInfo/symbol (.meth ^JCTree$JCMethodInvocation e))]
+                                (when (and (instance? Symbol$MethodSymbol s) (= "<init>" (str (.name ^Symbol s))))
+                                  s))))))
+                      (.stats (.body ^JCTree$JCMethodDecl d)))))
+            (.defs cd))
+      fallback))
+
 (defn- enum-constant [env ^JCTree$JCVariableDecl d]
   (let [sym (.sym d)
         nm (apply m+ (member-name (.owner sym) (str (.name d))) (concat (annotation-items env (.annotations (.mods d)))
                                                      [(deprecated-item sym (.mods d))]))
         nc ^JCTree$JCNewClass (.init d)
-        m (.constructor nc)
-        [afs _] (call-args env m (.constructorType nc) (.args nc) (.varargsElement nc)
-                           (and (.varargsElement nc) true))]
+        m (if (.def nc) (anon-super-ctor (.def nc) (.constructor nc)) (.constructor nc))
+        [afs _ nodes] (call-args env m (.constructorType nc) (.args nc) (.varargsElement nc)
+                                 (and (.varargsElement nc) true))
+        pin? (pin-needed? :ctor (.owner sym) (.owner sym) m nodes (some? (.varargsElement nc)))]
     (note! :form/enum-constant)
-    (if (or (seq (.args nc)) (.def nc))
-      (apply list nm (vec afs) (when (.def nc)
+    (if (or (seq (.args nc)) (.def nc) pin?)
+      (apply list nm (cond-> (vec afs) pin? (m+ (param-tags env m))) (when (.def nc)
                                  (note! :form/enum-constant-body)
                                  (class-body (class-env env (.sym (.def nc))) (.def nc))))
       nm)))
@@ -2684,12 +2697,23 @@
         c ^Symbol$ClassSymbol (.sym cd)
         ifaces (seq (.getInterfaces c))
         super (if ifaces (first ifaces) (.getSuperclass c))
-        m (.constructor t)
-        [afs _] (call-args env m (.constructorType t) (.args t) (.varargsElement t) true)
+        m (anon-super-ctor cd (.constructor t))
+        ;; Java's o.new Inner(args) {...} (§4.8): javac's constructor type has the outer
+        ;; instance as first parameter
+        ctype (let [ct (.constructorType t)]
+                (if (and (.encl t) (instance? Type$MethodType ct))
+                  (Type$MethodType. (.tail (.getParameterTypes ct)) (.getReturnType ct)
+                                    (.getThrownTypes ct) (.tsym ct))
+                  ct))
+        [afs _ nodes] (call-args env m ctype (.args t) (.varargsElement t) true)
+        encl (when (.encl t) (coerce env (ex env (.encl t)) (erasure (.type (.encl t)))))
+        pin? (and (not ifaces)
+                  (pin-needed? :ctor c (.tsym (erasure super)) m nodes (some? (.varargsElement t))))
         inner (class-env (assoc env :this nil) c)]
     (note! :form/anon)
-    (when (.encl t) (note! :warn/qualified-anon))
-    (r (apply list (h env 'anon) (type-form env super) (vec afs) (class-body inner cd))
+    (when encl (note! :form/anon-outer))
+    (r (apply list (h env 'anon) (type-form env super) (cond-> (vec afs) pin? (m+ (param-tags env m)))
+              (concat (when encl [:outer encl]) (class-body inner cd)))
        (erasure (.type t)))))
 
 ;;; ------------------------------------------------------------------------------------------
