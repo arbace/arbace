@@ -480,3 +480,24 @@ instead of calling `arbace.classes`'s resolution.
 - Next: make the class forms native (SPEC §9.5). Open for the user:
   - `arbace.clj`, the package file of the class `arbace.main`
   - the leftover `clojure` identifiers
+
+## 2026-10-07: Spec gaps closed; decisions on step 4's leftovers
+
+- A background agent closed the four places where the code lagged the amended spec. The work
+  is `f240a04`, `90ba9ae` and `13ef825`; details are in the notes files.
+  - Param-tags on constructor calls: `super.`, `this.`, `.super`, `.new`, and the argument
+    vectors of `anon` and enum constants.
+  - `(anon Inner [args] :outer o ...)`, compiled as javac compiles `o.new Inner(args) {...}`.
+  - All-literal conditionals are `int` operands of every primitive operator. All 6 language
+    samples are now identical to javac.
+  - The converter decides pins with the compiler's own resolution (`arbace/j2c/resolve.clj`).
+    Param-tags went from 534 to 4 in the baseline and from 14,182 to 1,440 in the JDK.
+  - All checks stay green: `bin/class-forms-tests`, `bin/j2c-check --suite` and
+    `bin/build-arbace --suite` (the fixpoint, and the suite on stages 1 and 2).
+- The user's decisions on step 4's open points:
+  - The class `arbace.main` moves into a package, so nothing remains at the repo root.
+    `arbace.clj` goes away, and the `arbace.main` namespace stays.
+  - Runtime-visible leftovers are renamed to `arbace`: the `clojure-agent-*` thread names,
+    `__clojureFnMap` and the `clojure-` temp-file prefix. `clojure-version` and
+    `*clojure-version*` stay, because libraries call them.
+  - Next step, started now: make the class forms native (SPEC §9.5).

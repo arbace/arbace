@@ -36,10 +36,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Make the class forms native (SPEC §9.5): real `arbace.core` vars for the macros, and special
+- Make the class forms native (SPEC §9.5, in progress): real `arbace.core` vars for the macros, and special
   forms in `arbace.lang.Compiler`, instead of `arbace.classes.boot` interning them at run time.
-- Open decisions from step 4: whether to keep `arbace.clj` (the package file of the class
-  `arbace.main`), and whether to rename the leftover `clojure` identifiers (thread names,
-  `__clojureFnMap`, the temp-file prefix, `clojure-version`).
+- Decided cleanups from step 4 (in progress, same agent): move the class `arbace.main` into a
+  package and drop `arbace.clj`; rename the runtime-visible `clojure` leftovers (thread names,
+  `__clojureFnMap`, the temp-file prefix), keeping `clojure-version`.
 - Later: decide which native runtime Arbace targets, and how much of a JVM-like or Go-like
   runtime it reimplements.
