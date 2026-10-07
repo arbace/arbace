@@ -932,3 +932,33 @@ recommended:
 - SPEC §9.5 was amended to match. The main session renumbered the hand change, which had
   clashed with the reverted Atom entry 8.
 - Checked by the main session: `bin/build-arbace --suite` passes (see the log of this commit).
+
+## 2026-10-07: Keyword sites and `str` as invokedynamic (kept); condy constants (not kept)
+
+- Done by a background agent and measured. The machine was heavily loaded; medians come from
+  interleaved runs.
+  - **Condy constants: not kept, not pushed.** `<clinit>` methods went from 4,237 to 1,238 and
+    the classes got 0.8% smaller. Launch and namespace loading did not change, with or without
+    the AOT cache, which does not pre-resolve app condys. Condys in `__init` classes were
+    slower. The experiment is kept on the local branch `condy-item1-experiment` (`bdd773b`).
+  - **Keyword invoke sites** (`7fb2da7`, hand change 12): `invokedynamic` to the new
+    `arbace.lang.KeywordInvokeSite`.
+    - It always computes `(get x :k)`. After 256 calls it links a cache of up to 4 exact-class
+      guards, and becomes `RT.get` from the fifth class on.
+    - Lookups got faster: records 7.8 → 5.1 ns, array maps 10.6 → 7.3 ns. Classes are 6.6%
+      smaller and launch is unchanged.
+    - The 256-call threshold avoids spinning LambdaForms at launch.
+  - **`str` with 2-99 arguments** (`65120ab`, hand change 13): `StringConcatFactory`, with
+    constants folded into the recipe. Behaviour is identical: nil gives "", and a null
+    `toString` on the first argument throws as before. It is 1.5-2.5x faster, and launch is
+    unchanged because the AOT cache pre-resolves these sites. It acts like an `:inline`, so a
+    redefinition of `str` does not reach compiled calls. A stack trace from a throwing
+    `toString` no longer has the `core$str` frame.
+  - `LICENSE.md` now states that Arbace's own files under `arbace/` are EPL-1.0.
+- The main session checked `65120ab`:
+  - `bin/build-arbace --suite`: stages 1-3 identical at 5,656 classes, the verifier clean,
+    native tests 47/2,780, and the suite 20,750/20,750 on stages 1 and 2;
+  - `(str "a" nil 1 \c (:x p) :k)` gives `"a1c1:k"`;
+  - 1M record lookups plus `str` calls take about 12 ms warm.
+- Pre-freeze item 4 (benchmarks, CI, freeze kit) started at the user's request. The freeze
+  kit is only prepared: the branch and tag are created after the user confirms.

@@ -47,10 +47,6 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Decide on the survey of modern JVM features, [MODERN-COMPILER.md](MODERN-COMPILER.md). Its
-  first recommendation is to AOT-compile all namespaces into the stages and use the JDK AOT
-  cache: launch time measured 3.3 s → 0.45 s. Then add `ClassFile.verify` to the checks and
-  emit classfile version 70.
 - Short term: make Arbace excellent on the JVM.
   - Done: compiled namespaces in every stage, a reproducible jar, the JDK AOT cache and
     `bin/arbace`, which launches in about 0.2 s against about 2 s before (`8c9f2d3`).
@@ -60,8 +56,8 @@ The current state of the work. This file is rewritten as things change. For the 
     calls about 100-1,000x faster), an opt-in virtual-thread executor, and a `jlink` image.
     `Atom` on a `VarHandle` was tried and reverted (slower under contention). ASM stays, and
     Var calls stay indirect.
-  - In progress: condy constants, `invokedynamic` keyword sites, `StringConcatFactory` for
-    `str`.
+  - Done: `invokedynamic` keyword sites (about 30% faster lookups) and `StringConcatFactory`
+    for `str` (1.5-2.5x faster). Condy constants were tried and not kept (no time gain).
 - g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). The open
   questions are decided (journal, 2026-10-07): front end, spec and round trip (G0-G2), then the
   box via gc + TamaGo (B1). No Go libraries on the JVM. Target `GOOS=tamago` amd64/arm64,
@@ -74,8 +70,9 @@ The current state of the work. This file is rewritten as things change. For the 
      (20,750 of 20,750 assertions).
   3. Done: the remaining todo rows: `deftype` inside class bodies, covariant bridges,
      Clojure's full overload matching, and the `SecurityManager` import.
-  4. Queued, last (not started, by the user's choice): steady-state benchmarks against upstream Clojure 1.12, a GitHub Actions
-     workflow running the gate on JDK 26, and branch notes plus a tag.
+  4. In progress: steady-state benchmarks against upstream Clojure 1.12, a GitHub Actions
+     workflow running the gate on JDK 26, and a freeze kit (`doc/FREEZE.md`, `bin/freeze`). The branch
+     and tag are created only after the user confirms.
 
 ## Later
 
