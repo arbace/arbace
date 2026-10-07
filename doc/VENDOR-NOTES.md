@@ -494,6 +494,13 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    accepts all classes at 70 as at 61 (no classfile feature or verifier rule changed between
    61 and 70). The AOT-compiled namespaces of each stage (4,276 classes) and everything compiled
    at run time now have major version 70; the fixpoint holds as before (5,091 classes).
+8. **`SecurityManager` is no longer a default import** (`doc/MODERN-COMPILER.md` §4.17): the
+   entry `SecurityManager` of `RT/DEFAULT_IMPORTS` (`arbace/lang/RT.clj`, upstream
+   `RT.java:119`) is gone, since JEP 486 (Java 24) disabled the Security Manager for good.
+   Upstream still imports it (`clojure/clojure` master `4278bcea`, 2026-10-07); nothing in
+   `arbace/`, its tools or Clojure's test suite names the class unqualified. The class still
+   exists in JDK 26, so `java.lang.SecurityManager` resolves; the class forms compiler's own
+   `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
 
 8. **(Reverted.)** `Atom` briefly held its state in a volatile field updated through a
    `VarHandle` (`298ad15`): 16 bytes less per atom and slightly faster uncontended, but one atom

@@ -210,8 +210,6 @@
                         RuntimePermission
                         (Symbol/intern "SecurityException")
                         SecurityException
-                        (Symbol/intern "SecurityManager")
-                        SecurityManager
                         (Symbol/intern "Short")
                         Short
                         (Symbol/intern "StackOverflowError")
