@@ -52,7 +52,8 @@ Prior art:
     JDK AOT cache `target/arbace.aot` (training workload `test/aot-training.clj`). With
     `--suite` it also runs Clojure's test suite on stages 1 and 2. Run Arbace with `bin/arbace`
     (the jar, with the cache when it applies), or a stage with
-    `java -cp target/stageN:. arbace.lang.Main`.
+    `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
+    --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
   - `arbace/j2c/`: the Java → class forms converter.
 
