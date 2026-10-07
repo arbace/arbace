@@ -19,9 +19,10 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/j2c/main.clj` | `arbace.j2c.main` | command line: `convert`, `jdk` |
 | `arbace/j2c/build.clj` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
 | `arbace/j2c/coverage.clj` | `arbace.j2c.coverage` | coverage summary from run reports |
+| `arbace/j2c/resolve.clj` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
 | `bin/j2c` | | starts the frozen Clojure with access to javac's internals |
 | `bin/j2c-check` | | the checks (below) |
-| `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4 |
+| `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
 | `test/j2c/module/` | | a module declaration and package annotations |
 
 The converted files are not kept in the repository: they are regenerated (the user's decision).
@@ -71,10 +72,21 @@ file; Java's comments are not carried over.
    *instantiated* parameter types, qualifiers to the erasure of their type, results of generic
    members), unboxing from non-wrapper types, boxing of literals, narrowing, constant
    promotions (`(unchecked-multiply-float c (float 2.0))`, `(< side 0.0)`).
-3. **Overloads.** A call is pinned with param-tags unless only one method of that name and arity
-   is accessible, or the most specific match is javac's choice under both Java's and Clojure's
-   argument rules (literals tried as `int` and as `long`). This is conservative: the compiler's
-   JLS 15.12.2 resolution (SPEC §5.6) would need fewer pins.
+3. **Overloads.** Pins are decided by the class forms compiler's own resolution (SPEC §5.6,
+   §7.3; `arbace.j2c.resolve`): for every call, constructor call and method reference the
+   converter asks `arbace.classes.analyze/select-method`, with the compiler's candidates
+   (`instance-candidates`, `static-candidates`, `ctor-candidates`), what the compiler will
+   choose for the call as written without param-tags, and pins only where that is not javac's
+   method in javac's arity mode, or where the compiler would find none or an ambiguity. The
+   arguments are stubs with the types the converted forms have for the compiler: an integer
+   literal (or a conditional of them) is a `long` literal node with its values, so the
+   literal narrowing phase sees them. The class infos come from javac's symbols (erased
+   descriptors, access flags, supertypes, nest), so the classes being converted need not be
+   loadable and resolution sees what javac saw. Pins go on the head (`(^[int] Math/max a 1)`,
+   `(^[int] this. 5)`, `(^[int] .super o 7)`, `(^[int] .new o In 8)`) or on the argument vector
+   (`(anon C ^[int] [9] ...)`, `(A ^[int] [1])` for enum constants). Method references to
+   `super::m`, on array types and on anonymous classes keep the older rule: pinned when the
+   name is overloaded.
 4. **Statements** convert in a context `{:fall :jumps :vpos}`: the forms that follow when the
    statement completes normally (for example `(recur ...)` at the end of a loop body), the jump
    targets equivalent to completing normally here with what replaces such a jump, and whose value
@@ -126,15 +138,24 @@ All on 2026-10-06, jdk26u at the system JDK (26.0.2.1).
   every class (812, the same names as javac's) has the same shape as javac's: flags, supertypes,
   signatures, nest and inner class attributes, fields, methods, and the symbolic content of code
   (member and class references, call sites, constants).
+- **Pins** (2026-10-07, counted by `:form/param-tags`, `:pin/*` in the reports): deciding them
+  with the compiler's resolution instead of the conservative prediction takes the baseline from
+  534 param-tags to 4 (two `Math/max` with a literal, `List/.remove` with a literal,
+  `GeneratorAdapter/.push` with an `int` conditional; plus the signature polymorphic call,
+  which always has them), with every class still shape-identical to javac and the test suite
+  unchanged; jdk26u (12,730 files) from 14,182 to 1,440 (236 instance calls, 543 static calls,
+  658 constructor calls of 664,014 decided). Before, 134 constructor calls (`this.`, `super.`)
+  and one qualified `new` that needed pins had none (there was no syntax), and 6 qualified
+  anonymous classes lost their outer instance; they are now pinned or written with `:outer`.
+  Compiling the converted JDK: 11,753 of 12,444 files shape-identical (11,745 with the earlier
+  output), no file regressing.
 - **Clojure's test suite** (`bin/clojure-tests`) on those 812 classes, compiled from the
   converted forms, with the baseline's `.clj` sources: 83 namespaces, 809 tests, 20,718 of
   20,750 assertions pass and 27 of 27 test.generative specs pass, the same as the baseline (the
   32 failures expect spec's messages). No regressions.
-- `test/j2c/java/sample`: 4 of 5 files shape-identical to javac, §11.4 included. `Features`
-  compiles with three differences, none from the converter's output being wrong: the constants of
-  `d + (z ? 1 : 2)` (amendment 13); the name of a serializable lambda, which javac derives from a
-  hash (`lambda$lambdas$35817b2b$1`, for the compiler and §3.6's exemptions); and javac's merging
-  of record patterns with a common record type into one nested `typeSwitch` (for the compiler).
+- `test/j2c/java/sample`: all 6 files shape-identical to javac, §11.4 included (2026-10-07;
+  before, `Features` differed in the constants of `d + (z ? 1 : 2)`, a serializable lambda's
+  name and record pattern merging, all fixed in the compiler since; `Pins` was added).
 - A sample of the JDK conversion compiled the same way (`javax/security/auth/x500`,
   `sun/util/calendar`, `jdk/internal/util`): the differences are javac's string concatenation
   with `StringBuilder` (java.base is built with `-XDstringConcat=inline`), one array upcast
@@ -222,9 +243,11 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 ## What remains
 
 - Type annotations (`TYPE_ANNOTATION`, `ANNOTATED_TYPE`) are dropped (6 in the JDK).
-- Pins: call the compiler's resolution (SPEC §7.3); write constructor-call pins in the syntax
-  of SPEC §5.6 (the stage-0 compiler does not read them on `super.`, `this.`, `.super`, `.new`,
-  `anon` and enum constants yet).
+- Method references to `super::m`, on array types and on anonymous classes are still pinned
+  whenever the name is overloaded (the compiler turns `super::m` into a lambda whose call
+  drops the pin, so it must not rely on it either way).
+- Variable arity arguments are packed into an explicit array unless the method is the only
+  one of its name; the compiler's resolution could decide this too.
 - Comments are not carried over (§7 says "where easy").
 - Restructurings the spec's examples show and the converter does not do: folding a local
   assigned in a loop into the loop's bindings, computing a later-assigned local with an `if`

@@ -101,6 +101,9 @@ Some mechanisms:
 - **Constants.** Integer literals are `long` (Clojure) but marked as literals: they narrow to
   `int`, `short`, `byte`, `char` where the context needs it and the value fits (assignments,
   operands of `-int` operators, comparisons with `int`, branches whose other branches are `int`).
+  A conditional whose values are all such literals is an `int` operand of every primitive
+  operator, widened like one: `(unchecked-add d (if z 1 2))` loads `int` constants and `i2d`
+  (§5.4).
   Constant expressions fold; constant fields get `ConstantValue` and are inlined.
 
 ## Stage-0 limits
@@ -138,14 +141,18 @@ shape-identical to the JDK's (91%), 233 compile errors and 860 files with differ
 partial run after more fixes gave 8,872 of 9,418 (94%). Each round of differences was triaged:
 compiler issues were fixed (bridges, `this$N`, holder classes, outer instances, annotations,
 lambda names, constant folding...), converter issues went into the notes for the converter
-below. What remains is mostly:
+below. A complete rerun on 2026-10-07 (converter with the compiler's resolution for pins,
+compiler with constructor-call param-tags, `anon :outer` and `int` literal conditionals; the
+script in `.tmp/` of that worktree runs the modules in parallel) gave 11,753 of 12,444 files
+shape-identical (94%), 174 compile errors, 517 files with differences; the same compiler on the
+converter's earlier output (conservative pins) gave 11,745 / 177 / 522, and no file identical
+there differs with the new output. What remains is mostly:
 
-- converter output: overloads chosen with `long` literals (note 8), mutable captures and catch
-  parameters (note 9), inherited fields by simple name (note 7), generic varargs arrays (note 6);
-- javac details the forms cannot express: the diamond in anonymous classes (note 10), integer
-  literal types in conditionals of non-`int` contexts (`d + (z ? 1 : 2)`), and `InnerClasses`
-  entries javac adds for classes named only in local variable signatures of its debug
-  information;
+- converter output: mutable captures and catch parameters (note 9), inherited fields by simple
+  name (note 7), generic varargs arrays (note 6);
+- javac details the forms cannot express: the diamond in anonymous classes (note 10) and
+  `InnerClasses` entries javac adds for classes named only in local variable signatures of its
+  debug information;
 - the converted `java.base` and a few other modules are compared with `-XDstringConcat=inline`
   and `-parameters` as the JDK build uses them; others need `--add-modules ALL-SYSTEM`.
 
@@ -188,7 +195,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `ANY_PATTERN`, `BINDING_PATTERN`, `DECONSTRUCTION_PATTERN` | done ≡ (`switch`, `if-instance`, `when-instance`; record patterns with `MatchException` wrapping; consecutive record patterns of one record merged into a nested switch on the first component, as javac's `TransPatterns.processCases`) |
 | `THROW`, `TRY`, `CATCH`, `SYNCHRONIZED`, `ASSERT` | done ≡ (`with-resources`, multi-catch, `locking`, `java-assert`, in interfaces through javac's holder class) |
 | `IDENTIFIER`, `MEMBER_SELECT` | done ≡ (own and outer fields by name, `C/f`, `(.-f x)`, `Outer/this`, `super`, `Iface/super`) |
-| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, signature polymorphic calls, `C/super` calls and javac's `access$` accessors, `(.super o args)`) |
+| `METHOD_INVOCATION`, `NEW_CLASS` | done ≡ (qualifying types per javac, `invokeinterface`, `super` calls, inner class creation, `(.new o Inner)`, `anon`, `(anon Inner [args] :outer o ...)`, signature polymorphic calls, `C/super` calls and javac's `access$` accessors, `(.super o args)`; param-tags on every call, constructor calls included: `(^[int] super. x)`, `(^[int] this. x)`, `(^[int] .super o x)`, `(^[int] .new o Inner x)`, `(anon C ^[int] [x] ...)`, `(NAME ^[int] [x])`) |
 | `NEW_ARRAY`, `ARRAY_ACCESS` | done ≡ |
 | `ASSIGNMENT`, compound assignments, increments | done ≡ |
 | unary and binary operators | done ≡ (`-int`, long, `-float`, double; bit and shift operators; comparisons; `not`, `and`, `or`, `identical?`, `nil?`, `some?`) |
@@ -263,9 +270,9 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    `SingleNodeCounter`).
 8. Overloads: integer literals are `long`, so where javac picks an `int` overload for a literal
    argument (`new Symbol(id, -1)` with `(int, int)` and `(int, Object)` constructors) the
-   compiler picks another one; the converter can ask the compiler's own resolution
-   (`arbace.classes.analyze/select-method`) and pin with param-tags where they differ, or write
-   `(unchecked-int -1)`.
+   compiler picks another one. Done (2026-10-07): the converter asks the compiler's own
+   resolution (`select-method` with `instance-candidates`, `static-candidates`,
+   `ctor-candidates`) and pins where it differs, constructor calls included.
 9. Captured locals must not be `^:mutable` (Java's effectively final); catch parameters that are
    assigned need `^:mutable`; locals must not shadow the macros the converted code uses (a local
    named `cond` or `when`). All seen in the converted JDK.
