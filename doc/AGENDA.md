@@ -8,7 +8,7 @@ The current state of the work. This file is rewritten as things change. For the 
 - `clojure/` holds the frozen reference baseline: Clojure's Java and clj sources, with spec stubbed
   out, plus ASM repackaged as `clojure.asm`. It compiles with `javac -g` and the REPL works. The
   seed script is kept only in git history (commit `d21dc91`).
-- `LICENSE.md` holds all licenses: EPL-1.0 for Clojure, BSD-3-Clause for ASM, Apache-2.0 for
+- `LICENSE.md` holds all licenses: Arbace is EPL-1.0, like Clojure; EPL-1.0 for Clojure, BSD-3-Clause for ASM, Apache-2.0 for
   Guava's Murmur3, and which files each covers.
 - javalisp (`arbace/javalisp/`, spec in `doc/javalisp/SPEC.md`, files `.jls`) is the pathfinder: an
   exact, line-preserving Java ↔ s-expression transcription, verified on `clojure/` and all of

@@ -575,3 +575,13 @@ instead of calling `arbace.classes`'s resolution.
 - The stale `arbace/` paths in `LICENSE.md` (`arbace.clj`, `arbace/main_class.clj`) were
   replaced by a rule: everything outside `arbace/classes/`, `arbace/j2c/` and `arbace/javalisp/`
   is vendored, under its source file's license.
+
+## 2026-10-07: Arbace is licensed under EPL 1.0
+
+- The user chose the Eclipse Public License 1.0 for Arbace's own code and docs (Copyright (c) the
+  Arbace authors), the same license as Clojure. Recorded in `LICENSE.md`, whose EPL section now
+  covers both Arbace and Clojure, and in the root README. No per-file headers were added.
+- Alternatives considered: MIT (the user's recent choice elsewhere) and 0BSD. Both would have
+  covered only the tools (`arbace/classes/`, `arbace/j2c/`, `arbace/javalisp/`, `bin/`), while
+  the vendored Clojure in `arbace/` stays EPL 1.0 regardless. New code is written into those
+  hand-maintained EPL files, so one license spares tracking a boundary that blurs over time.

@@ -23,5 +23,6 @@ we go so that it could be repeated.
 - [doc/AGENDA.md](doc/AGENDA.md): the current state of the work and what comes next
 - [doc/JOURNAL.md](doc/JOURNAL.md): an append-only log of important decisions and actions
 - [doc/javalisp/SPEC.md](doc/javalisp/SPEC.md): the javalisp forms, layout rules and tool
-- [LICENSE.md](LICENSE.md): the licenses of all code in this repository
+- [LICENSE.md](LICENSE.md): Arbace is under the Eclipse Public License 1.0, like Clojure; the
+  file also holds the licenses of all vendored code
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and the origin of the vendored Clojure

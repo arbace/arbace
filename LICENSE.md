@@ -1,7 +1,13 @@
 # Licenses
 
-All licenses of the code in this repository are collected here. Arbace vendors code from the
-projects below; each part stays under its own license, reproduced in full in this file. Source
+All licenses of the code in this repository are collected here.
+
+Arbace itself, all code and documentation in this repository not listed below, is Copyright (c)
+the Arbace authors and licensed under the Eclipse Public License 1.0, the same license as Clojure
+(text below).
+
+Arbace vendors code from the projects below; each part stays under its own license, reproduced in
+full in this file. Source
 files keep the copyright and license notices they came with (EPL 1.0 §3 and the BSD 3-Clause
 License require it); this file is the one place that states which license covers what.
 
@@ -23,7 +29,7 @@ License require it); this file is the one place that states which license covers
   `arbace.asm`), `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
   `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0.
 
-## Clojure: Eclipse Public License 1.0
+## Arbace and Clojure: Eclipse Public License 1.0
 
 Copyright (c) Rich Hickey. All rights reserved.
 
