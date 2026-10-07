@@ -490,42 +490,10 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    61 and 70). The AOT-compiled namespaces of each stage (4,276 classes) and everything compiled
    at run time now have major version 70; the fixpoint holds as before (5,091 classes).
 
-8. **`Atom` holds its state in a volatile field, updated through a `VarHandle`**
-   (`doc/MODERN-COMPILER.md` §4.8): `arbace/lang/Atom.clj` had upstream's `final AtomicReference
-   state` (`clojure/lang/Atom.java:18`). Now `state` is a `volatile` field of the atom itself,
-   read directly (`deref`, `reset`), written directly by `reset` (a volatile write, as
-   `AtomicReference.set`), and swapped by the private method `cas`, which calls
-   `STATE.compareAndSet(this, oldv, newv)` on a `private static final VarHandle STATE`
-   (`MethodHandles.lookup().findVarHandle(Atom.class, "state", Object.class)` in `<clinit>`)
-   with the exact descriptor `(Larbace/lang/Atom;Ljava/lang/Object;Ljava/lang/Object;)Z`, so
-   the class forms' signature-polymorphic call (SPEC §5.6) links to the intrinsic. It compares by
-   identity, as `AtomicReference.compareAndSet` does. The constructors end with
-   `VarHandle.releaseFence()`, standing in for the final field's freeze: an atom published
-   without synchronization is seen with its initial state. Validators, watches and the return
-   values of `swap!`, `swap-vals!`, `reset!`, `reset-vals!` and `compare-and-set!` are unchanged.
-   Measured on JDK 26 with `-XX:+UseCompactObjectHeaders` (as `bin/arbace`), jar against jar,
-   best of 10 after warm-up:
-
-   | | `AtomicReference` | `VarHandle` |
-   |---|---|---|
-   | retained heap per atom (1M atoms in an array, heap delta) | 44.2 B | 28.2 B |
-   | `swap!` `inc`, 10M, one thread | 67.2 ms | 64.4 ms |
-   | `reset!`, 10M | 33.4 ms | 32.8 ms |
-   | `deref`, 10M | 23.6 ms | 21.9 ms |
-   | `compare-and-set!`, 10M | 51.7 ms | 44.8 ms |
-   | `swap-vals!` `inc`, 10M | 67.4 ms | 64.4 ms |
-   | `swap!` on one atom from 8 threads, 1M each (median of 15) | 1.81–1.88 s | 2.27–2.50 s |
-   | same, 4 threads | 0.46–0.57 s | 0.51–0.58 s |
-
-   Each atom is 16 bytes smaller (the `AtomicReference` object: a 12-byte header without
-   compact headers plus the field) and the uncontended operations are 2–13% faster. Heavy
-   contention on a single atom is about 25% slower at 8 threads. The likely cause is that the
-   CAS now invalidates the cache line that also holds the atom's `validator` and `watches`,
-   which every retry reads; but a Java model of both layouts (not kept) showed no difference,
-   so the cause is not settled. It was kept: the uncontended case and the memory are the common ones, and the
-   8-thread case is a worst case. `Agent`'s `AtomicReference aq` (one per agent) and `Ref`'s
-   atomics were left: agents and refs are few, and their cost is in the queue and the
-   transaction, not in the reference.
+8. **(Reverted.)** `Atom` briefly held its state in a volatile field updated through a
+   `VarHandle` (`298ad15`): 16 bytes less per atom and slightly faster uncontended, but one atom
+   swapped by 8 threads became about 25% slower. At the user's decision it was reverted, so
+   `Atom` keeps upstream's `final AtomicReference state`.
 
 9. **An opt-in virtual-thread executor for `send-off`, `future` and `pmap`**
    (`doc/MODERN-COMPILER.md` §4.12): in `arbace/lang/Agent.clj`, `soloExecutor` (the executor of
