@@ -714,3 +714,30 @@ instead of calling `arbace.classes`'s resolution.
 - Measured: JDK 26 virtual threads match Go for spawning and uncontended channel use but degrade
   under parallel scheduling, so Go's own channel algorithm would be converted.
 - Ten open questions for the user are in §9 of the document. No decision taken yet.
+
+## 2026-10-07: Compiled namespaces, a reproducible jar, the JDK AOT cache and bin/arbace
+
+- First item of the modern-compiler survey, done by a background agent (`8c9f2d3`). Details and
+  measurements are in `doc/VENDOR-NOTES.md` ("Compiled namespaces, the jar and the AOT cache").
+- Every stage AOT-compiles, with its own compiler and with direct linking (as Clojure's release
+  build does), the 35 namespaces of upstream's `build.xml` list plus `arbace.classes`. `arbace.j2c`
+  stays source. Stages 1, 2 and 3 are byte-identical at 5,091 classes; no new nondeterminism
+  turned up.
+- `target/arbace.jar` (stage 2 plus all `arbace/**/*.clj`) is reproducible, and the build checks
+  it against stage 3's jar. Sources are dated before their classes, because `RT.load` takes a
+  class only when it is strictly newer. `target/arbace.aot` (JEP 514 one-step training over
+  `test/aot-training.clj`) is the JDK AOT cache. It is not reproducible, so it is not compared.
+- New launcher `bin/arbace`: the jar, `-XX:+UseCompactObjectHeaders` (11% less retained heap
+  for small maps, same speed), and the cache when it is newer than the jar. It falls back
+  cleanly when the cache is missing, stale or rejected.
+- Clojure's suite now runs against each stage's compiled namespaces
+  (`CLOJURE_TESTS_PRECOMPILED=1`), as upstream's does.
+- Launch of `-e 1` (agent's hyperfine): from sources 2.14 s, compiled classes 0.48 s, jar with
+  cache 0.16 s; frozen `clojure.main` 2.11 s. The main session measured `bin/arbace -e` at 0.21 s
+  wall time against 2.0 s for the frozen Clojure. The first `defclass` takes about 55 ms.
+- Gate rerun by the main session on `8c9f2d3`: `bin/build-arbace --suite` (fixpoint 5,091
+  classes, jars equal, native tests, suite on stages 1 and 2 without regressions),
+  `bin/class-forms-tests` and `bin/j2c-check --suite` all pass.
+- Left open: the survey's other two "do first" items (`ClassFile.verify` in the checks,
+  classfile version 70 in the Clojure compiler). `bin/arbace` does not notice a jar that is
+  stale against edited sources.

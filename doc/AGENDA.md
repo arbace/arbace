@@ -51,8 +51,13 @@ The current state of the work. This file is rewritten as things change. For the 
   first recommendation is to AOT-compile all namespaces into the stages and use the JDK AOT
   cache: launch time measured 3.3 s → 0.45 s. Then add `ClassFile.verify` to the checks and
   emit classfile version 70.
-- Short term, now: make Arbace excellent on the JVM. In progress: AOT-compile all namespaces into
-  the stages, plus a JDK AOT cache and a launcher (survey item 1).
+- Short term: make Arbace excellent on the JVM.
+  - Done: compiled namespaces in every stage, a reproducible jar, the JDK AOT cache and
+    `bin/arbace`, which launches in about 0.2 s against about 2 s before (`8c9f2d3`).
+  - Next from the survey: `ClassFile.verify` in the checks, and classfile version 70 in the
+    Clojure compiler. After that, the survey's "do next" items, measured one by one.
+- g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). Ten open
+  questions for the user (§9) before any work starts.
 
 ## Later
 
