@@ -2214,6 +2214,11 @@
                 (when (or (.equals argType Object) (.equals argType Number)) (return true))))))
         false))
 
+    (method ^:static fold ^StringBuilder [^String/1 texts]
+      (let [sb (StringBuilder.)]
+        (for-each [^String t texts] (.append sb t))
+        sb))
+
     (method ^:public eval [this]
       (try
         (let [argvals (new Object/1 (.count args))]
@@ -3567,6 +3572,235 @@
       (when (nil? jc) (set! jc (HostExpr/tagToClass tag)))
       jc))
 
+  ;; Arbace: (str a b ...) with two or more arguments, inside a fn, as invokedynamic
+  ;; StringConcatFactory/makeConcatWithConstants (JEP 280), with exactly str's result: nil gives
+  ;; "", any other object its toString (a null from it gives "null", as StringBuilder.append
+  ;; does, except for the first argument, where str's new StringBuilder throws the
+  ;; NullPointerException it throws). Constants whose text is fixed are folded into the recipe;
+  ;; primitives are passed as such. The arguments are evaluated in order and only then
+  ;; converted, in order, as str does: when an object argument comes before an argument with
+  ;; effects (anything but a folded constant or an immutable local), all the arguments are
+  ;; first evaluated into temporary locals.
+  (defclass ^:static StrConcatExpr
+    :implements [Expr]
+
+    (field ^:static ^:final ^Var STR_VAR (RT/var "arbace.core" "str"))
+
+    (field ^:static ^:final ^Handle SCF_BSM
+      (Handle. Opcodes/H_INVOKESTATIC
+               "java/lang/invoke/StringConcatFactory"
+               "makeConcatWithConstants"
+               (java-str "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
+                         "Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)"
+                         "Ljava/lang/invoke/CallSite;")
+               false))
+
+    (field ^:static ^:final ^Method toStringMethod (Method/getMethod "String toString()"))
+
+    (field ^:public ^:final ^IPersistentVector args)
+
+    ;; per argument: its folded text (a constant), or nil
+    (field ^:final ^String/1 texts)
+
+    ;; per argument: its primitive type when passed as such, or nil
+    (field ^:final ^Class/1 prims)
+
+    ;; per argument: its temporary local, or -1
+    (field ^:final ^int/1 temps)
+
+    (field ^:final ^int line)
+
+    (field ^:final ^int column)
+
+    (field ^:final ^String source)
+
+    (constructor [this ^String source ^int line ^int column ^IPersistentVector args
+                  ^String/1 texts ^Class/1 prims ^int/1 temps]
+      (set! (.-source this) source)
+      (set! (.-line this) line)
+      (set! (.-column this) column)
+      (set! (.-args this) args)
+      (set! (.-texts this) texts)
+      (set! (.-prims this) prims)
+      (set! (.-temps this) temps))
+
+    ;; the text of a constant whose str never varies, or nil
+    (method ^:static constantText ^String [^Expr e]
+      (let [v (cond
+                (instance? NilExpr e) (return "")
+                (instance? BooleanExpr e) (.val (cast BooleanExpr e))
+                (instance? StringExpr e) (.-str (cast StringExpr e))
+                (instance? KeywordExpr e) (.-k (cast KeywordExpr e))
+                (instance? NumberExpr e) (.val (cast NumberExpr e))
+                (instance? ConstantExpr e) (.val (cast ConstantExpr e))
+                :else (return nil))]
+        (if (or (instance? String v) (instance? Character v) (instance? Boolean v)
+                (instance? Long v) (instance? Double v) (instance? Keyword v))
+            (.toString v)
+            nil)))
+
+    ;; whether evaluating e has no effect, and may so be done later
+    (method ^:static isPure ^boolean [^Expr e]
+      (if (instance? LocalBindingExpr e)
+          (let [m (RT/meta (.-sym (.-b (cast LocalBindingExpr e))))]
+            (not (or (RT/booleanCast (RT/get m (Keyword/intern "unsynchronized-mutable")))
+                     (RT/booleanCast (RT/get m (Keyword/intern "volatile-mutable"))))))
+          (some? (StrConcatExpr/constantText e))))
+
+    ;; the intrinsic for (str args...), or nil to leave it a call of str
+    (method ^:static parse ^Expr [^ISeq argForms]
+      ;; StringConcatFactory takes at most 200 argument slots (a long or double takes two)
+      (when (> (RT/count argForms) 99) (return nil))
+      (let [n (RT/count argForms)
+            texts (new String/1 n)
+            prims (new Class/1 n)
+            temps (new int/1 n)
+            ^:mutable ^IPersistentVector args PersistentVector/EMPTY
+            ^:mutable ^int lastEffect -1
+            ;; slots for temporaries, below the locals of the arguments; given back after
+            base (.intValue (cast Number (.deref NEXT_LOCAL_NUM)))
+            ^int/1 reserved (new int/1 n)]
+        (loop [^int i 0]
+          (when (< i n)
+            (aset reserved i (arbace.lang.Compiler/getAndIncLocalNum))
+            (recur (unchecked-inc-int i))))
+        (loop [s (RT/seq argForms) ^int i 0]
+          (when (some? s)
+            (let [e (arbace.lang.Compiler/analyze C/EXPRESSION (.first s))]
+              (set! args (.cons args e))
+              (aset temps i -1)
+              (aset texts i (StrConcatExpr/constantText e))
+              (when (nil? (aget texts i))
+                (aset prims i (arbace.lang.Compiler/maybePrimitiveType e)))
+              (when-not (StrConcatExpr/isPure e) (set! lastEffect i))
+              (recur (.next s) (unchecked-inc-int i)))))
+        ;; an object converted before an argument with effects: all go through temporaries
+        (let [^:mutable needTemps false]
+          (loop [^int i 0]
+            (when (< i lastEffect)
+              (when (and (nil? (aget texts i)) (nil? (aget prims i))) (set! needTemps true))
+              (recur (unchecked-inc-int i))))
+          (when needTemps
+            (loop [^int i 0]
+              (when (< i n)
+                (when (nil? (aget texts i))
+                  (aset temps i (aget reserved i))
+                  (aset prims i nil))
+                (recur (unchecked-inc-int i))))))
+        (.set NEXT_LOCAL_NUM (Integer/valueOf base))
+        (StrConcatExpr. (cast String (.deref SOURCE))
+                        (arbace.lang.Compiler/lineDeref)
+                        (arbace.lang.Compiler/columnDeref)
+                        args
+                        texts
+                        prims
+                        temps)))
+
+    (method ^:static fold ^StringBuilder [^String/1 texts]
+      (let [sb (StringBuilder.)]
+        (for-each [^String t texts] (.append sb t))
+        sb))
+
+    (method ^:public eval [this]
+      (try
+        (let [argvals (new Object/1 (.count args))]
+          (loop [^int i 0]
+            (when (< i (.count args))
+              (aset argvals i (.eval (cast Expr (.nth args i))))
+              (recur (unchecked-inc-int i))))
+          (.applyTo (cast IFn (.deref STR_VAR)) (RT/seq argvals)))
+        (catch Throwable e
+          (if (not (instance? CompilerException e))
+              (throw (CompilerException. source line column nil CompilerException/PHASE_EXECUTION e))
+              (throw (cast CompilerException e))))))
+
+    ;; converts the object on the stack as str does; first: it is str's first argument
+    (method ^:static emitConvert ^void [^GeneratorAdapter gen ^boolean first]
+      (let [notNil (.newLabel gen)
+            end (.newLabel gen)]
+        (.dup gen)
+        (.ifNonNull gen notNil)
+        (.pop gen)
+        (.push gen "")
+        (.goTo gen end)
+        (.mark gen notNil)
+        (.invokeVirtual gen OBJECT_TYPE toStringMethod)
+        (when first
+          ;; (new StringBuilder (str x)) throws for a null toString
+          (.dup gen)
+          (.ifNonNull gen end)
+          (.pop gen)
+          (let [sb (Type/getType StringBuilder)]
+            (.newInstance gen sb)
+            (.dup gen)
+            (.visitInsn gen Opcodes/ACONST_NULL)
+            (.invokeConstructor gen sb (Method/getMethod "void <init>(String)"))
+            (.invokeVirtual gen sb toStringMethod)))
+        (.mark gen end)))
+
+    (method ^:public emit ^void [this ^C context ^ObjExpr objx ^GeneratorAdapter gen]
+      (.visitLineNumber gen line (.mark gen))
+      ;; the arguments with effects that need a temporary, in order
+      (loop [^int i 0]
+        (when (< i (.count args))
+          (when (>= (aget temps i) 0)
+            (.emit (cast Expr (.nth args i)) C/EXPRESSION objx gen)
+            (.visitVarInsn gen Opcodes/ASTORE (aget temps i)))
+          (recur (unchecked-inc-int i))))
+      ;; then all, in order
+      (let [recipe (StringBuilder.)
+            desc (StringBuilder. "(")
+            ^List consts (ArrayList.)]
+        (loop [^int i 0]
+          (when (< i (.count args))
+            (let [e (cast Expr (.nth args i))
+                  text (aget texts i)
+                  primc (aget prims i)
+                  t (aget temps i)]
+              (cond
+                (some? text)
+                  (if (or (>= (.indexOf text "\u0001") 0) (>= (.indexOf text "\u0002") 0))
+                      (do (.append recipe \u0002) (.add consts text))
+                      (.append recipe text))
+                (some? primc)
+                  (do
+                    (.emitUnboxed (cast MaybePrimitiveExpr e) C/EXPRESSION objx gen)
+                    (.append recipe \u0001)
+                    (.append desc (.getDescriptor (Type/getType primc))))
+                :else
+                  (do
+                    (if (>= t 0)
+                        (do
+                          (.visitVarInsn gen Opcodes/ALOAD t)
+                          (.visitInsn gen Opcodes/ACONST_NULL)
+                          (.visitVarInsn gen Opcodes/ASTORE t))
+                        (.emit e C/EXPRESSION objx gen))
+                    (StrConcatExpr/emitConvert gen (== i 0))
+                    (.append recipe \u0001)
+                    (.append desc "Ljava/lang/String;"))))
+            (recur (unchecked-inc-int i))))
+        (.append desc ")Ljava/lang/String;")
+        ;; all constants: a new string at each evaluation, as str makes
+        (when (.equals (.toString desc) "()Ljava/lang/String;")
+          (.newInstance gen (Type/getType String))
+          (.dup gen)
+          (.push gen (.toString (StrConcatExpr/fold texts)))
+          (.invokeConstructor gen (Type/getType String) (Method/getMethod "void <init>(String)"))
+          (when (identical? context C/STATEMENT) (.pop gen))
+          (return))
+        (let [bsmArgs (new Object/1 (unchecked-add-int (.size consts) 1))]
+          (aset bsmArgs 0 (.toString recipe))
+          (loop [^int i 0]
+            (when (< i (.size consts))
+              (aset bsmArgs (unchecked-add-int i 1) (.get consts i))
+              (recur (unchecked-inc-int i))))
+          (.visitInvokeDynamicInsn gen "makeConcatWithConstants" (.toString desc) SCF_BSM bsmArgs)))
+      (when (identical? context C/STATEMENT) (.pop gen)))
+
+    (method ^:public hasJavaClass ^boolean [this] true)
+
+    (method ^:public getJavaClass ^Class [this] String))
+
   (defclass ^:public ^:static InstanceOfExpr
     :implements [Expr MaybePrimitiveExpr]
 
@@ -3944,6 +4178,13 @@
                     (return
                       (InstanceOfExpr. (cast Class val)
                                        (arbace.lang.Compiler/analyze context (RT/third form)))))))))
+          ;; Arbace: (str a b ...) as StringConcatFactory
+          (when (and (instance? VarExpr fexpr)
+                     (.equals (.-var (cast VarExpr fexpr)) StrConcatExpr/STR_VAR)
+                     (not (identical? context C/EVAL))
+                     (>= (RT/count form) 3)
+                     (InvokeExpr/shouldRegisterCallsites KEYWORD_CALLSITES))
+            (let [ret (StrConcatExpr/parse (RT/next form))] (when (some? ret) (return ret))))
           (when (and (and (RT/booleanCast (arbace.lang.Compiler/getCompilerOption directLinkingKey))
                           (instance? VarExpr fexpr))
                      (not (identical? context C/EVAL)))

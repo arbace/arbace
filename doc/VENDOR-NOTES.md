@@ -725,6 +725,31 @@ the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
    hash maps 11.4 → 8.2 ns, six classes (records, maps, `java.util.HashMap`, `nil`) at one site
    18 → 11.5 ns.
 
+13. **`str` with two or more arguments is `StringConcatFactory`** (`doc/MODERN-COMPILER.md`
+   §4.7; 2026-10-07): `Compiler$InvokeExpr/parse` (`arbace/lang/Compiler.clj`) turns a call of
+   `#'arbace.core/str` with 2 to 99 arguments, inside a fn, into the new
+   `Compiler$StrConcatExpr`, an intrinsic like an `:inline` (a redefinition of `str` does not
+   reach it, as with other inlined fns). It emits `invokedynamic makeConcatWithConstants`
+   (JEP 280) with exactly `str`'s result: constants whose text is fixed (strings, characters,
+   booleans, longs, doubles, keywords, `nil`) are folded into the recipe (passed as recipe
+   constants when they hold `\u0001` or `\u0002`); primitive arguments are passed as such (the
+   factory prints them as `toString` of their box does); any other argument is converted
+   inline: `nil` to `""`, else its `toString`. A `null` from `toString` gives `"null"` (as
+   `StringBuilder.append` does in `str`), except for the first argument, where `str`'s
+   `new StringBuilder` throws, and the intrinsic throws the same `NullPointerException` from
+   the same constructor. The arguments are evaluated in order before any conversion, as for a
+   call: when an argument with effects (anything but a folded constant or an immutable local) follows
+   an object argument, every argument goes through a temporary local first (reserved below the
+   arguments' own locals, cleared after use). All-constant calls make `new String(text)`, so
+   each evaluation still gives a new string. `eval` (top level, outside a fn) calls `str`.
+   Stack traces of an exception from a `toString` lack the `arbace.core$str` frame. Measured
+   (2026-10-07, machine under heavy load): 515 sites in the AOT-compiled namespaces, classes
+   8,822,445 → 8,989,918 bytes (+1.9%: recipes and bootstrap entries); calls 1.5 to 2.5 times
+   faster (min of 7 rounds: `(str "n=" x)` 105-119 → 66-69 ns, five arguments 186-260 → 89-134
+   ns, with a `nil` 132-199 → 60-94 ns, with a primitive 162-199 → 68-108 ns); `bin/arbace -e
+   1` unchanged (median 393 → 391 ms with the AOT cache, which pre-resolves these sites; 833 →
+   842 ms without, noise ±20 ms).
+
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.

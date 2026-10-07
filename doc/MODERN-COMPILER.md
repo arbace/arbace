@@ -80,6 +80,8 @@ Status (2026-10-07), each measured on its own and kept only if it pays off:
   constants. The experiment is on the local branch `condy-item1-experiment`.
 - Item 5, keyword sites: **done**, see `doc/VENDOR-NOTES.md` (hand change 12). Steady-state
   lookups 28-37% faster, classes 6.6% smaller, launch unchanged.
+- `StringConcatFactory` for `str` (folded into this round): **done**, see `doc/VENDOR-NOTES.md`
+  (hand change 13). Calls 1.5-2.5 times faster, launch unchanged.
 
 4. **Constant dynamic (`ldc` of condy) for the compiler's constants**: keywords, vars, symbols
    and read-back literals. These are now 7,350 `RT.var` calls and many `Keyword.intern` calls
