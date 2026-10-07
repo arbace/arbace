@@ -242,6 +242,61 @@ during the runs; hyperfine, 3 warmups, 20 runs; noise about ±5 %):
   about 6 s per stage; stages 2 and 3, built by a stage with compiled namespaces, start faster;
   the jars and the training run add about 6 s). With `--suite`: 5 min 43 s.
 
+### The runtime image (2026-10-07)
+
+`doc/MODERN-COMPILER.md` §4.11 (the `jlink` half; Arbace stays on the class path, no JPMS
+module): `bin/arbace-image`, also run by `bin/build-arbace --image`, makes
+`target/arbace-image` from `target/arbace.jar` in about 14 s:
+
+- **Modules**: `jdeps --print-module-deps` over the jar gives `java.base`, `java.desktop` (the
+  `java.beans` of `bean`, Swing in `arbace.inspector` and `arbace.java.browse-ui`, AWT in
+  `arbace.java.browse`), `java.sql` (`resultset-seq`, `java.sql.Timestamp` in `arbace.instant`)
+  and `jdk.unsupported` (`sun.misc.Signal` in `arbace.repl`); `jlink` adds what they require
+  (`java.xml`, `java.logging`, `java.datatransfer`, `java.prefs`, `java.transaction.xa`).
+  `ARBACE_IMAGE_MODULES` adds more. `jlink --strip-debug --no-header-files --no-man-pages`.
+- **Layout**: the image's `bin/arbace` is the repository's `bin/arbace`, which, when it finds
+  `bin/java` and `lib/arbace/arbace.jar` beside it, runs that `java` and that jar (and
+  `lib/arbace/arbace.aot`). The jar is copied unchanged.
+- **The AOT cache** is trained by the image's own `java` (`bin/arbace --aot-train` inside the
+  image, the same `test/aot-training.clj`), then the image is launched once with it. A JDK
+  26.0.2 problem showed up here: with AOT class linking (the default of `-XX:AOTCacheOutput`),
+  the cache of a `jlink` image of some module sets stops the JVM at startup ("Unexpected
+  exception when loading aot-linked classes", `InternalError` from
+  `ClassLoader.registerAsParallelCapable` in `ClassLoaders$AppClassLoader.<clinit>`). It
+  reproduces with a hello-world class and `jlink --add-modules java.base,java.sql` (also
+  `java.base,java.compiler`, and Arbace's set), not with `java.base` alone, `java.base,
+  java.desktop`, all modules or the full JDK, nor with JDK 25's `jlink`. In the failing
+  images the cache records `ClassLoaders$AppClassLoader` among the classes of the archived
+  `ArchivedClassLoaders` subgraph, to be initialized at run time. Adding one of a dozen small
+  modules (`jdk.unsupported.desktop`, `jdk.attach`, ...) avoids it, so the image adds
+  `jdk.unsupported.desktop` (a few classes; it requires only `java.desktop`). As a safeguard,
+  if the launch with the cache fails, the script trains again with `-XX:-AOTClassLinking`
+  (classes still come from the cache, not linked; about 45 ms slower to launch) and writes
+  that option to `lib/arbace/aot-train-options`, which `bin/arbace --aot-train` reads in the
+  image.
+- **Relocation**: the image runs from any directory and needs no JDK on the `PATH`
+  (`env -i image/bin/arbace`). The cache still applies after a move: the JVM matches the
+  recorded class path by its common prefix (`-Xlog:class+path`: "Longest common prefix
+  substitution in boot/app classpath matching: yes").
+- **Tested**: all native tests pass on the image (`ARBACE_CLASSPATH=test`, 30 tests).
+
+Measured on 2026-10-07 (load average 50 to 160 from other agents; hyperfine, 5 warmups, 40
+runs):
+
+| | size | `-e 1` mean | min |
+|---|---:|---:|---:|
+| `bin/arbace` (the JDK, 401 MB, plus `target/arbace.jar` and `.aot`) | 444 MB | 179 ms | 158 ms |
+| `target/arbace-image/bin/arbace` | 131 MB | 174 ms | 152 ms |
+| the image, cache trained with `-XX:-AOTClassLinking` | 128 MB | 220 ms | 195 ms |
+| the image without its cache (`ARBACE_AOT=off`) | | 562 ms | 520 ms |
+| `bin/arbace` without the cache | | 508 ms | 475 ms |
+
+The image's 131 MB: `lib/modules` 54 MB, `libjvm.so` 30 MB, the cache 35 MB, the jar 6.5 MB,
+the rest 5 MB; 42 MB as a `.tar.gz`. Without `java.desktop` the JDK part would be 67 MB
+instead of 89 MB, but `bean` and the inspector need it. Without the cache the image is slower
+than the full JDK, which has its default CDS archive (`lib/server/classes.jsa`); `jlink
+--generate-cds-archive` would add one, but the image always has its own cache.
+
 ## Clojure's test suite on stages 1 and 2
 
 `bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace`:

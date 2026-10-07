@@ -40,6 +40,14 @@ we go so that it could be repeated.
 `target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache applies (it is tied
 to the JDK build and the jar), and from the jar alone otherwise.
 
+`bin/arbace-image` (or `bin/build-arbace --image`) makes `target/arbace-image`, a
+self-contained Arbace needing no installed JDK: a JDK runtime image trimmed by `jlink` to the
+modules Arbace uses (`java.base`, `java.desktop`, `java.sql`, `jdk.unsupported` and what they
+require), the jar, an AOT cache trained by the image's own `java`, and `bin/arbace`. Copy the
+directory anywhere and run `arbace-image/bin/arbace`. It takes 131 MB (42 MB as a `.tar.gz`)
+against 401 MB for the JDK alone, and launches as fast as `bin/arbace`. Further modules go in
+`ARBACE_IMAGE_MODULES` (e.g. `java.net.http`).
+
 `send-off`, `future` and `pmap` run on a cached pool of platform threads, as in Clojure. With
 `ARBACE_JAVA_OPTS=-Darbace.virtual-threads=true` they run on virtual threads instead, one per
 task, which suits many blocking tasks (10,000 futures sleeping 100 ms: 120 ms against 230 ms,
