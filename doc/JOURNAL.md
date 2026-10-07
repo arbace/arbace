@@ -962,3 +962,11 @@ recommended:
   - 1M record lookups plus `str` calls take about 12 ms warm.
 - Pre-freeze item 4 (benchmarks, CI, freeze kit) started at the user's request. The freeze
   kit is only prepared: the branch and tag are created after the user confirms.
+
+## 2026-10-07: CI only for the frozen branch
+
+- The user's decision: main's progress is not tied to GitHub's infrastructure yet. The gate
+  workflow (`.github/workflows/gate.yml`, added in `e68c480`) runs automatically only on pushes
+  to `arbace-for-java-26`; it can be started by hand on any ref (`workflow_dispatch`)
+  (`44cf328`). The in-progress run on main was cancelled. main is gated by running the checks
+  locally, as before.
