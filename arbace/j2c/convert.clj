@@ -735,8 +735,23 @@
   [env ^Symbol$MethodSymbol m mtype args varargs-elem loose?]
   (let [targets (arg-targets m mtype (count args) varargs-elem)
         rs (doall (map (fn [a t]
-                         (let [x (coerce-r env (ex env a) t)
-                               a (TreeInfo/skipParens a)]
+                         (let [x0 (ex env a)
+                               x (coerce-r env x0 t)
+                               ;; an int conditional of literals widened to a long, float or
+                               ;; double parameter: javac widens the int value
+                               x (if (and (= :lit-int (:t x0)) (seq? (:f x0)) t (prim? t)
+                                          (#{"LONG" "FLOAT" "DOUBLE"} (tag-name t)))
+                                   (assoc x :f (list (widen-op (tag-name t)) (:f x0)) :t t)
+                                   x)
+                               a (TreeInfo/skipParens a)
+                               ;; an array's clone() is cast to the instantiated parameter type
+                               ;; (TransTypes.retype): a hint tells the compiler
+                               x (if (and t (instance? Type$ArrayType t) (seq? (:f x))
+                                          (instance? JCTree$JCMethodInvocation a)
+                                          (= "clone" (str (TreeInfo/name (.meth ^JCTree$JCMethodInvocation a))))
+                                          (empty? (.args ^JCTree$JCMethodInvocation a)))
+                                   (assoc x :f (tag (:f x) (erased-form env t)))
+                                   x)]
                            ;; the compiler unifies a conditional's branches by their class
                            ;; chain only: javac's type for it (the parameter's) as a hint
                            (if (and t (not (prim? t)) (not (jt/object? t)) (seq? (:f x))

@@ -1150,12 +1150,12 @@
   [actx node tag]
   (let [d (actx-desc actx tag)]
     (cond
-      (= d (:type node)) node
-      (t/prim? d) node
-      (#{:null :none} (:type node)) node
       ;; an array's clone() is cast to the type expected of it (TransTypes.retype)
       (and (:array-clone node) (t/array? d) (env/assignable? (:type node) d))
       (assoc node :type d :cast-to d)
+      (= d (:type node)) node
+      (t/prim? d) node
+      (#{:null :none} (:type node)) node
       ;; the tag gives the static type, also a supertype (Clojure's hint)
       (and (t/ref? (:type node)) (env/assignable? (:type node) d)) (assoc node :type d)
       ;; branches that all convert to it (javac's lub can be sharper than theirs): no cast
@@ -1324,7 +1324,9 @@
 
 (defn- retype-clone [node to]
   (case (:op node)
-    :invoke (if (t/array? to) (assoc node :cast-to to :type to) (assoc node :no-cast true))
+    :invoke (cond (:cast-to node) node
+                  (t/array? to) (assoc node :cast-to to :type to)
+                  :else (assoc node :no-cast true))
     :do (let [r (retype-clone (:ret node) to)] (assoc node :ret r :type (if (= :none (:type node)) :none (:type r))))
     :let (let [b (retype-clone (:body node) to)] (assoc node :body b :type (:type b)))))
 
