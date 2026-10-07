@@ -181,7 +181,7 @@
         m (fn-meta form)]
     (list 'class* :local
           [(concat
-             [(with-meta cn {:clojure-fn true :final true})
+             [(with-meta cn {:clojure-fn true :clojure-type true :final true})
               :implements (conj (vec ifaces) 'arbace.lang.IObj)
               (list 'field (with-meta '__meta {:tag pm :final true :private true}))
               (list 'constructor (with-meta [rcv (with-meta mm {:tag pm})] {:public true})
@@ -234,7 +234,8 @@
                        (list 'quote (symbol (name f))))))]
     (concat
       [(with-meta simple (merge (annotation-meta (meta classname))
-                                {:public true :final true :clojure-fn true :reflection :clojure}))
+                                {:public true :final true :clojure-fn true :clojure-type true
+                                 :reflection :clojure}))
        :package pkg
        :implements (vec (:implements opts))]
       (for [f fields

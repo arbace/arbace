@@ -1134,9 +1134,17 @@
             (when (and (not= bp tp) (t/ref? tp))
               (.visitTypeInsn mv Opcodes/CHECKCAST (t/desc->internal tp)))
             (recur more (+ slot (t/size bp)))))
-        (if (:special m)
+        (cond
+          (:special m)
           (.visitMethodInsn mv Opcodes/INVOKESPECIAL (:owner target) (:name m) (:desc target)
                             (boolean (env/interface? (:owner target))))
+          ;; arbace.lang.Compiler's bridges of reify and deftype classes call the most specific
+          ;; method through its declaring interface
+          (:clojure-bridge m)
+          (let [oi (env/interface? (:owner target))]
+            (.visitMethodInsn mv (if oi Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL)
+                              (:owner target) (:name m) (:desc target) (boolean oi)))
+          :else
           (.visitMethodInsn mv (if itf Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL) n (:name m) (:desc target) itf))
         (.visitInsn mv (opcode br Opcodes/IRETURN)))
       :record-accessor

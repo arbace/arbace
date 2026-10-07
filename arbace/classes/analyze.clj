@@ -443,6 +443,18 @@
                   (:desc m)))]
     (when (= 1 (count cands)) (first cands))))
 
+(defn- clojure-implementables
+  "The methods of class n's supertypes that a reify or deftype class n can implement (public or
+  protected, neither static nor final), as arbace.lang.Compiler's NewInstanceExpr.considerMethod
+  takes them, each with its declaring class as :owner."
+  [n]
+  (for [s (rest (env/all-supertypes n))
+        m (:methods (env/info! s))
+        :when (not (#{"<init>" "<clinit>"} (:name m)))
+        :when (has? (:flags m) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
+        :when (not (has? (:flags m) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)))]
+    (assoc m :owner s)))
+
 (defn- clojure-overrideables
   "arbace.lang.Compiler's NewInstanceExpr.gatherMethods for class n (a reify or deftype class):
   the methods of its supertypes it can implement (public or protected, neither static nor
@@ -459,12 +471,29 @@
                       acc))
                   (assoc acc k m))))
             (array-map)
-            (for [s (rest (env/all-supertypes n))
-                  m (:methods (env/info! s))
-                  :when (not (#{"<init>" "<clinit>"} (:name m)))
-                  :when (has? (:flags m) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
-                  :when (not (has? (:flags m) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)))]
-              m))))
+            (clojure-implementables n))))
+
+(defn- clojure-bridges
+  "The covariant bridges arbace.lang.Compiler gives a reify or deftype class n
+  (NewInstanceExpr.emitMethods over gatherMethods' covariants): for every method of the
+  supertypes that another one with the same name and parameter types but a more specific return
+  type overrides, whether n implements it or not, a public bridge (ACC_BRIDGE only, no
+  exceptions) with the overridden return type calling the most specific one through its
+  declaring interface."
+  [n]
+  (let [all (clojure-implementables n)]
+    (for [c (clojure-overrideables n)
+          :let [[ps r] (t/parse-method-desc (:desc c))]
+          br (distinct (for [m all
+                             :when (= (:name c) (:name m))
+                             :let [[mps mr] (t/parse-method-desc (:desc m))]
+                             :when (and (= ps mps) (not= r mr))]
+                         mr))]
+      {:name (:name c) :desc (t/method-desc ps br) :owner n
+       :bridge-of c :clojure-bridge true :derived :bridge
+       :throws [] :ret br
+       :params (mapv (fn [pd] {:desc pd :flags 0}) ps)
+       :flags (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_BRIDGE)})))
 
 (defn- clojure-tag-desc
   "The descriptor of arbace.lang.Compiler's tagClass of a hint: Object without one."
@@ -2825,9 +2854,16 @@
   not yet present, as javac translates nested classes before adding the outer class's bridges."
   [n]
   (let [d (decl! n)]
-    (when-not (or (= :annotation (:kind d)) (:bridges-done d))
-      (update-decl! n assoc :bridges-done true)
-      (let [envs (supertype-envs n)
+    (cond
+      (or (= :annotation (:kind d)) (:bridges-done d)) nil
+      ;; reify and deftype classes get arbace.lang.Compiler's bridges, not javac's
+      (:clojure-type (:meta d))
+      (do (update-decl! n assoc :bridges-done true)
+          (when-let [bs (seq (clojure-bridges n))]
+            (update-decl! n update :methods into bs)))
+      :else
+      (let [_ (update-decl! n assoc :bridges-done true)
+            envs (supertype-envs n)
             iface? (= :interface (:kind d))
             chain (if iface? [n] (vec (env/superclass-chain n)))
             enclosing (set (take-while some? (iterate #(some-> % decl :outer) (:outer d))))

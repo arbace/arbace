@@ -71,3 +71,23 @@
                               (import java.util.UUID)]))]))]
     (is (= ["v3:w" '[a] java.util.UUID] (call C "make" 3)))
     (is (= {:a 1} (into {} ((resolve 'classes.clojure-test/->RecInBody) 1))))))
+
+(definterface CovBase (^Object item []) (^CharSequence label [^long i]))
+(definterface CovNarrow (^String item []) (^String label [^long i]))
+
+(defn- bridges-of [^Class c]
+  (sort (for [^java.lang.reflect.Method m (.getDeclaredMethods c) :when (.isBridge m)]
+          [(.getName m) (.getName (.getReturnType m)) (.getModifiers m) (.isSynthetic m)])))
+
+(deftest reify-covariant-bridges
+  ;; Clojure's compiler's bridges: one per overridden return type, implemented or not,
+  ;; ACC_PUBLIC | ACC_BRIDGE only
+  (let [[C] (load-forms 'classes.clojure-test
+                        '[(^:public Cov
+                           (method ^:public ^:static make [s]
+                             (reify CovBase CovNarrow (item [this] (str s)))))])
+        r (call C "make" 5)]
+    (is (= "5" (.item ^CovBase r)))
+    (is (= [["item" "java.lang.Object" 65 false] ["label" "java.lang.CharSequence" 65 false]]
+           (bridges-of (class r))
+           (bridges-of (class (reify CovBase CovNarrow (item [this] "x"))))))))

@@ -157,9 +157,13 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   specific return type): the only one of that name and arity when nothing is hinted, otherwise
   the one whose parameter types are the hinted classes (`Object` unhinted) and whose return
   type is the name's hint (`Object` unhinted), with the compiler's error messages; the method
-  declares the chosen method's exceptions. Covariant returns get bridges as for any class
-  (`ACC_BRIDGE` and `ACC_SYNTHETIC`, where the compiler sets only `ACC_BRIDGE`, and only for the
-  methods implemented).
+  declares the chosen method's exceptions. Such classes (`:clojure-type`) get the compiler's
+  covariant bridges, not javac's (`analyze/clojure-bridges`, as `NewInstanceExpr.emitMethods`
+  over `gatherMethods`' covariants): for every method of the supertypes overridden by one with
+  the same name and parameter types and a more specific return type, implemented or not, a
+  public method with only `ACC_BRIDGE` and no exceptions that calls the most specific one
+  through its declaring interface (`test/native/bridge_test.clj` compares the methods with the
+  same deftype and reify compiled by `arbace.lang.Compiler`).
 - `deftype*` (of `deftype` and `defrecord`) is compiled and defined while the code is analyzed
   by Clojure's compiler (`Compiler/analyze`, in a fresh `Compiler/LOADER` as `eval` binds one,
   with `*ns*` the code's namespace), and is `nil`: its methods see only the fields
