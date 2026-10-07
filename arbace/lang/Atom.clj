@@ -12,60 +12,78 @@
 ;;
 ;; Converted from clojure/lang/Atom.java of Clojure 98d735fab02f by arbace.j2c
 ;; (convert --rename clojure=arbace) and arbace.j2c.rename; see doc/VENDOR-NOTES.md.
+;; Hand change (doc/VENDOR-NOTES.md, "After vendoring: hand changes"): the state is a volatile
+;; field updated through the VarHandle STATE, not a final AtomicReference (one object less per
+;; atom; doc/MODERN-COMPILER.md §4.8). compareAndSet compares by identity, as before.
 
 (in-ns 'arbace.lang)
 
-(import '(java.util.concurrent.atomic AtomicReference))
+(import '(java.lang.invoke MethodHandles VarHandle))
 
 (defclass ^:public ^:final Atom
   :extends ARef
   :implements [IAtom2]
 
-  (field ^:final ^AtomicReference state)
+  (field ^:volatile state)
 
+  (field ^:private ^:static ^:final ^VarHandle STATE)
+
+  (static-initializer
+    (try
+      (set! STATE (.findVarHandle (MethodHandles/lookup) Atom "state" Object))
+      (catch ReflectiveOperationException e (throw (ExceptionInInitializerError. e)))))
+
+  ;; The release fence keeps what the final AtomicReference gave: an atom published without
+  ;; synchronization is seen with its initial state, as through a final field.
   (constructor ^:public [this state]
-    (set! (.-state this) (AtomicReference. state)))
+    (set! (.-state this) state)
+    (VarHandle/releaseFence))
 
   (constructor ^:public [this state ^IPersistentMap meta]
     (super. meta)
-    (set! (.-state this) (AtomicReference. state)))
+    (set! (.-state this) state)
+    (VarHandle/releaseFence))
 
-  (method ^:public deref [this] (.get state))
+  ;; STATE.compareAndSet(this, oldv, newv), with the exact descriptor (Atom, Object, Object)Z
+  (method ^:private cas ^boolean [this oldv newv]
+    ^boolean (^[Atom Object Object] VarHandle/.compareAndSet STATE this oldv newv))
+
+  (method ^:public deref [this] state)
 
   (method ^:public swap [this ^IFn f]
     (while true
       (let [v (.deref this)
             newv (.invoke f v)]
         (.validate this newv)
-        (when (.compareAndSet state v newv) (.notifyWatches this v newv) (return newv)))))
+        (when (.cas this v newv) (.notifyWatches this v newv) (return newv)))))
 
   (method ^:public swap [this ^IFn f arg]
     (while true
       (let [v (.deref this)
             newv (.invoke f v arg)]
         (.validate this newv)
-        (when (.compareAndSet state v newv) (.notifyWatches this v newv) (return newv)))))
+        (when (.cas this v newv) (.notifyWatches this v newv) (return newv)))))
 
   (method ^:public swap [this ^IFn f arg1 arg2]
     (while true
       (let [v (.deref this)
             newv (.invoke f v arg1 arg2)]
         (.validate this newv)
-        (when (.compareAndSet state v newv) (.notifyWatches this v newv) (return newv)))))
+        (when (.cas this v newv) (.notifyWatches this v newv) (return newv)))))
 
   (method ^:public swap [this ^IFn f x y ^ISeq args]
     (while true
       (let [v (.deref this)
             newv (.applyTo f (RT/listStar v x y args))]
         (.validate this newv)
-        (when (.compareAndSet state v newv) (.notifyWatches this v newv) (return newv)))))
+        (when (.cas this v newv) (.notifyWatches this v newv) (return newv)))))
 
   (method ^:public swapVals ^IPersistentVector [this ^IFn f]
     (while true
       (let [oldv (.deref this)
             newv (.invoke f oldv)]
         (.validate this newv)
-        (when (.compareAndSet state oldv newv)
+        (when (.cas this oldv newv)
           (.notifyWatches this oldv newv)
           (return (^[Object/1] LazilyPersistentVector/createOwning oldv newv))))))
 
@@ -74,7 +92,7 @@
       (let [oldv (.deref this)
             newv (.invoke f oldv arg)]
         (.validate this newv)
-        (when (.compareAndSet state oldv newv)
+        (when (.cas this oldv newv)
           (.notifyWatches this oldv newv)
           (return (^[Object/1] LazilyPersistentVector/createOwning oldv newv))))))
 
@@ -83,7 +101,7 @@
       (let [oldv (.deref this)
             newv (.invoke f oldv arg1 arg2)]
         (.validate this newv)
-        (when (.compareAndSet state oldv newv)
+        (when (.cas this oldv newv)
           (.notifyWatches this oldv newv)
           (return (^[Object/1] LazilyPersistentVector/createOwning oldv newv))))))
 
@@ -92,18 +110,18 @@
       (let [oldv (.deref this)
             newv (.applyTo f (RT/listStar oldv x y args))]
         (.validate this newv)
-        (when (.compareAndSet state oldv newv)
+        (when (.cas this oldv newv)
           (.notifyWatches this oldv newv)
           (return (^[Object/1] LazilyPersistentVector/createOwning oldv newv))))))
 
   (method ^:public compareAndSet ^boolean [this oldv newv]
     (.validate this newv)
-    (let [ret (.compareAndSet state oldv newv)] (when ret (.notifyWatches this oldv newv)) ret))
+    (let [ret (.cas this oldv newv)] (when ret (.notifyWatches this oldv newv)) ret))
 
   (method ^:public reset [this newval]
-    (let [oldval (.get state)]
+    (let [oldval state]
       (.validate this newval)
-      (.set state newval)
+      (set! state newval)
       (.notifyWatches this oldval newval)
       newval))
 
@@ -111,6 +129,6 @@
     (.validate this newv)
     (while true
       (let [oldv (.deref this)]
-        (when (.compareAndSet state oldv newv)
+        (when (.cas this oldv newv)
           (.notifyWatches this oldv newv)
           (return (^[Object/1] LazilyPersistentVector/createOwning oldv newv)))))))
