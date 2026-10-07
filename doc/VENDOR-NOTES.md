@@ -313,13 +313,18 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    language, and `CLOJURE_*` constants (not visible). The suite's `test-proxy-method-order`
    expects the `IProxy` method names; the harness adjusts it (above).
 
+3. **The class forms native** (SPEC §9.5; `doc/classes/COMPILER-NOTES.md`, "Native class
+   forms"): `arbace/core.clj` loads the new `arbace/core_classes.clj` (the class forms' names in
+   `arbace.core`), and `arbace/lang/Compiler.clj` knows their special forms (`class*`,
+   `switch*`, ...), handing them to `arbace.classes` through `arbace.classes.native`: new parser
+   `Compiler$ClassFormsExpr`, the signal it throws caught by `FnExpr/parse`, `eval` and
+   `compile1`, top-level `do` siblings, and signals instead of three errors (a primitive tag on a
+   local with a primitive initializer, `set!` of a local, `new` of an array class). Stage 1 needs no `arbace.classes.boot`.
+
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.
 2. (decided, above) the leftover `clojure` identifiers.
 3. **`CLAUDE.md`'s layout section** still describes `arbace/` as the tools only; it could name
    the vendored tree and `bin/build-arbace` (left to the main session).
-4. At stage 1 the class forms' names (`defclass`, `switch`, ...) are interned into `arbace.core`
-   at run time by `arbace.classes.boot`, as at stage 0. SPEC §9.5 wants them as vars of
-   `arbace.core` and the new special forms in `arbace.lang.Compiler`; that is the next step, not
-   done here.
+4. (done, item 3 of "After vendoring") the class forms native at stage 1.

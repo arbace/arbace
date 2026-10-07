@@ -4,7 +4,8 @@
   (:require [arbace.string :as str]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
-            [arbace.classes.parse :as p])
+            [arbace.classes.parse :as p]
+            [arbace.classes.lower :as lower])
   (:import (arbace.asm Opcodes Type MethodVisitor ClassWriter TypeReference)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -985,8 +986,9 @@
                    (map? form) (clj-collection actx "map" (t/lang-desc "IPersistentMap") (mapcat identity form))
                    (set? form) (clj-collection actx "set" (t/lang-desc "IPersistentSet") (seq form))
                    (instance? arbace.lang.BigInt form) (const-node :bigint form)
-                   :else (fail (str "Not supported in class bodies at stage 0: " (pr-str form)
-                                    " (" (.getName (class form)) ")")))]
+                   ;; any other constant (regex, ratio, big decimal, tagged literal...): read
+                   ;; at class initialization, as Clojure embeds constants
+                   :else (clj-constant actx form))]
         (let [node (accessorize actx node)]
           (if-let [tag (and (instance? arbace.lang.IMeta form) (:tag (meta form)))]
             (coerce-hint actx node tag)
@@ -1085,7 +1087,7 @@
       {:op :var-deref :var (resolve-var actx sym) :field (clj-var-field actx (resolve-var actx sym))
        :owner (:class actx) :type t/object-desc}
 
-      :else (fail (str "Unable to resolve symbol: " sym)))))
+      :else (fail (str "Unable to resolve symbol: " sym) {:unresolved sym}))))
 
 ;; operators --------------------------------------------------------------------------------------
 
@@ -1127,6 +1129,11 @@
       node)))
 
 (defn- prim-type [node] (:type (unboxed node)))
+
+(defn- prim-type-of
+  "The primitive type of a node's value (unboxing a wrapper), or nil."
+  [node]
+  (let [t (prim-type node)] (when (t/prim? t) t)))
 
 (defn convert-node
   "Converts node to type `to` (an assignment conversion; a const is converted at compile time)."
@@ -1184,6 +1191,15 @@
       (if (= :const (:op n)) (const-node t (const-of-type t (:val n))) {:op :convert :expr n :from from :to t :type t})
       :else (fail (str "Operand of type " (pr-str from) " where " t " is needed")))))
 
+(defn- int-operand
+  "An int operand (array dimension or index); in Clojure code (§5.13) also any other value,
+  converted by RT.intCast as Clojure converts it."
+  [actx node]
+  (if (and (:clojure actx) (t/ref? (value-type (:type node))) (nil? (t/unbox-of (value-type (:type node)))))
+    {:op :invoke :kind :static :owner (t/lang-class "RT") :itf false :name "intCast"
+     :desc "(Ljava/lang/Object;)I" :target nil :args [node] :type "I"}
+    (operand node "I")))
+
 (defn- fold-arith [t op a b]
   (try
     (case t
@@ -1214,9 +1230,9 @@
                   :neg (- a) :inc (inc a) :dec (dec a) nil)))
     (catch ArithmeticException _ nil)))
 
-(defn- analyze-arith [actx opname args]
+(defn- analyze-arith [actx opname arg-nodes]
   (let [[family op] (arith-ops opname)
-        nodes (mapv #(unboxed (analyze actx %)) args)
+        nodes (mapv unboxed arg-nodes)
         types (map :type nodes)
         unary? (#{:neg :inc :dec :not} op)
         _ (when-not (= (count nodes) (if unary? 1 2))
@@ -1259,8 +1275,8 @@
         {:op :arith :family family :o op :args ops :type t})
       {:op :arith :family family :o op :args ops :type t})))
 
-(defn- analyze-conversion [actx to arg checked?]
-  (let [n (unboxed (analyze actx arg))
+(defn- analyze-conversion [actx to arg checked? & [node]]
+  (let [n (unboxed (or node (analyze actx arg)))
         from (:type n)]
     (cond
       ;; (unchecked-long 0x8000000000000000): a big literal as Java's long or int literal
@@ -1367,7 +1383,7 @@
       {:op :cast :class type :expr init :type type}
       :else (convert-node init type :what (str "initializer of " sym)))))
 
-(defn- analyze-let [actx [_ bindings & body] loop?]
+(defn- analyze-let [actx [_ bindings & body :as form] loop?]
   (when-not (and (vector? bindings) (even? (count bindings)))
     (fail "let/loop needs a vector of bindings"))
   (let [[actx bs]
@@ -1389,7 +1405,11 @@
                 (partition 2 bindings))]
     (if loop?
       (let [target {:id (next-id) :kind :loop :bindings (mapv first bs) :breaks (atom [])}
-            actx (cond-> (-> actx (assoc :loop target :break-target target) (dissoc :label-loop))
+            ;; the loop at the top of a fn arity (arbace.classes.lower) is recur's target, not
+            ;; break's
+            fn-body? (:arbace.classes/fn-body (meta (first form)))
+            actx (cond-> (-> actx (assoc :loop target) (dissoc :label-loop))
+                   (not fn-body?) (assoc :break-target target)
                    (:label-loop actx) (assoc-in [:labels (:label-loop actx) :loop] target))
             body (analyze-body actx body)
             ;; a loop's value: its body's value, or nil from a (break)
@@ -1422,7 +1442,14 @@
       (fail (str "Mismatched argument count to recur/continue, expected: " (count bs)
                  " args, got: " (count args))))
     {:op :recur :target target
-     :args (mapv (fn [b a] (convert-node (analyze actx a) (:type b) :what "recur argument")) bs args)
+     :args (mapv (fn [b a]
+                   (let [n (analyze actx a)]
+                     ;; Clojure code: a hinted reference local takes any reference (checked)
+                     (if (and (:clojure actx) (t/ref? (:type b)) (t/ref? (value-type (:type n)))
+                              (nil? (conversion n (:type n) (:type b))))
+                       {:op :cast :class (:type b) :expr n :type (:type b)}
+                       (convert-node n (:type b) :what "recur argument"))))
+                 bs args)
      :type :none}))
 
 (defn- expand-to-loop
@@ -1461,9 +1488,16 @@
     {:op :return :val vn :type :none}))
 
 (defn- analyze-throw [actx [_ e]]
-  (let [en (analyze actx e)]
-    (when-not (and (t/ref? (:type en)) (or (= :null (:type en)) (env/assignable? (:type en) "Ljava/lang/Throwable;")))
-      (fail (str "throw of a non-Throwable: " (pr-str (:type en)))))
+  (let [en (analyze actx e)
+        thr "Ljava/lang/Throwable;"
+        en (cond
+             (and (t/ref? (:type en)) (or (= :null (:type en)) (env/assignable? (:type en) thr))) en
+             ;; Clojure throws any expression, checked at run time
+             (and (t/class-desc? (value-type (:type en)))
+                  (or (= t/object-desc (value-type (:type en)))
+                      (env/interface? (t/desc->internal (value-type (:type en))))))
+             {:op :cast :class thr :expr en :type thr}
+             :else (fail (str "throw of a non-Throwable: " (pr-str (:type en)))))]
     {:op :throw :expr en :type :none}))
 
 (defn- analyze-try [actx [_ & forms]]
@@ -1511,6 +1545,11 @@
         {:op :set-static :field f :owner (:owner f) :val vn :type (:desc f)}
         {:op :set-field :field f :owner (:owner f) :target (outer-this-node actx c) :val vn
          :type (:desc f)}))
+
+    ;; a var: Var.set, as Clojure's set! of a thread-bound var
+    (and (symbol? target) (resolve-var actx target)
+         (not (and (namespace target) (resolve-class actx (symbol (namespace target))))))
+    (analyze actx (list '. (list 'var target) 'set v))
 
     (and (symbol? target) (namespace target))
     (let [cn (or (resolve-class actx (symbol (namespace target)))
@@ -1665,42 +1704,71 @@
        (= "[Ljava/lang/Object;" (first (first (t/parse-method-desc (:desc m)))))
        (= 1 (count (first (t/parse-method-desc (:desc m)))))))
 
+(defn- reflect?
+  "Does a call the compiler cannot resolve go through arbace.lang.Reflector? With
+  ^{:reflection :warn} on the class (SPEC §12 question 7), and in the code of fns that
+  arbace.lang.Compiler hands over (^{:reflection :clojure}), as in Clojure."
+  [actx]
+  (#{:warn :clojure} (:reflection actx)))
+
+(defn- reflection-warning [actx what why]
+  (when (or (= :warn (:reflection actx)) *warn-on-reflection*)
+    (binding [*out* *err*]
+      (println (str "Reflection warning, " (or (some-> *file* str) "NO_SOURCE_PATH") " ("
+                    (str/replace (:class actx) "/" ".") ") - " what " can't be resolved (" why ").")))))
+
+(defn- objects [nodes]
+  {:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) nodes)})
+
+(defn- reflective-node [owner mname desc args]
+  {:op :invoke :kind :static :owner (t/lang-class "Reflector") :itf false :name mname :desc desc
+   :target nil :args args :type t/object-desc})
+
 (defn- reflective-call
-  "With ^{:reflection :warn} on the class, a call the compiler cannot resolve goes through
-  arbace.lang.Reflector at run time, with a warning (SPEC §12 question 7)."
+  "A call through arbace.lang.Reflector at run time (see reflect?)."
   [actx target mname arg-nodes why]
-  (binding [*out* *err*]
-    (println (str "Reflection warning, " (str/replace (:class actx) "/" ".") " - call to method "
-                  mname " can't be resolved (" why ").")))
-  {:op :invoke :kind :static :owner (t/lang-class "Reflector") :itf false :name "invokeInstanceMethod"
-   :desc "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
-   :target nil
-   :args [(convert-node target t/object-desc) (const-node t/string-desc mname)
-          {:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) arg-nodes)}]
-   :type t/object-desc})
+  (reflection-warning actx (str "call to method " mname) why)
+  (if (empty? arg-nodes)
+    ;; (. x m): a method or a field, as Clojure's InstanceMethodExpr without arguments
+    (reflective-node nil "invokeNoArgInstanceMember" "(Ljava/lang/Object;Ljava/lang/String;Z)Ljava/lang/Object;"
+                     [(convert-node target t/object-desc) (const-node t/string-desc mname) (const-node "Z" false)])
+    (reflective-node nil "invokeInstanceMethod" "(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
+                     [(convert-node target t/object-desc) (const-node t/string-desc mname) (objects arg-nodes)])))
+
+(defn- unresolved?
+  "Is e the compiler's failure to resolve a member (so that reflection may apply)?"
+  [e]
+  (and (:arbace/compile-error (ex-data e))
+       (re-find #"^(No accessible|No matching|Ambiguous call|No field|No static field|Field not accessible|Method call|Field access)" (ex-message e))))
+
+(defn- or-reflect
+  "f's node, or when reflection applies and f fails to resolve a member, (reflect why)."
+  [actx f reflect]
+  (if (reflect? actx)
+    (try (f)
+         (catch arbace.lang.ExceptionInfo e
+           (if (unresolved? e) (reflect (ex-message e)) (throw e))))
+    (f)))
 
 (defn analyze-method-call
   "(.name target args) where target is a node of static type `tt`."
   [actx target mname args & {:keys [special param-tags owner-override ret-tag]}]
-  (if (and (= :warn (:reflection actx)) (not special))
-    (try (analyze-method-call* actx target mname args :param-tags param-tags :owner-override owner-override
-                               :ret-tag ret-tag)
-         (catch arbace.lang.ExceptionInfo e
-           (if (and (:arbace/compile-error (ex-data e))
-                    (re-find #"^(No accessible method|No matching method|Ambiguous call)" (ex-message e))
-                    (t/ref? (value-type (:type target))))
-             (reflective-call actx target mname (mapv #(analyze actx %) args) (ex-message e))
-             (throw e))))
+  (if (and (reflect? actx) (not special) (t/ref? (value-type (:type target))))
+    (let [arg-nodes (mapv #(analyze actx %) args)]
+      (or-reflect actx
+                  #(analyze-method-call* actx target mname nil :param-tags param-tags :owner-override owner-override
+                                         :ret-tag ret-tag :arg-nodes arg-nodes)
+                  #(reflective-call actx target mname arg-nodes %)))
     (analyze-method-call* actx target mname args :special special :param-tags param-tags
                           :owner-override owner-override :ret-tag ret-tag)))
 
 (defn analyze-method-call*
-  [actx target mname args & {:keys [special param-tags owner-override ret-tag]}]
+  [actx target mname args & {:keys [special param-tags owner-override ret-tag arg-nodes]}]
   (let [tt (value-type (:type target))
         _ (when-not (t/ref? tt) (fail (str "Method call ." mname " on a value of type " (pr-str tt))))
         _ (when (= tt :null) (fail (str "Method call ." mname " on nil")))
         cn (if (t/array? tt) "java/lang/Object" (t/desc->internal tt))
-        arg-nodes (mapv #(analyze actx %) args)]
+        arg-nodes (or arg-nodes (mapv #(analyze actx %) args))]
     (if (and (t/array? tt) (= mname "clone") (empty? args))
       {:op :invoke :kind :virtual :owner tt :itf false :name "clone" :desc "()Ljava/lang/Object;"
        :target target :args [] :type tt :array-clone true}
@@ -1721,17 +1789,36 @@
             (invoke-node actx (when special :special) (or owner-override tt) m target arg-nodes va)))))))
 
 (defn analyze-static-call [actx cn mname args & {:keys [param-tags]}]
-  (let [arg-nodes (mapv #(analyze actx %) args)
-        cands (static-candidates (:class actx) cn mname)
-        _ (when (empty? cands)
-            (fail (str "No accessible static method " mname " in " (str/replace cn "/" "."))))
-        [m va] (select-method actx cands arg-nodes (str "static method " mname) param-tags)]
-    (invoke-node actx nil (t/internal->desc cn) m nil arg-nodes va)))
+  (let [arg-nodes (mapv #(analyze actx %) args)]
+    (or-reflect
+      actx
+      #(let [cands (static-candidates (:class actx) cn mname)
+             _ (when (empty? cands)
+                 (fail (str "No accessible static method " mname " in " (str/replace cn "/" "."))))
+             [m va] (select-method actx cands arg-nodes (str "static method " mname) param-tags)]
+         (invoke-node actx nil (t/internal->desc cn) m nil arg-nodes va))
+      (fn [why]
+        (reflection-warning actx (str "call to static method " mname " on " (str/replace cn "/" ".")) why)
+        (reflective-node nil "invokeStaticMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
+                         [(class-lit actx (t/internal->desc cn)) (const-node t/string-desc mname) (objects arg-nodes)])))))
+
+(declare analyze-field-access*)
 
 (defn analyze-field-access
   "Field `fname` of target node; k is called with the field and owner (default: a read)."
   ([actx tn fname] (analyze-field-access actx tn fname nil))
   ([actx tn fname k]
+   (if (and (nil? k) (reflect? actx) (t/ref? (value-type (:type tn))))
+     (or-reflect actx #(analyze-field-access* actx tn fname nil)
+                 (fn [why]
+                   (reflection-warning actx (str "reference to field " fname) why)
+                   (reflective-node nil "getInstanceField" "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"
+                                    [(convert-node tn t/object-desc) (const-node t/string-desc fname)])))
+     (analyze-field-access* actx tn fname k))))
+
+(defn- analyze-field-access*
+  [actx tn fname k]
+  (do
    (let [tt (value-type (:type tn))]
      (cond
        (and (t/array? tt) (= fname "length") (nil? k))
@@ -1857,7 +1944,7 @@
         (init tdesc (first args)))
       (do (when (or (empty? args) (> (count args) dims))
             (fail (str "Bad dimensions for new " tdesc)))
-          {:op :new-array :type tdesc :dims (mapv #(operand (analyze actx %) "I") args)}))))
+          {:op :new-array :type tdesc :dims (mapv #(int-operand actx (analyze actx %)) args)}))))
 
 (defn- needs-outer-instance? [cn]
   (when-let [d (env/info cn)]
@@ -1900,24 +1987,24 @@
 
 ;; arrays, tests -----------------------------------------------------------------------------------
 
-(defn- analyze-aget [actx [_ a & idxs]]
+(defn- analyze-aget [actx [_ a & idxs] a-node]
   (reduce (fn [an i]
             (let [at (value-type (:type an))]
               (when-not (t/array? at) (fail (str "aget on a non-array of type " (pr-str at))))
-              {:op :aget :array an :index (operand (analyze actx i) "I") :type (t/elem-type at)}))
-          (analyze actx a) idxs))
+              {:op :aget :array an :index (int-operand actx (analyze actx i)) :type (t/elem-type at)}))
+          a-node idxs))
 
-(defn- analyze-aset [actx [_ a & more]]
+(defn- analyze-aset [actx [_ a & more] a-node]
   (let [idxs (butlast more) v (last more)
         an (reduce (fn [an i]
                      (let [at (value-type (:type an))]
                        (when-not (t/array? at) (fail "aset on a non-array"))
-                       {:op :aget :array an :index (operand (analyze actx i) "I") :type (t/elem-type at)}))
-                   (analyze actx a) (butlast idxs))
+                       {:op :aget :array an :index (int-operand actx (analyze actx i)) :type (t/elem-type at)}))
+                   a-node (butlast idxs))
         at (value-type (:type an))
         _ (when-not (t/array? at) (fail (str "aset on a non-array of type " (pr-str at))))
         et (t/elem-type at)]
-    {:op :aset :array an :index (operand (analyze actx (last idxs)) "I")
+    {:op :aset :array an :index (int-operand actx (analyze actx (last idxs)))
      :val (convert-node (analyze actx v) et :what "array element") :type et}))
 
 (defn code-type-anns
@@ -1990,14 +2077,172 @@
 
       :else nil)))
 
+(declare analyze-fn-call var-invoke-node analyze-clj-special)
+
+(defn- specialized
+  "The node of f, or nil when f fails to compile (the Clojure operation then applies)."
+  [f]
+  (try (f)
+       (catch arbace.lang.ExceptionInfo e
+         (if (:arbace/compile-error (ex-data e)) nil (throw e)))))
+
+(declare with-node-locals)
+
+(defn clj-convert
+  "convert-node; in Clojure code (§5.13) a value that no assignment conversion gives the
+  primitive type `to` is converted by RT's longCast, intCast... as Clojure converts it."
+  [actx node to what]
+  (if (and (:clojure actx) (t/prim? to) (not= "Z" to)
+           (not (#{:null :none} (:type node)))
+           (nil? (conversion node (:type node) to)))
+    (with-node-locals actx [node]
+      (fn [[s]] (list (symbol (str/replace (t/lang-class "RT") "/" ".")
+                              ({"J" "longCast" "D" "doubleCast" "I" "intCast" "F" "floatCast"
+                                "S" "shortCast" "B" "byteCast" "C" "charCast"} to))
+                      s)))
+    (convert-node node to :what what)))
+
+(defn- with-node-locals
+  "Analyzes (f syms) with the symbols bound to the already analyzed nodes, in order: a let."
+  [actx nodes f]
+  (let [syms (vec (repeatedly (count nodes) #(gensym "arg__")))
+        [actx2 bs] (reduce (fn [[a bs] [s n]]
+                             (let [t (let [vt (value-type (:type n))] (if (#{:null :none} vt) t/object-desc vt))
+                                   b (make-binding a s t)]
+                               [(with-local a b) (conj bs [b (bind-init a s n t)])]))
+                           [actx []] (map vector syms nodes))
+        body (analyze actx2 (f syms))]
+    {:op :let :bindings bs :body body :type (:type body)}))
+
+(defn- clj-call-node
+  "A call of the function of var v on the analyzed argument nodes, as Clojure compiles it: its
+  :inline expansion if it has one for this arity, else a call of the var."
+  [actx v nodes]
+  (let [m (meta v)
+        inl (:inline m)
+        ar (:inline-arities m)]
+    (if (and inl (or (nil? ar) (ar (count nodes))))
+      (with-node-locals actx nodes #(apply inl %))
+      (var-invoke-node actx v nodes))))
+
+(defn- core-op-node
+  "A call of the core var named cop: an instruction where its operands allow (§5.4, §5.5),
+  else a call as Clojure compiles it (§5.13). Each argument is analyzed once."
+  [actx form cop]
+  (let [args (rest form)
+        v (resolve-var actx (first form))
+        call (fn [nodes] (clj-call-node actx v nodes))]
+    (cond
+      (arith-ops cop)
+      (let [nodes (mapv #(analyze actx %) args)]
+        (or (specialized #(analyze-arith actx cop nodes)) (call nodes)))
+
+      (or (conversions cop) (checked-conversions cop))
+      (let [nodes (mapv #(analyze actx %) args)]
+        (or (when (= 1 (count nodes))
+              (specialized #(analyze-conversion actx (or (conversions cop) (checked-conversions cop))
+                                                (first args) (boolean (checked-conversions cop))
+                                                (first nodes))))
+            (call nodes)))
+
+      (comparisons cop)
+      (let [nodes (mapv #(analyze actx %) args)]
+        (or (specialized #(analyze-compare actx cop nil nodes)) (call nodes)))
+
+      (#{"zero?" "pos?" "neg?"} cop)
+      (let [nodes (mapv #(analyze actx %) args)]
+        (or (when (= 1 (count nodes))
+              (specialized #(analyze-compare actx ({"zero?" "==" "pos?" ">" "neg?" "<"} cop) nil
+                                             [(first nodes) (const-node "J" 0 :literal true)])))
+            (call nodes)))
+
+      (= "=" cop)
+      (let [nodes (mapv #(analyze actx %) args)
+            [a b] nodes]
+        (cond (and (= 2 (count nodes)) (= "Z" (prim-type a)) (= "Z" (prim-type b)))
+              {:op :bool= :args [(unboxed a) (unboxed b)] :type "Z"}
+              (and (= 2 (count nodes)) (t/numeric? (prim-type a)) (t/numeric? (prim-type b)))
+              (or (specialized #(analyze-compare actx "==" nil nodes)) (call nodes))
+              :else (call nodes)))
+
+      (= "not=" cop) (analyze actx (list 'arbace.core/not (cons 'arbace.core/= args)))
+
+      (= "not" cop)
+      (if (= 1 (count args))
+        (let [x (analyze actx (first args))]
+          (if (and (= :const (:op x)) (boolean? (:val x)))
+            (const-node "Z" (not (:val x)))
+            {:op :not :expr x :type "Z"}))
+        (call (mapv #(analyze actx %) args)))
+
+      (#{"nil?" "some?"} cop)
+      (let [nodes (mapv #(analyze actx %) args)]
+        (if (and (= 1 (count nodes)) (t/ref? (value-type (:type (first nodes)))))
+          (let [n {:op :nil? :expr (first nodes) :type "Z"}]
+            (if (= "nil?" cop) n {:op :not :expr n :type "Z"}))
+          (call nodes)))
+
+      (= "identical?" cop)
+      (let [nodes (mapv #(analyze actx %) args)]
+        (if (and (= 2 (count nodes)) (every? #(t/ref? (value-type (:type %))) nodes))
+          {:op :identical? :args nodes :type "Z"}
+          (call nodes)))
+
+      (= "instance?" cop)
+      (let [[c x] args]
+        (if (and (= 2 (count args)) (symbol? c) (not (contains? (:locals actx) c))
+                 (or (namespace c) (resolve-class actx c)))
+          (analyze-instance? actx form)
+          (call (mapv #(analyze actx %) args))))
+
+      (= "cast" cop)
+      (let [[c x] args]
+        (if (and (= 2 (count args)) (or (seq? c) (and (symbol? c) (not (contains? (:locals actx) c))
+                                                        (or (namespace c) (t/prim-names c) (resolve-class actx c)))))
+          (analyze-cast actx form)
+          (call (mapv #(analyze actx %) args))))
+
+      (#{"aget" "aset" "alength"} cop)
+      (let [an (analyze actx (first args))]
+        (if (t/array? (value-type (:type an)))
+          (case cop
+            "aget" (analyze-aget actx form an)
+            "aset" (analyze-aset actx form an)
+            "alength" {:op :alength :array an :type "I"})
+          (call (into [an] (map #(analyze actx %) (rest args))))))
+
+      (= "and" cop)
+      (if (empty? args) (const-node "Z" true)
+          (let [ns (mapv #(analyze actx %) args)]
+            (if (every? #(and (= :const (:op %)) (boolean? (:val %))) ns)
+              (const-node "Z" (every? :val ns))
+              {:op :and :args ns :type (reduce unify (map :type ns))})))
+
+      (= "or" cop)
+      (if (empty? args) (const-node :null nil)
+          (let [ns (mapv #(analyze actx %) args)]
+            (if (every? #(and (= :const (:op %)) (boolean? (:val %))) ns)
+              (const-node "Z" (boolean (some :val ns)))
+              {:op :or :args ns :type (reduce unify (map :type ns))})))
+
+      (= "locking" cop) (analyze-locking actx form)
+
+      (= "boolean" cop)
+      (let [nodes (mapv #(analyze actx %) args)
+            n (when (= 1 (count nodes)) (unboxed (first nodes)))]
+        (if (= "Z" (:type n)) n (call nodes)))
+
+      :else nil)))
+
 (defn analyze-op [actx form]
   (let [op (first form)]
     (cond
+      ;; calling a local, or any expression, as a function (§5.13)
       (and (symbol? op) (contains? (:locals actx) op))
-      (fail (str "Calling a local as a function is not supported in class bodies: " op))
+      (analyze-fn-call actx (analyze actx op) (rest form))
 
       (not (symbol? op))
-      (fail (str "Not supported in class bodies at stage 0: " (pr-str form)))
+      (analyze-fn-call actx (analyze actx op) (rest form))
 
       :else
       (do
@@ -2029,7 +2274,8 @@
               return* (analyze-return actx form)
               class* (case (second form)
                        :anon (analyze-anon actx form)
-                       :local (analyze-letclass actx form))
+                       :local (analyze-letclass actx form)
+                       (fail (str "class* " (second form) " is not an expression")))
               java-str* (analyze-java-str actx form)
               java-assert* (analyze-java-assert actx form)
               for-each* (analyze-for-each actx form)
@@ -2038,60 +2284,15 @@
               switch* (analyze-switch actx form)
               lambda* (analyze-lambda actx form)
               method-ref* (analyze-method-ref actx form)
-              fn* (fail "fn is not supported in class bodies at stage 0 (use lambda)")
-              (letfn* case* def var deftype* reify* monitor-enter monitor-exit)
-              (fail (str op " is not supported in class bodies at stage 0"))
+              (fn* letfn* case* def var reify*) (analyze-clj-special actx form)
+              (deftype* monitor-enter monitor-exit)
+              (fail (str op " is not supported in code compiled by the class forms compiler"
+                         " (class bodies, and fns using the class forms; use defclass or anon)"))
               nil))
+          (when (= 'arbace.core/import* op)
+            (fail "import is not supported in code compiled by the class forms compiler"))
           (when-let [cop (core-op actx op)]
-            (let [args (rest form)]
-              (cond
-                (arith-ops cop) (analyze-arith actx cop args)
-                (conversions cop) (do (when-not (= 1 (count args)) (fail (str cop " takes 1 argument")))
-                                      (analyze-conversion actx (conversions cop) (first args) false))
-                (checked-conversions cop) (do (when-not (= 1 (count args)) (fail (str cop " takes 1 argument")))
-                                              (analyze-conversion actx (checked-conversions cop) (first args) true))
-                (comparisons cop) (analyze-compare actx cop args)
-                :else
-                (case cop
-                  "not" (let [x (analyze actx (first args))]
-                          (if (and (= :const (:op x)) (boolean? (:val x)))
-                            (const-node "Z" (not (:val x)))
-                            {:op :not :expr x :type "Z"}))
-                  "nil?" {:op :nil? :expr (ref-node actx (first args) "nil?") :type "Z"}
-                  "some?" {:op :not :expr {:op :nil? :expr (ref-node actx (first args) "some?") :type "Z"} :type "Z"}
-                  "identical?" {:op :identical? :args [(ref-node actx (first args) "identical?")
-                                                       (ref-node actx (second args) "identical?")] :type "Z"}
-                  "=" (let [[a b] (map #(analyze actx %) args)]
-                        (cond (and (= 2 (count args)) (= "Z" (prim-type a)) (= "Z" (prim-type b)))
-                              {:op :bool= :args [(unboxed a) (unboxed b)] :type "Z"}
-                              (and (= 2 (count args)) (t/numeric? (prim-type a)) (t/numeric? (prim-type b)))
-                              (analyze-compare actx "==" nil [a b])
-                              :else (fail "= on references needs the Clojure runtime; use .equals or identical?")))
-                  "not=" (analyze actx (list 'arbace.core/not (cons 'arbace.core/= args)))
-                  ("zero?" "pos?" "neg?")
-                  (analyze-compare actx ({"zero?" "==" "pos?" ">" "neg?" "<"} cop) [(first args) 0])
-                  "instance?" (analyze-instance? actx form)
-                  "cast" (analyze-cast actx form)
-                  "aget" (analyze-aget actx form)
-                  "aset" (analyze-aset actx form)
-                  "alength" (let [an (analyze actx (first args))]
-                              (when-not (t/array? (value-type (:type an))) (fail "alength of a non-array"))
-                              {:op :alength :array an :type "I"})
-                  "and" (if (empty? args) (const-node "Z" true)
-                            (let [ns (mapv #(analyze actx %) args)]
-                              (if (every? #(and (= :const (:op %)) (boolean? (:val %))) ns)
-                                (const-node "Z" (every? :val ns))
-                                {:op :and :args ns :type (reduce unify (map :type ns))})))
-                  "or" (if (empty? args) (const-node :null nil)
-                           (let [ns (mapv #(analyze actx %) args)]
-                             (if (every? #(and (= :const (:op %)) (boolean? (:val %))) ns)
-                               (const-node "Z" (boolean (some :val ns)))
-                               {:op :or :args ns :type (reduce unify (map :type ns))})))
-                  "locking" (analyze-locking actx form)
-
-                  "boolean" (let [n (unboxed (analyze actx (first args)))]
-                              (if (= "Z" (:type n)) n (fail "boolean of a non-boolean")))
-                  nil))))
+            (core-op-node actx form cop))
           (when-let [s (method-sugar actx form)]
             (if (= ::qualified-instance (first s))
               (let [[_ cn mname [tgt & margs]] s
@@ -2106,10 +2307,69 @@
           (let [ex (macroexpand1 actx form)]
             (if (identical? ex form)
               (if-let [v (resolve-var actx op)]
-                {:op :var-invoke :var v :field (clj-var-field actx v) :owner (:class actx)
-                 :args (mapv #(analyze actx %) (rest form)) :type t/object-desc}
-                (fail (str "Unable to resolve: " op)))
+                (clj-call-node actx v (mapv #(analyze actx %) (rest form)))
+                ;; a field or other value called as a function
+                (analyze-fn-call actx (analyze-symbol actx op) (rest form)))
               (analyze actx ex))))))))
+
+(defn var-invoke-node
+  "A call of the function in var v with the argument nodes."
+  [actx v nodes]
+  (if (> (count nodes) 20)
+    (analyze-fn-call actx {:op :var-deref :var v :field (clj-var-field actx v) :owner (:class actx)
+                           :type t/object-desc}
+                     nil nodes)
+    {:op :var-invoke :var v :field (clj-var-field actx v) :owner (:class actx)
+     :args nodes :type t/object-desc}))
+
+(defn analyze-fn-call
+  "(f args*) where f is the node of any value: IFn.invoke (§5.13)."
+  [actx fnode args & [arg-nodes]]
+  (let [ifn (t/lang-desc "IFn")
+        ft (value-type (:type fnode))
+        _ (when-not (t/ref? ft) (fail (str "Cannot call a value of type " (pr-str ft) " as a function")))
+        _ (when (= :null ft) (fail "Can't call nil"))
+        tn (if (env/assignable? ft ifn) (assoc fnode :type ifn) {:op :cast :class ifn :expr fnode :type ifn})
+        nodes (or arg-nodes (mapv #(analyze actx %) args))
+        cands (instance-candidates (:class actx) (t/desc->internal ifn) "invoke")
+        [m va] (select-method actx cands nodes "IFn.invoke" nil)]
+    (invoke-node actx nil ifn m tn nodes va)))
+
+(defn- expand-fully
+  "Macroexpands form until its head is no macro."
+  [actx form]
+  (loop [f form]
+    (let [e (if (seq? f) (macroexpand1 actx f) f)]
+      (if (identical? e f) f (recur e)))))
+
+(defn analyze-clj-special
+  "Clojure's fn*, letfn*, case*, def and var in code compiled by the class forms compiler,
+  rewritten by arbace.classes.lower (§5.13, §9.5)."
+  [actx form]
+  (case (first form)
+    fn* (analyze actx (with-meta (lower/lower-fn form) (meta form)))
+    reify* (analyze actx (lower/lower-reify form))
+    letfn* (analyze actx (lower/lower-letfn form #(expand-fully actx %)))
+    case* (let [ge (second form)
+                b (when (symbol? ge) (get (:locals actx) ge))
+                t (when b (value-type (:type b)))]
+            (analyze actx (lower/lower-case form (contains? #{"I" "J" "S" "B"} t))))
+    var (let [sym (second form)
+              v (resolve-var actx sym)]
+          (when-not v (fail (str "Unable to resolve var: " sym " in this context")))
+          (let [f (clj-var-field actx v)]
+            {:op :get-static :field (assoc f :flags (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL))
+             :owner (:owner f) :type (t/lang-desc "Var")}))
+    def (let [[_ sym] form
+              _ (when-not (symbol? sym) (fail "First argument to def must be a Symbol"))
+              ns (:ns actx)
+              _ (when (and (namespace sym) (not= (namespace sym) (name (ns-name ns))))
+                  (fail "Can't create defs outside of current ns"))
+              v (intern ns (symbol (name sym)))]
+          (when (:dynamic (meta sym)) (.setDynamic ^arbace.lang.Var v true))
+          (analyze actx (lower/lower-def (list* 'def (with-meta (symbol (name sym)) (meta sym)) (nnext form))
+                                         (some-> *file* str) (or (:line (meta form)) 0)
+                                         (or (:column (meta form)) 0))))))
 
 ;; the forms of later steps are filled in below or in the next sections
 
@@ -2160,6 +2420,8 @@
         cactx (creation-actx n)]
     {:class n :ns (:ns d) :bounds bounds :static static? :frame f
      :reflection (some #(:reflection (:meta (decl %))) (take-while some? (iterate #(some-> % decl :outer) n)))
+     ;; code of a Clojure fn (arbace.classes.lower) and of the classes in it: Clojure's leniency
+     :clojure (boolean (some #(:clojure-fn (:meta (decl %))) (take-while some? (iterate #(some-> % decl :outer) n))))
      :locals (or (:locals cactx) {})
      :local-classes (merge (:local-classes cactx) (:local-classes d))
      :labels {} :method-info method-info :ret ret}))
@@ -2183,7 +2445,7 @@
         actx (body-actx n :method static? (:bounds (:scope m)) {:name (:name m) :method m} (:ret m))
         [actx bs] (bind-params actx n m)
         body (analyze-body actx (get-in m [:member :body]))
-        body (if (= "V" (:ret m)) body (convert-node body (:ret m) :what (str "value of method " (:name m))))]
+        body (if (= "V" (:ret m)) body (clj-convert actx body (:ret m) (str "value of method " (:name m))))]
     {:params bs :body body :recv (get-in actx [:locals (:recv m)])}))
 
 (defn- ctor-call-form? [f] (and (seq? f) (#{'super. 'this. '.super} (first f))))
@@ -2518,7 +2780,8 @@
         sname (:name stn)
         from (count @(:order *unit*))
         n (local-class-name cur nil)
-        parsed (-> (p/parse-class {:ns (:ns actx) :nesting :anon :outer (decl cur)} (cons 'anon members))
+        parsed (-> (p/parse-class {:ns (:ns actx) :nesting :anon :outer (decl cur)}
+                                  (cons (with-meta 'anon (select-keys (meta super-form) [:clojure-fn])) members))
                    (assoc :simple nil :anon-super stn))
         ;; before the superclass constructor call there is no instance yet: a static context
         _ (declare-class! {:nesting :anon :outer cur :name n :bounds (:bounds actx)
@@ -3010,6 +3273,21 @@
 
 (defn analyze-switch [actx [_ sel & clauses]]
   (let [sn (analyze actx sel)
+        int-labels? (let [ls (map first (partition 2 clauses))]
+                      (and (seq ls)
+                           (every? #(or (integer? %) (and (seq? %) (seq %) (every? integer? %))) ls)))
+        ;; an int literal selector; in Clojure code (§5.13) with integer labels also a long or
+        ;; any other value (Clojure's integers), converted by RT.intCast (which fails beyond
+        ;; int's range)
+        sn (cond
+             (and (= :const (:op sn)) (:literal sn) (fits? "I" (:val sn))) (const-node "I" (int (:val sn)))
+             (and (:clojure actx) int-labels? (= "J" (prim-type sn)))
+             {:op :invoke :kind :static :owner (t/lang-class "RT") :itf false :name "intCast"
+              :desc "(J)I" :target nil :args [(unboxed sn)] :type "I"}
+             (and (:clojure actx) int-labels? (t/ref? (value-type (:type sn))) (nil? (prim-type-of sn)))
+             {:op :invoke :kind :static :owner (t/lang-class "RT") :itf false :name "intCast"
+              :desc "(Ljava/lang/Object;)I" :target nil :args [sn] :type "I"}
+             :else sn)
         st (value-type (:type sn))
         [pairs dflt] (if (odd? (count clauses))
                        [(partition 2 (butlast clauses)) [(last clauses)]]

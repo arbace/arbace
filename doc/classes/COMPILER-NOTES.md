@@ -107,15 +107,107 @@ Some mechanisms:
   (§5.4).
   Constant expressions fold; constant fields get `ConstantValue` and are inlined.
 
+## Clojure in class bodies
+
+Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
+
+- A call of a core operation (`+`, `=`, `int`, `aget`, `instance?`, ...) compiles to an
+  instruction when its operands allow it, and otherwise as Clojure compiles it: the var's
+  `:inline` expansion (`(+ a b)` on `Object`s is `Numbers.add(Object, Object)`, `(int x)` is
+  `RT.intCast`), else a call of the var. The arguments are analyzed once (the expansion binds
+  them as locals).
+- Any value can be called: locals, keywords, collections, fields, expressions (`IFn.invoke`).
+- `fn*`, `letfn*`, `case*`, `def` and `var` are compiled by rewriting them
+  (`arbace/classes/lower.clj`): a `fn` is an anonymous subclass of `AFunction` (`RestFn` when
+  variadic) with an `invoke` (`doInvoke`, `getRequiredArity`) per arity, its parameters
+  `Object` with their hints as local hints, `recur` to the top of the arity, the fn's name
+  bound to the instance; with primitive signatures (`^long`, `^double`) it is a local class
+  that also implements the `IFn$LL`... interfaces, with `invokePrim` and an `invoke` that
+  converts with `RT.longCast`/`doubleCast`, as `arbace.lang.Compiler` makes them. `letfn`
+  binds `Box`es, then the fns (which read the others from the boxes), then fills the boxes.
+  `case*` is a `switch` on the hash (or int value) inside a `label`, each arm testing
+  `Util.equiv` (or `identical?`) and leaving with its value, the default after the switch,
+  as `CaseExpr`. `def` interns the var at compile time and calls `bindRoot`, `setMeta` (the
+  evaluated metadata with the source position) and `setDynamic`.
+- Any other constant (regex, ratio, big decimal, symbol, tagged literal) is read at class
+  initialization, like keywords; `throw` of an `Object` is checked at run time; `set!` of a var
+  is `Var.set`.
+- `reify*` is a local class implementing the interfaces and `IObj` (`__meta`, `withMeta`
+  making a copy), its methods' signatures inferred as for untyped methods (§4.6).
+- `deftype*`, `monitor-enter`, `monitor-exit` and `import*` are errors there (use `defclass`;
+  `locking` works).
+
 ## Stage-0 limits
 
-- Class bodies compile the Java subset (§5.13) plus some Clojure: a symbol naming a var reads
-  it and a call of a var invokes its function, keywords, quoted data and collection literals
-  work (they need the Clojure runtime). `fn`, `case` and `letfn` are errors in class bodies.
 - `anon`, `letclass`, `lambda`, `switch` and the other new code forms work inside class bodies
-  only (the frozen compiler does not know their special forms).
+  only (the frozen compiler does not know their special forms). From stage 1 on they work in
+  ordinary fns too (below).
 - `defclass` must be evaluated (it compiles at macroexpansion time); a top-level `do` of class
-  forms is seen form by form by the frozen compiler, hence `defclasses` (amendment 1).
+  forms is seen form by form by the frozen compiler, hence `defclasses` (amendment 1). From
+  stage 1 on a top-level `do` works.
+
+## Native class forms (stage 1 on)
+
+SPEC §9.5: the class forms' names are vars of `arbace.core` and their special forms are known to
+`arbace.lang.Compiler`; there is still one implementation of the class forms, `arbace.classes`
+(§12 question 17), which the compiler loads on first use. Nothing needs `arbace.classes.boot`
+from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)`.
+
+- **The names.** `arbace/core_classes.clj`, loaded at the end of `arbace/core.clj`, defines the
+  macros (`defclass` ... `when-instance`) and the operators of §5.4 in `arbace.core`. At stage 0
+  `arbace.classes.boot` loads the same file into `clojure.core` (reading `arbace.X` as
+  `clojure.X`); there `defclass` and `defclasses` compile at macroexpansion time, as before,
+  since the frozen compiler has no `class*` (the macros test `(contains? Compiler/specials
+  'class*)`).
+- **The special forms.** `class*`, `label*`, `break*`, `continue*`, `return*`, `switch*`,
+  `lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`, `with-resources*` and
+  `if-instance*` are in `Compiler/specials` (so `special-symbol?` holds and syntax-quote leaves
+  them unqualified), all parsed by `Compiler$ClassFormsExpr$Parser`.
+- **The boundary**, `arbace.classes.native`, called through `Compiler/classForms` (which
+  requires the namespace):
+  - `compile-top`: `(class* :top form)` and `(class* :tops forms)`, the expansions of `defclass`
+    and `defclasses`, are compiled and defined (written under `*compile-files*`) while the
+    compiler analyzes them, which then analyzes `(do (import* "p.C") C)` in their place (the
+    class object as a constant, so classes of the unnamed package work too). AOT works: the
+    classes are written to `*compile-path*` and the namespace's `__init` imports them.
+  - Top-level `do`: `Compiler/eval` and `compile1` bind `Compiler/CLASS_FORM_SIBLINGS` to the
+    class forms of the outermost top-level `do` (found through nested `do`s, by `class*` or by
+    the head resolving to `arbace.core/defclass` or `defclasses`, without macroexpanding); each
+    of them is compiled with the others entered as declarations only (like classes found by
+    source lookup, §9.2), so mutually referring class forms work. `Compiler/load` resets the
+    binding for the files it loads.
+  - `compile-fn`: any other class form in code the compiler compiles itself, and the forms that
+    are errors for Clojure but class forms for the spec (a primitive tag on a local with a
+    primitive initializer, `set!` of a local of the method, `new` of an array class), throw `Compiler$ClassFormsExpr$Signal`. `FnExpr/parse` catches it
+    and hands the whole fn over, unless the fn is one of the compiler's own `(fn* ^:once [] ...)`
+    wrappers (loops and `try` in expression position, `lazy-seq` bodies) or a `letfn*`
+    initializer (`CLASS_FORMS_NO_DELEGATE`): then the enclosing fn is handed over. At the top
+    level (a `def`'s initializer) `eval` and `compile1` retry the form as `((fn* [] form))`.
+    `compile-fn` makes the fn class the compiler would have made, with the compiler's name for
+    it (`ns$f__123`), `public final`, extending `AFunction` or `RestFn` (and the `IFn$...`
+    interfaces of primitive signatures), its arities compiled as for fns in class bodies (above),
+    and with a field and constructor parameter per local of the compiler's environment that the
+    fn uses (their primitive type or public tag class, else `Object`; found by the symbols of the
+    form, plus any local a macro's expansion uses, by retrying). The compiler analyzes
+    `(new C local...)` in place of the fn (with `with-meta` for the fn's metadata).
+  - Code of handed-over fns has Clojure's meaning: everything of "Clojure in class bodies"
+    above, and reflection where a member cannot be resolved (`Reflector`, with a warning under
+    `*warn-on-reflection*`: `^{:reflection :clojure}` on the class), `Object` values converted
+    by `RT.intCast` where an `int` is needed (array dimensions and indexes) and by
+    `RT.longCast`... where a method returns a primitive, a `switch` with integer labels on a
+    `long` or any other value (Clojure's integers) converting it by `RT.intCast`, hinted reference locals taking any
+    reference from `recur` (checked), and the loop at the top of an arity is not a target of
+    `break`.
+- **Limits.** `recur` out of tail position and across `try` stay errors in code the compiler
+  compiles (Clojure's test suite holds it to them; `continue` has that meaning). The class forms in `deftype` method
+  bodies are not supported (the enclosing fn is handed over, and `deftype*` is an error there;
+  `defclass` does what `deftype` does).
+- **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.clj`, run by `bin/build-arbace` on
+  stage 1): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
+  `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
+  bodies, extended special forms, primitive signatures, and AOT compilation loaded by a fresh
+  JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
+  stage 0.
 
 ## Checking converted code
 

@@ -1091,6 +1091,12 @@ The **Java subset** is what converted code uses and what stage 0 must compile:
 
 Each of these compiles to plain bytecode. In the subset nothing refers to a var at run time.
 
+Outside the subset, a core operation compiles as Clojure compiles it: an operator or conversion
+whose operands are not primitives (or their wrappers) is its function's `:inline` expansion
+(`Numbers.add(Object, Object)`, `RT.intCast(Object)`), or a call of its var; any value can be
+called as a function (`IFn.invoke`). A `fn` in a class body is an anonymous class; with
+primitive signatures a local class implementing the `IFn$...` interfaces.
+
 ## 6. What the compiler derives
 
 The forms state the source construct; the compiler derives the class file pattern the way javac
@@ -1312,7 +1318,8 @@ from
    frozen compiler evaluates the forms of a top-level `do` one by one, so a `defclass` macro
    cannot see its siblings; there `(defclasses (defclass A ...) (defclass B ...))` compiles
    class forms together and evaluates to a vector of the classes. Arbace's own compiler treats a
-   top-level `do` as said, and keeps `defclasses` as the explicit form,
+   top-level `do` as said: compiling each class form of the `do`, it enters the others as
+   declarations (as for sources, 3). It keeps `defclasses` as the explicit form,
 3. **sources**: a class name that resolves to nothing is looked up as `p/C.clj` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
    top-level class forms are entered, declarations only, without compiling their bodies or
@@ -1368,6 +1375,29 @@ no special form of their own. The operators of §5.4 are functions with `:inline
 Extensions of existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recur`) are listed in
 §1.1.
 
+**One implementation.** Arbace's compiler knows these special forms but compiles none of them
+itself: the class forms compiler (§12 question 17), loaded on first use, does, at this boundary:
+
+- `(class* :top form)` and `(class* :tops forms)`, the expansions of `defclass` and
+  `defclasses`, are compiled and defined while the compiler analyzes them, and stand for the
+  imports of their classes and the classes.
+- A fn whose code uses any other class form, or one of the extensions above where Clojure's
+  compiler reports an error (a primitive tag on a local with a primitive initializer, `set!` of
+  a local, `new` of an array class), is compiled whole by the class
+  forms compiler: the innermost such `fn*` becomes the same fn class (name, `AFunction` or
+  `RestFn`, primitive interfaces), its code compiled with Clojure's meaning (§5.13), the locals
+  it uses passed to its constructor. A class form in a `def`'s initializer at the top level is
+  compiled as a fn. So the code forms work in any fn, not only in class bodies.
+- `recur` out of tail position and across `try` stay errors in code Arbace's compiler compiles
+  itself, as in Clojure (Clojure's test suite holds it to that); in class bodies and in fns
+  compiled by the class forms compiler `recur` has `continue`'s meaning, and `continue` works
+  anywhere.
+
+In class bodies and in such fns, Clojure's `fn*`, `letfn*`, `case*`, `reify*`, `def` and `var`
+are compiled by rewriting them into class forms (a `fn` is an anonymous `AFunction`, a `reify` a
+local class), and a core operation whose operands do not fit an instruction compiles as Clojure
+compiles it (§5.13). `deftype*` is not supported there; `defclass` is.
+
 ### 9.6 Bootstrap
 
 - **Stage 0**: the frozen `clojure/` with a bootstrap library implementing the class forms. Its
@@ -1377,7 +1407,9 @@ Extensions of existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recu
   `clojure.core` namespace (at run time; the frozen sources are not touched), so the same
   `arbace/**/*.clj` sources work at every stage without qualifying the new names.
 - **Stage 1**: stage 0 compiles `arbace/**/*.clj`. Its classes are self-contained `arbace.*`
-  classes, `arbace.lang.Compiler` (converted, with this spec implemented) among them. Clojure-level
+  classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among them;
+  `arbace.core` holds the names of §9.5, and the class forms compiler is loaded from source on
+  first use. Clojure-level
   namespaces such as `arbace.core` must be compiled by Arbace's own compiler, since the frozen one
   emits references to `clojure.lang`; the order of that is a matter for steps 2 and 4.
 - **Stage 2** recompiles with stage 1, and must reproduce itself.

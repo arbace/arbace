@@ -31,6 +31,7 @@
   '[arbace.classes.types
     arbace.classes.env
     arbace.classes.parse
+    arbace.classes.lower
     arbace.classes.analyze
     arbace.classes.emit
     arbace.classes.compiler

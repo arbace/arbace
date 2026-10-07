@@ -230,6 +230,10 @@
   ;; when one of them is compiled (doc/classes/SPEC.md §9.2)
   (field ^:public ^:static ^:final ^Var CLASS_FORM_SIBLINGS (.setDynamic (Var/create nil)))
 
+  ;; true while the initializers of a letfn* are analyzed: their fns are not handed over to the
+  ;; class forms compiler one by one (their mutual references), the enclosing fn is
+  (field ^:public ^:static ^:final ^Var CLASS_FORMS_NO_DELEGATE (.setDynamic (Var/create nil)))
+
   (field ^:private ^:static ^:final ^int MAX_POSITIONAL_ARITY 20)
 
   (field ^:private ^:static ^:final ^Type OBJECT_TYPE)
@@ -670,6 +674,13 @@
           (let [target (arbace.lang.Compiler/analyze C/EXPRESSION (RT/second form))]
             (when-not (instance? AssignableExpr target)
               (throw (IllegalArgumentException. "Invalid assignment target")))
+            ;; set! of a local of the method (not a mutable deftype field, not a captured local):
+            ;; a mutable local of the class forms (doc/classes/SPEC.md §5.3)
+            (when (and (instance? LocalBindingExpr target) (some? (.deref METHOD)))
+              (let [lb (.-b (cast LocalBindingExpr target))
+                    objx (.-objx (cast ObjMethod (.deref METHOD)))]
+                (when-not (or (.isMutable objx lb) (RT/booleanCast (RT/contains (.-closes objx) lb)))
+                  (throw (ClassFormsExpr$Signal. "set! of a local")))))
             (AssignExpr. (cast AssignableExpr target)
                          (arbace.lang.Compiler/analyze C/EXPRESSION (RT/third form))))))))
 
@@ -780,8 +791,17 @@
                          kind
                          (RT/third form)
                          (.deref CLASS_FORM_SIBLINGS)))
-              (throw (UnsupportedOperationException.
-                       (java-str (RT/first form) " is only supported in class bodies")))))))
+              ;; any other class form in code the compiler compiles itself: the enclosing fn is
+              ;; handed over to the class forms compiler (FnExpr/parse, delegateFn)
+              (throw (Signal. (java-str (RT/first form))))))))
+
+    ;; Thrown while analyzing code that only the class forms compiler can compile; caught by
+    ;; FnExpr/parse, or at the top level by eval and compile1, which wrap the form in a fn.
+    (defclass ^:public ^:static Signal
+      :extends RuntimeException
+
+      (constructor ^:public [this ^String what]
+        (super. (java-str what " outside a fn or class body"))))
 
     (method ^:static siblings ^IPersistentVector [^ISeq doForm ^IPersistentVector acc]
       (let [^:mutable ret acc]
@@ -824,6 +844,22 @@
             (if (> (.count sibs) 1)
                 (do (Var/pushThreadBindings (^[Object/1] RT/map CLASS_FORM_SIBLINGS sibs)) true)
                 false)))))
+
+  ;; FnExpr/parse caught a Signal: hand the fn over to the class forms compiler, unless it is
+  ;; one of the compiler's own wrappers (fn* ^:once []) or a letfn* initializer
+  (method ^:static delegateFn ^Expr [^C context ^ISeq form ^String name ^boolean onceOnly
+                                     ^RuntimeException sig]
+    (when (or (RT/booleanCast (.deref CLASS_FORMS_NO_DELEGATE))
+              (and onceOnly
+                   (instance? IPersistentVector (RT/second form))
+                   (== 0 (RT/count (RT/second form)))))
+      (throw sig))
+    (arbace.lang.Compiler/analyze context
+                                  (.invoke (arbace.lang.Compiler/classForms "compile-fn")
+                                           (arbace.lang.Compiler/currentNS)
+                                           name
+                                           form
+                                           (.deref LOCAL_ENV))))
 
   (method ^:static classForms ^IFn [^String name]
     (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.classes.native"))
@@ -2858,6 +2894,11 @@
             (throw (Util/runtimeException
                      "wrong number of arguments, expecting: (new Classname args...)")))
           (let [c (HostExpr/maybeClass (RT/second form) false)]
+            ;; new of an array class (doc/classes/SPEC.md §5.11)
+            (when (or (and (some? c) (.isArray c))
+                      (and (nil? c) (instance? Symbol (RT/second form))
+                           (some? (HostExpr/maybeArrayClass (cast Symbol (RT/second form))))))
+              (throw (ClassFormsExpr$Signal. "new of an array class")))
             (when (nil? c)
               (throw (IllegalArgumentException.
                        (java-str "Unable to resolve classname: " (RT/second form)))))
@@ -4060,10 +4101,13 @@
               (set! (.-name fn) (java-str basename simpleName))
               (set! (.-internalName fn) (.replace (.-name fn) \. \/))
               (set! (.-objtype fn) (Type/getObjectType (.-internalName fn)))
+              (try
               (let [^{:tag (ArrayList String)} prims (ArrayList.)]
                 (try
                   (Var/pushThreadBindings
                     (^[Object/1] RT/mapUniqueKeys
+                      CLASS_FORMS_NO_DELEGATE
+                      nil
                       CONSTANTS
                       PersistentVector/EMPTY
                       CONSTANT_IDS
@@ -4166,7 +4210,9 @@
                                  (MapExpr/parse
                                    (if (identical? context C/EVAL) context C/EXPRESSION)
                                    fmeta))
-                      fn))))))))
+                      fn)))
+              (catch ClassFormsExpr$Signal sig
+                (arbace.lang.Compiler/delegateFn context origForm (.-name fn) (.-onceOnly fn) sig))))))))
 
     (method ^:public ^:final variadicMethod ^ObjMethod [this]
       variadicMethod)
@@ -5553,9 +5599,10 @@
 
     (constructor ^:public [this ^int num ^Symbol sym ^Symbol tag ^Expr init ^boolean isArg
                            ^PathNode clearPathRoot]
+      ;; a primitive tag on a local with a primitive initializer: an exact primitive type of the
+      ;; class forms (doc/classes/SPEC.md §5.3)
       (when (and (some? (arbace.lang.Compiler/maybePrimitiveType init)) (some? tag))
-        (throw (UnsupportedOperationException.
-                 "Can't type hint a local with a primitive initializer")))
+        (throw (ClassFormsExpr$Signal. "A type hint on a local with a primitive initializer")))
       (set! (.-idx this) num)
       (set! (.-sym this) sym)
       (set! (.-tag this) tag)
@@ -5789,10 +5836,15 @@
                           (loop [^int i 0]
                             (when (< i (.count bindings))
                               (let [sym (cast Symbol (.nth bindings i))
-                                    init (arbace.lang.Compiler/analyze
-                                           C/EXPRESSION
-                                           (.nth bindings (unchecked-add-int i 1))
-                                           (.-name sym))
+                                    init (do
+                                           (Var/pushThreadBindings
+                                             (^[Object/1] RT/map CLASS_FORMS_NO_DELEGATE RT/T))
+                                           (try
+                                             (arbace.lang.Compiler/analyze
+                                               C/EXPRESSION
+                                               (.nth bindings (unchecked-add-int i 1))
+                                               (.-name sym))
+                                             (finally (Var/popThreadBindings))))
                                     lb (cast LocalBinding (.nth lbs (unchecked-divide-int i 2)))]
                                 (set! (.-init lb) init)
                                 (let [bi (BindingInit. lb init)]
@@ -6228,6 +6280,8 @@
             (set! (.-onceOnly (.-objx method)) false))
           (let [form (cast ISeq frm)
                 loopLocals (cast IPersistentVector (.deref LOOP_LOCALS))]
+            ;; recur out of tail position and across try stay errors here (Clojure's test suite
+            ;; holds the compiler to them); continue has that meaning (doc/classes/SPEC.md §5.7)
             (when (or (not (identical? context C/RETURN)) (nil? loopLocals))
               (throw (UnsupportedOperationException. "Can only recur from tail position")))
             (when (some? (.deref NO_RECUR))
@@ -6348,12 +6402,14 @@
               (instance? IPersistentSet form) (SetExpr/parse context (cast IPersistentSet form))
               :else (ConstantExpr. form))))
       (catch Throwable e
-        (if (not (instance? CompilerException e))
+        (cond
+          (instance? ClassFormsExpr$Signal e) (throw e)
+          (not (instance? CompilerException e))
             (throw (CompilerException. (cast String (.deref SOURCE_PATH))
                                        (arbace.lang.Compiler/lineDeref)
                                        (arbace.lang.Compiler/columnDeref)
                                        e))
-            (throw (cast CompilerException e))))))
+          :else (throw (cast CompilerException e))))))
 
   (defclass ^:public ^:static CompilerException
     :extends RuntimeException
@@ -6622,6 +6678,7 @@
                             :else (InvokeExpr/parse context form))))))))
           (catch Throwable e
             (let [s (when (and (some? op) (instance? Symbol op)) (cast Symbol op))]
+              (when (instance? ClassFormsExpr$Signal e) (throw e))
               (if (not (instance? CompilerException e))
                   (throw (CompilerException. (cast String (.deref SOURCE_PATH))
                                              (arbace.lang.Compiler/lineDeref)
@@ -6672,14 +6729,23 @@
                   (and (instance? IPersistentCollection form)
                        (not (and (instance? Symbol (RT/first form))
                                  (.startsWith (.-name (cast Symbol (RT/first form))) "def")))))
-                (let [fexpr (cast ObjExpr
-                                  (arbace.lang.Compiler/analyze
-                                    C/EXPRESSION
-                                    (RT/list FN PersistentVector/EMPTY form)
-                                    (java-str "eval" (RT/nextID))))
+                (let [fexpr (arbace.lang.Compiler/analyze
+                              C/EXPRESSION
+                              (RT/list FN PersistentVector/EMPTY form)
+                              (java-str "eval" (RT/nextID)))
                       fn (cast IFn (.eval fexpr))]
                   (.invoke fn))
-              :else (let [expr (arbace.lang.Compiler/analyze C/EVAL form)] (.eval expr)))
+              :else
+                (let [^:mutable ^Expr expr nil]
+                  (try
+                    (set! expr (arbace.lang.Compiler/analyze C/EVAL form))
+                    ;; class forms outside a fn (in a def's initializer): evaluated as a fn
+                    (catch ClassFormsExpr$Signal sig
+                      (set! expr
+                            (arbace.lang.Compiler/analyze
+                              C/EVAL
+                              (RT/list (RT/list FN PersistentVector/EMPTY form))))))
+                  (.eval expr)))
             (finally (Var/popThreadBindings))))
         (finally (when createdLoader (Var/popThreadBindings))))))
 
@@ -7074,7 +7140,13 @@
                     (arbace.lang.Compiler/compile1 gen objx (RT/first s))
                     (recur (RT/next s))))
                 (finally (when pushed (Var/popThreadBindings)))))
-            (let [expr (arbace.lang.Compiler/analyze C/EVAL form)]
+            (let [expr (try
+                         (arbace.lang.Compiler/analyze C/EVAL form)
+                         ;; class forms outside a fn (in a def's initializer): compiled as a fn
+                         (catch ClassFormsExpr$Signal sig
+                           (arbace.lang.Compiler/analyze
+                             C/EVAL
+                             (RT/list (RT/list FN PersistentVector/EMPTY form)))))]
               (set! (.-keywords objx) (cast IPersistentMap (.deref KEYWORDS)))
               (set! (.-vars objx) (cast IPersistentMap (.deref VARS)))
               (set! (.-constants objx) (cast PersistentVector (.deref CONSTANTS)))
