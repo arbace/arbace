@@ -167,6 +167,81 @@ All on 2026-10-06, jdk26u at the system JDK (26.0.2.1).
 `bin/j2c-check` reruns the baseline, compiler and sample checks (one minute); with `--suite` it
 also builds the converted baseline and runs Clojure's test suite on it.
 
+### The converted JDK
+
+`bin/j2c-check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
+checks) converts every module of jdk26u's `src/*/share/classes` with `bin/j2c ... jdk`,
+compiles the same Java files twice with javac (`--patch-module` against the running JDK, which
+is built from the same sources, with the options of the JDK build for the module:
+`-XDstringConcat=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`,
+`jdk.internal.vm.ci`, and `-parameters` for the latter), compiles the converted forms with the
+class forms compiler in parallel chunks (`bin/class-forms-check` with `REF`, `FILES`, and the
+converted module on the class path for classes found nowhere else) and compares every class's
+shape with javac's (SPEC §3). Classes whose two javac runs differ are not compared (2 do);
+classes javac made from a Java file (by `SourceFile`) that the forms did not make count as
+differences; `defpackage` forms are compiled and compared too. The report,
+`.tmp/j2c-jdk/report.md`, counts per module the Java files converted, the converted files with
+class forms compiled without error, those whose classes are all shape-identical, those with
+differences, and the compile errors, and lists differences and errors by kind with an example.
+
+Results (2026-10-07; "before" is the first run, with the compiler and converter of
+`origin/main` at `f425bc8`, where one chunk of 60 `java.base` files did not finish because
+`java.lang.Object` sent the compiler into a loop; "after" is `bin/j2c-check --jdk` at the end of
+the work). Files are converted Java files with class forms; 286 have none (no annotations in a
+`package-info.java`):
+
+| module | Java files | with class forms | identical before | identical after | differing before | differing after | errors before | errors after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| java.base | 3,088 | 3,026 | 2,755 | 3,001 | 144 | 24 | 67 | 1 |
+| java.desktop | 2,287 | 2,235 | 2,168 | 2,223 | 53 | 12 | 14 | 0 |
+| java.xml | 1,854 | 1,825 | 1,792 | 1,823 | 27 | 2 | 6 | 0 |
+| jdk.hotspot.agent | 837 | 837 | 828 | 836 | 7 | 1 | 2 | 0 |
+| jdk.compiler | 347 | 342 | 289 | 331 | 28 | 10 | 25 | 1 |
+| java.management | 327 | 318 | 308 | 317 | 7 | 1 | 3 | 0 |
+| jdk.jfr | 321 | 318 | 301 | 318 | 17 | 0 | 0 | 0 |
+| java.net.http | 312 | 308 | 259 | 308 | 31 | 0 | 18 | 0 |
+| java.xml.crypto | 271 | 265 | 263 | 265 | 2 | 0 | 0 | 0 |
+| jdk.jdi | 248 | 243 | 200 | 243 | 41 | 0 | 2 | 0 |
+| jdk.internal.vm.ci | 213 | 199 | 193 | 199 | 6 | 0 | 0 | 0 |
+| java.security.jgss | 210 | 208 | 206 | 208 | 2 | 0 | 0 | 0 |
+| java.naming | 203 | 197 | 194 | 197 | 1 | 0 | 2 | 0 |
+| jdk.javadoc | 195 | 184 | 166 | 180 | 16 | 4 | 2 | 0 |
+| jdk.jpackage | 145 | 144 | 113 | 141 | 25 | 2 | 6 | 1 |
+| jdk.internal.md | 144 | 135 | 128 | 135 | 7 | 0 | 0 | 0 |
+| java.compiler | 135 | 129 | 119 | 129 | 10 | 0 | 0 | 0 |
+| jdk.internal.le | 117 | 112 | 100 | 112 | 9 | 0 | 3 | 0 |
+| java.rmi | 104 | 99 | 95 | 99 | 2 | 0 | 2 | 0 |
+| jdk.jshell | 92 | 88 | 75 | 84 | 8 | 4 | 5 | 0 |
+| jdk.jlink | 81 | 81 | 73 | 80 | 7 | 1 | 1 | 0 |
+| jdk.crypto.cryptoki | 81 | 81 | 76 | 80 | 3 | 1 | 2 | 0 |
+| jdk.dynalink | 66 | 61 | 60 | 60 | 1 | 1 | 0 | 0 |
+| jdk.jdeps | 64 | 63 | 54 | 62 | 6 | 1 | 3 | 0 |
+| jdk.jconsole | 63 | 62 | 58 | 60 | 3 | 2 | 1 | 0 |
+| 43 other modules | 925 | 884 | 826 | 884 | 49 | 0 | 9 | 0 |
+| **all 68** | 12,730 | 12,444 | 11,699 | 12,375 | 512 | 66 | 173 | 3 |
+
+All 12,730 files convert; 24,127 classes compile from the forms. What differs or fails at the
+end (69 files), by cause:
+- **Code duplicated by the forms.** `switch` fall-through repeats the following arms' code
+  (SPEC §12 question 9), so a lambda or anonymous class there is made twice (`JavacParser`,
+  `GraphUtils`, `PrintingProcessor`, `DeferredAttr`: missing and extra lambda methods and
+  classes).
+- **javac's attribution order.** javac numbers anonymous classes in an argument of a chained
+  call before those of its qualifier (arguments are attributed first); the forms number them
+  in textual order (`StringConcatFactory`).
+- **Stack map frames.** javac's frames name the common superclass of merged types, ASM's
+  sometimes another class; classes named only there give `InnerClasses` differences (15 files).
+- **Constants of instance fields read as `this.k` in Java.** javac null-checks `this`; the
+  forms write an inherited constant read by simple name the same way, `(.-k this)`, so the
+  compiler cannot tell them apart and checks neither.
+- **Smaller ones**, one or two files each: a lambda's `throws` (`ThrowsTaglet`), widening of
+  some constants (`Math.nextAfter`, metal look and feel `double` constants), a `switch` on an
+  interface type with qualified enum constants as labels (`PackageBuilder`; javac's
+  `typeSwitch` with `EnumDesc` labels, not supported), an anonymous class in a constructor
+  prologue whose methods use the enclosing instance of the class being constructed (`Attr`),
+  and a call passing `T[]` with `T extends Object & Comparable` where javac relies on the
+  verifier's leniency for interface arrays (`ModuleDescriptor`).
+
 ## Coverage
 
 Tree kinds met in the whole corpus (baseline, jdk26u, samples) and what they become. Every kind
@@ -178,7 +253,7 @@ met was converted without failure. Generated by `arbace.j2c.coverage` (rounded c
 | `MODULE`, `REQUIRES`, `EXPORTS`, `OPENS`, `USES`, `PROVIDES` | test module | `defmodule` |
 | `CLASS`, `INTERFACE`, `ENUM`, `RECORD`, `ANNOTATION_TYPE` | ✓ | `defclass` with kind metadata, `anon`, `letclass`, `constants` |
 | `METHOD`, `VARIABLE`, `BLOCK`, `MODIFIERS`, `ANNOTATION`, `TYPE_PARAMETER` | ✓ | `method`, `constructor`, `field`, bindings, metadata, `:type-params` |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | 6, 0 | **dropped** (todo) |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | ✓ | metadata on the type forms' nodes; in code on the operand of `cast`, `instance?`, `new`, `catch`; `^{:type-args [...]}`, `^{:qualifier T}` on method symbols (`test/j2c/java/sample/TypeAnns.java`) |
 | type kinds, wildcards, `UNION_TYPE`, `INTERSECTION_TYPE` | ✓ | type forms, `(catch [A B] e)`, `(& A B)` |
 | `IF`, `CONDITIONAL_EXPRESSION` | ✓ | `if`, `when`, `when-not`, `cond`, folding |
 | loops | ✓ | `loop`/`recur`, `while`, `for-each` |
@@ -240,21 +315,40 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 14. **§5.3, cross-case locals.** Accepted (2026-10-07), folded into SPEC §5.3, §7.10.
 15. **§7.3, resolution.** Accepted (2026-10-07), folded into SPEC §5.6, §7.3.
 
+## Spec amendments (proposed, 2026-10-07)
+
+Found while compiling the converted JDK; already in SPEC.md, marked "amendment, 2026-10-07",
+for the user's approval:
+
+16. **§4.8, `^:diamond`.** javac gives the constructor of an anonymous class of an interface
+    that captures locals a `Signature`, except when Java wrote the diamond; the forms say so
+    with `^:diamond` on the supertype.
+17. **§5.12, `^:method-ref` on an array constructor reference's lambda.** javac names the
+    lambda it makes of `T[]::new` as a reference (after the field in a field initializer),
+    not as an explicit lambda.
+18. **§4.11, `&` in a record's components.** A variable arity record's canonical constructor
+    is `ACC_VARARGS`.
+19. **§4.4, type annotations in code.** Generic type operands (`(new (C ^{A true} T))`,
+    `(new (array ^{A true} T) n)`, `(cast (C ^{A true} T) x)`), annotated `catch`
+    alternatives, `^{:type-args [...]}` also on method references, and `^{:qualifier T}` for
+    the qualifying type of a method reference.
+
 ## What remains
 
-- Type annotations (`TYPE_ANNOTATION`, `ANNOTATED_TYPE`) are dropped (6 in the JDK).
 - Method references to `super::m`, on array types and on anonymous classes are still pinned
   whenever the name is overloaded (the compiler turns `super::m` into a lambda whose call
   drops the pin, so it must not rely on it either way).
 - Variable arity arguments are packed into an explicit array unless the method is the only
-  one of its name; the compiler's resolution could decide this too.
+  one of its name and the array's element type is the erased parameter's; the compiler's
+  resolution could decide this too.
 - Comments are not carried over (§7 says "where easy").
 - Restructurings the spec's examples show and the converter does not do: folding a local
   assigned in a loop into the loop's bindings, computing a later-assigned local with an `if`
   initializer when the branches do more than assign it.
 - Local and anonymous classes declared in field initializers of anonymous classes cannot name
   that anonymous instance (no receiver parameter there); none in the corpus.
-- Module declarations of the JDK cannot be attributed with `--patch-module`; they would need the
-  module's own sources (`--module-source-path`).
-- Equivalence of the JDK conversion has been checked only on a few packages (they compile to
-  javac's shapes apart from java.base's inline string concatenation).
+- Module declarations of the JDK are not converted (`--patch-module` cannot take them). An
+  experiment showed the way: javac attributes a module's `module-info.java` with
+  `--module-source-path` naming only that module's sources (the others come from the system
+  image), so `bin/j2c-check --jdk` could convert and compare them with `defmodule`; not done.
+- The JDK differences listed in "The converted JDK" above.

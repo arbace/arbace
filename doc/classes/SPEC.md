@@ -288,7 +288,12 @@ place Java allows annotations:
   `@Target` includes `TYPE_USE` also annotates the declared type, as in Java. Type annotations
   inside a type go on the node they qualify: `^{:tag (List ^{NonNull true} String)}`. Those in
   code (local types, casts, `instance?`, `new`, catch parameters, method references) go to
-  the `Code` attribute's type annotations, as javac's do.
+  the `Code` attribute's type annotations, as javac's do. There the type operand carries
+  them, generic where they are inside: `(cast ^{A true} String x)`,
+  `(new ^{B true} (ArrayList ^{A true} String))`, `(new (array ^{A true} String) n)`,
+  `(catch [^{A true} E1 ^{B true} E2] e ...)`. Explicit type arguments of a call or method
+  reference go on its method symbol as `^{:type-args [^{A true} String]}`, the qualifying type
+  of a method reference as `^{:qualifier (ArrayList ^{A true} String)}` (amendment, 2026-10-07).
 - Annotations on record components propagate to the field, accessor and canonical constructor
   parameter by `@Target`, as javac does.
 
@@ -432,7 +437,9 @@ passes `this` (or the right enclosing instance) implicitly. `(.new o Inner args)
     (.conj (cast ITransientVector coll) val)))
 ```
 
-`Super` is one class or interface, possibly generic: `(anon (Comparator String) [] ...)`. The
+`Super` is one class or interface, possibly generic: `(anon (Comparator String) [] ...)`;
+`^:diamond` on it records Java's diamond (`new Comparator<>() {...}`), after which javac gives
+the constructor of an anonymous class of an interface no `Signature` (amendment, 2026-10-07). The
 arguments go to the superclass constructor; param-tags on the vector pin its overload,
 `(anon C ^[int] [x] ...)`. Members are any members but constructors.
 
@@ -535,6 +542,8 @@ default with `(.m Iface/super ...)`.
     (Integer/compare lo (.lo (cast Range o)))))
 ```
 
+- A variable arity record has `&` before its last component, `[^int a & ^String/1 rest]`
+  (amendment, 2026-10-07).
 - The components vector gives the `Record` attribute and, unless written, the private final
   fields, the accessors and the canonical constructor (whose parameter names give a
   `MethodParameters` attribute, as javac emits for it). `toString`, `hashCode` and `equals`,
@@ -1065,7 +1074,9 @@ constant operands folded into the recipe. Constant operands only give a constant
   receiver from the first argument (`String::length`). A receiver expression before the method
   binds it (`expr::m`); it is evaluated once, null-checked as javac does, and may be `this` or
   `super` (`super::m`). Array constructor references (`int[]::new`) are written as the lambda
-  javac makes of them: `(lambda IntFunction [^int n] (new int/1 n))`.
+  javac makes of them, the parameter vector marked `^:method-ref` (javac names it as a
+  reference, after the field in a field initializer):
+  `(lambda IntFunction ^:method-ref [^int n] (new int/1 n))` (amendment, 2026-10-07).
 - The compiler makes direct method handles or synthetic lambda methods for references exactly
   where javac does (javac uses a lambda method for `super::m`, varargs adaptation, protected
   members across packages and the like).

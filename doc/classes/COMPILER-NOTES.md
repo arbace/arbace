@@ -364,15 +364,22 @@ compiler with constructor-call param-tags, `anon :outer` and `int` literal condi
 script in `.tmp/` of that worktree runs the modules in parallel) gave 11,753 of 12,444 files
 shape-identical (94%), 174 compile errors, 517 files with differences; the same compiler on the
 converter's earlier output (conservative pins) gave 11,745 / 177 / 522, and no file identical
-there differs with the new output. What remains is mostly:
+there differs with the new output.
 
-- converter output: mutable captures and catch parameters (note 9), inherited fields by simple
-  name (note 7), generic varargs arrays (note 6);
-- javac details the forms cannot express: the diamond in anonymous classes (note 10) and
-  `InnerClasses` entries javac adds for classes named only in local variable signatures of its
-  debug information;
-- the converted `java.base` and a few other modules are compared with `-XDstringConcat=inline`
-  and `-parameters` as the JDK build uses them; others need `--add-modules ALL-SYSTEM`.
+Since 2026-10-07 this is repeatable: `bin/j2c-check --jdk` (about 10 minutes on 64 cores) and
+its report, with javac's classes compiled from the same sources as the reference rather than
+the JDK's own (results and remaining differences in CONVERTER-NOTES.md, "The converted JDK").
+It took the files whose classes are all shape-identical from 11,699 to 12,375 of 12,444, the
+compile errors from 173 to 3. The compiler gaps it found and fixed are listed in the
+commit `Class forms compiler: gaps found by compiling the converted jdk26u` and its follow-up:
+literal narrowing in more contexts, constant instance fields, InnerClasses entries for
+constants and annotation types (javac's ClassReferenceVisitor), fields hidden from reflection
+read from class files, bridges (direct superclass, covariant casts, outer type arguments,
+annotations), interface lubs, null checks of outer receivers, flexible constructor bodies,
+`java.lang.Object`, anonymous classes reaching their superclass's outer instance through their
+own, constructor lambdas capturing the outer instance parameter, enum `$SwitchMap$` in constant
+bodies, abstract enums, variable arity records, dead branches declaring classes, local class
+signatures and capture order, serializable lambda names, and the type annotations of code.
 
 ### Running the converted runtime
 
@@ -403,7 +410,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | `VARIABLE` | done ≡: fields, parameters, `let`/`loop` locals (`^:mutable`, `^:const`, primitive tags), catch parameters, resources, pattern bindings |
 | `BLOCK` | done ≡: bodies, `initializer`, `static-initializer` |
 | `MODIFIERS`, `ANNOTATION` | done ≡ (declaration annotations by retention, element values of every kind, defaults) |
-| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, `cast`, `instance?`, `new`, catch parameters); method reference type arguments todo |
+| `TYPE_ANNOTATION`, `ANNOTATED_TYPE` | done ≡ in declarations (field, return, parameter, receiver, type parameters and bounds, supertypes, throws, with type paths; `TYPE_USE` annotations on declared names) and in code (local variables, for-each and pattern bindings, `cast`, `instance?`, `new` of classes and arrays, catch parameters, explicit type arguments of calls and method references `^{:type-args [...]}`, qualifying types of method references `^{:qualifier T}`); bridges carry them (`test/j2c/java/sample/TypeAnns.java`) |
 | `TYPE_PARAMETER` | done ≡ (`Signature` of classes, methods, fields, record components) |
 | `PRIMITIVE_TYPE`, `ARRAY_TYPE`, `PARAMETERIZED_TYPE`, wildcards, `INTERSECTION_TYPE`, `UNION_TYPE` | done ≡ |
 | `IF`, `CONDITIONAL_EXPRESSION` | done ≡ |
@@ -482,10 +489,11 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    element type (`Arrays.asList("a", "b")` makes a `String[]`), the compiler with the erased one
    (`Object[]`). Where they differ, write the array: `(Arrays/asList (new String/1 ["a" "b"]))`,
    and for method references that need variable arity adaptation, the lambda javac makes.
+   Done (2026-10-07): the converter packs the array whenever its element type differs.
 7. A field read or assigned by simple name in a nested class resolves, in Java, to an inherited
    field before an enclosing class's field; in the forms only own and enclosing fields are in scope
    by name, so inherited ones must be written `(.-f this)` (seen in the converted JDK, e.g.
-   `SingleNodeCounter`).
+   `SingleNodeCounter`). Done (2026-10-07).
 8. Overloads: integer literals are `long`, so where javac picks an `int` overload for a literal
    argument (`new Symbol(id, -1)` with `(int, int)` and `(int, Object)` constructors) the
    compiler picks another one. Done (2026-10-07): the converter asks the compiler's own
@@ -493,10 +501,13 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
    `ctor-candidates`) and pins where it differs, constructor calls included.
 9. Captured locals must not be `^:mutable` (Java's effectively final); catch parameters that are
    assigned need `^:mutable`; locals must not shadow the macros the converted code uses (a local
-   named `cond` or `when`). All seen in the converted JDK.
+   named `cond` or `when`). All seen in the converted JDK. Done (2026-10-07): captured blank
+   finals are rebound immutably around the capturing form, catch parameters and pattern
+   bindings honor `^:mutable`, heads are qualified where a local shadows them.
 10. javac gives the constructor of an anonymous class of an interface that captures locals a
     `Signature` attribute, except when the Java source used the diamond (`new I<>() {...}`); the
-    forms do not say which was written, and the compiler always emits it.
+    forms do not say which was written, and the compiler always emits it. Done (2026-10-07):
+    `^:diamond` on the supertype (proposed amendment).
 
 ## Spec amendments (accepted)
 
