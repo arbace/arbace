@@ -60,8 +60,10 @@ The current state of the work. This file is rewritten as things change. For the 
     sites and `StringConcatFactory` for `str`; `invokedynamic` reflective calls; VarHandles in
     `Atom`, an opt-in virtual-thread executor and a `jlink` image. ASM stays, and Var calls stay
     indirect.
-- g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). Ten open
-  questions for the user (§9) before any work starts.
+- g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). The open
+  questions are decided (journal, 2026-10-07): front end, spec and round trip (G0-G2), then the
+  box via gc + TamaGo (B1). No Go libraries on the JVM. Target `GOOS=tamago` amd64/arm64,
+  go1.27.1, with the helper under `tools/`. Not started: the JVM work comes first.
 
 ## Later
 

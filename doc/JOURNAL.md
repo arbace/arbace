@@ -781,3 +781,34 @@ The user decided, on the main session's recommendations:
   default for user code; REPL redefinition stays free.
 - Fold three smaller items into this round: VarHandles in `Atom`, `StringConcatFactory` for
   `str`, and a `jlink` runtime image.
+
+## 2026-10-07: Decisions on g2c's open questions
+
+The user answered the ten open questions of `doc/G2C-SURVEY.md` §9, all as the main session
+recommended:
+1. **Phases:** first the front end, the Go forms spec and the round trip back to Go (G0-G2).
+   Then the box (B1). Phase a, the Go standard library on the JVM (G3-G6), is skipped, since
+   the `arbace-for-java-26` freeze would leave it behind.
+2. **The box via gc:** yes. The first bare-metal Arbace is built by Go's toolchain plus TamaGo
+   and run by go-whim's monitor. "Arbace all the way down" is reached by replacing gc layer by
+   layer, with gc as the reference.
+3. **Operators:** inside Go function bodies, `+`, `<<` and the rest mean Go's operators at the
+   operands' type (a "Go context"). This is a deliberate exception to "Clojure keeps its
+   meaning".
+4. **Names:** the survey's proposal:
+   - `go/type`, `go/func`, `go/method`, `go/var`, `go/const`;
+   - `(addr x)` and `@p`;
+   - core.async's `<!` and `>!`;
+   - `(values ...)` binding targets;
+   - Go identifiers verbatim.
+5. **Build configuration:** `GOOS=tamago` for amd64 and arm64, the box's own (not wasip1).
+6. **Go version:** pinned to TamaGo's release, go1.27.1 now. Claude proposes moves, the user
+   approves, and the journal records them.
+7. **Build tags:** one configuration per conversion. The helper resolves tags and the forms
+   record the configuration.
+8. **The Go helper:** lives in this repository under `tools/`, seeded from the survey's
+   `godump`, under EPL. BSD-3-Clause goes into `LICENSE.md` once converted Go code is kept.
+9. **Converted output:** regenerated, not tracked, as for j2c, until a package becomes
+   hand-maintained source by a recorded decision.
+10. **go-lisp:** its coverage tables, round-trip method and corpus are reused. No `.lgo` back
+    end; go-lisp stays a separate tool.
