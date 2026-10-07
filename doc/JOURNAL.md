@@ -918,3 +918,17 @@ recommended:
   most likely the error report a non-REPL run writes on an uncaught error (`Full report at:
   /tmp/arbace-NNN.edn`, Clojure 1.10+'s `clojure.main/report-error`; renamed from `clojure-`).
   It is a report of the error, not a class file. Compiled fns still never touch the disk.
+
+## 2026-10-07: The remaining todo rows closed (pre-freeze item 3)
+
+- Done by a background agent (`6c62f61`, `e06e81a`, `28e24d5`, `b75b87e`):
+  - `deftype*` (and `import*`) now work inside class bodies and handed-over fns: Clojure's
+    compiler defines the class during analysis.
+  - Handed-over reify/deftype classes get Clojure's covariant bridges (`ACC_BRIDGE` only).
+  - Clojure-meaning code chooses overloads as Clojure's compiler does (`getMatchingParams`,
+    its errors, reflection otherwise).
+  - `SecurityManager` was dropped from `RT`'s default imports (hand change 11; upstream still
+    imports it).
+- SPEC §9.5 was amended to match. The main session renumbered the hand change, which had
+  clashed with the reverted Atom entry 8.
+- Checked by the main session: `bin/build-arbace --suite` passes (see the log of this commit).

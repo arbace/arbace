@@ -72,7 +72,7 @@ The current state of the work. This file is rewritten as things change. For the 
      compare with javac's class shapes, and fix the gaps, type annotations included.
   2. Done: clojure.spec restored (`d9ecda7`). Clojure's suite passes in full on Arbace
      (20,750 of 20,750 assertions).
-  3. In progress: the remaining todo rows: `deftype` inside class bodies, covariant bridges,
+  3. Done: the remaining todo rows: `deftype` inside class bodies, covariant bridges,
      Clojure's full overload matching, and the `SecurityManager` import.
   4. Queued, last (not started, by the user's choice): steady-state benchmarks against upstream Clojure 1.12, a GitHub Actions
      workflow running the gate on JDK 26, and branch notes plus a tag.
