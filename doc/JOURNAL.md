@@ -619,3 +619,45 @@ instead of calling `arbace.classes`'s resolution.
   protocol caches, replacing ASM with `java.lang.classfile`. Avoid `LambdaMetafactory` and
   hidden classes for fns, preview APIs, `ScopedValue` for bindings, JVM records for `defrecord`.
 - No decision taken yet; it is the user's.
+
+## 2026-10-07: Step 5's open ends closed
+
+- Two background agents, in parallel. The main session reran the full gate on the combined tree
+  (`2f2a5f2`).
+- Operators and load time (`2dd9cba`, `367c83d`, `ea25842`):
+  - The §5.4 operators have `:inline` expansions to new `arbace.lang.Numbers` methods. Where the
+    context is primitive, `Intrinsics` makes them bare instructions (`IAND`, `FADD`, `LDIV`,
+    ...). Boxed operands convert as for `unchecked-add-int` (RT casts), with no reflection.
+    Behaviour changes: float overflow gives Infinity (the old function threw); a shift count
+    that does not fit an `int` throws.
+  - In class bodies, when no method applies after a Clojure `:inline` expansion, the single
+    method of that name and arity is called with RT casts, as Clojure does. This also fixes
+    Clojure's own `unchecked-add-int` on Object operands there. Float `%` constant folding gave
+    0.0 and is fixed.
+  - Each stage AOT-compiles `arbace.classes` into itself. The first class form in a session
+    went from about 1.05 s to 0.26 s; the time was nearly all compiling those namespaces from
+    source. For reproducible AOT output, `Compiler$LocalBinding` got a `hashCode` from index and
+    name, and `generate-proxy` sorts superclass constructors.
+- `deftype`/`defrecord` and `reify` (`2f2a5f2`):
+  - A `deftype*` whose method bodies use class forms is handed over whole to
+    `arbace.classes.native/compile-deftype`. That builds a class form with Clojure's deftype
+    shape (fields, mutability flags, constructors, the record extras, `getBasis`). Deftypes
+    without class forms compile as before.
+  - `reify` and handed-over deftype methods pick the interface method as Clojure's compiler
+    does (name and arity, then hints), with Clojure's error messages.
+  - Left open: `deftype*` inside a class body or a handed-over fn (use `defclass`); small
+    differences in covariant bridges; the arity fallback is not Clojure's full
+    `getMatchingParams`.
+- SPEC §9.5 and §9.6 were amended by the agents to match (see the notes files).
+- Gate on `2f2a5f2`, rerun by the main session:
+  - `bin/build-arbace --suite`: stages 1, 2 and 3 identical, now 2,150 classes. The native tests
+    (25 tests, 2,337 assertions) pass. The suite on stages 1 and 2 gives the baseline's result.
+  - `bin/class-forms-tests`: 61 tests, 126 assertions pass. `bin/j2c-check --suite` is clean.
+- Pitfall both agents hit: in a fresh worktree checkout leaves `clojure/**/*.java` newer than
+  their tracked classes, so in-process javac recompiles them and `bin/class-forms-tests` fails.
+  The fix is `find clojure -name '*.class' -exec touch {} +`; CLAUDE.md now says so.
+- On the user's question about tail calls: Java 26 has no tail-call support (no bytecode, no
+  HotSpot elimination; the MLVM patch and Loom's stated goal never landed). Self-calls compile to
+  jumps via `recur`. A group of mutually recursive fns known at compile time could be fused
+  into one method with a dispatch switch. Full Scheme-style tail calls are a point for an own
+  runtime.

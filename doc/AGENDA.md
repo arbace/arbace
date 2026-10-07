@@ -39,9 +39,18 @@ The current state of the work. This file is rewritten as things change. For the 
    (`08e2167`): the main class is `arbace.lang.Main`, and runtime-visible `clojure` names are
    renamed.
 
+6. Step 5's open ends: **done** (`367c83d`, `2dd9cba`, `2f2a5f2`). The §5.4 operators inline
+   to instructions. `arbace.classes` is AOT-compiled into each stage, so the first class form
+   costs 0.26 s, not about 1 s. Class forms work in `deftype`/`defrecord` methods, and
+   `reify`/`deftype` methods are chosen by hints as in Clojure. The stages hold 2,150 classes,
+   byte-identical.
+
 ## Next
 
-- Open ends of step 5: `:inline` expansions of the §5.4 operators, class forms inside `deftype`
-  methods, hint-based `reify` signatures, the load cost of `arbace.classes` on first use.
+- Decide on the survey of modern JVM features, [MODERN-COMPILER.md](MODERN-COMPILER.md). Its
+  first recommendation is to AOT-compile all namespaces into the stages and use the JDK AOT
+  cache: launch time measured 3.3 s → 0.45 s. Then add `ClassFile.verify` to the checks and
+  emit classfile version 70.
 - Decide which native runtime Arbace targets, and how much of a JVM-like or Go-like runtime it
-  reimplements.
+  reimplements. One input: Java 26 has no tail calls, while an own runtime could have proper
+  ones.

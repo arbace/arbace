@@ -51,5 +51,8 @@ Prior art:
 
 ## Working conventions
 
+- In a fresh git worktree, run `find clojure -name '*.class' -exec touch {} +` first: checkout
+  leaves the `.java` files newer than their tracked classes, and the checks then recompile them.
+
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.
