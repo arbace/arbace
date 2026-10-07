@@ -1157,11 +1157,14 @@
   (let [n (unboxed node)
         from (:type n)]
     (cond
+      ;; an all-literal conditional is an int operand, widened like one (§5.4)
+      (and (= from "J") (#{"I" "J" "F" "D"} t) (not= :const (:op n))
+           (some->> (literal-tail-vals n) (every? #(fits? "I" %))))
+      (let [i (convert-node n "I")]
+        (if (= t "I") i {:op :convert :expr i :from "I" :to t :type t}))
       (= from t) n
       (and (= :const (:op n)) (= t "I") (= from "J") (:literal n) (fits? "I" (:val n)))
       (const-node "I" (int (:val n)))
-      (and (= t "I") (= from "J") (some->> (literal-tail-vals n) (every? #(fits? "I" %))))
-      (convert-node n "I")
       (and (t/prim? from) (widens? from t))
       (if (= :const (:op n)) (const-node t (const-of-type t (:val n))) {:op :convert :expr n :from from :to t :type t})
       :else (fail (str "Operand of type " (pr-str from) " where " t " is needed")))))
@@ -1744,7 +1747,8 @@
             _ (when-not (needs-outer-instance? sup)
                 (fail (str (str/replace sup "/" ".") " is not an inner class")))
             on (analyze actx target)]
-        (ctor-call-node actx sup args :super :outer {:op :null-checked :expr on :type (:type on)}))
+        (ctor-call-node actx sup args :super :outer {:op :null-checked :expr on :type (:type on)}
+                        :param-tags param-tags))
 
       (and (= mname "new") (seq args) (symbol? (first args)))
       ;; (.new o Inner args): Java's o.new Inner(args)
@@ -1758,7 +1762,8 @@
           (when-not (some-> (env/info cn) :outer)
             (fail (str (str/replace cn "/" ".") " is not an inner class"))))
         (ctor-call-node actx cn (rest args) :new
-                        :outer (if (or (= :this-path (:op on)) (:receiver (:b on))) on {:op :null-checked :expr on :type ot})))
+                        :outer (if (or (= :this-path (:op on)) (:receiver (:b on))) on {:op :null-checked :expr on :type ot})
+                        :param-tags param-tags))
 
       (= target 'super)
       (if (str/starts-with? mname "-")
@@ -2167,16 +2172,20 @@
           (ctor-call-node actx sup [] :super
                           :outer (when (needs-outer-instance? sup) (outer-instance-for actx sup))))))))
 
-(defn analyze-ctor-call [actx [_ & args] kind]
+(defn analyze-ctor-call
+  "(super. args) or (this. args); param-tags on the head pin the constructor (§4.7)."
+  [actx [head & args] kind]
   (when-not (:in-ctor actx) (fail (str (if (= kind :super) "super." "this.") " outside a constructor")))
   (let [n (:class actx)
-        d (decl! n)]
+        d (decl! n)
+        param-tags (:param-tags (meta head))]
     (when (= :enum (:kind d)) (if (= kind :super) (fail "An enum constructor cannot call super.")))
     (if (= kind :this)
-      (ctor-call-node actx n args :this)
+      (ctor-call-node actx n args :this :param-tags param-tags)
       (let [sup (:super d)]
         (ctor-call-node actx sup args :super
-                        :outer (when (needs-outer-instance? sup) (outer-instance-for actx sup)))))))
+                        :outer (when (needs-outer-instance? sup) (outer-instance-for actx sup))
+                        :param-tags param-tags)))))
 
 (defn- analyze-ctor-body [n m]
   (let [actx (-> (body-actx n :method false (:bounds (or (:scope m) (class-scope n)))
@@ -2213,7 +2222,8 @@
     (conj
       (vec (for [[i c] (map-indexed vector (:constants d))]
              (let [args (mapv #(analyze sactx %) (:args c))
-                   [m va] (select-method sactx ctors args (str "constructor of enum constant " (:name c)) nil)
+                   [m va] (select-method sactx ctors args (str "constructor of enum constant " (:name c))
+                                         (:param-tags c))
                    cls (if (:has-body c) (analyze-enum-body sactx n c m) n)
                    ctor (if (:has-body c)
                           (some #(when (= "<init>" (:name %)) %) (:methods (decl! cls)))
@@ -2459,9 +2469,16 @@
     (doseq [n (supertypes-first names) :when (not (:declared-only (decl n)))] (add-bridges! n))
     (doseq [n names :when (not (:declared-only (decl n)))] (analyze-class! n))))
 
-(defn analyze-anon [actx [_ _ super-form args & members]]
+(defn analyze-anon
+  "(anon Super [args] member*) and (anon Inner [args] :outer o member*) (§4.8); param-tags on
+  the argument vector pin the superclass constructor."
+  [actx [_ _ super-form args & members]]
   (when-not (vector? args) (fail "anon needs a vector of constructor arguments"))
-  (let [cur (:class actx)
+  (let [[explicit-outer members] (if (= :outer (first members))
+                                   (do (when-not (next members) (fail "anon: :outer needs a value"))
+                                       [(second members) (nnext members)])
+                                   [nil members])
+        cur (:class actx)
         stn (parse-type (scope-of actx) super-form)
         _ (when-not (= :class (:t stn)) (fail (str "Bad anon supertype: " super-form)))
         sname (:name stn)
@@ -2476,22 +2493,33 @@
                            :enclosing-method (:method-info actx)} parsed)
         _ (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx)
         _ (resolve-header! n)
+        ;; Java's o.new Inner(args) {...}: o is evaluated first
+        outer-node (when explicit-outer
+                     (let [on (analyze actx explicit-outer)]
+                       (when-not (t/class-desc? (value-type (:type on)))
+                         (fail "anon: :outer needs an instance of the superclass's outer class"))
+                       on))
         arg-nodes (mapv #(analyze actx %) args)
         iface? (env/interface? sname)
         _ (when (and iface? (seq args)) (fail "An anonymous class of an interface takes no arguments"))
+        _ (when (and outer-node (not (needs-outer-instance? sname)))
+            (fail (str "anon: " (str/replace sname "/" ".") " is not an inner class, :outer is not allowed")))
         [sctor va] (when-not iface?
                      (select-method actx (filter #(env/accessible? n %) (env/constructors sname))
-                                    arg-nodes (str "constructor of " sname) nil))
+                                    arg-nodes (str "constructor of " sname) (:param-tags (meta args))))
         ;; an anonymous subclass of an inner class takes the superclass's outer instance as its
         ;; first (mandated) constructor parameter, and has no outer instance of its own (javac)
         super-outer (when (and sctor (needs-outer-instance? sname))
-                      (let [o (outer-instance-for actx sname)]
-                        (if (and (:outer-instance? (decl n)) (= :this-path (:op o)) (empty? (:path o)))
+                      (let [o (or outer-node (outer-instance-for actx sname))]
+                        (if (and (not outer-node) (:outer-instance? (decl n)) (= :this-path (:op o)) (empty? (:path o)))
                           ;; the creating instance is both the anonymous class's outer instance and
                           ;; its superclass's: one parameter (javac)
                           (do (update-decl! n assoc :super-outer-is-outer true) nil)
-                          (do (update-decl! n assoc :outer-instance? false
-                                            :super-outer (t/internal->desc (:outer (env/info sname))))
+                          ;; with :outer the anonymous class keeps its own outer instance (javac)
+                          (do (if outer-node
+                                (update-decl! n assoc :super-outer (t/internal->desc (:outer (env/info sname))))
+                                (update-decl! n assoc :outer-instance? false
+                                              :super-outer (t/internal->desc (:outer (env/info sname)))))
                               o))))
         _ (update-decl! n assoc :anon-super-ctor sctor :anon-ctor-desc (if iface? "()V" (:desc sctor)))
         _ (process-classes! from)

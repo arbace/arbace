@@ -90,6 +90,7 @@
                                     {:sym c :name (name c) :meta (meta c) :args []}
                                     (let [[nm args & body] c]
                                       {:sym nm :name (name nm) :meta (meta nm) :args (vec args)
+                                       :param-tags (:param-tags (meta args))
                                        :body body :has-body (some? body)})))
                                 (rest f))}
     defclass {:kind :class :form f}))
