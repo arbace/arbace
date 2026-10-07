@@ -1017,3 +1017,49 @@ recommended:
     native tests 47/2,780, and the suite 20,750/20,750 on stages 1 and 2;
   - `bin/class-forms-tests`: 64/133;
   - `bin/j2c-check --suite`: baseline and samples identical, no regressions.
+
+## 2026-10-07: Benchmarks, CI and the freeze kit (pre-freeze item 4)
+
+- Done by a background agent (`e68c480` .. `3179442`); the main session reviewed it.
+- Benchmarks (`5fe500e`): `bin/arbace-bench`, `test/bench/{workload,driver,repl-session}.clj`,
+  results in `doc/BENCHMARKS.md`.
+  - Compared on JDK 26.0.2.1: Arbace `e311a30` (`bin/arbace`: the jar plus its AOT cache);
+    Clojure 1.12.6 from Maven Central (spec.alpha 0.5.238, core.specs.alpha 0.4.74; SHA-256
+    sums in BENCHMARKS.md, downloaded into `.tmp/bench/lib`, not vendored); the frozen
+    `clojure/` AOT-compiled with direct linking; and, for startup only, Clojure 1.12.6 with a
+    JDK AOT cache trained like Arbace's.
+  - Own harness, no libraries: one workload file run unchanged by all three, a fresh JVM per
+    measurement, interleaved forks, load average recorded. Alternatives considered: JMH and
+    criterium, rejected because the same source had to run on Arbace's renamed namespaces.
+  - Results (quiet run, load 1-8): `-e 1` 184 ms vs 571 ms; a REPL session 417 vs 1,070 ms;
+    un-hinted interop about 580x faster; multi-argument `str` about 10x; keyword lookups
+    20-33% faster. The startup gain is the JDK AOT cache: Clojure with the same cache starts
+    in 190 ms. Geometric mean of the ratios 0.75; without the interop and `str` outliers 0.98
+    (the frozen baseline: 0.96).
+  - Slower on Arbace in every run: `into-xform` (1.2-1.6x), `reduce-vector` (1.13-1.20x),
+    `vector-transient` (1.0-1.6x). Cause not found: the call sites' bytecode is identical, the
+    hot runtime methods differ from javac's by a few bytes (`iload/iadd` for `iinc`, a branch
+    for a boolean `instanceof`), and `-XX:+PrintInlining` shows the same inlining. A lead for
+    the class forms compiler.
+  - Raw results: `.tmp/bench/full2.edn` (quiet) and `full1.edn` (under load), not tracked.
+- CI (`e68c480`): `.github/workflows/gate.yml` runs the gate (`bin/build-arbace --suite`,
+  native tests, `bin/class-forms-tests`, `bin/j2c-check --suite`) on Temurin 26.0.2.1 via
+  actions/setup-java@v5, with `-Xmx4g`/`-Xmx5g` for the 2-core 7 GB runner; about 45 minutes.
+  Its trigger is pushes to `arbace-for-java-26` and `workflow_dispatch` only (`44cf328`, the
+  user's decision not to tie main to GitHub). Manual runs passed at `e311a30`
+  (actions run 37684486653) and `3179442` (run 37697838281).
+- `ffdb37f`: `bin/native-tests` runs with `-XX:-OmitStackTraceInFastThrow`. Under load,
+  `native.reflect-test/overloads-by-runtime-types` failed about once in five runs: C2 threw a
+  preallocated NullPointerException without a message, and the test compares messages.
+- Freeze kit (`3179442`): `doc/FREEZE.md` (what the branch holds, how to build, verify and run
+  it, CI, benchmarks, known limits, what changes on main after the break) and `bin/freeze`. It
+  is a dry run by default; `--yes` creates the branch `arbace-for-java-26` and the annotated tag
+  `arbace-for-java-26-v1` and pushes them, after checking a clean tree at `origin/main`, the
+  README section, that neither exists, and a successful gate run on that commit (GitHub, or
+  `--run-gate` locally). Tested as a dry run in a throwaway clone.
+- The README section `## Arbace for Java 26` is commit `c57969f` on the local branch
+  `freeze-readme`, kept off main until the branch exists, since it describes it as existing.
+- The main session checked `3179442` with the full local gate: stages 1-3 identical at 5,756
+  classes, the verifier clean, native tests 47/2,780, the suite 20,750/20,750 on stages 1 and
+  2, `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without regressions.
+- Not created: the branch and the tag wait for the user's confirmation.

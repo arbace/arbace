@@ -71,14 +71,16 @@ The current state of the work. This file is rewritten as things change. For the 
      (20,750 of 20,750 assertions).
   3. Done: the remaining todo rows: `deftype` inside class bodies, covariant bridges,
      Clojure's full overload matching, and the `SecurityManager` import.
-  4. In progress: steady-state benchmarks against upstream Clojure 1.12, a GitHub Actions
-     workflow running the gate on JDK 26, and a freeze kit (`doc/FREEZE.md`, `bin/freeze`). The branch
-     and tag are created only after the user confirms.
+  4. Done: benchmarks against Clojure 1.12.6 ([BENCHMARKS.md](BENCHMARKS.md)), the GitHub
+     Actions gate (only on `arbace-for-java-26` and by hand), and the freeze kit
+     ([FREEZE.md](FREEZE.md), `bin/freeze`). Open lead: `reduce`/transducer/transient
+     benchmarks run 15-60% slower than Clojure; cause not found.
+- The freeze itself, waiting for the user's confirmation: cherry-pick the README section
+  (`c57969f`, branch `freeze-readme`) onto main, have the gate pass on that commit, then
+  `bin/freeze --yes` creates and pushes `arbace-for-java-26` and the tag `arbace-for-java-26-v1`.
 
 ## Later
 
-- Before breaking away from the JVM and the `.class` format: freeze the JVM state of the art on
-  the branch `arbace-for-java-26` and advertise it in the docs.
 - `clojure/` (the frozen seed) stays until the freeze and remains on `arbace-for-java-26` for
   good, so that branch builds and verifies from its own checkout. It still serves as stage 0 of
   the bootstrap, j2c's regression corpus, the suite's reference results, and the replay of the
