@@ -4,6 +4,7 @@
   with constant values read from class files). Member lookup with Java's access rules (§5.6).
   Package class loaders with generations for the REPL (§10)."
   (:require [arbace.string :as str]
+            [arbace.set]
             [arbace.classes.types :as t])
   (:import (arbace.asm ClassReader ClassVisitor Opcodes)
            (java.lang.reflect Field Method Constructor Modifier)))
@@ -51,8 +52,60 @@
     (catch ClassNotFoundException _ nil)
     (catch NoClassDefFoundError _ nil))))
 
-(defn- read-constants
-  "Field name -> ConstantValue of the class file of c, read with ClassReader."
+(defn- read-fields
+  "The fields of the class file of c, read with ClassReader: [{:name :desc :flags :value}], or
+  nil without a class file. (Reflection hides some fields of the JDK's own classes,
+  jdk.internal.reflect.Reflection's filters.)"
+  [^Class c]
+  (try
+    (let [ld (or (.getClassLoader c) (ClassLoader/getSystemClassLoader))
+          in (.getResourceAsStream ld (str (internal c) ".class"))]
+      (when in
+        (with-open [in in]
+          (let [fields (atom [])
+                cv (proxy [ClassVisitor] [Opcodes/ASM9]
+                     (visitField [acc name desc sig value]
+                       (swap! fields conj {:name name :desc desc :flags acc :value value})
+                       nil))]
+            (.accept (ClassReader. in) cv (bit-or ClassReader/SKIP_CODE ClassReader/SKIP_DEBUG))
+            @fields))))
+    (catch Exception _ nil)))
+
+(defn- ann-reader
+  "An AnnotationVisitor collecting values in the compiler's annotation data format into
+  (put name value)."
+  [put]
+  (let [const (fn [v] (cond
+                        (instance? arbace.asm.Type v) {:class (.getDescriptor ^arbace.asm.Type v)}
+                        :else {:const {:val v :type (condp instance? v
+                                                       Integer "I" Long "J" Short "S" Byte "B"
+                                                       Character "C" Float "F" Double "D"
+                                                       Boolean "Z" "Ljava/lang/String;")}}))]
+    (proxy [arbace.asm.AnnotationVisitor] [Opcodes/ASM9]
+      (visit [n v]
+        (put n (if (and v (.isArray (class v)))
+                 {:array (mapv const (seq v))}
+                 (const v))))
+      (visitEnum [n d v] (put n {:enum d :name v}))
+      (visitAnnotation [n d]
+        (let [vals (atom {})]
+          (put n {:annotation {:type d :nested true :values vals}})
+          (ann-reader #(swap! vals assoc %1 %2))))
+      (visitArray [n]
+        (let [xs (atom [])]
+          (put n {:array xs})
+          (ann-reader (fn [_ v] (swap! xs conj v))))))))
+
+(defn- realize-ann [v]
+  (cond
+    (instance? arbace.lang.Atom v) (realize-ann @v)
+    (map? v) (into {} (map (fn [[k x]] [k (realize-ann x)]) v))
+    (vector? v) (mapv realize-ann v)
+    :else v))
+
+(defn read-method-annotations
+  "[name desc] -> {:annotations [...] :param-annotations [[...] ...]} of the methods of the
+  class file of c (the declaration annotations javac copies to bridges)."
   [^Class c]
   (try
     (let [ld (or (.getClassLoader c) (ClassLoader/getSystemClassLoader))
@@ -60,13 +113,21 @@
       (if-not in
         {}
         (with-open [in in]
-          (let [consts (atom {})
+          (let [ms (atom {})
                 cv (proxy [ClassVisitor] [Opcodes/ASM9]
-                     (visitField [acc name desc sig value]
-                       (when (some? value) (swap! consts assoc name value))
-                       nil))]
+                     (visitMethod [acc name desc sig exs]
+                       (let [k [name desc]
+                             n (count (first (t/parse-method-desc desc)))
+                             add (fn [path d vis]
+                                   (let [vals (atom {})]
+                                     (swap! ms update-in path (fnil conj []) {:type d :visible vis :values vals})
+                                     (ann-reader #(swap! vals assoc %1 %2))))]
+                         (swap! ms assoc k {:annotations [] :param-annotations (vec (repeat n []))})
+                         (proxy [arbace.asm.MethodVisitor] [Opcodes/ASM9]
+                           (visitAnnotation [d vis] (add [k :annotations] d vis))
+                           (visitParameterAnnotation [i d vis] (add [k :param-annotations i] d vis))))))]
             (.accept (ClassReader. in) cv (bit-or ClassReader/SKIP_CODE ClassReader/SKIP_DEBUG))
-            @consts))))
+            (realize-ann @ms)))))
     (catch Exception _ {})))
 
 (defn- coerce-const [desc v]
@@ -87,7 +148,7 @@
   (locking reflect-cache
     (or (.get reflect-cache c)
         (let [n (internal c)
-              consts (delay (read-constants c))
+              manns (delay (read-method-annotations c))
               info {:name n
                     :flags (.getModifiers c)
                     :interface? (.isInterface c)
@@ -95,28 +156,36 @@
                     :interfaces (mapv internal (.getInterfaces c))
                     :nest-host (internal (.getNestHost c))
                     :outer (some-> (.getDeclaringClass c) internal)
-                    :fields (vec (for [^Field f (.getDeclaredFields c)]
-                                   (let [fl (.getModifiers f)
-                                         d (t/class->desc (.getType f))]
-                                     {:name (.getName f) :desc d :flags fl :owner n
-                                      :const (when (and (Modifier/isStatic fl) (Modifier/isFinal fl)
-                                                        (or (t/prim? d) (= d t/string-desc)))
-                                               (delay (some->> (get @consts (.getName f)) (coerce-const d))))})))
+                    :fields (if-let [fs (read-fields c)]
+                              (vec (for [{:keys [name desc flags value]} fs]
+                                     {:name name :desc desc :flags flags :owner n
+                                      :const (when (and (Modifier/isFinal flags) (some? value)
+                                                        (or (t/prim? desc) (= desc t/string-desc)))
+                                               (coerce-const desc value))}))
+                              (vec (for [^Field f (.getDeclaredFields c)]
+                                     {:name (.getName f) :desc (t/class->desc (.getType f))
+                                      :flags (.getModifiers f) :owner n :const nil})))
                     ;; an inner member class: its constructors take the outer instance first
                     :outer-instance? (inner-member? c)
                     :methods (vec (concat
-                                    (for [^Method m (.getDeclaredMethods c)]
+                                    (for [^Method m (.getDeclaredMethods c)
+                                          :let [desc (t/method-desc (map t/class->desc (.getParameterTypes m))
+                                                                    (t/class->desc (.getReturnType m)))]]
                                       {:name (.getName m)
-                                       :desc (t/method-desc (map t/class->desc (.getParameterTypes m))
-                                                            (t/class->desc (.getReturnType m)))
+                                       :desc desc
                                        :flags (.getModifiers m) :owner n
-                                       :throws (mapv internal (.getExceptionTypes m))})
+                                       :throws (mapv internal (.getExceptionTypes m))
+                                       :annotations (delay (get-in @manns [[(.getName m) desc] :annotations]))
+                                       :param-annotations (map-indexed
+                                                           (fn [i _] (delay (get-in @manns [[(.getName m) desc] :param-annotations i])))
+                                                           (.getParameterTypes m))})
                                     (for [^Constructor m (.getDeclaredConstructors c)]
                                       {:name "<init>"
                                        :desc (t/method-desc (map t/class->desc (cond->> (seq (.getParameterTypes m))
                                                                                   (inner-member? c) rest))
                                                             "V")
-                                       :flags (.getModifiers m) :owner n})))
+                                       :flags (.getModifiers m) :owner n
+                                       :throws (mapv internal (.getExceptionTypes m))})))
                     :class c}]
           (.put reflect-cache c info)
           info))))
@@ -194,7 +263,17 @@
         (assignable? a b) b
         (assignable? b a) a
         (and (t/class-desc? a) (t/class-desc? b))
-        (t/internal->desc (common-super (t/desc->internal a) (t/desc->internal b)))
+        (let [c (common-super (t/desc->internal a) (t/desc->internal b))]
+          (if (= c "java/lang/Object")
+            ;; javac's lub: the common interface, when there is one most specific one
+            (let [sups (fn [n] (set (tree-seq some? (fn [x] (when-let [i (info x)]
+                                                             (cond-> (vec (:interfaces i)) (:super i) (conj (:super i)))))
+                                              n)))
+                  common (filter interface? (arbace.set/intersection (sups (t/desc->internal a))
+                                                                     (sups (t/desc->internal b))))
+                  minimal (remove (fn [i] (some #(and (not= % i) (subclass? % i)) common)) common)]
+              (if (= 1 (count minimal)) (t/internal->desc (first minimal)) t/object-desc))
+            (t/internal->desc c)))
         :else t/object-desc))
 
 ;; access

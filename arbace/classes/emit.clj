@@ -387,10 +387,14 @@
                                         (arg-types node)))
                   (spill-operands gen (:args node) (arg-types node)))
                 (invoke-insn gen node)
-                (when (:array-clone node)
-                  (.visitTypeInsn m Opcodes/CHECKCAST (:owner node))))
+                (doseq [[i anns] (:type-arg-anns node)]
+                  (write-insn-type-annotations gen arbace.asm.TypeReference/METHOD_INVOCATION_TYPE_ARGUMENT i anns))
+                (when (and (:array-clone node) (not (:no-cast node)))
+                  (.visitTypeInsn m Opcodes/CHECKCAST (or (some-> (:cast-to node) t/desc->internal) (:owner node)))))
       :new (emit-new gen node)
-      :ctor-call (fail "Constructor call outside the constructor prologue")
+      :ctor-call (if-let [site (:ctor-site gen)]
+                   (site gen)
+                   (fail "Constructor call outside the constructor prologue"))
       :new-array (let [d (:type node) dims (:dims node)]
                    (spill-operands gen dims (repeat "I"))
                    (cond
@@ -400,7 +404,8 @@
                                     (case (t/elem-type d) "Z" Opcodes/T_BOOLEAN "C" Opcodes/T_CHAR
                                           "F" Opcodes/T_FLOAT "D" Opcodes/T_DOUBLE "B" Opcodes/T_BYTE
                                           "S" Opcodes/T_SHORT "I" Opcodes/T_INT "J" Opcodes/T_LONG))
-                     :else (.visitTypeInsn m Opcodes/ANEWARRAY (t/desc->internal (t/elem-type d)))))
+                     :else (.visitTypeInsn m Opcodes/ANEWARRAY (t/desc->internal (t/elem-type d))))
+                   (write-insn-type-annotations gen arbace.asm.TypeReference/NEW nil (:type-anns node)))
       :array-init (let [d (:type node) et (t/elem-type d) elems (:elems node)
                         unsafe (some #(unsafe? gen %) elems)
                         temps (when unsafe
@@ -414,6 +419,7 @@
                                            "F" Opcodes/T_FLOAT "D" Opcodes/T_DOUBLE "B" Opcodes/T_BYTE
                                            "S" Opcodes/T_SHORT "I" Opcodes/T_INT "J" Opcodes/T_LONG))
                       (.visitTypeInsn m Opcodes/ANEWARRAY (t/desc->internal et)))
+                    (write-insn-type-annotations gen arbace.asm.TypeReference/NEW nil (:type-anns node))
                     (doseq [[i e] (map-indexed vector elems)]
                       (insn gen Opcodes/DUP)
                       (emit-const gen "I" i)
@@ -547,7 +553,9 @@
       :label (emit-label gen node :stmt)
       :try (emit-try gen node :stmt)
       :monitor (emit-monitor gen node :stmt)
-      :ctor-call (fail "Constructor call outside the constructor prologue")
+      :ctor-call (if-let [site (:ctor-site gen)]
+                   (site gen)
+                   (fail "Constructor call outside the constructor prologue"))
       (if (and (get-method emit-extra (:op node)) (not= (:op node) :default))
         ((get-method emit-extra (:op node)) gen node :stmt)
         (do (emit-expr gen node)
@@ -980,6 +988,9 @@
   (let [call (:call ab)
         m (mv gen)]
     (cond
+      ;; java.lang.Object's constructor calls none
+      (nil? call) nil
+
       (:enum-args call)
       (do (.visitVarInsn m Opcodes/ALOAD 0)
           (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
@@ -998,6 +1009,10 @@
           (.visitVarInsn m Opcodes/ALOAD 0)
           (when-let [s (:super-outer-slot gen)] (.visitVarInsn m Opcodes/ALOAD s))
           (when (:super-outer-is-outer d) (.visitVarInsn m Opcodes/ALOAD (:outer-slot gen)))
+          (when-let [p (:super-outer-path d)]
+            (.visitVarInsn m Opcodes/ALOAD (:outer-slot gen))
+            (doseq [c p]
+              (.visitFieldInsn m Opcodes/GETFIELD c (this0-name c) (t/internal->desc (:outer (a/decl! c))))))
           (when (:enum-slot gen)
             (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
             (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))
@@ -1059,16 +1074,22 @@
     ;; before the superclass constructor call captured values come from the parameters, after
     ;; it from the val$ fields, as javac does
     (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s))
-    (doseq [p (:prologue ab)] (emit gen p :stmt))
-    (emit-ctor-call gen d ab)
-    ;; field initializers read the outer instance and captured values from the fields (javac
-    ;; translates them in the class), the constructor body from the parameters
-    (when (:calls-super ab)
-      (doseq [[b _] cap-slots] (swap! (:slots gen) dissoc (:id b)))
-      (let [igen (if (this0-field? d) (dissoc gen :outer-slot) gen)]
-        (doseq [i (:init st)] (emit igen i :stmt)))
-      (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s)))
-    (when-let [b (:body ab)] (emit gen b :stmt))
+    (let [call-site (fn [gen]
+                      (emit-ctor-call gen d ab)
+                      ;; field initializers read the outer instance and captured values from
+                      ;; the fields (javac translates them in the class), the constructor body
+                      ;; from the parameters
+                      (when (:calls-super ab)
+                        (doseq [[b _] cap-slots] (swap! (:slots gen) dissoc (:id b)))
+                        (let [igen (if (this0-field? d) (dissoc gen :outer-slot) gen)]
+                          (doseq [i (:init st)] (emit igen i :stmt)))
+                        (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s))))]
+      (if (:nested-call ab)
+        ;; the call is inside the body's let forms: emitted where the body reaches it
+        (emit (assoc gen :ctor-site call-site) (:body ab) :stmt)
+        (do (doseq [p (:prologue ab)] (emit gen p :stmt))
+            (call-site gen)
+            (when-let [b (:body ab)] (emit gen b :stmt)))))
     (when (and (= :record (:kind d)) (or (:compact m) (= :record-canonical (:derived m))))
       (emit-assign-fields-from-params gen d (:params ab)))
     (when (or (nil? (:body ab)) (not= :none (:type (:body ab))))
@@ -1131,13 +1152,15 @@
         (loop [[[bp tp] & more] (map vector bps tps) slot 1]
           (when bp
             (xload gen bp slot)
-            (when (and (not= bp tp) (t/ref? tp))
+            (when (and (not= bp tp) (t/ref? tp) (not (env/assignable? bp tp)))
               (.visitTypeInsn mv Opcodes/CHECKCAST (t/desc->internal tp)))
             (recur more (+ slot (t/size bp)))))
         (cond
           (:special m)
-          (.visitMethodInsn mv Opcodes/INVOKESPECIAL (:owner target) (:name m) (:desc target)
-                            (boolean (env/interface? (:owner target))))
+          ;; a superclass's method is named by the direct superclass (javac's super call, JLS 13.1)
+          (let [o (if (env/interface? (:owner target)) (:owner target) (or (:super (a/decl n)) (:owner target)))]
+            (.visitMethodInsn mv Opcodes/INVOKESPECIAL o (:name m) (:desc target)
+                              (boolean (env/interface? o))))
           ;; arbace.lang.Compiler's bridges of reify and deftype classes call the most specific
           ;; method through its declaring interface
           (:clojure-bridge m)
@@ -1146,6 +1169,9 @@
                               (:owner target) (:name m) (:desc target) (boolean oi)))
           :else
           (.visitMethodInsn mv (if itf Opcodes/INVOKEINTERFACE Opcodes/INVOKEVIRTUAL) n (:name m) (:desc target) itf))
+        ;; a bridge returning a subtype of the implementation's return type casts (TransTypes)
+        (when (and (t/ref? br) (t/ref? tr) (not (env/assignable? tr br)))
+          (.visitTypeInsn mv Opcodes/CHECKCAST (t/desc->internal br)))
         (.visitInsn mv (opcode br Opcodes/IRETURN)))
       :record-accessor
       (let [c (:component m)]
@@ -1174,11 +1200,13 @@
         desc (if ctor? (ctor-real-desc n m) (:desc m))
         exc (when (seq (:throws m)) (into-array String (:throws m)))
         ;; javac gives constructors with captured locals a Signature of the declared parameters,
-        ;; except those of anonymous subclasses of classes
+        ;; except those of anonymous subclasses of classes and anonymous classes written with
+        ;; the diamond (^:diamond)
         sig (or (:sig m)
                 (when (and ctor?
                            (or (and (#{:local :anon} (:nesting d)) (seq (:captures st))
-                                    (or (= :local (:nesting d)) (seq (:interfaces d))))
+                                    (or (= :local (:nesting d))
+                                        (and (seq (:interfaces d)) (not (:diamond d)))))
                                (= :enum (:kind d))))
                   (str "(" (apply str (map #(if (:tn %) (t/signature (:tn %)) (:desc %)) (:params m))) ")V")))
         mv (.visitMethod cw (:flags m) (:name m) desc sig exc)
@@ -1247,23 +1275,76 @@
   (let [cr (ClassReader. bytes)
         buf (char-array (.getMaxStringLength cr))
         names (java.util.LinkedHashSet.)
+        used (java.util.HashSet.)
+        framed (java.util.HashSet.)
         add-desc (fn [^String d]
                    ;; class names in descriptors and signatures (Outer<T>.Inner in signatures too)
                    (doseq [[_ c] (re-seq #"L([^;<>.]+)[;<.]" d)] (.add names c)))]
     (.add names self)
-    ;; descriptors and signatures of the class's own members (javac enters their classes)
-    (.accept cr (proxy [ClassVisitor] [Opcodes/ASM9]
-                  (visit [v a n sig sup ifs] (when sig (add-desc sig)))
-                  (visitField [a n d sig v] (add-desc d) (when sig (add-desc sig)) nil)
-                  (visitMethod [a n d sig ex] (add-desc d) (when sig (add-desc sig)) nil)
-                  (visitRecordComponent [n d sig] (add-desc d) (when sig (add-desc sig)) nil))
-             (bit-or ClassReader/SKIP_CODE ClassReader/SKIP_DEBUG ClassReader/SKIP_FRAMES))
+    (doseq [c (sort (:const-classes @(:state (a/decl self))))] (.add names c))
+    ;; the local and anonymous classes declared in the class (javac's trans_local), referred to
+    ;; or not
+    (doseq [c @(:order a/*unit*)
+            :let [cd (a/decl c)]
+            :when (and (#{:anon :local} (:nesting cd)) (= self (:outer cd)))]
+      (.add names c))
+    ;; descriptors and signatures of the class's own members, and the types named in
+    ;; annotations (javac enters their classes)
+    (let [av (fn av [] (proxy [AnnotationVisitor] [Opcodes/ASM9]
+                         (visit [n v] (when (instance? Type v) (add-desc (.getDescriptor ^Type v))))
+                         (visitEnum [n d v] (add-desc d))
+                         (visitAnnotation [n d] (add-desc d) (av))
+                         (visitArray [n] (av))))
+          ann (fn [d] (add-desc d) (av))
+          use! (fn [c] (when c (.add used (str/replace c #"^\[+L?|;$" ""))))]
+      (.accept cr (proxy [ClassVisitor] [Opcodes/ASM9]
+                    (visit [v a n sig sup ifs] (when sig (add-desc sig)) (use! sup) (run! use! ifs))
+                    (visitNestHost [h] (use! h))
+                    (visitNestMember [m] (use! m))
+                    (visitPermittedSubclass [c] (use! c))
+                    (visitOuterClass [o n d] (use! o))
+                    (visitAnnotation [d vis] (ann d))
+                    (visitTypeAnnotation [r p d vis] (ann d))
+                    (visitField [a n d sig v] (add-desc d) (when sig (add-desc sig))
+                      (proxy [FieldVisitor] [Opcodes/ASM9]
+                        (visitAnnotation [d vis] (ann d))
+                        (visitTypeAnnotation [r p d vis] (ann d))))
+                    (visitMethod [a n d sig ex] (add-desc d) (when sig (add-desc sig)) (run! use! ex)
+                      (proxy [MethodVisitor] [Opcodes/ASM9]
+                        ;; classes only in stack map frames: ASM's merged types, not javac's
+                        (visitFrame [t nl locs ns stk]
+                          (doseq [x (concat locs stk) :when (string? x)] (.add framed x)))
+                        (visitTypeInsn [op t] (use! t))
+                        (visitFieldInsn [op o n d] (use! o))
+                        (visitMethodInsn [op o n d itf] (use! o))
+                        (visitLdcInsn [v] (cond (instance? Type v) (use! (.getInternalName ^Type v))
+                                                (instance? Handle v) (use! (.getOwner ^Handle v))))
+                        (visitInvokeDynamicInsn [n d ^Handle b bargs]
+                          (use! (.getOwner b))
+                          (doseq [x bargs] (cond (instance? Handle x) (use! (.getOwner ^Handle x))
+                                                 (instance? Type x) (when (= Type/OBJECT (.getSort ^Type x))
+                                                                      (use! (.getInternalName ^Type x))))))
+                        (visitMultiANewArrayInsn [d n] (use! d))
+                        (visitTryCatchBlock [s e h t] (use! t))
+                        (visitAnnotation [d vis] (ann d))
+                        (visitTypeAnnotation [r p d vis] (ann d))
+                        (visitParameterAnnotation [i d vis] (ann d))
+                        (visitAnnotationDefault [] (av))
+                        (visitInsnAnnotation [r p d vis] (ann d))
+                        (visitLocalVariableAnnotation [r p s e i d vis] (ann d))
+                        (visitTryCatchAnnotation [r p d vis] (ann d))))
+                    (visitRecordComponent [n d sig] (add-desc d) (when sig (add-desc sig))
+                      (proxy [arbace.asm.RecordComponentVisitor] [Opcodes/ASM9]
+                        (visitAnnotation [d vis] (ann d))
+                        (visitTypeAnnotation [r p d vis] (ann d)))))
+               ClassReader/SKIP_DEBUG))
     (doseq [i (range 1 (.getItemCount cr))]
       (let [off (.getItem cr i)]
         (when (pos? off)
           (case (int (.readByte cr (dec off)))
-            7 (let [c (.readUTF8 cr off buf)]
-                (.add names (str/replace c #"^\[+L?|;$" "")))
+            7 (let [c (str/replace (.readUTF8 cr off buf) #"^\[+L?|;$" "")]
+                (when (or (not (.contains framed c)) (.contains used c))
+                  (.add names c)))
             12 (add-desc (.readUTF8 cr (+ off 2) buf))
             16 (add-desc (.readUTF8 cr off buf))
             nil))))
@@ -1308,7 +1389,9 @@
                                  (if (or (:deprecated (:meta d))
                                          (some #(and (symbol? %) (#{"Deprecated" "java.lang.Deprecated"} (str %)))
                                                (keys (:meta d))))
-                                   Opcodes/ACC_DEPRECATED 0))
+                                   Opcodes/ACC_DEPRECATED 0)
+                                 ;; a Record attribute even without components (javac)
+                                 (if (= :record (:kind d)) Opcodes/ACC_RECORD 0))
             n (:signature d) (:super d) (into-array String (:interfaces d)))
     (if (= :top (:nesting d))
       (doseq [c @(:order a/*unit*) :when (and (not= c n) (= n (:nest-host (a/decl c))))]
@@ -1480,8 +1563,12 @@
         (.visitVarInsn m Opcodes/ILOAD len)
         (.visitJumpInsn m Opcodes/IF_ICMPGE exit)
         (emit gen (:elem node) :expr)
-        (xstore gen (:type b) (bind-hidden! gen b))
-        (emit gen2 (:body node) :stmt)
+        (let [s (bind-hidden! gen b) l (Label.) e (Label.)]
+          (xstore gen (:type b) s)
+          (.visitLabel m l)
+          (emit gen2 (:body node) :stmt)
+          (.visitLabel m e)
+          (when (seq (:type-anns b)) (write-local-type-annotations gen b l e s)))
         (.visitLabel m upd)
         (.visitIincInsn m i 1)
         (.visitJumpInsn m Opcodes/GOTO test))
@@ -1493,8 +1580,12 @@
         (.visitMethodInsn m Opcodes/INVOKEINTERFACE "java/util/Iterator" "hasNext" "()Z" true)
         (.visitJumpInsn m Opcodes/IFEQ exit)
         (emit gen (:elem node) :expr)
-        (xstore gen (:type b) (bind-hidden! gen b))
-        (emit gen2 (:body node) :stmt)
+        (let [s (bind-hidden! gen b) l (Label.) e (Label.)]
+          (xstore gen (:type b) s)
+          (.visitLabel m l)
+          (emit gen2 (:body node) :stmt)
+          (.visitLabel m e)
+          (when (seq (:type-anns b)) (write-local-type-annotations gen b l e s)))
         (.visitJumpInsn m Opcodes/GOTO upd)))
     ;; the loop's normal end gives nil; a break arrives at end with its value
     (.visitLabel m exit)
@@ -1609,6 +1700,15 @@
                           "(Ljava/lang/Object;)Ljava/lang/Object;" false)
         (insn gen Opcodes/POP)))
     (emit-indy-lambda gen node ctypes h)
+    ;; the type annotations of the reference's qualifying type and explicit type arguments
+    (let [ctor? (= :new kind)]
+      (write-insn-type-annotations gen (if ctor? arbace.asm.TypeReference/CONSTRUCTOR_REFERENCE
+                                           arbace.asm.TypeReference/METHOD_REFERENCE)
+                                   nil (:qualifier-anns node))
+      (doseq [[i anns] (:type-arg-anns node)]
+        (write-insn-type-annotations gen (if ctor? arbace.asm.TypeReference/CONSTRUCTOR_REFERENCE_TYPE_ARGUMENT
+                                             arbace.asm.TypeReference/METHOD_REFERENCE_TYPE_ARGUMENT)
+                                     i anns)))
     (intersection-casts gen node)
     (when (= ctx :stmt) (insn gen Opcodes/POP))))
 
