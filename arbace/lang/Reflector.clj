@@ -82,17 +82,23 @@
 
   (method ^:public ^:static invokeInstanceMethodOfClass [target ^Class c ^String methodName
                                                          ^Object/1 args]
-    (let [methods (cast
-                    List
-                    (.collect
-                      (.filter
-                        (.map
-                          (.stream (Reflector/getMethods c (alength args) methodName false))
-                          (lambda Function ^java.lang.reflect.Method [^java.lang.reflect.Method method]
-                            (Reflector/toAccessibleSuperMethod method target)))
-                        (method-ref Predicate [java.lang.reflect.Method] Objects/nonNull))
-                      (Collectors/toList)))]
-      (Reflector/invokeMatchingMethod methodName methods c target args)))
+    (Reflector/invokeMatchingMethod methodName
+                                    (Reflector/instanceMethods target c methodName (alength args))
+                                    c
+                                    target
+                                    args))
+
+  ;; The candidates of invokeInstanceMethodOfClass, also used by ReflectorCallSite (Arbace)
+  (method ^:static instanceMethods ^List [target ^Class c ^String methodName ^int arity]
+    (cast List
+          (.collect
+            (.filter
+              (.map
+                (.stream (Reflector/getMethods c arity methodName false))
+                (lambda Function ^java.lang.reflect.Method [^java.lang.reflect.Method method]
+                  (Reflector/toAccessibleSuperMethod method target)))
+              (method-ref Predicate [java.lang.reflect.Method] Objects/nonNull))
+            (Collectors/toList))))
 
   (method ^:public ^:static invokeInstanceMethodOfClass [target ^String className ^String methodName
                                                          ^Object/1 args]
@@ -156,8 +162,23 @@
                                     args))
 
   (method ^:static invokeMatchingMethod [^String methodName ^List methods ^Class contextClass target
-                                         ^:mutable ^Object/1 args]
-    (let [^:mutable ^java.lang.reflect.Method m nil]
+                                         ^Object/1 args]
+    (let [argsRef (new Object/2 1)]
+      (aset argsRef 0 args)
+      (let [m (Reflector/selectMatchingMethod methodName methods contextClass target argsRef)
+            args (aget argsRef 0)]
+        (try
+          (Reflector/prepRet (.getReturnType m)
+                             (.invoke m target (Reflector/boxArgs (.getParameterTypes m) args)))
+          (catch Exception e (throw (Util/sneakyThrow (Reflector/getCauseOrElse e))))))))
+
+  ;; The method invokeMatchingMethod calls, split from it for ReflectorCallSite (Arbace). It may
+  ;; replace the arguments in argsRef[0] with their widened copy.
+  (method ^:static selectMatchingMethod ^java.lang.reflect.Method [^String methodName ^List methods
+                                                                   ^Class contextClass target
+                                                                   ^Object/2 argsRef]
+    (let [^:mutable ^java.lang.reflect.Method m nil
+          ^:mutable ^Object/1 args (aget argsRef 0)]
       (cond
         (.isEmpty methods)
           (throw
@@ -168,6 +189,7 @@
             (set! m (Reflector/matchMethod methods args))
             (when (nil? m)
               (set! args (Reflector/widenBoxedArgs args))
+              (aset argsRef 0 args)
               (set! m (Reflector/matchMethod methods args)))))
       (when (nil? m)
         (throw (IllegalArgumentException. (Reflector/noMethodReport methodName contextClass args))))
@@ -178,10 +200,7 @@
           (when (nil? m)
             (throw (IllegalArgumentException.
                      (java-str "Can't call public method of non-public class: " (.toString oldm)))))))
-      (try
-        (Reflector/prepRet (.getReturnType m)
-                           (.invoke m target (Reflector/boxArgs (.getParameterTypes m) args)))
-        (catch Exception e (throw (Util/sneakyThrow (Reflector/getCauseOrElse e)))))))
+      m))
 
   (method ^:public ^:static getAsMethodOfPublicBase ^java.lang.reflect.Method [^Class c
                                                                                ^java.lang.reflect.Method m]
@@ -245,32 +264,40 @@
 
   (method ^:public ^:static invokeConstructor [^Class c ^Object/1 args]
     (try
-      (let [allctors (.getConstructors c)
-            ctors (ArrayList.)]
-        (loop [^int i 0]
-          (when (< i (alength allctors))
-            (let [ctor (aget allctors i)]
-              (if (== (alength (.getParameterTypes ctor)) (alength args))
-                  (do (.add ctors ctor) (recur (unchecked-inc-int i)))
-                  (recur (unchecked-inc-int i))))))
-        (cond
-          (.isEmpty ctors)
-            (throw (IllegalArgumentException. (java-str "No matching ctor found for " c)))
-          (== (.size ctors) 1)
-            (let [ctor (cast Constructor (.get ctors 0))]
-              (.newInstance ctor (Reflector/boxArgs (.getParameterTypes ctor) args)))
-          :else
-            (do
-              (loop [iterator (.iterator ctors)]
-                (when (.hasNext iterator)
-                  (let [ctor (cast Constructor (.next iterator))
-                        params (.getParameterTypes ctor)]
-                    (if (Reflector/isCongruent params args)
-                        (let [boxedArgs (Reflector/boxArgs params args)]
-                          (return (.newInstance ctor boxedArgs)))
-                        (recur iterator)))))
-              (throw (IllegalArgumentException. (java-str "No matching ctor found for " c))))))
+      (let [ctor (Reflector/selectConstructor c args)]
+        (.newInstance ctor (Reflector/boxArgs (.getParameterTypes ctor) args)))
       (catch Exception e (throw (Util/sneakyThrow (Reflector/getCauseOrElse e))))))
+
+  ;; The constructor invokeConstructor calls, split from it for ReflectorCallSite (Arbace). With
+  ;; one constructor of the arity it is that one, with more the first congruent one.
+  (method ^:static selectConstructor ^Constructor [^Class c ^Object/1 args]
+    (let [ctors (Reflector/constructors c (alength args))]
+      (cond
+        (.isEmpty ctors)
+          (throw (IllegalArgumentException. (java-str "No matching ctor found for " c)))
+        (== (.size ctors) 1) (cast Constructor (.get ctors 0))
+        :else
+          (do
+            (loop [iterator (.iterator ctors)]
+              (when (.hasNext iterator)
+                (let [ctor (cast Constructor (.next iterator))
+                      params (.getParameterTypes ctor)]
+                  (if (Reflector/isCongruent params args)
+                      (return ctor)
+                      (recur iterator)))))
+            (throw (IllegalArgumentException. (java-str "No matching ctor found for " c)))))))
+
+  ;; The public constructors of c taking arity parameters
+  (method ^:static constructors ^ArrayList [^Class c ^int arity]
+    (let [allctors (.getConstructors c)
+          ctors (ArrayList.)]
+      (loop [^int i 0]
+        (when (< i (alength allctors))
+          (let [ctor (aget allctors i)]
+            (if (== (alength (.getParameterTypes ctor)) arity)
+                (do (.add ctors ctor) (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i))))))
+      ctors))
 
   (method ^:public ^:static invokeStaticMethodVariadic [^String className ^String methodName &
                                                         ^Object/1 args]

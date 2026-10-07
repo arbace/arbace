@@ -33,3 +33,9 @@
 (with-out-str (prn (range 3) "s" 1.5 \c))
 (sort-by :a [{:a 2} {:a 1}])
 (frequencies "abracadabra")
+;; reflective calls (arbace.lang.ReflectorCallSite), each site called thrice so it links: an
+;; instance method, overloaded and not, a no-argument member, a field, a static method, a
+;; constructor
+(let [f (fn [s x t] [(.indexOf s x) (.substring s (count x)) (.length s) (Math/abs (count x))
+                     (java.util.ArrayList. (count x)) (.-x t)])]
+  (dotimes [_ 3] (f "abc" "b" (TrainingT. 1)) (f (StringBuilder. "abc") "b" (TrainingT. 2))))

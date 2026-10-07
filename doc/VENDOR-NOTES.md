@@ -526,6 +526,87 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    (thread counts are the JVM's peak of platform threads; the virtual threads run on the
    carrier pool.) The JDK AOT cache still applies with the property set.
 
+10. **Reflective calls are `invokedynamic` inline caches** (`doc/MODERN-COMPILER.md` §2.2, §4.1,
+   §4.8). The Clojure compiler emitted a call of `Reflector` for each call it could not resolve,
+   and `Reflector` searched the class's methods on every call. Now:
+   - `arbace/lang/Compiler.clj`: the unresolved emissions of `InstanceMethodExpr` (upstream
+     `Compiler.java` `invokeInstanceMethod`/`invokeInstanceMethodOfClass`), `InstanceFieldExpr`
+     (`invokeNoArgInstanceMember`, `requireField` or not), `StaticMethodExpr`
+     (`invokeStaticMethod`) and `NewExpr` (`invokeConstructor`) emit the target and arguments as
+     before (each as an `Object`, in the same order), then `invokedynamic "invoke"
+     (Object...)Object` with the bootstrap `ReflectorCallSite.bootstrap` and the static arguments
+     member name, class name (the qualifying class, or the class of a static method or
+     constructor; `""` for none) and kind (`METHOD`, `MEMBER`, `FIELD`, `STATIC`, `NEW`). The
+     new `Compiler/emitReflectorSite` and `Compiler/isSystemClass` do it. The old emission stays
+     for more than 20 arguments, for a static method named `new`, and when the class named in
+     the site is not of the boot or platform loader (a user class: its name can denote a newer
+     class after a REPL redefinition, which `RT.classForName` per call finds and a cached class
+     would not); unqualified instance calls are guarded on the receiver's class and need no
+     name. Field assignment (`setInstanceField`) keeps `Reflector`: it is rare, and a cached
+     setter would be the place where JEP 500's final-field rules bite. Reflection warnings are
+     made at analysis, unchanged; `eval` of top-level forms uses `Reflector` as before.
+   - `arbace/lang/ReflectorCallSite.clj` (new, Arbace's own class form): a `MutableCallSite`
+     per site. Its fallback goes through `Reflector`'s unchanged path for the first call of a
+     site (a site run once never links), and from the second call on it first links an entry:
+     it finds the member `Reflector` would call with `Reflector`'s own code, unreflects it from
+     its own lookup (in `arbace.lang`, as `Reflector`, so the same access rules and the same
+     caller for caller-sensitive methods), and adapts it with `Reflector`'s argument conversion
+     (a `boxArg` filter, after `widenBoxedArgs` where `Reflector` widened; a plain cast or unboxing
+     where the guarded argument class makes `boxArg` one) and return conversion (`prepRet` for a
+     `Boolean` result). The entry is guarded on the receiver's class, and on the argument
+     classes (nil as `Void`) when there was more than one candidate, so the choice, which then
+     depends on them, is `Reflector`'s for every call it takes. Entries are prepended to the
+     site's target as `guardWithTest` (8 at most); past that the site is megamorphic and its
+     fallback scans the entries (64 at most), then goes through `Reflector`. The call that links
+     still goes through `Reflector`. Whatever is not cached goes through `Reflector` too, which
+     so throws its own exceptions with its own messages: a nil receiver, a call `Reflector`
+     refuses, a member a method handle cannot reach (after 8 failed links a site stops
+     trying). Exceptions of the called member pass through unwrapped, as `Reflector` unwraps
+     `InvocationTargetException`; an exception of `boxArg` is unwrapped as `Reflector` does.
+     No field is written through it (JEP 500). A site keeps the classes of its entries
+     reachable, as a protocol call site's `__cached_class__` field does: a site in a long-lived
+     class that saw a REPL-defined receiver class keeps that class's loader alive.
+   - `arbace/lang/Reflector.clj`: the selection is split from the invocation, unchanged, so
+     both paths share it: `selectMatchingMethod` (what `invokeMatchingMethod` chose and checked;
+     it returns the widened arguments through a one-element array), `instanceMethods` (the
+     candidates of `invokeInstanceMethodOfClass`), `selectConstructor` and `constructors` (of
+     `invokeConstructor`). The public methods behave as before.
+   - `test/native/reflect_test.clj` compares each kind of site, on its first calls and cached,
+     with `Reflector`'s results and exceptions: mono-, poly- and megamorphic receivers (80
+     classes), threads, overloads chosen by runtime argument types (widened `Integer`, `Short`,
+     `Byte`, `Float`; `Ratio`, `BigInt`, nil), nil receivers and arguments, error messages, fields
+     and no-argument members, canonical `Boolean`s, functional-interface adaptation, qualified
+     calls, static methods and constructors; and checks by the stack (no `Method.invoke` frame)
+     that cached calls bypass `Reflector`. `test/aot-training.clj` runs a few reflective sites,
+     so the AOT cache holds what they load.
+
+   Measured (JDK 26, one JVM per row, after warm-up, best of five runs of 10⁶-2·10⁶ calls, the
+   arguments un-hinted):
+
+   | call | `Reflector` | call site |
+   |---|---:|---:|
+   | `(.length s)` (a member, monomorphic) | 1,053 ns | 2.0 ns |
+   | `(.get m k)` (`HashMap`) | 492 ns | 8 ns |
+   | `(.append sb x)` (overloads, `Long`) | 1,972 ns | 14-17 ns |
+   | `(.indexOf s "c" 1)` (overloads) | 1,443 ns | 7 ns |
+   | `(.size c)`, 2 / 4 receiver classes | 521 / 611 ns | 6 / 6 ns |
+   | `(.size c)`, 10 classes (megamorphic) | 690 ns | 14-21 ns |
+   | `(.contains c x)`, 3 classes | 920 ns | 6 ns |
+   | `(Math/abs x)`, `(Math/max x y)` | 2,041 / 2,123 ns | 1.2 / 3.3 ns |
+   | `(ArrayList. x)`, `(StringBuilder. x)` | 427 / 465 ns | 9 / 12 ns |
+
+   The cost is once per site. A site's first call (the JVM's linkage of the `invokedynamic` and
+   the bootstrap, then `Reflector`) and its second (the link) cost more than `Reflector`'s
+   calls; from the third call on it is cheaper. In a cold JVM (the jar with its AOT cache, 300
+   fresh sites, each called thrice): 108 / 91 / 3 µs per site against 64 / 20 / 12 µs; with the
+   JIT warm, 8-20 / 5-28 / 1 µs against 3.5-4 / 2 / 2 µs. So a site called fewer than about 20
+   times in a cold JVM costs more than before, by at most about 0.1 ms; a script of 300
+   reflective sites each run once took 1.07 → 1.18 s, each run 100 times 1.52 → 1.50 s.
+   Startup is unchanged (`bin/arbace -e '(+ 1 2)'` 213 ms → 214 ms, the AOT training session
+   802 → 779 ms): no reflective site runs at startup. The JDK AOT cache does not pre-resolve
+   custom bootstraps, so every launch pays the linkage again. The stages hold 31 classes with
+   such sites (`ReflectorCallSite` itself not counted).
+
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.

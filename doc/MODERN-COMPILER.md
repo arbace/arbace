@@ -80,6 +80,12 @@ major version 70.
    level). `locking` no longer pins carriers since JEP 491 (24), and `LazySeq` and `Delay`
    already use `ReentrantLock`.
 
+Item 5, reflective calls: done (2026-10-07). Unresolved instance calls, no-argument members,
+fields, static methods and constructors are `invokedynamic` sites, `arbace.lang.ReflectorCallSite`,
+caching `Reflector`'s choice per receiver class (and argument classes where it depends on them):
+100 to 1,700 times faster per call at steady state, for 10 to 100 µs more once per site; see
+`doc/VENDOR-NOTES.md`, hand change 10.
+
 **Defer**
 
 - `invokedynamic` for Var calls. It brings no steady-state gain at monomorphic sites, a link cost

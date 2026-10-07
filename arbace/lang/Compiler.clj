@@ -260,6 +260,40 @@
 
   (field ^:static ^:final ^Type REFLECTOR_TYPE (Type/getType Reflector))
 
+  ;; Arbace: the bootstrap of reflective call sites (arbace.lang.ReflectorCallSite)
+  (field ^:private ^:static ^:final ^Handle REFLECTOR_SITE_BOOTSTRAP
+    (Handle.
+      Opcodes/H_INVOKESTATIC
+      "arbace/lang/ReflectorCallSite"
+      "bootstrap"
+      "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/invoke/CallSite;"
+      false))
+
+  ;; Arbace: an invokedynamic reflective call of the arguments on the stack, all Objects: the
+  ;; target and nargs arguments for ReflectorCallSite's kinds METHOD (0), MEMBER (1) and FIELD (2),
+  ;; nargs arguments for STATIC (3) and NEW (4)
+  (method ^:static emitReflectorSite ^void [^GeneratorAdapter gen ^String name ^String qualifier
+                                            ^int kind ^int nargs]
+    (let [desc (StringBuilder. (if (< kind 3) "(Ljava/lang/Object;" "("))]
+      (loop [^int i 0]
+        (when (< i nargs)
+          (.append desc "Ljava/lang/Object;")
+          (recur (unchecked-inc-int i))))
+      (.append desc ")Ljava/lang/Object;")
+      (.visitInvokeDynamicInsn gen
+                               "invoke"
+                               (.toString desc)
+                               REFLECTOR_SITE_BOOTSTRAP
+                               (new Object/1 [name
+                                              (if (some? qualifier) qualifier "")
+                                              (Integer/valueOf kind)]))))
+
+  ;; Arbace: whether c is a class of the boot or platform loader, whose name always denotes it;
+  ;; ReflectorCallSite resolves the name of such a class once
+  (method ^:static isSystemClass ^boolean [^Class c]
+    (let [l (.getClassLoader c)]
+      (or (nil? l) (identical? l (ClassLoader/getPlatformClassLoader)))))
+
   (field ^:static ^:final ^Type THROWABLE_TYPE (Type/getType Throwable))
 
   (field ^:static ^:final ^Type BOOLEAN_OBJECT_TYPE (Type/getType Boolean))
@@ -1568,9 +1602,7 @@
           (do
             (.emit target C/EXPRESSION objx gen)
             (.visitLineNumber gen line (.mark gen))
-            (.push gen fieldName)
-            (.push gen requireField)
-            (.invokeStatic gen REFLECTOR_TYPE invokeNoArgInstanceMember)
+            (arbace.lang.Compiler/emitReflectorSite gen fieldName nil (if requireField 2 1) 0)
             (when (identical? context C/STATEMENT) (.pop gen)))))
 
     (method ^:public hasJavaClass ^boolean [this]
@@ -2032,18 +2064,37 @@
                         (.pop2 gen)
                         (when-not (identical? retClass Void/TYPE) (.pop gen)))
                     (HostExpr/emitBoxReturn objx gen retClass)))))
-          (do
-            (.emit target C/EXPRESSION objx gen)
-            (when (some? qualifyingClass) (.push gen (.getName qualifyingClass)))
-            (.push gen methodName)
-            (InstanceMethodExpr/emitArgsAsArray args objx gen)
-            (.visitLineNumber gen line (.mark gen))
-            (when (identical? context C/RETURN)
-              (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
-            (if (some? qualifyingClass)
-                (.invokeStatic gen REFLECTOR_TYPE invokeInstanceMethodOfClassMethod)
-                (.invokeStatic gen REFLECTOR_TYPE invokeInstanceMethodMethod))
-            (when (identical? context C/STATEMENT) (.pop gen)))))
+          (if (and (<= (.count args) MAX_POSITIONAL_ARITY)
+                   (or (nil? qualifyingClass) (arbace.lang.Compiler/isSystemClass qualifyingClass)))
+              (do
+                ;; Arbace: an invokedynamic site caching Reflector's choice (ReflectorCallSite)
+                (.emit target C/EXPRESSION objx gen)
+                (loop [^int i 0]
+                  (when (< i (.count args))
+                    (.emit (cast Expr (.nth args i)) C/EXPRESSION objx gen)
+                    (recur (unchecked-inc-int i))))
+                (.visitLineNumber gen line (.mark gen))
+                (when (identical? context C/RETURN)
+                  (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
+                (arbace.lang.Compiler/emitReflectorSite gen
+                                                        methodName
+                                                        (when (some? qualifyingClass)
+                                                          (.getName qualifyingClass))
+                                                        0
+                                                        (.count args))
+                (when (identical? context C/STATEMENT) (.pop gen)))
+              (do
+                (.emit target C/EXPRESSION objx gen)
+                (when (some? qualifyingClass) (.push gen (.getName qualifyingClass)))
+                (.push gen methodName)
+                (InstanceMethodExpr/emitArgsAsArray args objx gen)
+                (.visitLineNumber gen line (.mark gen))
+                (when (identical? context C/RETURN)
+                  (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
+                (if (some? qualifyingClass)
+                    (.invokeStatic gen REFLECTOR_TYPE invokeInstanceMethodOfClassMethod)
+                    (.invokeStatic gen REFLECTOR_TYPE invokeInstanceMethodMethod))
+                (when (identical? context C/STATEMENT) (.pop gen))))))
 
     (method ^:public hasJavaClass ^boolean [this]
       (or (some? method) (some? tag)))
@@ -2251,17 +2302,31 @@
                         (.pop2 gen)
                         (when-not (identical? retClass Void/TYPE) (.pop gen)))
                     (HostExpr/emitBoxReturn objx gen (.getReturnType method))))))
-          (do
-            (.visitLineNumber gen line (.mark gen))
-            (.push gen (.getName c))
-            (.invokeStatic gen RT_TYPE forNameMethod)
-            (.push gen methodName)
-            (StaticMethodExpr/emitArgsAsArray args objx gen)
-            (.visitLineNumber gen line (.mark gen))
-            (when (identical? context C/RETURN)
-              (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
-            (.invokeStatic gen REFLECTOR_TYPE invokeStaticMethodMethod)
-            (when (identical? context C/STATEMENT) (.pop gen)))))
+          (if (and (and (<= (.count args) MAX_POSITIONAL_ARITY) (not (.equals methodName "new")))
+                   (arbace.lang.Compiler/isSystemClass c))
+              (do
+                ;; Arbace: an invokedynamic site caching Reflector's choice (ReflectorCallSite)
+                (.visitLineNumber gen line (.mark gen))
+                (loop [^int i 0]
+                  (when (< i (.count args))
+                    (.emit (cast Expr (.nth args i)) C/EXPRESSION objx gen)
+                    (recur (unchecked-inc-int i))))
+                (.visitLineNumber gen line (.mark gen))
+                (when (identical? context C/RETURN)
+                  (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
+                (arbace.lang.Compiler/emitReflectorSite gen methodName (.getName c) 3 (.count args))
+                (when (identical? context C/STATEMENT) (.pop gen)))
+              (do
+                (.visitLineNumber gen line (.mark gen))
+                (.push gen (.getName c))
+                (.invokeStatic gen RT_TYPE forNameMethod)
+                (.push gen methodName)
+                (StaticMethodExpr/emitArgsAsArray args objx gen)
+                (.visitLineNumber gen line (.mark gen))
+                (when (identical? context C/RETURN)
+                  (let [method (cast ObjMethod (.deref METHOD))] (.emitClearLocals method gen)))
+                (.invokeStatic gen REFLECTOR_TYPE invokeStaticMethodMethod)
+                (when (identical? context C/STATEMENT) (.pop gen))))))
 
     (method ^:public hasJavaClass ^boolean [this]
       (or (some? method) (some? tag)))
@@ -2874,11 +2939,19 @@
             (.dup gen)
             (MethodExpr/emitTypedArgs objx gen (.getParameterTypes ctor) args)
             (.invokeConstructor gen type (Method. "<init>" (Type/getConstructorDescriptor ctor))))
-          (do
-            (.push gen (arbace.lang.Compiler/destubClassName (.getName c)))
-            (.invokeStatic gen RT_TYPE forNameMethod)
-            (MethodExpr/emitArgsAsArray args objx gen)
-            (.invokeStatic gen REFLECTOR_TYPE invokeConstructorMethod)))
+          (if (and (<= (.count args) MAX_POSITIONAL_ARITY) (arbace.lang.Compiler/isSystemClass c))
+              (do
+                ;; Arbace: an invokedynamic site caching Reflector's choice (ReflectorCallSite)
+                (loop [^int i 0]
+                  (when (< i (.count args))
+                    (.emit (cast Expr (.nth args i)) C/EXPRESSION objx gen)
+                    (recur (unchecked-inc-int i))))
+                (arbace.lang.Compiler/emitReflectorSite gen "new" (.getName c) 4 (.count args)))
+              (do
+                (.push gen (arbace.lang.Compiler/destubClassName (.getName c)))
+                (.invokeStatic gen RT_TYPE forNameMethod)
+                (MethodExpr/emitArgsAsArray args objx gen)
+                (.invokeStatic gen REFLECTOR_TYPE invokeConstructorMethod))))
       (when (identical? context C/STATEMENT) (.pop gen)))
 
     (method ^:public hasJavaClass ^boolean [this] true)
