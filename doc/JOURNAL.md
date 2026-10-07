@@ -661,3 +661,25 @@ instead of calling `arbace.classes`'s resolution.
   jumps via `recur`. A group of mutually recursive fns known at compile time could be fused
   into one method with a dispatch switch. Full Scheme-style tail calls are a point for an own
   runtime.
+
+## 2026-10-07: Direction: excellent on the JVM now, standalone on bare metal later
+
+- The user set Arbace's direction:
+  - Short term: make Arbace excellent on the modern JVM (Java 26). The first step was started
+    now: AOT-compile all namespaces into the stages and use the JDK AOT cache (survey item 1).
+  - Long term: Arbace will not be binary compatible with the Java ecosystem. Java source stays
+    usable through j2c transcription.
+  - The Arbace language: Clojure extended with an idiomatic representation of Java (the class
+    forms), and later a projection of Go into the same dialect.
+  - The goal: a self-sustaining REPL inside a virtual sandbox, written in Arbace all the way
+    down to the bare metal ISA, much like Go plus TamaGo. The JVM is overkill for this; the Go
+    runtime is the promising inspiration.
+  - Two target environments: /dev/kvm on amd64 with an Alpine edge Linux host, and
+    Hypervisor.framework on arm64 with a macOS host.
+  - Before breaking away from the `.class` format and the JVM, freeze the JVM state of the art
+    on a well-known branch, `arbace-for-java-26`, advertised in the docs. It is not created yet,
+    because the JVM work is still going on.
+- New prior art: https://github.com/usbarmory/tamago (Go on bare metal) and
+  https://github.com/candid82/joker (a Clojure dialect in Go). Go changes role: before, only the
+  runtime was in scope; now the language too, as a later projection into Arbace.
+- Recorded in CLAUDE.md ("Direction", prior art), README and AGENDA.

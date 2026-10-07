@@ -51,6 +51,16 @@ The current state of the work. This file is rewritten as things change. For the 
   first recommendation is to AOT-compile all namespaces into the stages and use the JDK AOT
   cache: launch time measured 3.3 s → 0.45 s. Then add `ClassFile.verify` to the checks and
   emit classfile version 70.
-- Decide which native runtime Arbace targets, and how much of a JVM-like or Go-like runtime it
-  reimplements. One input: Java 26 has no tail calls, while an own runtime could have proper
-  ones.
+- Short term, now: make Arbace excellent on the JVM. In progress: AOT-compile all namespaces into
+  the stages, plus a JDK AOT cache and a launcher (survey item 1).
+
+## Later
+
+- Before breaking away from the JVM and the `.class` format: freeze the JVM state of the art on
+  the branch `arbace-for-java-26` and advertise it in the docs.
+- The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.
+  The language is Clojure plus class forms, and later forms for Go. The goal is a
+  self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
+  of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
+  Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
+  GC), with proper tail calls possible.

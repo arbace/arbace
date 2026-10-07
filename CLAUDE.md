@@ -8,11 +8,25 @@ Arbace is a from-scratch reimplementation of Clojure in Clojure. Studying prior 
 parts of it is always allowed. The work is a derivation done once by hand, so it must stay
 reproducible from the record we keep.
 
+Direction:
+- Short term: Arbace is excellent on the modern JVM (Java 26), binary compatible with it.
+- Before breaking away from the JVM and the `.class` format, the JVM state of the art is frozen
+  on a well-known branch, `arbace-for-java-26`, advertised in the docs.
+- Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
+  usable at the source level through j2c. The language is Clojure extended with an idiomatic
+  representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
+  self-sustaining REPL inside a virtual sandbox, written in Arbace all the way down to the bare
+  metal ISA, in the way of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host),
+  and Hypervisor.framework on arm64 (macOS host).
+
 Prior art:
 - https://github.com/clojure/clojure covers the language.
-- https://github.com/openjdk/jdk26u covers the native runtime.
-- https://github.com/golang/go is a model for a slimmer runtime and anything else useful from it.
-  The Go language itself is out of scope.
+- https://github.com/openjdk/jdk26u covers the JVM runtime, the near-term target.
+- https://github.com/golang/go is the model for a slimmer runtime of Arbace's own, and later a
+  language to project into Arbace, as Java was.
+- https://github.com/usbarmory/tamago: Go on bare metal, the model for running in a sandbox
+  without an OS.
+- https://github.com/candid82/joker: a Clojure dialect implemented in Go.
 
 ## Layout
 
