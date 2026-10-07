@@ -21,7 +21,7 @@ and stage 2.
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
-| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): the 812 classes of each stage |
+| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` (815) and the AOT-compiled `arbace.classes` namespaces (1,289) |
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
