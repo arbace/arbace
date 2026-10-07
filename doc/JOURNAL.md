@@ -970,3 +970,16 @@ recommended:
   to `arbace-for-java-26`; it can be started by hand on any ref (`workflow_dispatch`)
   (`44cf328`). The in-progress run on main was cancelled. main is gated by running the checks
   locally, as before.
+
+## 2026-10-07: Plan for clojure/ after the freeze
+
+- The user asked whether `clojure/` is still needed. It still serves as:
+  - stage 0 of the bootstrap and of `bin/class-forms-tests`;
+  - j2c's regression corpus (`bin/j2c-check`);
+  - the reference for `bin/clojure-tests` (`test/baseline-results.edn`);
+  - the source for `bin/vendor-arbace` and `bin/vendor-spec`.
+- It is 5.4 MB, 1,044 files with 812 tracked classes. It differs from upstream `98d735fab02f`
+  by the spec stub, the separately pinned ASM and the two approved fixes.
+- Agreed plan (in AGENDA): keep it until the freeze and on `arbace-for-java-26` for good. On main
+  after the break, replace it, preferably by a Go-style binary seed (the freeze tag's jar,
+  pinned by hash), otherwise by a pinned upstream fetch plus patches. Decide at the break.
