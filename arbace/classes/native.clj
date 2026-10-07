@@ -14,7 +14,10 @@
     it into a fn class, a subclass of arbace.lang.AFunction or RestFn named as the compiler
     names its fn classes, whose code is compiled with Clojure's meaning (SPEC §5.13), and
     returns the form the compiler analyzes in its place: (new C captured-local...).
-    The locals of the compiler's environment that the fn uses become the class's fields."
+    The locals of the compiler's environment that the fn uses become the class's fields.
+  - `compile-deftype`, for a deftype* one of whose method bodies uses the class forms: compiles
+    and defines the deftype class, with the shape arbace.lang.Compiler gives it, and returns
+    nil, the value of deftype*."
   (:require [arbace.string :as str]
             [arbace.classes.env :as env]
             [arbace.classes.lower :as lower]
@@ -32,6 +35,18 @@
     ;; the classes themselves, not their names: a name in the unnamed package would not resolve
     `(do ~@(for [[n] loaded] (list 'arbace.core/import* n))
          ~(if (= :top kind) (second (first loaded)) (mapv second loaded)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; deftypes handed over by arbace.lang.Compiler
+
+(defn compile-deftype
+  "Compiles (deftype* tagname classname [fields] :implements [interfaces] ...) in namespace ns
+  into the deftype class (arbace.classes.lower/deftype-class-form) and defines it (writing it
+  under *compile-files*). Returns nil, the form to analyze in place of deftype*."
+  [ns form]
+  (binding [*ns* ns]
+    (compiler/compile-and-load! ns [(lower/deftype-class-form form)]))
+  nil)
 
 ;; ---------------------------------------------------------------------------------------------
 ;; fns handed over by arbace.lang.Compiler

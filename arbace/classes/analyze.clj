@@ -443,6 +443,70 @@
                   (:desc m)))]
     (when (= 1 (count cands)) (first cands))))
 
+(defn- clojure-overrideables
+  "arbace.lang.Compiler's NewInstanceExpr.gatherMethods for class n (a reify or deftype class):
+  the methods of its supertypes it can implement (public or protected, neither static nor
+  final), one per name and parameter types, the one with the most specific return type."
+  [n]
+  (vals
+    (reduce (fn [acc m]
+              (let [[ps r] (t/parse-method-desc (:desc m))
+                    k [(:name m) (vec ps)]]
+                (if-let [om (get acc k)]
+                  (let [oret (second (t/parse-method-desc (:desc om)))]
+                    (if (or (= oret r) (and (t/ref? oret) (t/ref? r) (env/assignable? r oret)))
+                      (assoc acc k m)
+                      acc))
+                  (assoc acc k m))))
+            (array-map)
+            (for [s (rest (env/all-supertypes n))
+                  m (:methods (env/info! s))
+                  :when (not (#{"<init>" "<clinit>"} (:name m)))
+                  :when (has? (:flags m) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
+                  :when (not (has? (:flags m) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_FINAL)))]
+              m))))
+
+(defn- clojure-tag-desc
+  "The descriptor of arbace.lang.Compiler's tagClass of a hint: Object without one."
+  [scope tag]
+  (cond (nil? tag) t/object-desc
+        (instance? Class tag) (t/class->desc tag)
+        (and (string? tag) (str/starts-with? tag "[")) (str/replace tag "." "/")
+        :else (erase scope (parse-type scope (symbol (str tag))))))
+
+(defn- class-name-of
+  "Class.getName of the class of descriptor d."
+  [d]
+  (or (t/prim-desc->name d) (t/desc->class-name d)))
+
+(defn- clojure-override
+  "The method of class n's supertypes that a method of reify or deftype named mname (munged)
+  with parameters params and return hint ret-tag implements, chosen as arbace.lang.Compiler's
+  NewInstanceMethod.parse chooses it, with its errors: the only method with that name and arity
+  when nothing is hinted; otherwise the one whose parameter types are the hinted classes
+  (Object where unhinted), whose return type must be the hinted class (Object when unhinted)."
+  [n scope mname ret-tag params]
+  (let [hinted (or (some? ret-tag) (boolean (some tag-of params)))
+        pdescs (mapv #(clojure-tag-desc scope (tag-of %)) params)
+        rdesc (clojure-tag-desc scope ret-tag)
+        matches (filter #(and (= mname (:name %))
+                              (= (count params) (count (first (t/parse-method-desc (:desc %))))))
+                        (clojure-overrideables n))
+        exact #(first (filter (fn [m] (= pdescs (vec (first (t/parse-method-desc (:desc m)))))) matches))
+        check-ret (fn [m]
+                    (let [r (second (t/parse-method-desc (:desc m)))]
+                      (when-not (= r rdesc)
+                        (fail (str "Mismatched return type: " mname ", expected: " (class-name-of r)
+                                   ", had: " (class-name-of rdesc))))
+                      m))]
+    (cond
+      (empty? matches) (fail (str "Can't define method not in interfaces: " mname))
+      (next matches) (do (when-not hinted (fail (str "Must hint overloaded method: " mname)))
+                         (check-ret (or (exact) (fail (str "Can't find matching overloaded method: " mname)))))
+      hinted (check-ret (or (exact) (fail (str "Can't find matching method: " mname
+                                               ", leave off hints for auto match."))))
+      :else (first matches))))
+
 (defn- method-scope [scope tparams-form]
   (let [syms (map #(if (symbol? %) % (first %)) tparams-form)
         s1 (update scope :bounds merge (zipmap syms (repeat [])))
@@ -490,19 +554,27 @@
             (fail (str "Instance method " (:name m) " needs a receiver parameter")))
         untyped? (and (not static?) (nil? (:tag (:vmeta m))) (not-any? tag-of params)
                       (not (iface-kind? d)))
-        inferred (when untyped? (infer-signature n (:name m) (count params)))
-        pinfos (if inferred
+        ;; a method of reify or deftype (arbace.classes.lower/clojure-method)
+        clj (when (and (:clojure-method meta) (not static?))
+              (clojure-override n scope (:name m) (:tag meta) params))
+        inferred (if clj (:desc clj) (when untyped? (infer-signature n (:name m) (count params))))
+        pinfos (cond
+                 clj (mapv (fn [s pd] {:sym s :desc pd :tn (t/desc->tnode pd) :meta (arbace.core/meta s) :flags 0})
+                           params (first (t/parse-method-desc inferred)))
+                 inferred
                  (let [[ps r] (t/parse-method-desc inferred)]
                    (mapv (fn [s pd] {:sym s :desc pd :tn (parse-type scope (symbol (t/desc->class-name pd)))
                                      :meta (arbace.core/meta s) :flags 0})
                          params ps))
-                 (mapv #(param-info scope %) params))
+                 :else (mapv #(param-info scope %) params))
         pinfos (if inferred (mapv (fn [pi] (if (t/prim? (:desc pi)) (assoc pi :tn {:t :prim :desc (:desc pi)}) pi)) pinfos) pinfos)
-        ret-tn (if inferred
+        ret-tn (cond
+                 clj (t/desc->tnode (second (t/parse-method-desc inferred)))
+                 inferred
                  (let [r (second (t/parse-method-desc inferred))]
                    (if (or (t/prim? r) (= r "V")) {:t :prim :desc r}
                        (parse-type scope (symbol (t/desc->class-name r)))))
-                 (parse-type scope (or (:tag (:vmeta m)) 'java.lang.Object)))
+                 :else (parse-type scope (or (:tag (:vmeta m)) 'java.lang.Object)))
         ret (erase scope ret-tn)
         throws-tn (mapv #(parse-type scope %) (get-in m [:opts :throws]))
         flags (p/flags-of meta method-mods)
@@ -518,7 +590,7 @@
     {:name (:name m) :owner n :flags flags :params pinfos :recv recv :ret ret :ret-tn ret-tn
      :desc (t/method-desc (map :desc pinfos) ret)
      :sig (method-signature tps pinfos ret-tn throws-tn)
-     :throws (mapv #(t/desc->internal (erase scope %)) throws-tn)
+     :throws (if clj (vec (:throws clj)) (mapv #(t/desc->internal (erase scope %)) throws-tn))
      :annotations (decl-annotations scope meta "METHOD")
      :param-annotations (mapv #(decl-annotations scope (:meta %) "PARAMETER") pinfos)
      :type-annotations (method-type-annotations scope tps meta ret-tn pinfos throws-tn recv)
@@ -1036,7 +1108,11 @@
   [actx sym]
   (loop [c (:class actx)]
     (when-let [d (and c (decl c))]
-      (if-let [f (some #(when (= (name sym) (:name %)) %) (remove :derived (:fields d)))]
+      ;; Clojure's code names a field of a deftype by its name before munging
+      (if-let [f (some #(when (or (= (name sym) (:name %))
+                                  (and (:clojure actx) (= (munge (name sym)) (:name %))))
+                          %)
+                       (remove :derived (:fields d)))]
         [f c]
         (recur (:outer d))))))
 
@@ -1057,7 +1133,9 @@
       (let [[f c] (find-own-field actx sym)]
         (if (static-flag? f)
           (field-node actx f nil)
-          (field-node actx f (outer-this-node actx c))))
+          ;; a deftype field with a reference hint is an Object field read as hinted
+          (cond-> (field-node actx f (outer-this-node actx c))
+            (get-in f [:member :meta :clojure-tag]) (as-> node (coerce-hint actx node (get-in f [:member :meta :clojure-tag]))))))
 
       (and ns-part (= "this" (name sym)) (resolve-class actx (symbol ns-part)))
       (outer-this-node actx (resolve-class actx (symbol ns-part)))
@@ -1645,6 +1723,11 @@
                                  (applicable? :literal args (expand-varargs (pdescs %) n)))
                            cands)]
             (when-let [m (pick vs #(expand-varargs (pdescs %) n))] [m true]))
+          ;; Clojure's code: the only method of that arity, its arguments converted as
+          ;; Clojure converts them (MethodExpr.emitTypedArgs)
+          (when (:clojure actx)
+            (let [ms (filter #(not (varargs? %)) fixed)]
+              (when (= 1 (count ms)) [(assoc (first ms) :clojure-args true) false])))
           (fail (str "No matching " what " for argument types " (pr-str (mapv (comp value-type :type) args))
                      (when (seq cands) (str "; candidates: " (pr-str (map :desc cands))))))))))
 
@@ -1668,17 +1751,43 @@
   [from cn]
   (filter #(env/accessible? from %) (env/constructors cn)))
 
+(defn- clj-arg-convert
+  "An argument node converted to parameter type `to` as arbace.lang.Compiler converts it
+  (HostExpr.emitUnboxArg): references by RT's longCast, intCast..., Boolean and Character
+  unboxed, references of other types checked, long to int by RT.intCast."
+  [node to]
+  (let [from (value-type (:type node))
+        rt (t/lang-class "RT")
+        cast-fn {"J" "longCast" "D" "doubleCast" "I" "intCast" "F" "floatCast" "S" "shortCast"
+                 "B" "byteCast"}]
+    (cond
+      (or (#{:null :none} from) (conversion node (:type node) to)) (convert-node node to :what "argument")
+      (and (t/ref? from) (cast-fn to))
+      {:op :invoke :kind :static :owner rt :itf false :name (cast-fn to)
+       :desc (str "(Ljava/lang/Object;)" to) :target nil :args [node] :type to}
+      (and (t/ref? from) (#{"Z" "C"} to))
+      (let [b (t/internal->desc (t/box-of to))]
+        (convert-node {:op :cast :class b :expr node :type b} to :what "argument"))
+      (and (t/ref? from) (t/ref? to)) {:op :cast :class to :expr node :type to}
+      (and (= "J" from) (= "I" to))
+      {:op :invoke :kind :static :owner rt :itf false :name "intCast" :desc "(J)I" :target nil
+       :args [node] :type "I"}
+      :else (convert-node node to :what "argument"))))
+
 (defn convert-args
   "Converts argument nodes to the parameter types of method m (packing variable arity
-  arguments into an array)."
+  arguments into an array); as Clojure converts them when m was chosen for Clojure's code
+  (:clojure-args)."
   [m args varargs?]
   (let [[ps _] (t/parse-method-desc (:desc m))]
-    (if varargs?
+    (cond
+      (:clojure-args m) (mapv clj-arg-convert args ps)
+      varargs?
       (let [nfixed (dec (count ps))
             el (t/elem-type (last ps))]
         (conj (mapv #(convert-node %1 %2) (take nfixed args) ps)
               {:op :array-init :type (last ps) :elems (mapv #(convert-node % el) (drop nfixed args))}))
-      (mapv #(convert-node %1 %2 :what "argument") args ps))))
+      :else (mapv #(convert-node %1 %2 :what "argument") args ps))))
 
 (defn- qualifying-owner
   "JLS 13.1: the class named in the instruction is the receiver's static type, except for
@@ -1955,8 +2064,8 @@
 
 (defn ctor-call-node
   "A call of constructor of class cn with args; kind :new, :super or :this."
-  [actx cn args kind & {:keys [outer param-tags]}]
-  (let [arg-nodes (mapv #(analyze actx %) args)
+  [actx cn args kind & {:keys [outer param-tags arg-nodes]}]
+  (let [arg-nodes (or arg-nodes (mapv #(analyze actx %) args))
         cands (ctor-candidates (:class actx) cn)
         _ (when (empty? cands) (fail (str "No accessible constructor of " (str/replace cn "/" "."))))
         [m va] (select-method actx cands arg-nodes (str "constructor of " (str/replace cn "/" ".")) param-tags)]
@@ -2011,10 +2120,21 @@
         (when-let [cd (decl cn)]
           (when (= :local (:nesting cd))
             (doseq [b (:captures @(:state cd))] (local-ref actx b))))
-        (assoc (ctor-call-node actx cn args :new
-                               :outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
-                               :param-tags (:param-tags (meta cls)))
-               :type-anns (code-type-anns actx cls))))))
+        (let [outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
+              arg-nodes (when (reflect? actx) (mapv #(analyze actx %) args))]
+         (or-reflect
+          actx
+          #(assoc (ctor-call-node actx cn args :new :outer outer :param-tags (:param-tags (meta cls))
+                                  :arg-nodes arg-nodes)
+                  :type-anns (code-type-anns actx cls))
+          ;; Clojure's NewExpr without a constructor: Reflector.invokeConstructor
+          (fn [why]
+            (reflection-warning actx (str "call to " (str/replace cn "/" ".") " ctor") why)
+            (let [desc (t/internal->desc cn)]
+              {:op :cast :class desc :type desc
+               :expr (reflective-node nil "invokeConstructor"
+                                      "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;"
+                                      [(class-lit actx desc) (objects arg-nodes)])}))))))))
 
 ;; arrays, tests -----------------------------------------------------------------------------------
 
@@ -2131,7 +2251,11 @@
                               ({"J" "longCast" "D" "doubleCast" "I" "intCast" "F" "floatCast"
                                 "S" "shortCast" "B" "byteCast" "C" "charCast"} to))
                       s)))
-    (convert-node node to :what what)))
+    (if (and (:clojure actx) (t/ref? to) (t/ref? (value-type (:type node)))
+             (nil? (conversion node (:type node) to)))
+      ;; a reference of another type: checked, as Clojure checks it
+      {:op :cast :class to :expr node :type to}
+      (convert-node node to :what what))))
 
 (defn- with-node-locals
   "Analyzes (f syms) with the symbols bound to the already analyzed nodes, in order: a let."

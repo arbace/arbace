@@ -1392,6 +1392,12 @@ itself: the class forms compiler (§12 question 17), loaded on first use, does, 
   `RestFn`, primitive interfaces), its code compiled with Clojure's meaning (§5.13), the locals
   it uses passed to its constructor. A class form in a `def`'s initializer at the top level is
   compiled as a fn. So the code forms work in any fn, not only in class bodies.
+- A `deftype*` (of `deftype` or `defrecord`) one of whose method bodies uses a class form is
+  compiled whole by the class forms compiler into the class Clojure's compiler would make
+  (`public final`, its fields public final, `volatile` for `^:volatile-mutable`,
+  package-private for `^:unsynchronized-mutable`, primitive for a primitive hint and otherwise
+  `Object`; the constructor taking the fields, and for records the two shorter ones and
+  `create`; `getBasis`), its methods compiled with Clojure's meaning, and stands for `nil`.
 - `recur` out of tail position and across `try` stay errors in code Arbace's compiler compiles
   itself, as in Clojure (Clojure's test suite holds it to that); in class bodies and in fns
   compiled by the class forms compiler `recur` has `continue`'s meaning, and `continue` works
@@ -1400,7 +1406,14 @@ itself: the class forms compiler (§12 question 17), loaded on first use, does, 
 In class bodies and in such fns, Clojure's `fn*`, `letfn*`, `case*`, `reify*`, `def` and `var`
 are compiled by rewriting them into class forms (a `fn` is an anonymous `AFunction`, a `reify` a
 local class), and a core operation whose operands do not fit an instruction compiles as Clojure
-compiles it (§5.13). `deftype*` is not supported there; `defclass` is.
+compiles it (§5.13). A method of `reify` or of a deftype compiled this way implements the
+interface (or `Object`) method that Clojure's compiler chooses, not one inferred as in §4.6: the
+only one with its (munged) name and arity when nothing is hinted, otherwise the one whose
+parameter types are the hinted classes (`Object` where unhinted), whose return type must be the
+name's hint (`Object` when unhinted); with Clojure's errors ("Must hint overloaded method",
+"Can't find matching overloaded method", "Mismatched return type", "Can't define method not in
+interfaces"). `deftype*` itself is not supported inside class bodies and such fns; `defclass`
+is.
 
 ### 9.6 Bootstrap
 

@@ -7383,18 +7383,25 @@
                   (while (and (some? rform) (instance? Keyword (.first rform)))
                     (set! opts (.assoc opts (.first rform) (RT/second rform)))
                     (set! rform (.next (.next rform))))
-                  (let [ret (NewInstanceExpr/build
-                              (cast IPersistentVector
-                                    (RT/get opts implementsKey PersistentVector/EMPTY))
-                              fields
-                              nil
-                              tagname
-                              classname
-                              (cast Symbol (RT/get opts RT/TAG_KEY))
-                              rform
-                              frm
-                              opts)]
-                    ret))))))))
+                  ;; a method body using the class forms: the class forms compiler compiles
+                  ;; the whole deftype (arbace.classes.native/compile-deftype); deftype* is nil
+                  (try
+                    (NewInstanceExpr/build
+                      (cast IPersistentVector (RT/get opts implementsKey PersistentVector/EMPTY))
+                      fields
+                      nil
+                      tagname
+                      classname
+                      (cast Symbol (RT/get opts RT/TAG_KEY))
+                      rform
+                      frm
+                      opts)
+                    (catch ClassFormsExpr$Signal sig
+                      (arbace.lang.Compiler/analyze
+                        context
+                        (.invoke (arbace.lang.Compiler/classForms "compile-deftype")
+                                 (arbace.lang.Compiler/currentNS)
+                                 frm)))))))))))
 
     (defclass ^:static ReifyParser
       :implements [IParser]

@@ -138,9 +138,20 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   initialization, like keywords; `throw` of an `Object` is checked at run time; `set!` of a var
   is `Var.set`.
 - `reify*` is a local class implementing the interfaces and `IObj` (`__meta`, `withMeta`
-  making a copy), its methods' signatures inferred as for untyped methods (§4.6).
+  making a copy). Its methods (`lower/clojure-method`: public, munged names, `recur` to the top)
+  carry `:clojure-method`, and `analyze/enter-method` gives them the signature of the method
+  `arbace.lang.Compiler`'s `NewInstanceMethod.parse` would choose (`clojure-override` over
+  `clojure-overrideables`, its `gatherMethods`: the public or protected, neither static nor
+  final methods of `Object` and the interfaces, one per name and parameter types with the most
+  specific return type): the only one of that name and arity when nothing is hinted, otherwise
+  the one whose parameter types are the hinted classes (`Object` unhinted) and whose return
+  type is the name's hint (`Object` unhinted), with the compiler's error messages; the method
+  declares the chosen method's exceptions. Covariant returns get bridges as for any class
+  (`ACC_BRIDGE` and `ACC_SYNTHETIC`, where the compiler sets only `ACC_BRIDGE`, and only for the
+  methods implemented).
 - `deftype*`, `monitor-enter`, `monitor-exit` and `import*` are errors there (use `defclass`;
-  `locking` works).
+  `locking` works). A deftype with class forms in its methods is handed over whole instead
+  (below).
 
 ## Stage-0 limits
 
@@ -237,16 +248,46 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
     `RT.longCast`... where a method returns a primitive, a `switch` with integer labels on a
     `long` or any other value (Clojure's integers) converting it by `RT.intCast`, hinted reference locals taking any
     reference from `recur` (checked), and the loop at the top of an arity is not a target of
-    `break`.
+    `break`. As Clojure's interop: when no method or constructor applies, the only one of that
+    arity is called, its arguments converted as `HostExpr.emitUnboxArg` converts them
+    (`RT.longCast`..., `Boolean`/`Character` unboxed, references checked, `long` to `int` by
+    `RT.intCast`); a constructor that cannot be resolved is called through
+    `Reflector.invokeConstructor`; a method's value of another reference type than its return
+    type is checked (`checkcast`).
+  - `compile-deftype`: a `deftype*` one of whose method bodies throws the `Signal` (directly,
+    or through the compiler's `(fn* ^:once [] ...)` wrappers and `letfn*`; a fn inside a method
+    is handed over on its own) is caught by `NewInstanceExpr$DeftypeParser`, which analyzes
+    `nil` in its place after `compile-deftype` has compiled and defined the class (written under
+    `*compile-files*`; the `deftype` macro's `import` and factory fns then find it). The class
+    form is `lower/deftype-class-form`, with the shape of `NewInstanceExpr`'s classes:
+    `public final`, `:package` of the class name, the interfaces of `:implements` (the macros
+    add `IType`, `IRecord`...); a field per field (munged), `public final`, or `volatile` for
+    `^:volatile-mutable`, package-private for `^:unsynchronized-mutable`, of the primitive type
+    of a primitive hint and otherwise `Object`, a reference hint kept as `:clojure-tag` (a read
+    of the field is checked to the hint's class, as a hinted local; names before munging find
+    fields in Clojure's code); the constructor taking the fields; when the fields end in
+    `__meta __extmap __hash __hasheq` (records) the constructors without the last two and
+    without the last four, and `create(IPersistentMap)` taking the fields out of the map by
+    keyword (unboxing primitive ones) and passing the rest as `__extmap`; the static `getBasis()`
+    returning the fields before those four, with their metadata; the methods as for `reify`
+    (above). The class is `:clojure-fn` (Clojure's meaning) with `:reflection :clojure`. Its
+    constants, keyword and protocol call sites are the class forms compiler's (`const__N`
+    fields), not the compiler's `__site__`/`__thunk__`/`__cached_class__` fields; Clojure's
+    `deftype` stub class (`compile__stub`) was already defined when the method threw, and stays
+    unused. Tests in `test/native/deftype_test.clj` compare the members of such a deftype and
+    record with the same ones compiled by `arbace.lang.Compiler` (fields, constructors, methods
+    with flags and exceptions, `getBasis`'s metadata).
 - **Limits.** `recur` out of tail position and across `try` stay errors in code the compiler
-  compiles (Clojure's test suite holds it to them; `continue` has that meaning). The class forms in `deftype` method
-  bodies are not supported (the enclosing fn is handed over, and `deftype*` is an error there;
-  `defclass` does what `deftype` does).
+  compiles (Clojure's test suite holds it to them; `continue` has that meaning). A `deftype*`
+  inside a handed-over fn or a class body is an error (only a deftype whose own methods use the
+  class forms is handed over; `defclass` does what `deftype` does).
 - **Tests**: `bin/native-tests [STAGE]` (`test/native/*_test.clj`, run by `bin/build-arbace` on
   stage 1): `defclass` with no boot step, a REPL session (`arbace.main/repl` on a string),
   `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
-  bodies, extended special forms, primitive signatures, and AOT compilation loaded by a fresh
-  JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
+  bodies, extended special forms, primitive signatures, deftypes and records with the class
+  forms in their methods (their shape against the compiler's), `reify` methods chosen by hints
+  and Clojure's errors, protocols implemented and extended by such types, and AOT compilation
+  (a handed-over deftype included) loaded by a fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
   stage 0.
 
 ## Checking converted code

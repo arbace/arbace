@@ -1,6 +1,6 @@
 (ns arbace.classes.lower
   "Clojure's special forms that the class forms compiler compiles by rewriting them into class
-  forms and other forms it knows (SPEC §5.13, §9.5): fn*, reify*, letfn*, case* and def. These
+  forms and other forms it knows (SPEC §5.13, §9.5): fn*, reify*, deftype*, letfn*, case* and def. These
   are pure form-to-form functions; arbace.classes.analyze analyzes their results.
 
   - (fn* ...) becomes an anonymous subclass of arbace.lang.AFunction (or RestFn when it has a
@@ -9,7 +9,10 @@
     meaning: the parameters are Object, recur goes to the top of the arity, the fn's name is the
     instance. `fn-methods` makes the members; arbace.classes.native uses them for the top-level
     class of a fn that arbace.lang.Compiler hands over.
-  - (reify* [interfaces] methods) becomes a local class implementing them and IObj.
+  - (reify* [interfaces] methods) becomes a local class implementing them and IObj, its methods
+    choosing the interface method they implement as arbace.lang.Compiler does (`clojure-method`).
+  - (deftype* ...) gives the class form of the deftype class (`deftype-class-form`), which
+    arbace.classes.native compiles when arbace.lang.Compiler hands a deftype over.
   - (letfn* [f (fn* f ...) ...] body) binds boxes first, then the fns, whose bodies read the
     others from their boxes, then fills the boxes.
   - (case* ...) becomes a switch on the hash (or int value) inside a label, with the equality
@@ -139,16 +142,37 @@
       anon)))
 
 ;; ---------------------------------------------------------------------------------------------
-;; reify*
+;; reify* and deftype*
 
 (declare symbols-in)
+
+(defn clojure-method
+  "A method (name [this params*] body*) of reify* or deftype* as a class form method: public,
+  its name munged, marked :clojure-method so that arbace.classes.analyze picks the interface
+  method it implements as arbace.lang.Compiler does (by name and arity, then by the hints of the
+  parameters and of the name), with recur to the top of the method when its body uses recur."
+  [[nm pv & body]]
+  (when-not (and (vector? pv) (seq pv))
+    (throw (ex-info (str "Must supply at least one argument for 'this' in: " nm)
+                    {:arbace/compile-error true})))
+  (doseq [p pv]
+    (when-not (symbol? p)
+      (throw (ex-info "params must be Symbols" {:arbace/compile-error true}))))
+  (let [[this & ps] pv
+        ps (map #(if (namespace %) (with-meta (symbol (name %)) (meta %)) %) ps)]
+    (list 'method (with-meta (symbol (munge (name nm))) (assoc (meta nm) :public true :clojure-method true))
+          (vec (cons this ps))
+          (if (contains? (symbols-in body) 'recur)
+            (list* (with-meta 'loop* {:arbace.classes/fn-body true})
+                   (vec (mapcat (fn [p] [(vary-meta p dissoc :tag) p]) ps))
+                   body)
+            (list* 'do body)))))
 
 (defn lower-reify
   "(reify* [interface*] (method [this params*] body*)*): a local class implementing the
   interfaces and arbace.lang.IObj (its metadata in __meta, withMeta making a copy), its methods
-  public, their signatures inferred from the interfaces as for untyped methods (§4.6), with
-  recur to the top of a method when its body uses recur. Evaluates to an instance with the
-  form's metadata (without source positions)."
+  `clojure-method`s. Evaluates to an instance with the form's metadata (without source
+  positions)."
   [[_ ifaces & methods :as form]]
   (let [cn (symbol (str "Reify" (swap! ids inc)))
         pm 'arbace.lang.IPersistentMap
@@ -166,15 +190,91 @@
               (list 'method (with-meta 'withMeta {:public true})
                     (with-meta [rcv (with-meta mm {:tag pm})] {:tag 'arbace.lang.IObj})
                     (list 'new cn mm))]
-             (for [[nm pv & body] methods]
-               (let [[this & ps] pv]
-                 (list 'method (vary-meta nm assoc :public true) pv
-                       (if (contains? (symbols-in body) 'recur)
-                         (list* (with-meta 'loop* {:arbace.classes/fn-body true})
-                                (vec (mapcat (fn [p] [(vary-meta p dissoc :tag) p]) ps))
-                                body)
-                         (list* 'do body))))))]
+             (map clojure-method methods))]
           (list 'new cn m))))
+
+(def ^:private alt-ctor-fields #{"__meta" "__extmap" "__hash" "__hasheq"})
+
+(def ^:private boxes
+  '{int java.lang.Integer long java.lang.Long float java.lang.Float double java.lang.Double
+    char java.lang.Character short java.lang.Short byte java.lang.Byte boolean java.lang.Boolean})
+
+(defn- annotation-meta [m] (into {} (filter (comp symbol? key) m)))
+
+(defn deftype-class-form
+  "The class form (the rest of a defclass form) of (deftype* tagname classname [field*]
+  :implements [interface*] option* method*), with the shape arbace.lang.Compiler gives a
+  deftype (NewInstanceExpr): a public final class implementing the interfaces; a field per
+  field, public final, or volatile for ^:volatile-mutable, package-private for
+  ^:unsynchronized-mutable, primitive for a primitive hint and otherwise Object (a reference
+  hint stays a hint of the field, :clojure-tag); a constructor taking the fields; for records
+  (fields ending in __meta __extmap __hash __hasheq) the two shorter constructors and the
+  static create(IPersistentMap); the static getBasis(); the methods as `clojure-method`s."
+  [[_ _tagname classname fields & more]]
+  (let [[opts methods] (loop [opts {} s more]
+                         (if (keyword? (first s)) (recur (assoc opts (first s) (second s)) (nnext s)) [opts s]))
+        cname (str classname)
+        i (.lastIndexOf cname ".")
+        pkg (if (neg? i) "" (subs cname 0 i))
+        simple (symbol (subs cname (inc i)))
+        rcv (gsym "this")
+        fields (vec fields)
+        drops (count (take-while #(alt-ctor-fields (name %)) (rseq fields)))
+        hinted (subvec fields 0 (- (count fields) drops))
+        fname (fn [f] (symbol (munge (name f))))
+        ptag (fn [f] (let [t (:tag (meta f))] (when (prim-tag? t) t)))
+        param (fn [f] (if-let [t (ptag f)] (with-meta (fname f) {:tag t}) (fname f)))
+        n (count fields)
+        ctor (fn [k tail]
+               (list 'constructor (with-meta (vec (cons rcv (map param (take k fields)))) {:public true})
+                     (list* 'this. (concat (map fname (take k fields)) tail))))
+        basis (vec (for [f hinted]
+                     (if (seq (meta f))
+                       (list 'arbace.core/with-meta (list 'quote (symbol (name f))) (list 'quote (meta f)))
+                       (list 'quote (symbol (name f))))))]
+    (concat
+      [(with-meta simple (merge (annotation-meta (meta classname))
+                                {:public true :final true :clojure-fn true :reflection :clojure}))
+       :package pkg
+       :implements (vec (:implements opts))]
+      (for [f fields
+            :let [m (meta f) t (:tag m)]]
+        (list 'field (with-meta (fname f)
+                                (merge (annotation-meta m)
+                                       (cond (:volatile-mutable m) {:volatile true}
+                                             (:unsynchronized-mutable m) {}
+                                             :else {:public true :final true})
+                                       (cond (ptag f) {:tag t}
+                                             (some? t) {:clojure-tag t})))))
+      [(list* 'constructor (with-meta (vec (cons rcv (map param fields))) {:public true})
+              (list 'super.)
+              (for [f fields] (list 'set! (list (symbol (str ".-" (fname f))) rcv) (fname f))))]
+      (when (= 4 drops)
+        [(ctor (- n 4) [nil nil '(arbace.core/int 0) '(arbace.core/int 0)])
+         (ctor (- n 2) ['(arbace.core/int 0) '(arbace.core/int 0)])])
+      [(list 'method (with-meta 'getBasis {:public true :static true})
+             (with-meta [] {:tag 'arbace.lang.IPersistentVector})
+             basis)]
+      (when (= 4 drops)
+        (let [ms (vec (for [k (range (inc (count hinted)))] (gsym (str "m" k))))
+              vs (vec (for [f hinted] (gsym (name (fname f)))))]
+          [(list 'method (with-meta 'create {:public true :static true})
+                 (with-meta [(with-meta (ms 0) {:tag 'arbace.lang.IPersistentMap})] {:tag simple})
+                 (list 'let*
+                       (vec (mapcat (fn [f v m0 m1]
+                                      (let [k (list 'arbace.lang.Keyword/intern (name f))]
+                                        [v (list '. m0 'valAt k nil)
+                                         m1 (list '. m0 'without k)]))
+                                    hinted vs ms (rest ms)))
+                       (list* 'new simple
+                              (concat (map (fn [f v]
+                                             (if-let [t (ptag f)]
+                                               (list '. (list 'arbace.core/cast (boxes t) v) (symbol (str t "Value")))
+                                               v))
+                                           hinted vs)
+                                      [nil (list 'arbace.lang.RT/seqOrElse (peek ms))
+                                       '(arbace.core/int 0) '(arbace.core/int 0)]))))]))
+      (map clojure-method methods))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; letfn*

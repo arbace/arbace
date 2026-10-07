@@ -335,6 +335,10 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    `generate-proxy` (`arbace/core_proxy.clj`) emits the superclass's constructors sorted by
    parameter types, not in reflection order (which varies between JVM runs; methods were
    sorted already).
+6. **Deftypes with class forms** (SPEC §9.5; COMPILER-NOTES, "Native class forms"):
+   `Compiler$NewInstanceExpr$DeftypeParser/parse` catches the class forms' signal from a
+   method body of `deftype*` and analyzes `nil` in its place after
+   `arbace.classes.native/compile-deftype` has compiled and defined the class.
 
 ## Open decisions for the user
 

@@ -14,5 +14,10 @@
 
 (def table (vec (map kind [0 2 9])))
 
+(deftype Box [^long v]
+  Object
+  (toString [this] (label :l (when (neg? v) (break :l "negative")) (java-str "box" v))))
+
 (defn result []
-  [table (.-a (Pair. 1 2)) (Ping/ping 3) (class kind) (.getClassLoader (class kind))])
+  [table (.-a (Pair. 1 2)) (Ping/ping 3) (class kind) (.getClassLoader (class kind))
+   (str (->Box 3)) (.getClassLoader Box)])

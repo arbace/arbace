@@ -28,7 +28,19 @@
                            (method ^:public ^:static consts [] [#"a+b" 1/3 2.5M 'sym '(1 2)])
                            (method ^:public ^:static the-var [] (var *dyn*))
                            (method ^:public ^:static prim ^long [^long x]
-                             (long ((fn ^long [^long y] (unchecked-multiply y y)) x))))])]
+                             (long ((fn ^long [^long y] (unchecked-multiply y y)) x)))
+                           ;; reify's methods implement the interface method Clojure's
+                           ;; compiler chooses by the hints
+                           (method ^:public ^:static overloads []
+                             (let [sb (StringBuilder.)
+                                   ^Appendable a (reify Appendable
+                                                   (^Appendable append [this ^char c] (.append sb (str "c" c)) this)
+                                                   (^Appendable append [this ^CharSequence s] (.append sb (str "s" s)) this)
+                                                   (append [this s start end] (.append sb "range") this))]
+                               (.append a \x)
+                               (.append a "yz")
+                               (.append a "abc" 0 1)
+                               (str sb))))])]
     (is (= [2 4 6] (call C "twice" [1 2 3])))
     (is (= 15 ((call C "adder" 5) 10)))
     (is (= :done (call C "named" 3)))
@@ -42,4 +54,5 @@
       (is (= "aab" (re-matches re "aab")))
       (is (= [1/3 2.5M 'sym '(1 2)] [r d s l])))
     (is (= #'*dyn* (call C "the-var")))
-    (is (= 49 (call C "prim" 7)))))
+    (is (= 49 (call C "prim" 7)))
+    (is (= "cxsyzrange" (call C "overloads")))))
