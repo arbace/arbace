@@ -6530,7 +6530,7 @@
     (field ^:public ^:static ^:final ^Keyword PHASE_EXECUTION (Keyword/intern nil "execution"))
 
     (field ^:public ^:static ^:final ^Keyword SPEC_PROBLEMS
-      (Keyword/intern "clojure.spec.alpha" "problems"))
+      (Keyword/intern "arbace.spec.alpha" "problems"))
 
     (constructor ^:public [this ^String source ^int line ^int column ^Throwable cause]
       (this. source line column nil cause))
@@ -6645,9 +6645,9 @@
       (locking MACRO_CHECK_LOCK
         (when (nil? MACRO_CHECK)
           (set! MACRO_CHECK_LOADING true)
-          (RT/load "clojure/spec/alpha")
-          (RT/load "clojure/core/specs/alpha")
-          (set! MACRO_CHECK (Var/find (Symbol/intern "clojure.spec.alpha" "macroexpand-check")))
+          (RT/load "arbace/spec/alpha")
+          (RT/load "arbace/core/specs/alpha")
+          (set! MACRO_CHECK (Var/find (Symbol/intern "arbace.spec.alpha" "macroexpand-check")))
           (set! MACRO_CHECK_LOADING false))))
     MACRO_CHECK)
 

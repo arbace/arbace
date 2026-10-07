@@ -15,9 +15,11 @@
   - the keyword namespace clojure.error;
   - the system properties Clojure reads: clojure.compile.*, clojure.compiler.*,
     clojure.server.*, clojure.read.eval, clojure.main.report, clojure.basis;
-  - clojure.jar in usage texts.
-  Left alone: other libraries' names (clojure.spec.alpha, clojure.core.specs.alpha,
-  clojure.test.check, clojure.tools.namespace, clojure.tools.deps, clojure.data.generators,
+  - clojure.jar in usage texts;
+  - spec, vendored later (doc/VENDOR-NOTES.md, \"Spec\"): clojure.spec with whatever follows
+    (clojure.spec.alpha, .gen.alpha, .test.alpha, :clojure.spec.alpha/problems, the
+    clojure.spec.* system properties, clojure/spec/alpha) and clojure.core.specs.alpha.
+  Left alone: other libraries' names (clojure.test.check, clojure.tools.namespace, clojure.tools.deps, clojure.data.generators,
   clojure.java.classpath, ...; and the suite's own clojure.test-clojure.*), identifiers that
   merely contain the word (clojure-version, *clojure-version*, refer-clojure, CLOJURE_NS,
   __clojureFnMap, thread names clojure-agent-*; some were renamed by hand after vendoring, see
@@ -35,12 +37,14 @@
    "pprint.dispatch" "pprint.pprint_base" "pprint.pretty_writer" "pprint.print_table"
    "pprint.utilities" "reflect" "reflect.java" "repl" "repl.deps" "set" "stacktrace" "string"
    "template" "test" "test.junit" "test.tap" "tools.deps.interop" "uuid" "walk" "xml" "zip"
+   ;; core.specs.alpha (spec.alpha's namespaces are in `prefixes`)
+   "core.specs.alpha"
    ;; system properties and the jar name
    "read.eval" "main.report" "basis" "jar"])
 
 (def prefixes
   "Renamed together with whatever follows them."
-  ["lang" "asm" "java.api" "compile" "compiler" "server" "error"])
+  ["lang" "asm" "java.api" "compile" "compiler" "server" "error" "spec"])
 
 (defn- alt
   "A regex alternation of the names (longest first), their dots matched by regex sep."
@@ -62,11 +66,11 @@
    ;; descriptors and array class names: Lclojure/lang/..., [Lclojure.lang...
    (re-pattern (str "(?<=(?:^|[^\\w])L)clojure(?=" any "(?:lang|asm|java" any "api)" any ")"))
    ;; namespaces, dotted: clojure.core, clojure.core/x, :clojure.core/x, clojure.core$fn, classes
-   ;; of their packages (clojure.core.VecNode), not clojure.core.specs.alpha,
+   ;; of their packages (clojure.core.VecNode), not clojure.core.foo (a namespace not listed),
    ;; clojure.test-clojure, clojure.test.check
    (re-pattern (str before "clojure(?=" dot "(?:" (alt namespaces dot) ")(?!(?!__)[\\w*+!?-]|" dot "[a-z]))"))
-   ;; namespaces, as paths: clojure/core, clojure/core.clj, clojure/core__init, not
-   ;; clojure/core/specs/alpha
+   ;; namespaces, as paths: clojure/core, clojure/core.clj, clojure/core__init,
+   ;; clojure/core/specs/alpha, not clojure/core/foo
    (re-pattern (str before "clojure(?=/(?:" (alt namespaces "/") ")(?!(?!__)[\\w-]|/\\w))"))])
 
 (defn rename
@@ -143,11 +147,32 @@
       (io/make-parents o)
       (spit o (edit path (rename (slurp f)))))))
 
+(defn vendor-lib!
+  "Writes the .clj files of a Clojure library's checkout src (under src/main/clojure) into out,
+  path and text renamed, each with a line naming its origin after its leading comment block
+  (the library's notice, if any). repo and rev name the checkout (bin/vendor-spec)."
+  [src out repo rev]
+  (let [dir (io/file src "src/main/clojure")]
+    (doseq [^java.io.File f (sort-by str (file-seq dir))
+            :when (and (.isFile f) (str/ends-with? (.getName f) ".clj"))
+            :let [path (rel dir f)
+                  s (slurp f)
+                  notice (re-find #"^(?:;[^\n]*\n)+" s)
+                  origin (str ";; Vendored from " repo ", src/main/clojure/" path "\n"
+                              ";; at " rev ", renamed by arbace.j2c.rename;\n"
+                              ";; see doc/VENDOR-NOTES.md.\n")
+                  o (io/file out (rename path))]]
+      (io/make-parents o)
+      (spit o (if notice
+                (str notice ";\n" origin (rename (subs s (count notice))))
+                (str origin "\n" (rename s)))))))
+
 (defn -main
   "files FILE...       renames in place, printing the files changed;
    stdin               renames standard input to standard output;
    tree DIR EXT...     renames in place the files under DIR whose names end in one of EXT;
-   vendor CONV SRC OUT see vendor!."
+   vendor CONV SRC OUT see vendor!;
+   vendor-lib SRC OUT REPO REV  see vendor-lib!."
   [cmd & args]
   (case cmd
     "files" (doseq [f args]
@@ -162,4 +187,5 @@
                      :let [s (slurp f) r (rename s)]
                      :when (not= s r)]
                (spit f r)))
-    "vendor" (apply vendor! args)))
+    "vendor" (apply vendor! args)
+    "vendor-lib" (apply vendor-lib! args)))

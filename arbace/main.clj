@@ -12,7 +12,7 @@
        :author "Stephen C. Gilardi and Rich Hickey"}
   arbace.main
   (:refer-clojure :exclude [with-bindings])
-  #_(:require [clojure.spec.alpha :as spec])
+  (:require [arbace.spec.alpha :as spec])
   (:import (java.io StringReader BufferedWriter FileWriter)
            (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
@@ -50,7 +50,7 @@
 (def ^:private core-namespaces
   #{"arbace.core" "arbace.core.reducers" "arbace.core.protocols" "arbace.data" "arbace.datafy"
     "arbace.edn" "arbace.instant" "arbace.java.io" "arbace.main" "arbace.pprint" "arbace.reflect"
-    "arbace.repl" "arbace.set" "clojure.spec.alpha" "clojure.spec.gen.alpha" "clojure.spec.test.alpha"
+    "arbace.repl" "arbace.set" "arbace.spec.alpha" "arbace.spec.gen.alpha" "arbace.spec.test.alpha"
     "arbace.string" "arbace.template" "arbace.uuid" "arbace.walk" "arbace.xml" "arbace.zip"})
 
 (defn- core-class?
@@ -92,7 +92,7 @@
              *command-line-args* *command-line-args*
              *unchecked-math* *unchecked-math*
              *assert* *assert*
-             ; clojure.spec.alpha/*explain-out* clojure.spec.alpha/*explain-out*
+             arbace.spec.alpha/*explain-out* arbace.spec.alpha/*explain-out*
              *1 nil
              *2 nil
              *3 nil
@@ -223,7 +223,7 @@
   [datafied-throwable]
   (let [{:keys [via trace phase] :or {phase :execution}} datafied-throwable
         {:keys [type message data]} (last via)
-        {:clojure.spec.alpha/keys [problems fn], :clojure.spec.test.alpha/keys [caller]} data
+        {:arbace.spec.alpha/keys [problems fn], :arbace.spec.test.alpha/keys [caller]} data
         {:arbace.error/keys [source] :as top-data} (:data (first via))]
     (assoc
       (case phase
@@ -287,10 +287,10 @@
               (if symbol (str symbol " ") "")
               loc
               (if spec
-                nil #_(with-out-str
+                (with-out-str
                   (spec/explain-out
                     (if (= spec/*explain-out* spec/explain-printer)
-                      (update spec :clojure.spec.alpha/problems
+                      (update spec :arbace.spec.alpha/problems
                               (fn [probs] (map #(dissoc % :in) probs)))
                       spec)))
                 (format "%s%n" cause)))
@@ -324,13 +324,13 @@
 
       :execution
       (if spec
-        nil #_(format "Execution error - invalid arguments to %s at (%s).%n%s"
+        (format "Execution error - invalid arguments to %s at (%s).%n%s"
                 symbol
                 loc
                 (with-out-str
                   (spec/explain-out
                     (if (= spec/*explain-out* spec/explain-printer)
-                      (update spec :clojure.spec.alpha/problems
+                      (update spec :arbace.spec.alpha/problems
                               (fn [probs] (map #(dissoc % :in) probs)))
                       spec))))
         (format "Execution error%s at %s(%s).%n%s%n"

@@ -53,6 +53,8 @@
           (.equals "true" uncheckedMathProp) (set! uncheckedMath Boolean/TRUE)
           (.equals "warn-on-boxed" uncheckedMathProp)
             (set! uncheckedMath (Keyword/intern "warn-on-boxed")))
+        ;; force load to avoid transitive compilation during lazy load
+        (RT/load "arbace/core/specs/alpha")
         (try
           (Var/pushThreadBindings
             (^[Object/1] RT/map compile_path

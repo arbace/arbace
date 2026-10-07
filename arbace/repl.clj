@@ -12,7 +12,7 @@
   ^{:author "Chris Houser, Christophe Grand, Stephen Gilardi, Michel Salim"
     :doc "Utilities meant to be used interactively at the REPL"}
   arbace.repl
-  #_(:require [clojure.spec.alpha :as spec])
+  (:require [arbace.spec.alpha :as spec])
   (:import (java.io LineNumberReader InputStreamReader PushbackReader)
            (arbace.lang RT Reflector)))
 
@@ -106,7 +106,7 @@ itself (not its value) is returned. The reader macro #'x expands to (var x)."}})
         (println (str "\n  Please see http://clojure.org/" url)))
       (println (str "\n  Please see http://clojure.org/special_forms#" nm))))
   (when n
-    nil #_(when-let [fnspec (spec/get-spec (symbol (str (ns-name n)) (name nm)))]
+    (when-let [fnspec (spec/get-spec (symbol (str (ns-name n)) (name nm)))]
       (println "Spec")
       (doseq [role [:args :ret :fn]]
         (when-let [spec (get fnspec role)]
@@ -137,7 +137,7 @@ itself (not its value) is returned. The reader macro #'x expands to (var x)."}})
     `(#'print-doc (#'special-doc '~special-name))
     (cond
       (special-doc-map name) `(#'print-doc (#'special-doc '~name))
-      (keyword? name) `(#'print-doc {:spec '~name})
+      (keyword? name) `(#'print-doc {:spec '~name :doc '~(spec/describe name)})
       (find-ns name) `(#'print-doc (#'namespace-doc (find-ns '~name)))
       (resolve name) `(#'print-doc (meta (var ~name))))))
 

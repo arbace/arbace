@@ -20,6 +20,9 @@ and stage 2.
 | `arbace/classes/`, `arbace/j2c/` | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
 | `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
+| `arbace/spec/**.clj`, `arbace/core/specs/alpha.clj` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
+| `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/` |
+| `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
 | `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` (815) and the AOT-compiled `arbace.classes` namespaces (1,289) |
 
@@ -108,7 +111,8 @@ Left alone (with the reason):
   (the CLI's `-X`/`-T` protocol), `"clojure"` (the CLI command `tools.deps.interop` runs),
   `~/.clojure/deps.edn`; in the test libraries `clojure.test.check`, `clojure.test.generative`,
   `clojure.tools.namespace`, `clojure.tools.reader`, `clojure.data.generators`,
-  `clojure.java.classpath`. Spec is stubbed out in the baseline already; the others are not part
+  `clojure.java.classpath`. Spec is stubbed out in the baseline already (since vendored and
+  renamed as well, below, "Spec"); the others are not part
   of Clojure.
 - Identifiers that merely contain the word: `clojure-version`, `*clojure-version*`,
   `refer-clojure`/`:refer-clojure`, `clojure-fn?` (locals), `CLOJURE_NS` and other Java
@@ -330,6 +334,7 @@ CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage2 CLOJURE_SRC=$PWD/target/sta
 | baseline (reference) | 83 | 809 | 20,718 / 20,750 | 27 / 27 | |
 | stage 1 | 83 | 809 | 20,718 / 20,750 | 27 / 27 | none |
 | stage 2 | 83 | 809 | 20,718 / 20,750 | 27 / 27 | none |
+| stage 1, 2 with spec (below, "Spec") | 83 | 809 | 20,750 / 20,750 | 27 / 27 | none (against `test/arbace-results.edn`) |
 
 The 32 failing assertions are the baseline's: they expect spec's error messages.
 
@@ -525,6 +530,83 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
 
    (thread counts are the JVM's peak of platform threads; the virtual threads run on the
    carrier pool.) The JDK AOT cache still applies with the property set.
+## Spec (2026-10-07)
+
+The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of
+the suite, which expect spec's messages, failed on the baseline and on the stages. Arbace now
+vendors spec and behaves as upstream Clojure with it: macro calls are checked against
+core.specs at macroexpansion, `ex-triage` and the REPL print spec's explanations, `doc` shows
+specs. The frozen `clojure/` keeps the stub.
+
+**Vendored** (`bin/vendor-spec`, which replays it into `.tmp/vendor-spec/`): the versions
+upstream Clojure `98d735fab02f` depends on in its `pom.xml`, from their repositories at those
+tags (the `.clj` sources equal those in the Maven jars, checked with `cmp`):
+
+| library | tag (commit) | files | vendored as |
+|---|---|---|---|
+| https://github.com/clojure/spec.alpha | `v0.6.249` (`3d1efb353b8a95c699b4051ba8273568c21f874e`) | `src/main/clojure/clojure/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj` | `arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`: `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha` |
+| https://github.com/clojure/core.specs.alpha | `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`) | `src/main/clojure/clojure/core/specs/alpha.clj` | `arbace/core/specs/alpha.clj`: `arbace.core.specs.alpha` |
+
+Both are EPL-1.0 (`LICENSE.md` says which files). `arbace.j2c.rename/vendor-lib!` renames path
+and text and adds an origin comment after each file's notice. The renaming rules gained
+`clojure.spec` as a prefix (`clojure.spec.alpha`, `.gen.alpha`, `.test.alpha`,
+`:clojure.spec.alpha/problems`, `clojure/spec/alpha`, the system properties
+`clojure.spec.check-asserts`, `clojure.spec.skip-macros`, `clojure.spec.compile-asserts`) and
+the namespace `clojure.core.specs.alpha`; the suite is renamed with the same rules, so it
+expects `arbace.spec.alpha`'s keywords and `arbace.core/let`'s spec errors. `clojure.test.check`
+(spec's optional generator library, loaded lazily by `arbace.spec.gen.alpha` as upstream) keeps
+its name.
+
+**One hand edit** in the vendored files: `arbace/spec/gen/alpha.clj` excludes `return` from
+`arbace.core` (`:refer-clojure :exclude`), since `arbace.core` has the class form `return` and
+`gen/return` would replace it with a warning on every load. (test.check's
+`clojure.test.check.generators` gives the same warning; it is not vendored and stays as it is.)
+
+**Un-stubbed** (upstream's code, renamed; compare upstream `98d735fab02f` with `clojure/`):
+
+- `arbace/main.clj`: `(:require [arbace.spec.alpha :as spec])`; the REPL binds
+  `arbace.spec.alpha/*explain-out*`; `ex-str` prints the explanation of a spec error
+  (`with-out-str` of `spec/explain-out`) for macro syntax errors and instrumented calls; the
+  core namespace list names `arbace.spec.*`.
+- `arbace/repl.clj`: `(:require [arbace.spec.alpha :as spec])`; `doc` prints a fn's spec
+  (`spec/get-spec`) and documents a spec given a keyword (`spec/describe`).
+- `arbace/lang/RT.clj`: `instrumentMacros` is `(not (Boolean/getBoolean
+  "arbace.spec.skip-macros"))`, not `false`; `checkSpecAsserts` reads
+  `arbace.spec.check-asserts`.
+- `arbace/lang/Compiler.clj`: `ensureMacroCheck` loads `arbace/spec/alpha` and
+  `arbace/core/specs/alpha` and finds `arbace.spec.alpha/macroexpand-check`; `SPEC_PROBLEMS` is
+  `:arbace.spec.alpha/problems` (these strings had been left unrenamed).
+- `arbace/lang/Compile.clj`: `(RT/load "arbace/core/specs/alpha")` before compiling, as upstream
+  `Compile.java` ("force load to avoid transitive compilation during lazy load"; one of the two
+  seed fixes had dropped it from `clojure/`).
+
+**Build** (`bin/build-arbace`): after the stage's namespaces, a second `arbace.lang.Compile`
+run compiles `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha` with
+`-Darbace.spec.skip-macros=true`, as spec.alpha's own `pom.xml` compiles its jar, and then
+`arbace.core.specs.alpha`, which upstream ships as source: compiled, the first macro call of a
+session costs about 40 ms instead of loading it from source. A separate run because `Compile`
+loads core.specs (and so spec) before compiling; compiling spec in that JVM would reload it and
+redefine its protocols under the specs core.specs has registered. The main run so compiles the
+core namespaces with macro checking on, as upstream's build does. Each stage: 5,625 classes
+(815 class-form classes, 4,810 namespace classes, 534 of them spec's), stages 1, 2 and 3
+byte-identical, all verified; the jar has 5,890 entries, the AOT cache is 39 MB.
+`bin/arbace -e 1` launches as before (about 0.18 s, the time within noise; `arbace.main` now
+loads `arbace.spec.alpha`, as upstream's does); `-e "(let [a 1] a)"`, the first macro, takes
+about 40 ms more (core.specs and the check).
+
+Running a stage after editing `arbace/spec/**` or `arbace/core/specs/alpha.clj` without
+rebuilding loads the edited namespace from source with macro checking on, which can trip
+`Cyclic load dependency` (spec's `ns` form triggers the check, which loads core.specs, which
+requires spec): rebuild, or run with `-Darbace.spec.skip-macros=true`. Upstream has the same
+property; it ships spec compiled.
+
+**The suite**: `test/arbace-results.edn` is the reference for Arbace's stages, and
+`bin/clojure-tests` uses it by default in rename mode (`CLOJURE_TESTS_RENAME=arbace`): all
+passing, 83 namespaces, 809 tests, 20,750 / 20,750 assertions, test.generative 27 / 27, as
+upstream's control run. `test/baseline-results.edn` stays the frozen baseline's reference (the
+default run of `bin/clojure-tests`), with its 32 spec failures. Result on stages 1 and 2:
+20,750 / 20,750, no regressions. spec.alpha's own tests (its `src/test/clojure`, renamed, with
+the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
 
 10. **Reflective calls are `invokedynamic` inline caches** (`doc/MODERN-COMPILER.md` §2.2, §4.1,
    §4.8). The Clojure compiler emitted a call of `Reflector` for each call it could not resolve,

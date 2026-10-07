@@ -28,8 +28,16 @@ covers what.
   and `arbace/asm.clj` under ASM's BSD 3-Clause License (package `arbace.asm`),
   `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
   `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0.
+- `arbace/spec/` (`arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`): spec.alpha,
+  https://github.com/clojure/spec.alpha at `v0.6.249`
+  (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse
+  Public License 1.0. Renamed from `clojure.spec.*` to `arbace.spec.*` (doc/VENDOR-NOTES.md).
+- `arbace/core/specs/alpha.clj`: core.specs.alpha, https://github.com/clojure/core.specs.alpha
+  at `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`), under the Eclipse Public
+  License 1.0 (the repository's `LICENSE`; the file itself carries no notice). Renamed from
+  `clojure.core.specs.alpha` to `arbace.core.specs.alpha`.
 
-## Arbace and Clojure: Eclipse Public License 1.0
+## Arbace, Clojure, spec.alpha and core.specs.alpha: Eclipse Public License 1.0
 
 Copyright (c) Rich Hickey. All rights reserved.
 

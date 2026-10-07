@@ -452,9 +452,10 @@
           (throw (IllegalAccessError. "Context classloader is not a DynamicClassLoader")))))
 
   (field ^:public ^:static ^boolean checkSpecAsserts
-    (Boolean/getBoolean "clojure.spec.check-asserts"))
+    (Boolean/getBoolean "arbace.spec.check-asserts"))
 
-  (field ^:public ^:static ^boolean instrumentMacros false)
+  (field ^:public ^:static ^boolean instrumentMacros
+    (not (Boolean/getBoolean "arbace.spec.skip-macros")))
 
   (field ^:static ^:volatile ^boolean CHECK_SPECS false)
 
