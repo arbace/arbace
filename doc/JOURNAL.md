@@ -340,3 +340,42 @@ Recorded now, at the user's request, so that the current work does not block the
   `.tmp/worktrees/` then run the baseline Clojure without building it first.
 - They were rebuilt from scratch exactly as `SEED.bash` built them, `javac -g` over every
   `.java` under `clojure/`, including the two seed fixes. Rebuild them after any further fix.
+
+## 2026-10-07: Class forms compiler and Java → class forms converter (agenda steps 2 and 3)
+
+Both were built by background agents, each in its own worktree under `.tmp/worktrees/` (the
+user's rule for agents). They were checked by the main session on `b1bf2c8`.
+
+- Compiler: `arbace/classes/` (`arbace.classes.*`). It is one plain-Clojure implementation
+  (§12 q17), run at stage 0 on the frozen `clojure/` through `arbace.classes.boot`, which
+  rewrites `arbace.asm` to `clojure.asm`.
+  - It covers every class kind, every member kind, bridges, generic signatures, annotations and
+    type annotations, sealed types, modules and package annotations.
+  - Code: exact primitive arithmetic, mutable locals, `label`/`break`/`continue`/`return`,
+    `switch` with patterns, lambdas and method references (serializable ones too), `java-str`
+    by `invokedynamic`, and nested, inner, local and anonymous classes.
+  - Class environment: AOT, and REPL class loaders per package with generations.
+  - `bin/class-forms-tests`: most tests compare class shapes with javac's output for the
+    equivalent Java; others run the classes, among them a REPL session with redefinition.
+  - Details, stage-0 limits and §8 coverage: `doc/classes/COMPILER-NOTES.md`.
+- Converter: `arbace/j2c/` (`arbace.j2c.*`, `bin/j2c`). It runs the JDK's javac (`parse` and
+  `analyze`) and converts the attributed trees. `--rename clojure=arbace` serves step 4.
+  Details are in `doc/classes/CONVERTER-NOTES.md`.
+- Results:
+  - All 183 baseline files convert. They compile with the class forms compiler to 812 classes
+    whose shapes match javac's: flags, signatures, attributes, members, and the symbolic
+    content of the code.
+  - Clojure boots from those 812 classes. Clojure's test suite on them gives the same result
+    as on the baseline: 809 tests, 20,718 of 20,750 assertions, 27 of 27 generative specs.
+    Checked with `bin/j2c-check --suite`.
+  - jdk26u: all 12,730 files of `src/*/share/classes` convert. About 91 to 94% of them compile
+    to javac's class shapes (the agent's numbers, not rechecked).
+  - Language samples (`test/j2c/java`): one difference from javac is left, integer constants in
+    `d + (z ? 1 : 2)`.
+- The agents propose 13 (compiler) and 15 (converter) spec amendments, in their notes, and
+  await the user's decision. Known gaps:
+  - Stage 0 rejects `fn`, `letfn` and `case` inside class bodies.
+  - The new code forms work only inside class bodies at stage 0.
+  - No form yet for `o.new Inner() { ... }`.
+  - The converter drops 6 type annotations in the JDK.
+  - The converter predicts overloads conservatively instead of asking the compiler.

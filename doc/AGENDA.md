@@ -20,10 +20,12 @@ The current state of the work. This file is rewritten as things change. For the 
    forms, what the compiler derives as javac does, what the converter makes explicit, coverage
    tables, compilation model, REPL, worked examples). Reviewed: the user accepted all 17
    recommendations of §12.
-2. Bootstrap compiler for the new forms, running on the frozen `clojure/` (stage 0) and emitting
-   bytecode with `clojure.asm`, with tests per construct, including defining classes at the REPL.
-3. Converter (Java → Clojure) on javac's attributed trees. Convert the 183 baseline files and
-   check them for equivalence: Clojure's upstream test suite, and class shapes against javac's.
+2. Class forms compiler: **done** at stage 0 (`arbace/classes/`, `bin/class-forms-tests`,
+   `doc/classes/COMPILER-NOTES.md`).
+3. Converter: **done** (`arbace/j2c/`, `bin/j2c`, `bin/j2c-check`,
+   `doc/classes/CONVERTER-NOTES.md`). The converted baseline compiles to javac's class shapes,
+   and Clojure's test suite passes on it as on the baseline. **Pending:** the user's decision on
+   the 28 proposed spec amendments, which then go into SPEC.md.
 4. Vendor `clojure/` as `arbace/`, renamed to `arbace.*` with `version.properties` folded or
    dropped, and with all of it in `.clj`. Self-host: stage 1 and stage 2, with stage 2
    reproducing itself.
