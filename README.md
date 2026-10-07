@@ -32,6 +32,14 @@ we go so that it could be repeated.
   Java source into them. Arbace's own Java parts are class forms, and since stage 1 the forms are
   native to Arbace.
 
+## Running
+
+`bin/build-arbace` bootstraps Arbace into `target/` (about 1.5 minutes; see
+[doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md)). Then `bin/arbace` runs it like `clojure.main`:
+`bin/arbace` for a REPL, `bin/arbace -e '(+ 1 2)'`, `bin/arbace script.clj`. It runs
+`target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache applies (it is tied
+to the JDK build and the jar), and from the jar alone otherwise.
+
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): the current state of the work and what comes next

@@ -1426,7 +1426,8 @@ is.
 - **Stage 1**: stage 0 compiles `arbace/**/*.clj`. Its classes are self-contained `arbace.*`
   classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among them;
   `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
-  from classes that each stage AOT-compiles into itself (so they too must reproduce). Clojure-level
+  from classes that each stage AOT-compiles into itself, as it does `arbace.core` and the other
+  namespaces (so they too must reproduce). Clojure-level
   namespaces such as `arbace.core` must be compiled by Arbace's own compiler, since the frozen one
   emits references to `clojure.lang`; the order of that is a matter for steps 2 and 4.
 - **Stage 2** recompiles with stage 1, and must reproduce itself.

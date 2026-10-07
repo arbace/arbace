@@ -197,8 +197,10 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   instruction.
 - **Loading `arbace.classes`.** `bin/build-arbace` AOT-compiles the `arbace.classes`
   namespaces (`compile 'arbace.classes.boot`, not `arbace.j2c`) into each stage with that
-  stage's runtime, after its class forms are built; the libraries they require (`arbace.set`,
-  `arbace.string`, `arbace.java.io`) stay source. So a stage loads the class forms compiler from
+  stage's runtime, after its class forms are built. Since 2026-10-07 this is one
+  `arbace.lang.Compile` run with direct linking that first compiles `arbace.core` and the other
+  namespaces Clojure ships compiled, so the libraries `arbace.classes` requires are classes too
+  (`doc/VENDOR-NOTES.md`, "The bootstrap"). So a stage loads the class forms compiler from
   classes on first use (and the next stage is built by these classes); a source newer than its
   classes is still loaded from source, as Clojure's `load` decides. The output is
   reproducible, stage 3 equals stage 2 with them (2,100 files), after two fixes to the vendored
@@ -210,6 +212,10 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   45 ms). Measured by timing each `require` (the libraries they use are loaded at startup
   already): before, compiling from source took nearly all of it, `analyze` 470 ms and `emit`
   290 ms; ASM and the class environment cost nothing measurable.
+  With all namespaces AOT-compiled (2026-10-07) the first class form costs about 200 ms from
+  `-cp target/stage2:.` and about 55 ms from `bin/arbace` (the jar with the JDK AOT cache, which
+  has `arbace.classes` loaded and linked by its training run); the whole `defclass` script runs
+  in 0.78 s and 0.26 s, against 2.3 s before.
 - **The special forms.** `class*`, `label*`, `break*`, `continue*`, `return*`, `switch*`,
   `lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`, `with-resources*` and
   `if-instance*` are in `Compiler/specials` (so `special-symbol?` holds and syntax-quote leaves

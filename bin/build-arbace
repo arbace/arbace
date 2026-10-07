@@ -8,22 +8,39 @@
 #            arbace.*: java -cp target/stage1:. arbace.lang.Main
 #   stage 2  target/stage2: the same sources compiled by arbace.classes running on stage 1
 #   stage 3  target/stage3: compiled by stage 2; must equal stage 2 byte for byte (fixpoint)
-# Each stage also holds the class forms compiler (the arbace.classes namespaces), AOT-compiled
-# by that stage's own runtime, so that a stage loads it from classes on first use; the next
-# stage is built by these classes. Stage 3 must equal stage 2 there too.
-# Then the tests of the native class forms (bin/native-tests, test/native/) run on stage 1.
+# Each stage also holds its namespaces AOT-compiled by that stage's own runtime, with direct
+# linking, as Clojure's release jar holds its own (build.xml compile-clojure): arbace.core and
+# the rest of the namespaces Clojure ships compiled, then the class forms compiler
+# (arbace.classes). A stage so loads them from classes, and the next stage is built by these
+# classes. Stage 3 must equal stage 2 there too. arbace.j2c, a stage-0 tool, stays source.
 # Each stage compiles every package from its sources only (arbace.classes.build), so its own
 # loaded classes never stand in for the ones being compiled.
+# Then the tests of the native class forms (bin/native-tests, test/native/) run on stage 1.
+# Last, the launcher's files (bin/arbace):
+#   target/arbace.jar  stage 2's classes and the arbace/ sources, reproducible (fixed order and
+#                      times; the jar of stage 3 must equal it byte for byte)
+#   target/arbace.aot  a JDK AOT cache (JEP 483, 514, 515) from a training run of the jar; tied
+#                      to the JDK build and the jar, so it is made anew by every build
 #
 # Usage: bin/build-arbace [--suite]
 #   --suite  also run Clojure's test suite (bin/clojure-tests, renamed) on stage 1 and stage 2,
-#            runs "stage1" and "stage2"; both must show no regressions against the baseline
-# Exit status: 0 when every stage builds, stage 3 equals stage 2, the native tests pass and
-# (with --suite) the suite passes.
+#            runs "stage1" and "stage2", against the stages' own compiled namespaces; both must
+#            show no regressions against the baseline
+# Exit status: 0 when every stage builds, stage 3 equals stage 2, the native tests pass, the
+# jars are equal, the cache is made and (with --suite) the suite passes.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 pkgs="arbace/lang arbace/asm arbace/asm/commons arbace/asm/signature arbace/java/api"
+# The namespaces AOT-compiled into each stage: those of build.xml's compile-clojure (as
+# bin/clojure-tests lists them), in its order, then the class forms compiler
+nss="arbace.core arbace.core.protocols arbace.core.server arbace.main arbace.set arbace.edn
+arbace.xml arbace.zip arbace.inspector arbace.walk arbace.stacktrace arbace.template arbace.test
+arbace.test.tap arbace.test.junit arbace.pprint arbace.java.io arbace.repl arbace.java.browse
+arbace.java.javadoc arbace.java.shell arbace.java.process arbace.java.browse-ui
+arbace.java.basis.impl arbace.java.basis arbace.string arbace.data arbace.reflect arbace.datafy
+arbace.instant arbace.uuid arbace.core.reducers arbace.math arbace.tools.deps.interop
+arbace.repl.deps arbace.classes.boot"
 status=0
 
 # build STAGE: compile the class forms with the previous stage into target/stageSTAGE
@@ -37,15 +54,14 @@ build() {
   echo "== stage $n: compiled by stage $((n - 1)) into $out"
   java -Xss64m ${ARBACE_JVM_OPTS:--Xmx8g} -cp "$cp" $main -e \
     "(require 'arbace.classes.boot) (arbace.classes.build/-main $args)" || return 1
-  # the class forms compiler itself (arbace.classes), AOT-compiled by the stage just built, so
-  # the stage loads it from classes on first use; the libraries it requires stay source
-  java -Xss64m ${ARBACE_JVM_OPTS:--Xmx8g} -cp "$out:$root" arbace.lang.Main -e \
-    "(require 'arbace.set 'arbace.string 'arbace.java.io)
-     (binding [*compile-path* \"$out\"] (compile 'arbace.classes.boot))
-     (println \"   arbace.classes AOT:\" (count (filter #(.endsWith (str %) \".class\")
-                                                    (file-seq (java.io.File. \"$out/arbace/classes\"))))
-              \"classes\")
-     (shutdown-agents)" || return 1
+  # the namespaces, AOT-compiled by the stage just built (arbace.lang.Compile, as build.xml's
+  # compile-clojure runs clojure.lang.Compile)
+  local before; before=$(find "$out" -name '*.class' | wc -l)
+  # shellcheck disable=SC2086
+  java -Xss64m ${ARBACE_JVM_OPTS:--Xmx8g} -Djava.awt.headless=true -Darbace.compile.path="$out" \
+    -Darbace.compiler.direct-linking=true -cp "$out:$root" arbace.lang.Compile $nss \
+    > "$out.aot.log" 2>&1 || { cat "$out.aot.log"; return 1; }
+  echo "   namespaces AOT: $(( $(find "$out" -name '*.class' | wc -l) - before )) classes"
   echo "   $(echo '(println "arbace.lang.Main:" (clojure-version) (class []) (class (fn [])))' |
           java -cp "$out:$root" arbace.lang.Main - 2>&1 | tail -1)"
 }
@@ -70,10 +86,52 @@ if [ $status = 0 ]; then
   bin/native-tests 1 2>&1 | tail -3 || status=1
 fi
 
+# mkjar STAGE: target/stageSTAGE.jar, the stage's classes and the arbace/ sources (what
+# -cp target/stageN:. gives arbace.lang.Main), reproducible: entries in byte order, no
+# directory entries, a fixed manifest, sources dated 2000-01-01T00:00:00Z and classes ten
+# seconds later (RT.load takes a namespace's class only when it is newer than its source)
+mkjar() {
+  local n=$1 st=$root/.tmp/build-arbace/jar$1 out=$root/target/stage$1.jar
+  rm -rf "$st" "$out"
+  mkdir -p "$st/META-INF"
+  printf 'Manifest-Version: 1.0\nMain-Class: arbace.lang.Main\n\n' > "$st/META-INF/MANIFEST.MF"
+  cp -r "target/stage$n/." "$st/"
+  find arbace -name '*.clj' | cpio -pdm --quiet "$st"
+  (cd "$st" &&
+     find . -type f ! -name '*.class' -exec touch -d 2000-01-01T00:00:00Z {} + &&
+     find . -type f -name '*.class' -exec touch -d 2000-01-01T00:00:10Z {} + &&
+     find . -type f | sed 's|^\./||' | LC_ALL=C sort > "../list$n" &&
+     TZ=UTC jar --create --no-manifest --file "$out" "@../list$n") || return 1
+  rm -rf "$st" "$st/../list$n"
+}
+
+if [ $status = 0 ]; then
+  echo "== jar and AOT cache"
+  if mkjar 2 && mkjar 3 && cmp -s target/stage2.jar target/stage3.jar; then
+    mv target/stage2.jar target/arbace.jar && rm target/stage3.jar
+    echo "   target/arbace.jar: $(unzip -Z1 target/arbace.jar | wc -l) entries, equal to stage 3's"
+  else
+    echo "   the jars of stage 2 and stage 3 differ"; status=1
+  fi
+fi
+if [ $status = 0 ]; then
+  # The training run (bin/arbace --aot-train): a REPL session over the common libraries, the
+  # class forms compiler, deftype, defrecord, protocols, clojure.test, futures and agents
+  rm -f target/arbace.aot
+  bin/arbace --aot-train < test/aot-training.clj > target/arbace.aot.log 2>&1
+  if [ -s target/arbace.aot ]; then
+    echo "   target/arbace.aot: $(( $(stat -c %s target/arbace.aot) / 1048576 )) MB"
+    echo "   $(bin/arbace -e '(println "bin/arbace:" (clojure-version) (class []))' 2>&1 | tail -1)"
+  else
+    cat target/arbace.aot.log; echo "   no AOT cache made"; status=1
+  fi
+fi
+
 if [ $status = 0 ] && [ "${1:-}" = "--suite" ]; then
   for n in 1 2; do
     echo "== Clojure's test suite on stage $n"
     CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage$n CLOJURE_SRC="$root/target/stage$n:$root" \
+      CLOJURE_TESTS_PRECOMPILED=1 \
       bin/clojure-tests -j "${ARBACE_TEST_JOBS:-32}" | tail -6 || status=1
   done
 fi

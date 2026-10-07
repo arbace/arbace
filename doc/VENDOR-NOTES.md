@@ -136,7 +136,7 @@ Left alone (with the reason):
 
 ## The bootstrap
 
-`bin/build-arbace` (about one minute):
+`bin/build-arbace` (about 1.5 minutes):
 
 - **Stage 0 → stage 1.** The frozen `clojure/` loads `arbace.classes` through
   `arbace.classes.boot` and runs `arbace.classes.build` over the packages
@@ -160,6 +160,80 @@ nondeterminism to fix.
 
 Running a stage: `java -cp target/stageN:. arbace.lang.Main` (any `arbace.main` option, e.g. `-e`,
 `-m`, a script). The class path needs the repository root for the `.clj` sources.
+
+### Compiled namespaces, the jar and the AOT cache (2026-10-07)
+
+The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `bin/build-arbace`:
+
+- **Each stage holds its namespaces AOT-compiled by its own runtime.** After a stage's class
+  forms are built, one `arbace.lang.Compile` run on `-cp target/stageN:.` with
+  `-Darbace.compile.path=target/stageN -Darbace.compiler.direct-linking=true` compiles, in
+  order, the 35 namespaces of upstream `build.xml`'s `compile-clojure` (renamed; the list
+  `bin/clojure-tests` also uses: `arbace.core` ... `arbace.repl.deps`), then
+  `arbace.classes.boot` (the class forms compiler). Direct linking, as Clojure's release jar.
+  4,276 classes per stage (2,941 of them the 35 namespaces, 1,335 `arbace.classes`), in about
+  6 s. `arbace.j2c` stays source (a stage-0 tool, run by the frozen `clojure/`); the package
+  files `arbace/lang.clj`, `arbace/asm.clj`, `arbace/java/api.clj` are not namespaces to compile
+  (they load the class forms). The next stage is built by these classes.
+- **The fixpoint covers them**: stages 1, 2 and 3 are byte-identical, 5,091 classes each (815
+  class-form classes, 4,276 namespace classes). No further nondeterminism had to be fixed:
+  the two fixes made for `arbace.classes` (`LocalBinding.hashCode`, sorted proxy
+  constructors, "After vendoring" item 5) were enough, and three runs of the compile into fresh
+  directories gave identical bytes. Gensym and fn-class numbers (`RT.nextID`) depend only on
+  the load order, which is the same in every stage: each compile starts from a stage without
+  namespace classes, so `arbace.core` loads from source first in all of them.
+- **`target/arbace.jar`**: stage 2's classes plus every `arbace/**/*.clj` (what
+  `-cp target/stage2:.` gives), manifest `Main-Class: arbace.lang.Main`. It is reproducible: the
+  build makes the jar of stage 3 too and requires the two to be equal byte for byte. Entries in
+  byte order, no directory entries, a fixed manifest written as a file (`jar --no-manifest`),
+  times fixed through the files' mtimes in a staging copy under `TZ=UTC`: sources at
+  2000-01-01T00:00:00Z and classes ten seconds later. They must differ: `RT.load` takes a
+  namespace's `__init` class only when it is strictly newer than its source, and `jar --date`
+  gives every entry the same time (with it all namespaces loaded from source).
+- **`target/arbace.aot`**: a JDK AOT cache (JEP 483, 514, 515; 36 MB), made by a training run
+  `bin/arbace --aot-train < test/aot-training.clj` (`-XX:AOTCacheOutput`, one step): a REPL
+  session requiring the common libraries, a `defclass`, deftype/defrecord/protocols,
+  `arbace.test`, futures, `pmap`, agents, `doc` and `source`. The cache refuses directories on the
+  class path at creation, hence the jar. It is tied to the JDK build, the jar (path, size, mtime)
+  and the JVM options (e.g. compact headers), so every build remakes it; it is not compared
+  between stages (it is not reproducible and holds nothing of Arbace's own making).
+- **`bin/arbace`** runs `arbace.lang.Main` from the jar with `-XX:+UseCompactObjectHeaders`
+  (JEP 519; also used for the training run, since the cache must match), and with
+  `-XX:AOTCache=target/arbace.aot` when the cache is newer than the jar. If the JVM rejects the
+  cache (another JDK, other options) it runs without it; the launcher turns the JVM's `aot` and
+  `cds` logging off, which would otherwise print the rejection on stdout. `ARBACE_CLASSPATH` is
+  appended to the class path (the cache allows appending), `ARBACE_JAVA_OPTS` adds JVM options,
+  `ARBACE_AOT=off` skips the cache, `ARBACE_JAR` names another jar.
+- **The suite** (`bin/build-arbace --suite`) runs against the stages' own compiled namespaces,
+  as upstream's runs against its build: `bin/clojure-tests` got `CLOJURE_TESTS_PRECOMPILED=1`,
+  which skips its step 3 (compiling the namespaces into the run's `classes/`). Result on stages
+  1 and 2: 83 namespaces, 809 tests, 20,718 / 20,750 assertions, test.generative 27 / 27, no
+  regressions.
+
+Measured on 2026-10-07 (JDK 26.0.2.1, 64 cores shared with other agents, load average 2 to 7
+during the runs; hyperfine, 3 warmups, 20 runs; noise about ±5 %):
+
+| `-e 1` launch | mean | min |
+|---|---:|---:|
+| stage from sources (before: `-cp target/stage2:.`, no namespace classes) | 2.14 s | 2.04 s |
+| `-cp target/stage2:.` with the compiled namespaces | 0.48 s | 0.46 s |
+| `-cp target/arbace.jar` | 0.49 s | 0.46 s |
+| the jar, `-XX:+UseCompactObjectHeaders` | 0.49 s | 0.46 s |
+| the jar + AOT cache | 0.16 s | 0.15 s |
+| the jar + AOT cache, compact headers | 0.16 s | 0.15 s |
+| `bin/arbace -e 1` (the last, through bash) | 0.17 s | 0.16 s |
+| frozen `clojure/` (`java -cp . clojure.main`) | 2.11 s | 1.95 s |
+
+- First class form of a session (a `defclass` in a script, the `eval` timed): 255 ms before,
+  about 200 ms from `-cp target/stage2:.`, about 55 ms from `bin/arbace` (the cache has
+  `arbace.classes` loaded and linked). The whole script: 2.33 s → 0.78 s → 0.26 s.
+- Compact object headers: no launch difference, and no throughput difference within the noise
+  (`(into #{} (map #(update % :a inc) v))` over 2 million small maps, about 1.0 s either way),
+  but the retained heap of those maps is 245 MB instead of 277 MB (-11 %). Hence the launcher
+  default.
+- `bin/build-arbace` without `--suite`: 82.8 s before, 82.5 s after (the namespace compile adds
+  about 6 s per stage; stages 2 and 3, built by a stage with compiled namespaces, start faster;
+  the jars and the training run add about 6 s). With `--suite`: 5 min 43 s.
 
 ## Clojure's test suite on stages 1 and 2
 
