@@ -65,6 +65,9 @@ Prior art:
 
 ## Working conventions
 
+- Data and source formats target the Clojure reader (`read`), not strict EDN; the two differ
+  slightly, and where in doubt the Clojure reader wins.
+
 - In a fresh git worktree, run `find clojure -name '*.class' -exec touch {} +` first: checkout
   leaves the `.java` files newer than their tracked classes, and the checks then recompile them.
 
