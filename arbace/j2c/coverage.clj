@@ -3,8 +3,7 @@
   for them, from the reports (j2c-report.edn) of converter runs.
 
   bin/j2c -m arbace.j2c.coverage REPORT.edn... prints a Markdown summary."
-  (:require [clojure.edn :as edn]
-            [clojure.string :as str])
+  (:require [clojure.string :as str])
   (:import [com.sun.source.tree Tree$Kind]))
 
 (def kind-forms
@@ -64,7 +63,7 @@
     :else "?"))
 
 (defn -main [& reports]
-  (let [rs (map (comp edn/read-string slurp) reports)
+  (let [rs (map #(binding [*read-eval* false] (read-string (slurp %))) reports)
         stats (apply merge-with + (map :stats rs))
         heads (apply merge-with + (map :heads rs))
         files (reduce + (map :files rs))

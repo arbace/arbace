@@ -683,3 +683,14 @@ instead of calling `arbace.classes`'s resolution.
   https://github.com/candid82/joker (a Clojure dialect in Go). Go changes role: before, only the
   runtime was in scope; now the language too, as a later projection into Arbace.
 - Recorded in CLAUDE.md ("Direction", prior art), README and AGENDA.
+
+## 2026-10-07: Formats target the Clojure reader
+
+- The user's rule, now in CLAUDE.md: data and source formats target the Clojure reader (`read`),
+  not strict EDN; where in doubt, the Clojure reader wins.
+- Checked against the tools. j2c writes Clojure 1.12 syntax (param-tags, array class
+  symbols). Its `--check` counts a file as unreadable only when `clojure.core/read` fails, and
+  lists `clojure.edn/read` failures only as information. The class forms compiler and the boot
+  read sources with `read`.
+- For uniformity, `arbace.j2c.coverage` now reads `j2c-report.edn` files with `read-string`
+  (with `*read-eval*` off) instead of `clojure.edn/read-string`.
