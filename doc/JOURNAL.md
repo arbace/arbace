@@ -851,3 +851,26 @@ recommended:
 - Checked after the revert by the main session: `bin/build-arbace` (fixpoint 5,091 classes,
   verifier, native tests 30/2,367 pass). The full gate runs again once the parallel agents have
   pushed.
+
+## 2026-10-07: invokedynamic reflective call sites (kept)
+
+- Done by a background agent (`e81cf41`, hand change 10 in `doc/VENDOR-NOTES.md`).
+- How it works:
+  - Unresolved interop calls emit `invokedynamic` to `arbace.lang.ReflectorCallSite`, a
+    `MutableCallSite`. This covers instance methods, no-argument members, static methods and
+    constructors on JDK classes.
+  - Each site caches the member `Reflector` itself selects, guarded on the receiver class, and
+    on the argument classes where the choice depends on them. It holds up to 8 entries, then
+    turns megamorphic.
+  - Everything else, including every error, goes through `Reflector` unchanged. The selection
+    logic was moved inside `Reflector`, not changed, so both paths share it.
+  - User classes, field writes and calls with more than 20 arguments keep the old path, so
+    REPL redefinition and JEP 500 are unaffected.
+- Measured by the agent, per un-hinted call: `.length` 1,053 → 2 ns, `.get` 492 → 8 ns,
+  `Math/abs` 2,041 → 1.2 ns. Megamorphic `.size` over 10 classes went 690 → 14-21 ns.
+  Startup is unchanged. The cost is the link of each site on every launch, since the AOT cache
+  does not pre-resolve custom bootstraps: up to about 0.1 ms more for a site run only a few
+  times in a cold JVM.
+- The main session's check: 2M un-hinted `.length`/`.get` calls take about 4 ms on Arbace,
+  against about 3.6 s on the frozen Clojure. `bin/build-arbace` gives a fixpoint at 5,093
+  classes, and the native tests (38 tests, 2,722 assertions) pass.

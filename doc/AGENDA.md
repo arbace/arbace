@@ -56,10 +56,12 @@ The current state of the work. This file is rewritten as things change. For the 
     `bin/arbace`, which launches in about 0.2 s against about 2 s before (`8c9f2d3`).
   - Done: the JDK verifier checks every class of stages 1 and 2, and the Clojure compiler emits
     classfile version 70 (`e8a5e30`). All "do first" items of the survey are done.
-  - In progress (user's decisions, each measured): condy constants, `invokedynamic` keyword
-    sites and `StringConcatFactory` for `str`; `invokedynamic` reflective calls; VarHandles in
-    `Atom`, an opt-in virtual-thread executor and a `jlink` image. ASM stays, and Var calls stay
-    indirect.
+  - Done (user's decisions, each measured): `invokedynamic` reflective call sites (un-hinted
+    calls about 100-1,000x faster), an opt-in virtual-thread executor, and a `jlink` image.
+    `Atom` on a `VarHandle` was tried and reverted (slower under contention). ASM stays, and
+    Var calls stay indirect.
+  - In progress: condy constants, `invokedynamic` keyword sites, `StringConcatFactory` for
+    `str`.
 - g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). The open
   questions are decided (journal, 2026-10-07): front end, spec and round trip (G0-G2), then the
   box via gc + TamaGo (B1). No Go libraries on the JVM. Target `GOOS=tamago` amd64/arm64,
