@@ -233,7 +233,7 @@ for `GOOS=wasip1 GOARCH=wasm` with tags `purego,math_big_pure_go`.
 
 ### 2.4 Feasibility experiment
 
-`.tmp/g2c/godump/main.go`, about 330 lines of Go, is described in §10. It loads a package's
+`.tmp/g2c/godump/main.go`, 349 lines of Go, is described in §10. It loads a package's
 files for the current configuration (`go list`), type-checks them with `go/types` (importing
 dependencies from export data through `importer.ForCompiler(fset, "gc", nil)`), and prints
 the AST generically by reflection with the annotations above. With `-meta` the annotations
