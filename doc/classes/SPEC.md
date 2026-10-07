@@ -1406,7 +1406,9 @@ itself: the class forms compiler (§12 question 17), loaded on first use, does, 
 In class bodies and in such fns, Clojure's `fn*`, `letfn*`, `case*`, `reify*`, `def` and `var`
 are compiled by rewriting them into class forms (a `fn` is an anonymous `AFunction`, a `reify` a
 local class), and a core operation whose operands do not fit an instruction compiles as Clojure
-compiles it (§5.13). A method of `reify` or of a deftype compiled this way implements the
+compiles it (§5.13); so do calls of methods and constructors there: the overload is the one
+Clojure's compiler chooses (the only one of that arity, else `Compiler.getMatchingParams`, with
+its errors, and reflection where it chooses none), not Java's. A method of `reify` or of a deftype compiled this way implements the
 interface (or `Object`) method that Clojure's compiler chooses, not one inferred as in §4.6: the
 only one with its (munged) name and arity when nothing is hinted, otherwise the one whose
 parameter types are the hinted classes (`Object` where unhinted), whose return type must be the

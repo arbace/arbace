@@ -1722,6 +1722,134 @@
     (and (= (count tags) (count ps))
          (every? true? (map (fn [tag p] (or (= tag '_) (= p (actx-desc actx tag)))) tags ps)))))
 
+;; Clojure's choice among overloads (arbace.lang.Compiler's getMatchingParams and subsumes,
+;; Reflector's paramArgTypeMatch), on descriptors
+
+(def ^:private clj-fi-excluded #{"java/util/concurrent/Callable" "java/lang/Runnable" "java/util/Comparator"})
+
+(defn clj-fi-method
+  "Compiler's FISupport.maybeFIMethod: for a parameter of type desc that is a
+  @FunctionalInterface other than Callable, Runnable and Comparator, its method (an abstract
+  one, of at most 10 parameters, other than equals, toString and hashCode) that an IFn argument
+  is adapted to; else nil."
+  [desc]
+  (when (and (t/class-desc? desc) (not (clj-fi-excluded (t/desc->internal desc))))
+    (when-let [^Class c (env/load-class (t/desc->internal desc))]
+      (when (.isAnnotationPresent c java.lang.FunctionalInterface)
+        (first (filter (fn [^java.lang.reflect.Method m]
+                         (and (<= (.getParameterCount m) 10)
+                              (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
+                              (not (#{"equals" "toString" "hashCode"} (.getName m)))))
+                       (.getMethods c)))))))
+
+(defn- clj-arg-class
+  "The class arbace.lang.Compiler knows for an argument node (Expr.getJavaClass), as a
+  descriptor: nil for nil, ::unknown for Object (the type of what Clojure leaves untyped)."
+  [node]
+  (let [v (value-type (:type node))]
+    (cond (= v :null) nil
+          (or (not (string? v)) (= v t/object-desc)) ::unknown
+          :else v)))
+
+(def ^:private clj-prim-args
+  "Reflector.paramArgTypeMatch's conversions to primitive parameters."
+  {"I" #{"Ljava/lang/Integer;" "J" "Ljava/lang/Long;" "S" "B"}
+   "F" #{"Ljava/lang/Float;" "D"}
+   "D" #{"Ljava/lang/Double;" "F"}
+   "J" #{"Ljava/lang/Long;" "I" "S" "B"}
+   "C" #{"Ljava/lang/Character;"}
+   "S" #{"Ljava/lang/Short;"}
+   "B" #{"Ljava/lang/Byte;"}
+   "Z" #{"Ljava/lang/Boolean;"}})
+
+(defn- clj-param-arg-match?
+  "Reflector.paramArgTypeMatch for parameter type p and argument class a (clj-arg-class)."
+  [p a]
+  (cond
+    (nil? a) (t/ref? p)
+    (= a ::unknown) (= p t/object-desc)
+    (= p a) true
+    (and (t/ref? p) (t/ref? a) (env/assignable? a p)) true
+    (and (t/ref? p) (t/ref? a) (env/assignable? a (t/lang-desc "IFn")) (clj-fi-method p)) true
+    :else (contains? (get clj-prim-args p #{}) a)))
+
+(defn- clj-subsumes?
+  "Compiler.subsumes: is parameter list c1 more specific than c2?"
+  [c1 c2]
+  (loop [[[a b] & more] (map vector c1 c2) better false]
+    (cond (nil? a) better
+          (= a b) (recur more better)
+          (or (and (t/ref? a) (t/prim? b)) (and (t/ref? a) (t/ref? b) (env/assignable? a b))) (recur more true)
+          :else false)))
+
+(defn- clj-ret-assignable?
+  "Class.isAssignableFrom on return types: r1 from r2."
+  [r1 r2]
+  (or (= r1 r2) (and (t/ref? r1) (t/ref? r2) (env/assignable? r2 r1))))
+
+(defn- clj-matching-index
+  "Compiler.getMatchingParams: the index of the parameter list (of plists, with return types
+  rets) chosen for the argument nodes, or -1; \"More than one matching method found\" on a tie."
+  [what plists args rets]
+  (let [acs (mapv clj-arg-class args)
+        n (count args)]
+    (loop [i 0 idx -1 tied false found-exact false]
+      (if (= i (count plists))
+        (if tied
+          (fail (str "More than one matching method found: " what) {:clojure/no-reflect true})
+          idx)
+        (let [ps (nth plists i)
+              [exact match] (loop [p 0 exact 0]
+                              (if (= p n)
+                                [exact true]
+                                (let [a (acs p) pc (ps p)]
+                                  (cond (and (string? a) (= a pc)) (recur (inc p) (inc exact))
+                                        (clj-param-arg-match? pc a) (recur (inc p) exact)
+                                        :else [exact false]))))]
+          (cond
+            (= exact n)
+            (recur (inc i)
+                   (if (or (not found-exact) (= idx -1) (clj-ret-assignable? (rets idx) (rets i))) i idx)
+                   false true)
+            (and match (not found-exact))
+            (cond (= idx -1) (recur (inc i) i tied found-exact)
+                  (clj-subsumes? ps (plists idx)) (recur (inc i) i false found-exact)
+                  (= ps (plists idx)) (recur (inc i) (if (clj-ret-assignable? (rets idx) (rets i)) i idx)
+                                             tied found-exact)
+                  (not (clj-subsumes? (plists idx) ps)) (recur (inc i) idx true found-exact)
+                  :else (recur (inc i) idx tied found-exact))
+            :else (recur (inc i) idx tied found-exact)))))))
+
+(defn- clj-type-string
+  "Compiler.getTypeStringForArgs."
+  [args]
+  (str/join ", " (map #(let [a (clj-arg-class %)] (if (string? a) (class-name-of a) "unknown")) args)))
+
+(defn clj-select
+  "The method (or constructor) of cands that arbace.lang.Compiler calls for the argument nodes,
+  marked :clojure-args (its arguments converted as Clojure converts them): the only one of that
+  arity, else the one Compiler.getMatchingParams chooses (kind :instance, :static or :ctor of
+  class cn), with the compiler's errors. When it chooses none an instance method or constructor
+  is called by reflection, as in Clojure (an unresolved failure, see or-reflect)."
+  [cands args kind mname cn]
+  (let [n (count args)
+        pdescs #(vec (first (t/parse-method-desc (:desc %))))
+        ms (vec (filter #(= n (count (pdescs %))) cands))
+        c (str (if (env/interface? cn) "interface " "class ") (str/replace cn "/" "."))]
+    (case (count ms)
+      0 (case kind
+          :static (fail (str "No matching method " mname " found taking " n " args for " c) {:clojure/no-reflect true})
+          :ctor (fail (str "No matching ctor found for " c) {:clojure/no-reflect true})
+          (fail (str "No matching method " mname " of " n " args") {:clojure/why "no such method"}))
+      1 [(assoc (ms 0) :clojure-args true) false]
+      (let [i (clj-matching-index (if (= kind :ctor) (str/replace cn "/" ".") mname) (mapv pdescs ms) args
+                                  (mapv #(if (= kind :ctor) (t/internal->desc cn) (second (t/parse-method-desc (:desc %)))) ms))]
+        (if (neg? i)
+          (fail (str "No matching " (if (= kind :ctor) "constructor" (str "method " mname)) " for argument types "
+                     (clj-type-string args))
+                {:clojure/why (str "argument types: " (clj-type-string args))})
+          [(assoc (ms i) :clojure-args true) false])))))
+
 (defn select-method
   "Chooses among candidate methods for argument nodes (JLS 15.12.2 on erased types: strict,
   loose, then variable arity invocation; then literal narrowing). Returns [method varargs?]."
@@ -1752,11 +1880,6 @@
                                  (applicable? :literal args (expand-varargs (pdescs %) n)))
                            cands)]
             (when-let [m (pick vs #(expand-varargs (pdescs %) n))] [m true]))
-          ;; Clojure's code: the only method of that arity, its arguments converted as
-          ;; Clojure converts them (MethodExpr.emitTypedArgs)
-          (when (:clojure actx)
-            (let [ms (filter #(not (varargs? %)) fixed)]
-              (when (= 1 (count ms)) [(assoc (first ms) :clojure-args true) false])))
           (fail (str "No matching " what " for argument types " (pr-str (mapv (comp value-type :type) args))
                      (when (seq cands) (str "; candidates: " (pr-str (map :desc cands))))))))))
 
@@ -1791,6 +1914,29 @@
                  "B" "byteCast"}]
     (cond
       (or (#{:null :none} from) (conversion node (:type node) to)) (convert-node node to :what "argument")
+      ;; FISupport.maybeEmitFIAdapter: an IFn that is not an instance of the functional interface
+      ;; is adapted to it (invokedynamic on LambdaMetafactory with a FnInvokers method)
+      (and (t/ref? from) (t/ref? to) (clj-fi-method to))
+      (let [^java.lang.reflect.Method sam (clj-fi-method to)
+            pc (.getParameterCount sam)
+            ip (fn [^Class c] (if (<= pc 2)
+                                (cond (#{Byte/TYPE Short/TYPE Integer/TYPE Long/TYPE} c) Long/TYPE
+                                      (#{Float/TYPE Double/TYPE} c) Double/TYPE
+                                      :else Object)
+                                Object))
+            code (fn [^Class c] (get {Long/TYPE "L" Double/TYPE "D" Integer/TYPE "I" Short/TYPE "S"
+                                      Byte/TYPE "B" Float/TYPE "F"} c "O"))
+            params (map ip (.getParameterTypes sam))
+            iname (apply str "invoke" (concat (map code params)
+                                              [(code (if (<= pc 2) (.getReturnType sam) Object))]))
+            fn-invokers (Class/forName (str/replace (t/lang-class "FnInvokers") "/" "."))
+            ^java.lang.reflect.Method im (.getMethod fn-invokers iname
+                                                     (into-array Class (cons (Class/forName (str/replace (t/lang-class "IFn") "/" "."))
+                                                                             params)))]
+        {:op :fi-adapter :expr node :type to :sam-name (.getName sam)
+         :sam-desc (t/method-desc (map t/class->desc (.getParameterTypes sam)) (t/class->desc (.getReturnType sam)))
+         :invoker iname
+         :invoker-desc (t/method-desc (map t/class->desc (.getParameterTypes im)) (t/class->desc (.getReturnType im)))})
       (and (t/ref? from) (cast-fn to))
       {:op :invoke :kind :static :owner rt :itf false :name (cast-fn to)
        :desc (str "(Ljava/lang/Object;)" to) :target nil :args [node] :type to}
@@ -1801,6 +1947,11 @@
       (and (= "J" from) (= "I" to))
       {:op :invoke :kind :static :owner rt :itf false :name "intCast" :desc "(J)I" :target nil
        :args [node] :type "I"}
+      ;; another primitive: boxed, then converted as a reference (emitUnboxArg)
+      (and (t/prim? from) (not= "Z" from) (cast-fn to))
+      {:op :invoke :kind :static :owner rt :itf false :name (cast-fn to)
+       :desc (str "(Ljava/lang/Object;)" to) :target nil
+       :args [(convert-node node (t/internal->desc (t/box-of from)))] :type to}
       :else (convert-node node to :what "argument"))))
 
 (defn convert-args
@@ -1886,6 +2037,7 @@
   "Is e the compiler's failure to resolve a member (so that reflection may apply)?"
   [e]
   (and (:arbace/compile-error (ex-data e))
+       (not (:clojure/no-reflect (ex-data e)))
        (re-find #"^(No accessible|No matching|Ambiguous call|No field|No static field|Field not accessible|Method call|Field access)" (ex-message e))))
 
 (defn- or-reflect
@@ -1894,7 +2046,7 @@
   (if (reflect? actx)
     (try (f)
          (catch arbace.lang.ExceptionInfo e
-           (if (unresolved? e) (reflect (ex-message e)) (throw e))))
+           (if (unresolved? e) (reflect (or (:clojure/why (ex-data e)) (ex-message e))) (throw e))))
     (f)))
 
 (defn analyze-method-call
@@ -1932,25 +2084,12 @@
                 desc (t/method-desc ps ret)]
             {:op :invoke :kind :virtual :owner (:owner poly) :itf false :name mname :desc desc
              :target target :args (mapv #(convert-node %1 %2) arg-nodes ps) :type ret})
-          (let [[m va] (select-method actx cands arg-nodes (str "method " mname) param-tags)]
+          (let [[m va] (if (and (:clojure actx) (not special) (nil? param-tags))
+                         (clj-select cands arg-nodes :instance mname cn)
+                         (select-method actx cands arg-nodes (str "method " mname) param-tags))]
             (invoke-node actx (when special :special) (or owner-override tt) m target arg-nodes va)))))))
 
 (declare clj-convert)
-
-(defn- clj-single-method
-  "In the :inline expansion of a Clojure function (clj-call-node), a static call no method is
-  applicable to compiles as Clojure's compiler compiles it when the class has one method of
-  that name and arity: that method, each argument converted to its parameter type as Clojure
-  converts it (RT.intCast, RT.floatCast ...). So (bit-and-int x y) on Objects calls
-  Numbers.andInt(int, int), as (unchecked-add-int x y) does in Clojure. Else nil."
-  [actx cands arg-nodes param-tags]
-  (when (and (:clj-inline actx) (nil? param-tags))
-    (let [n (count arg-nodes)
-          ms (filter #(= n (count (first (t/parse-method-desc (:desc %))))) cands)]
-      (when (= 1 (count ms))
-        (let [m (first ms)
-              ps (first (t/parse-method-desc (:desc m)))]
-          [m (mapv (fn [a p] (clj-convert (assoc actx :clojure true) a p "argument")) arg-nodes ps)])))))
 
 (defn analyze-static-call [actx cn mname args & {:keys [param-tags]}]
   (let [arg-nodes (mapv #(analyze actx %) args)]
@@ -1959,13 +2098,20 @@
       #(let [cands (static-candidates (:class actx) cn mname)
              _ (when (empty? cands)
                  (fail (str "No accessible static method " mname " in " (str/replace cn "/" "."))))
-             [m va args] (try (conj (select-method actx cands arg-nodes (str "static method " mname) param-tags)
-                                    arg-nodes)
-                              (catch arbace.lang.ExceptionInfo e
-                                (if-let [[m args] (and (unresolved? e) (clj-single-method actx cands arg-nodes param-tags))]
-                                  [m false args]
-                                  (throw e))))]
-         (invoke-node actx nil (t/internal->desc cn) m nil args va))
+             [m va] (cond
+                      param-tags (select-method actx cands arg-nodes (str "static method " mname) param-tags)
+                      (:clojure actx) (clj-select cands arg-nodes :static mname cn)
+                      ;; in the :inline expansion of a Clojure function (clj-call-node) in a class
+                      ;; body, a static call no method is applicable to compiles as Clojure's
+                      ;; compiler compiles it: (bit-and-int x y) on Objects calls
+                      ;; Numbers.andInt(int, int), the arguments converted by RT.intCast, as
+                      ;; (unchecked-add-int x y) does in Clojure
+                      (:clj-inline actx)
+                      (try (select-method actx cands arg-nodes (str "static method " mname) nil)
+                           (catch arbace.lang.ExceptionInfo e
+                             (if (unresolved? e) (clj-select cands arg-nodes :static mname cn) (throw e))))
+                      :else (select-method actx cands arg-nodes (str "static method " mname) nil))]
+         (invoke-node actx nil (t/internal->desc cn) m nil arg-nodes va))
       (fn [why]
         (reflection-warning actx (str "call to static method " mname " on " (str/replace cn "/" ".")) why)
         (reflective-node nil "invokeStaticMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
@@ -2097,7 +2243,9 @@
   (let [arg-nodes (or arg-nodes (mapv #(analyze actx %) args))
         cands (ctor-candidates (:class actx) cn)
         _ (when (empty? cands) (fail (str "No accessible constructor of " (str/replace cn "/" "."))))
-        [m va] (select-method actx cands arg-nodes (str "constructor of " (str/replace cn "/" ".")) param-tags)]
+        [m va] (if (and (:clojure actx) (= kind :new) (nil? param-tags))
+                 (clj-select cands arg-nodes :ctor nil cn)
+                 (select-method actx cands arg-nodes (str "constructor of " (str/replace cn "/" ".")) param-tags))]
     {:op (case kind :new :new :ctor-call) :kind kind :class cn :ctor m
      :args (convert-args m arg-nodes va)
      :outer outer

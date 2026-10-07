@@ -128,10 +128,10 @@ Class bodies are Clojure (§5.13). Beyond the Java subset, at every stage:
   `:inline` expansion (`(+ a b)` on `Object`s is `Numbers.add(Object, Object)`, `(int x)` is
   `RT.intCast`), else a call of the var. The arguments are analyzed once (the expansion binds
   them as locals). In such an expansion a static call that no method is applicable to
-  compiles as Clojure's compiler compiles it when the class has one method of that name and
-  arity: that method, each argument converted as Clojure converts it (`RT.intCast`,
-  `RT.floatCast`, ...). So `(unchecked-add-int x y)` or `(bit-and-int x y)` on `Object`s calls
-  `Numbers.unchecked_int_add(int, int)` or `Numbers.andInt(int, int)`, without reflection.
+  compiles as Clojure's compiler compiles it (`analyze/clj-select`, below): so
+  `(unchecked-add-int x y)` or `(bit-and-int x y)` on `Object`s calls
+  `Numbers.unchecked_int_add(int, int)` or `Numbers.andInt(int, int)`, each argument converted
+  as Clojure converts it (`RT.intCast`), without reflection.
 - Any value can be called: locals, keywords, collections, fields, expressions (`IFn.invoke`).
 - `fn*`, `letfn*`, `case*`, `def` and `var` are compiled by rewriting them
   (`arbace/classes/lower.clj`): a `fn` is an anonymous subclass of `AFunction` (`RestFn` when
@@ -278,12 +278,25 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
     `RT.longCast`... where a method returns a primitive, a `switch` with integer labels on a
     `long` or any other value (Clojure's integers) converting it by `RT.intCast`, hinted reference locals taking any
     reference from `recur` (checked), and the loop at the top of an arity is not a target of
-    `break`. As Clojure's interop: when no method or constructor applies, the only one of that
-    arity is called, its arguments converted as `HostExpr.emitUnboxArg` converts them
-    (`RT.longCast`..., `Boolean`/`Character` unboxed, references checked, `long` to `int` by
-    `RT.intCast`); a constructor that cannot be resolved is called through
-    `Reflector.invokeConstructor`; a method's value of another reference type than its return
-    type is checked (`checkcast`).
+    `break`. Overloads (methods, static methods, `new`; without param-tags) are chosen as
+    Clojure's compiler chooses them (`analyze/clj-select`), not by Java's rules: among the
+    candidates of that arity (the accessible ones; Clojure's are the public ones), the only
+    one, else `Compiler.getMatchingParams` (exact argument classes first, then
+    `Reflector.paramArgTypeMatch`, with `Long` for `int`, `int` for `long`, an `IFn` for a
+    functional interface..., the most specific by `subsumes`, then by return type), the
+    argument classes being the nodes' types, `Object` counting as unknown and `nil` as
+    `null`. No varargs. With the compiler's errors: "More than one matching method found",
+    "No matching method m found taking n args for class C" (static), "No matching ctor found
+    for class C"; when it chooses none, an instance method or constructor is called through
+    `Reflector` (`invokeInstanceMethod`, `invokeConstructor`) with a reflection warning
+    ("argument types: ..." or "no such method"). The arguments are converted as
+    `MethodExpr.emitTypedArgs` converts them (`RT.longCast`..., `Boolean`/`Character`
+    unboxed, references checked, `long` to `int` by `RT.intCast`, other primitives boxed and
+    converted, and an `IFn` that is not an instance of a functional interface parameter
+    adapted to it as `FISupport.maybeEmitFIAdapter` does: `invokedynamic` on
+    `LambdaMetafactory` with a `FnInvokers` method). A method's value of another reference
+    type than its return type is checked (`checkcast`). `test/native/overload_test.clj`
+    compares choices, errors and reflection with the compiler's.
   - `compile-deftype`: a `deftype*` one of whose method bodies throws the `Signal` (directly,
     or through the compiler's `(fn* ^:once [] ...)` wrappers and `letfn*`; a fn inside a method
     is handed over on its own) is caught by `NewInstanceExpr$DeftypeParser`, which analyzes

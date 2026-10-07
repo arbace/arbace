@@ -1612,6 +1612,30 @@
     (intersection-casts gen node)
     (when (= ctx :stmt) (insn gen Opcodes/POP))))
 
+;; Clojure's adapter of an IFn argument to a functional interface parameter
+;; (arbace.lang.Compiler's FISupport.maybeEmitFIAdapter)
+
+(defmethod emit-extra :fi-adapter [gen node ctx]
+  (let [m (mv gen) end (Label.)
+        ifn (t/lang-class "IFn")
+        sam (t/desc->internal (:type node))
+        sam-type (Type/getMethodType ^String (:sam-desc node))]
+    (emit gen (:expr node) :expr)
+    (insn gen Opcodes/DUP)
+    (.visitTypeInsn m Opcodes/INSTANCEOF ifn)
+    (.visitJumpInsn m Opcodes/IFEQ end)
+    (insn gen Opcodes/DUP)
+    (.visitTypeInsn m Opcodes/INSTANCEOF sam)
+    (.visitJumpInsn m Opcodes/IFNE end)
+    (.visitInvokeDynamicInsn m (:sam-name node) (str "(L" ifn ";)" (:type node)) metafactory
+                             (object-array [sam-type
+                                            (Handle. Opcodes/H_INVOKESTATIC (t/lang-class "FnInvokers")
+                                                     (:invoker node) (:invoker-desc node) false)
+                                            sam-type]))
+    (.visitLabel m end)
+    (.visitTypeInsn m Opcodes/CHECKCAST sam)
+    (when (= ctx :stmt) (insn gen Opcodes/POP))))
+
 ;; $deserializeLambda$ (javac's LambdaToMethod.makeDeserializeMethod)
 
 (def ^:private serialized-lambda "java/lang/invoke/SerializedLambda")

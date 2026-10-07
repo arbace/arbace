@@ -91,3 +91,20 @@
     (is (= [["item" "java.lang.Object" 65 false] ["label" "java.lang.CharSequence" 65 false]]
            (bridges-of (class r))
            (bridges-of (class (reify CovBase CovNarrow (item [this] "x"))))))))
+
+(deftest clojure-overloads-in-class-bodies
+  ;; a fn in a class body chooses overloads as Clojure's compiler does
+  ;; (Compiler.getMatchingParams), with its errors
+  (let [[C] (load-forms 'classes.clojure-test
+                        '[(^:public Overs
+                           (method ^:public ^:static abs [x]
+                             ((fn [^long y] [(Math/abs y) (Math/abs (int y)) (Math/abs (double y))]) x))
+                           (method ^:public ^:static one [x] ((fn [y] (Integer/toBinaryString y)) x)))])]
+    (is (= [3 3 3.0] (call C "abs" -3)))
+    (is (= "101" (call C "one" 5))))
+  (is (re-find #"More than one matching method found: abs"
+               (try (load-forms 'classes.clojure-test
+                                '[(^:public OversTied
+                                   (method ^:public ^:static f [^Long x] ((fn [^Long y] (Math/abs y)) x)))])
+                    ""
+                    (catch Exception e (str (ex-message e) " " (some-> e ex-cause ex-message)))))))
