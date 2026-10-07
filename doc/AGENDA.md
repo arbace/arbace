@@ -33,13 +33,15 @@ The current state of the work. This file is rewritten as things change. For the 
 4. Vendor `clojure/` as `arbace/` and self-host: **done** (`af29cc6`, `doc/VENDOR-NOTES.md`).
    `arbace/` is all `.clj`. Stages 1, 2 and 3 are byte-identical, and Clojure's test suite
    (renamed) gives the baseline's result on stages 1 and 2.
+5. Native class forms (SPEC §9.5): **done** (`0290f14`, `5081e57`). `defclass` and the code
+   forms are `arbace.core` vars and `arbace.lang.Compiler` special forms, compiled by the one
+   implementation `arbace.classes`; stage 1 needs no boot step. With it, the step 4 cleanups
+   (`08e2167`): the main class is `arbace.lang.Main`, and runtime-visible `clojure` names are
+   renamed.
 
 ## Next
 
-- Make the class forms native (SPEC §9.5, in progress): real `arbace.core` vars for the macros, and special
-  forms in `arbace.lang.Compiler`, instead of `arbace.classes.boot` interning them at run time.
-- Decided cleanups from step 4 (in progress, same agent): move the class `arbace.main` into a
-  package and drop `arbace.clj`; rename the runtime-visible `clojure` leftovers (thread names,
-  `__clojureFnMap`, the temp-file prefix), keeping `clojure-version`.
-- Later: decide which native runtime Arbace targets, and how much of a JVM-like or Go-like
-  runtime it reimplements.
+- Open ends of step 5: `:inline` expansions of the §5.4 operators, class forms inside `deftype`
+  methods, hint-based `reify` signatures, the load cost of `arbace.classes` on first use.
+- Decide which native runtime Arbace targets, and how much of a JVM-like or Go-like runtime it
+  reimplements.

@@ -501,3 +501,48 @@ instead of calling `arbace.classes`'s resolution.
     `__clojureFnMap` and the `clojure-` temp-file prefix. `clojure-version` and
     `*clojure-version*` stay, because libraries call them.
   - Next step, started now: make the class forms native (SPEC §9.5).
+
+## 2026-10-07: Native class forms (SPEC §9.5); step 4 cleanups
+
+- A background agent did both; the work is `08e2167`, `0290f14` and `5081e57`. Details are in
+  `doc/VENDOR-NOTES.md` ("After vendoring: hand changes") and `doc/classes/COMPILER-NOTES.md`
+  ("Native class forms (stage 1 on)", "Clojure in class bodies").
+- Cleanups, as the user decided:
+  - The class `arbace.main` is now `arbace.lang.Main` (`arbace/lang/Main.clj`, next to
+    `Compile`, `Repl` and `Script`), and `arbace.clj` at the repo root is gone. The
+    `arbace.main` namespace keeps its name. Launch: `java -cp target/stageN:. arbace.lang.Main`.
+  - Renamed to `arbace`: the agent pool thread names, `__clojureFnMap` (now `__arbaceFnMap`),
+    the `IProxy` methods `__{init,update,get}ArbaceFnMappings`, the error-report temp-file
+    prefix, and the socket server and process IO thread names. Kept: `clojure-version`,
+    `*clojure-version*`, the REPL banner, `refer-clojure`, `arbace.java.api.Clojure` and the
+    `Clojure` debug stratum. `bin/clojure-tests` adjusts the one suite test that names the
+    `IProxy` methods (`test-proxy-method-order`).
+- Native class forms:
+  - The macros and the §5.4 operators are `arbace.core` vars (`arbace/core_classes.clj`, loaded
+    by `core.clj`); `arbace/classes/core.clj` is removed. `arbace.lang.Compiler` has the
+    special forms `class*`, `label*`, `break*`, `continue*`, `return*`, `switch*`, `lambda*`,
+    `method-ref*`, `java-str*`, `java-assert*`, `for-each*`, `with-resources*` and
+    `if-instance*`.
+  - One implementation: `arbace.classes`, loaded on first use through `arbace.classes.native`.
+    `defclass`/`defclasses` are compiled during analysis and replaced by imports and the
+    class. A fn using code forms (or Clojure errors that are class forms, such as `set!` of a
+    local) is handed over whole to `arbace.classes`, which emits the fn class the compiler
+    would have made. A top-level `do` enters its class forms as siblings (§9.2).
+  - `arbace/classes/lower.clj` rewrites `fn*`, `reify*`, `letfn*`, `case*`, `def` and `var`
+    into class forms, so class bodies accept them, also at stage 0.
+  - Narrowed from the spec, and SPEC §9.5 now says so: `recur` stays an error out of tail
+    position and across `try` in code the compiler compiles itself, because Clojure's suite
+    asserts those errors. Class forms inside `deftype` method bodies are not supported.
+  - SPEC changes: §9.5 ("One implementation"), §9.2 (top-level `do`), §9.6 (stage 1), §5.13
+    (Clojure semantics outside the Java subset).
+- Checks (the main session reran them on `5081e57`):
+  - `bin/build-arbace --suite`: stages 1, 2 and 3 identical, now 815 classes. The new
+    `bin/native-tests` on stage 1 runs 14 tests and 96 assertions with no failures. The suite on
+    stages 1 and 2 gives the baseline's result.
+  - `bin/class-forms-tests`: 61 tests, 125 assertions, all pass.
+  - `bin/j2c-check --suite`: clean, samples 6 of 6, no regressions.
+  - At a stage-1 REPL with no boot step: `defclass` with a constructor, `for-each` over a
+    mutable `^int` local in a `defn`, and `label`/`switch`/`break` in an anonymous fn all work.
+- Left open: the §5.4 operators have no `:inline` expansions yet; `reify` signatures are
+  inferred, not chosen from hints; the first class form costs about 2 s to load
+  `arbace.classes`; `bin/vendor-arbace` no longer reproduces `arbace/` where hand changes apply.
