@@ -823,3 +823,31 @@ recommended:
   4. benchmarks against upstream Clojure, CI, and a freeze kit.
 - The first started at once. The others wait for a free agent slot, at about four at a time.
   Item 4 goes last, so that it measures the final state.
+
+## 2026-10-07: Atom VarHandle (reverted), opt-in virtual threads, the jlink image
+
+- Three of the survey decisions, done by a background agent and measured:
+  - **`Atom` on a `VarHandle`** (`298ad15`), with the state a volatile field of the atom. It
+    saved 16 bytes per atom and made uncontended `swap!` slightly faster (67 → 64 ms per 10M).
+    But one atom swapped by 8 threads became about 25% slower (1.85 s → 2.3-2.5 s); the
+    suspected cause is the CAS sharing a cache line with `validator`/`watches`. **Reverted at
+    the user's decision** (`689bafa`): atoms exist for concurrent use, and few exist.
+  - **Opt-in virtual-thread executor** (`3a3e9d1`, hand change 9): `-Darbace.virtual-threads=true`
+    or `arbace.lang.Agent/newVirtualThreadExecutor` with `set-agent-send-off-executor!`. It
+    covers `send-off`, `future`, `pmap`, `pcalls` and `pvalues`; `send` stays on platform
+    threads. Example: 10k futures sleeping 100 ms took 231 → 120 ms and 814 → 238 MB RSS, with
+    no CPU-bound regression. Virtual threads are daemons, so the JVM does not wait for pending
+    futures (documented in the README).
+  - **`jlink` image** (`9c33091`): `bin/arbace-image` or `bin/build-arbace --image` builds
+    `target/arbace-image`. It holds the JDK trimmed to the jar's modules, the jar, an AOT cache
+    trained by the image's own java, and `bin/arbace`. It is 131 MB (42 MB as `.tar.gz`), runs
+    without a JDK, and launches as fast as `bin/arbace` (about 0.17 s).
+- JDK 26.0.2 problem found: with AOT class linking, the cache of a jlink image with certain
+  module sets (e.g. `java.base,java.sql`) stops the JVM at startup ("Unexpected exception when
+  loading aot-linked classes"; `InternalError` from `ClassLoader.registerAsParallelCapable` in
+  `AppClassLoader.<clinit>`). `java.base` alone, all modules and JDK 25 are fine. Workaround: the
+  image adds `jdk.unsupported.desktop`, and the script retrains with `-XX:-AOTClassLinking` if a
+  test launch fails. It may be worth reporting upstream.
+- Checked after the revert by the main session: `bin/build-arbace` (fixpoint 5,091 classes,
+  verifier, native tests 30/2,367 pass). The full gate runs again once the parallel agents have
+  pushed.
