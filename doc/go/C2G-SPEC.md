@@ -1,0 +1,2286 @@
+# c2g: class forms compiled to Go forms
+
+Status: draft for the user's review (2026-10-08), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)). The
+decisions it builds on: D1 (c2g + jrt), D2 (an evaluator first), D4 (Java's UTF-16 strings), D5
+(a port of `java.util.regex`), D6 (the first REPL without class forms, `gen-class`, `proxy`,
+interop beyond jrt's classes), and the seven decisions of 2026-10-08 in
+[JAVA-SURFACE.md](JAVA-SURFACE.md) (reflection hand-written over member tables c2g generates;
+the plain Java of the closure translated from jdk26u; a hand-written UTF-16 `String`;
+concurrency mixed; thread identity by a goroutine-local slot in the Go runtime; a trimmed REPL
+start; `#inst` over a small `Date`).
+
+This spec defines **c2g**, the compiler from **class forms** ([classes/SPEC.md](../classes/SPEC.md),
+the Java constructs as Clojure: the source of `arbace/lang/` and of j2c's output for the JDK
+classes) to **Go forms** ([SPEC.md](SPEC.md), Go programs as Clojure data, printed and built by
+`bin/g2c build`). It says how Java's types, objects, statics and code become Go, what c2g writes
+and what it leaves to **jrt** (the Java runtime in Go forms under the translated classes), and
+how the evaluator of B1a step 5 sits on top. It is the counterpart for Go of the class forms
+compiler's back end (`arbace.classes.emit`), and follows the two form specs in structure.
+
+Words used throughout:
+
+- **class forms**, **the analyzer**: the forms of classes/SPEC.md and Arbace's class forms
+  compiler `arbace.classes`, whose front end (entering, member resolution, the analysis of code
+  into typed nodes, `arbace.classes.analyze`) c2g reuses unchanged (§4.1).
+- **Go forms**, **the printer**, **the build**: SPEC.md's forms, `arbace.g2c.print` and
+  `bin/g2c build` ([BUILD.md](BUILD.md)).
+- **jrt**: the Go package `arbace/jrt` holding the JDK classes of the closed world, translated by
+  c2g from j2c's conversion of jdk26u or hand-written in Go forms (the VM's edge:
+  JAVA-SURFACE.md, "shim"), and the run-time helpers c2g's output calls (§11).
+- **the closed world**: every class c2g translates or jrt hand-writes for one build (§4.1). No
+  other class exists at run time, except the evaluator's dynamic types (§5.12).
+- **leaf class**: a class that no class of the closed world extends (§5.3).
+- **Go type of** a Java type: the Go type c2g gives values of that static type (§5.1).
+- Java names are binary names (`arbace.lang.PersistentVector$Node`); descriptors are JVM
+  descriptors, as the analyzer works with them.
+
+Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 The target: packages, files,
+names · 5 Types and objects · 6 Statics and initialization · 7 Code · 8 Concurrency and the
+memory model · 9 The boundary to jrt · 10 The boundary to the evaluator · 11 jrt's API as c2g
+uses it · 12 Out of scope · 13 Performance · 14 Coverage · 15 Worked examples · 16 Open
+questions · 17 Sources.
+
+## 1. Principles
+
+1. **Java's semantics, exactly, where Arbace can observe them.** A translated class behaves as
+   the JVM runs it: arithmetic, conversions, `null`, exceptions, string contents, class
+   initialization order, identity, overload choice (made by the analyzer, as on the JVM). The
+   few places where Go cannot or need not follow are listed (§3.2).
+2. **The analyzer decides, c2g translates.** c2g runs the class forms compiler's front end and
+   translates its typed nodes. Name resolution, overloads, conversions, boxing, constant
+   folding, bridges, inner class plumbing, enum and record members, switch maps and the other
+   derivations of class forms §6 are the analyzer's; c2g never re-derives them. So the Go build
+   and the JVM build cannot disagree on what a form means.
+3. **Go's machinery where it fits.** Objects are Go structs, references Go interface values or
+   pointers, dispatch Go interface calls, exceptions Go panics, threads goroutines, the heap
+   Go's garbage collector. jrt adds only what Go lacks (class initialization, monitors, UTF-16
+   strings, reflection tables). No `unsafe` in c2g's output.
+4. **A closed world.** c2g compiles all classes of a build at once and knows every class and
+   its subclasses. It uses that knowledge (§5.3), and the result is valid only for that world:
+   loading classes at run time is out of scope (D6).
+5. **Mechanical and stable names.** Every Go identifier follows from the Java name by a fixed
+   rule (§4.4), so hand-written jrt code and translated code meet at known names, and a change
+   in one class does not rename members of another.
+6. **Output is Go forms.** c2g writes Go forms as the converter writes them for Go source:
+   readable, one Go file per Java source file, printed by the printer and built by the build.
+   Nothing is generated as Go text.
+
+## 2. A first example
+
+`arbace/lang/Reduced.clj`:
+
+```clojure
+(defclass ^:public ^:final Reduced
+  :implements [IDeref]
+  (field val)
+  (constructor ^:public [this val] (set! (.-val this) val))
+  (method ^:public deref [this] val))
+```
+
+c2g writes, in `go/arbace/lang/Reduced.clj` (package `arbace/lang`, §4.2):
+
+```clojure
+(in-ns 'go.arbace.lang)
+(go/file "Reduced.go" :imports [[jrt "arbace/jrt"]])
+
+(go/type Reduced (struct jrt/Object ^any F_val))
+
+(go/func Reduced_New_O ^{:tag (* Reduced)} [^any val]
+  (let [t (addr (lit Reduced))]
+    (.Ctor_O t val)
+    t))
+
+(go/method Ctor_O [^{:tag (* Reduced)} t ^any val]
+  (set! (.-F_val t) val))
+
+(go/method Deref__O ^any [^{:tag (* Reduced)} t]
+  (.-F_val t))
+
+(go/method Is_IDeref [^{:tag (* Reduced)} t])
+(go/method Ref ^any [^{:tag (* Reduced)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* jrt/Class)} [^{:tag (* Reduced)} t] Reduced_class)
+(go/method ToString__String ^{:tag (* jrt/String)} [^{:tag (* Reduced)} t]
+  (jrt/Object_toString t))
+```
+
+and `IDeref` (an interface, in `IDeref.clj`) is
+
+```clojure
+(go/type IDeref (interface jrt/Object_I (Is_IDeref []) (Deref__O ^any [])))
+```
+
+- The class is a struct embedding `jrt.Object`, the object header (§5.2). The field `val` is
+  `F_val`; untyped, it is `Object`, whose Go type is `any` (§5.1).
+- `Reduced` is final, so its values are `*Reduced` pointers; a call `(.deref r)` on one is a
+  direct Go method call that gc can inline (§5.3).
+- `IDeref` is a Go interface. Its marker `Is_IDeref` makes Go's structural typing nominal: only
+  classes that implement `IDeref` in Java have it (§5.5).
+- Method names carry their descriptor: `deref()Object` is `Deref__O` (§4.4). The constructor is
+  an allocation function `Reduced_New_O` and a body `Ctor_O`; `super()` of `Object` is empty.
+- `Ref` converts to `any` without turning `null` into a non-nil interface (§5.6); `GetClass` and
+  `ToString` are generated for every concrete class, the others of `Object`'s methods come from
+  the header (§5.8). The class's member table, which reflection reads, is in the package's
+  generated tables file (§5.11).
+
+## 3. Equivalence
+
+### 3.1 What is compared
+
+A translated class is correct when it **behaves** as the same class on the JVM Arbace: the same
+results, side effects, printed output and exceptions (class and message) for the same
+operations. There is no structural comparison as for class files (classes/SPEC.md §3) or Go
+objects (SPEC.md §3): the check is differential testing (B1-PLAN.md, point 3 and step 4):
+
+1. **jrt's own tests**, against the JVM, for what jrt hand-writes (strings, reflection,
+   monitors, threads) and for the translated JDK classes where Arbace's tests do not reach
+   (regex on a corpus of patterns, `BigDecimal` and number printing, `Formatter`, the
+   collections' contracts).
+2. **Per class, in plan step 4's order** (`Util`, `Murmur3`, `Numbers`, the collections,
+   `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT`): the same
+   operations in a Go test program and in a Clojure script on the JVM, the printed results
+   compared.
+3. **Clojure's test suite** through the evaluator (plan step 5), recorded per namespace.
+
+### 3.2 Deviations
+
+What a translated class may do differently, by design. Each is either unobservable to
+Arbace's tests or listed here with its reason; anything else is a bug.
+
+| | deviation | why |
+|---|---|---|
+| V1 | `StackOverflowError` is not thrown by translated code: Go's stack grows to 1 GB, then the program dies (`fatal error: stack overflow`, not recoverable) | Go has no recoverable stack overflow; the evaluator counts its own depth and throws (§10.5, §16 Q15) |
+| V2 | `OutOfMemoryError` is not thrown: the program dies | Go's allocator |
+| V3 | identity hash codes differ (they differ between JVM runs too); so does the iteration order of identity-keyed hash maps | jrt assigns them (§5.8) |
+| V4 | a lambda's class is one class per functional interface (`Predicate$$Lambda`), not one per call site | §7.11 |
+| V5 | stack traces show translated frames (class, method, `.clj` file and line), and some jrt-internal frames are elided; no frames of hidden classes | §7.9.6 |
+| V6 | a thread that uses an instance of a class while another thread runs that class's static initializer does not wait for it | guards are elided in instance code (§6.2) |
+| V7 | a data race on a non-`volatile` field of interface type (two words in Go) can tear | §8.3; c2g lists such fields, the race detector finds the races |
+| V8 | `finalize` is never called | deprecated in Java; jrt has no finalization (references use `runtime.AddCleanup`) |
+| V9 | the classes of the closed world only: `Class.forName` of anything else fails, nothing can be defined at run time | D6 (§12) |
+| V10 | Thread priorities, thread groups and daemon status have no effect on scheduling; the program ends when `main` returns or `System.exit` is called | goroutines |
+
+Everything else Java specifies is kept, including the corner cases that are easy to lose in a
+translation: integer overflow, division of `MIN_VALUE` by `-1`, shift masking, float-to-int
+saturation, `-0.0`, NaN comparisons, no fused multiply-add (§7.4), `null` in string
+concatenation and `switch`, the order of evaluation (§7.2), the order of static initializers
+(§6.2), `finally` on every exit (§7.9), monitor release on exceptions (§8.1), the `Integer`
+cache and `==` on boxes (§7.6), the exception thrown by each implicit check (§7.9.5).
+
+## 4. The target: packages, files, names
+
+### 4.1 Inputs and the closed world
+
+c2g runs on the JVM Arbace (`target/stage2`, as the other tools, `bin/lib/tools.bash`), as
+`bin/c2g`, implemented in `arbace/c2g/` (namespaces `arbace.c2g.*`). Its input is a set of
+class forms files and a jrt manifest:
+
+1. **Arbace's runtime**, `arbace/lang/*.clj`, with the Go-build variants of §4.6.
+2. **The translated JDK closure**: j2c's conversion of the jdk26u source files of the closure
+   (JAVA-SURFACE.md, "The translation closure": 184 files, 422 classes; with D5's regex), with
+   their own variants.
+3. **The jrt manifest** `go/arbace/jrt/manifest.edn` (§9.1): for every hand-written jrt class,
+   its Java declaration (supertypes, the members jrt implements, with descriptors and
+   modifiers). c2g enters these as declarations and checks every use against them.
+
+c2g enters all classes into one class environment (classes/SPEC.md §9.2: the compilation set,
+then sources), runs the analyzer over every class body (`resolve-members!`, `analyze-class!`,
+`add-bridges!`, as `arbace.classes.compiler` does before emitting), and translates the analyzed
+classes. The closed world is exactly these classes. A reference to any other class is an error
+that names the class and the referring member; the cure is a variant (§4.6) or a jrt stub
+(JAVA-SURFACE.md, "cut": a class that must exist as a name, whose members throw
+`UnsupportedOperationException`).
+
+The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
+from source are never resolved by reflection on the running JDK, even when the JDK has them
+(the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
+reflective entry). The shims' declarations come from the manifest, so that a member jrt does
+not implement is an error at translation, not at run time.
+
+### 4.2 Go packages
+
+Go packages cannot import each other in a cycle; Java packages do (`java.lang` and `java.util`
+use each other, and the hand-written `String` uses translated classes that use `String`). So:
+
+- c2g computes the **strongly connected components** of the Java package dependency graph of
+  the closed world (a package depends on another when one of its classes names a class of the
+  other in a declaration or in code).
+- **A Go package holds one or more whole components**, by a fixed table, and the table must
+  induce no Go import cycle (checked). The table for B1a:
+
+| Java packages | Go package | forms namespace |
+|---|---|---|
+| `java.*`, `jdk.internal.*`, `sun.*` (the translated closure, the shims, the stubs) | `arbace/jrt` | `go.arbace.jrt` |
+| `arbace.lang` (the runtime, the evaluator's classes) | `arbace/lang` | `go.arbace.lang` |
+| the program's `main` (§10.6) | `arbace/cmd/arbace` | `go.arbace.cmd.arbace` |
+
+`arbace/lang` imports `arbace/jrt`; jrt imports only Go's standard library and the patched
+runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:module "arbace" :go
+"1.27"}`, BUILD.md); the build is `bin/g2c build` over the forms tree. The synthetic check of
+§13.6 shows that gc handles a package of jrt's size.
+
+### 4.3 Files and layout
+
+- **One Go file per Java source file** (per class forms file), holding the Go forms of its
+  top-level class and every class nested in it, in the order of the class forms. Its name is
+  the class forms file's name for `arbace/lang` (`PersistentVector.go`) and, in jrt, the Java
+  source path with `/` replaced by `_` (`java_util_HashMap.go`,
+  `jdk_internal_math_FloatingDecimal.go`). A name whose last `_`-separated element before `.go`
+  is a GOOS, a GOARCH or `test` gets `_c2g` appended, since gc reads those suffixes as build
+  constraints.
+- **Generated files per package**: `c2g_classes.go` (the member tables and class registrations,
+  §5.11), `c2g_strings.go` (the string literal pool, §7.5), in `arbace/lang` also `c2g_dyn.go`
+  (the dynamic object type, §5.12).
+- The forms tree follows Go forms SPEC §4.1: c2g writes `target/c2g/go/arbace/jrt.clj` (`ns`,
+  `go/package`, `load`s), `target/c2g/go/arbace/jrt/java_util_HashMap.clj` and so on. It is
+  regenerated, not tracked, as converted Go is (g2c decision 9).
+- **jrt's hand-written forms** are source, tracked, in a forms root of their own (§16 Q19),
+  `go/arbace/jrt/*.clj`; the build merges the two trees into one program root before
+  `bin/g2c build`. c2g's files and jrt's are told apart by name: hand-written files never begin
+  with `java_`, `jdk_`, `sun_` or `c2g_`.
+- **Positions.** c2g writes no Go positions (Go forms SPEC §10, forms built by a program): the
+  printer lays them out as gofmt would. For stack traces (§7.9.6) every function form carries
+  the `:line` of its class forms member, and the build uses the printer's `--line-file` option,
+  so that gc's line tables name the class forms file (`arbace/lang/PersistentVector.clj:137`).
+
+### 4.4 Names
+
+Every generated Go identifier is exported, so that `arbace/lang` can use what jrt declares and
+the reflection tables can refer to everything. Java names are kept verbatim where Go allows;
+`$` (not allowed in Go identifiers) becomes `_`.
+
+**Types.**
+
+| Java | Go |
+|---|---|
+| class, interface, enum, record `p.Outer$Inner` | `Outer_Inner`: the binary name after the package, `$` → `_`; `X` prepended when the first character is not an upper-case letter |
+| anonymous and local classes `Outer$1`, `Outer$1Local` | `Outer_1`, `Outer_1Local` (the analyzer's javac names) |
+| the interface type of a non-leaf class `C` (§5.3) | `C_I` |
+| the adapter of a functional interface `F` (§7.11) | `F_Fn` |
+
+**Members of classes** (methods with a receiver on the class's struct; fields of the struct):
+
+| Java | Go | example |
+|---|---|---|
+| instance field `f` | `F_f` | `cnt` → `F_cnt`, `_meta` → `F__meta` |
+| instance method `m` with descriptor `(P1...Pn)R` | `M_P1_..._Pn__R`, with `M` the name with its first letter upper-cased; `M__R` without parameters | `equiv(Object)boolean` → `Equiv_O__Z`; `count()int` → `Count__I`; `invoke(Object,Object)Object` → `Invoke_O_O__O` |
+| its implementation, in a non-leaf class (§5.4) | `Impl_` + the method's name | `Impl_Equiv_O__Z` |
+| constructor body `<init>(P1...Pn)V` | `Ctor_P1_..._Pn`, or `Ctor` | `Ctor_I_I_PersistentVector_Node_O1` |
+
+**Package members** (one Go package holds many classes, so class members are prefixed by the
+class's Go name):
+
+| Java | Go | example |
+|---|---|---|
+| static field `f` of `C` | `C_f` (a `var`, or a `const` for a constant, §6.1) | `PersistentVector_EMPTY`, `Var_dvals` |
+| static method of `C` | `C_` + the mangled method name | `Util_Equiv_O_O__Z`, `Murmur3_HashInt_I__I` |
+| allocation and construction (`new C(...)`) | `C_New_P1_..._Pn`, or `C_New` | `Reduced_New_O` |
+| interface `J`'s default, private and static methods | `J_` + the mangled name, taking the receiver first for the first two | `Iterator_ForEachRemaining_Consumer__V` |
+| the `Class` object of `C` | `C_class` (`class` cannot be a Java field) | `Reduced_class` |
+| class initialization (§6.2) | `C_Init()`, with its state `C_init` | |
+| `instanceof C`, checked cast to `C` (§5.7) | `C_InstanceOf(x any) bool`, `C_Cast(x any) T` | |
+
+**Codes of the descriptor.** The parameter and return codes are: `Z B C S I J F D` for the
+primitive types and `V` for `void`, as in descriptors; `O` for `java.lang.Object`; the Go type
+name for any other class (`String`, `ISeq`, `PersistentVector_Node`); an array is its element's
+code followed by its dimension count (`O1` for `Object[]`, `I1` for `int[]`, `String2` for
+`String[][]`). The descriptor is the **erased** one the analyzer records, return type included:
+two methods of one class differ in it exactly when the JVM tells them apart, so bridge methods,
+covariant returns and overloads all get distinct names, and an override always has its
+overridden method's name. That is what lets Go's method sets do Java's dispatch (§5.4).
+
+**Generated members that are not Java's** have names no Java member produces: Java's fields
+start with `F_`, Java's methods contain `__`, constructors start with `Ctor`; so `Ref` (§5.6),
+the markers `Is_J` and the accessors `Self_C` (§5.3, §5.5) are free. Per class, the package
+members `C_class`, `C_Init`, `C_init`, `C_clinit` (the static initializer, §6.2),
+`C_InstanceOf`, `C_Cast`, `C_New...` and `Up_C_I` (§5.6) are generated.
+
+**Package-private methods across packages.** A package-private method is not overridden by a
+method of a subclass in another package (JVMS 5.4.5); with the same Go name it would be. When
+the closed world has such a pair, c2g appends `_pp_` and the Go package's name to the
+package-private method's names (`Tailoff__I_pp_lang`) and reports it. None is expected in B1a's
+world (checked at translation).
+
+**Locals, parameters, labels.** Local and parameter names are kept, munged as Clojure's
+`munge` does for the characters Go does not allow (hand-written class forms use Clojure names:
+`i-1` becomes `i_1`; `$` becomes `_` everywhere), and with `_` appended when they equal a Go
+keyword, a predeclared identifier c2g's output uses (`len`, `cap`, `append`, `copy`, `make`,
+`new`, `panic`, `recover`, `any`, the Go type names) or an import name (`jrt`): `len_`. The
+same munging applies to field and method names, which the class forms take verbatim from the
+JVM's rules (a JVM name may contain `-`). Labels are keywords (`:L1`, `:L2`, numbered per
+function) and exist only where a jump targets them (gc rejects unused labels).
+
+**Collisions.** These rules are injective except in three cases: a Java name containing `_`
+followed by what reads as codes (`get_O()` against `get(Object)`), two parameter classes of one
+overload with the same Go name from different packages, and a class whose name contains `_`
+colliding with a nested class (`A_B` against `A$B`). c2g checks every Go package and every
+struct and interface for duplicate names and fails with both sources named. A **rename table**
+in c2g (data, empty for B1a) resolves a reported collision by giving one member another name.
+
+### 4.5 What a class becomes
+
+| Java declaration | Go forms |
+|---|---|
+| class `C` | `go/type C (struct Super F_x ...)`, the methods of §5.4, its `C_I` interface if non-leaf, `C_New_*`, `C_class`, statics (§6) |
+| interface `J` | `go/type J (interface ...)`, `J_` functions for default, private and static methods, statics |
+| enum, record | a class, with the members the analyzer derives (§7.13) |
+| annotation type | an interface with its marker only, and its `Class` (annotations are not kept, §12) |
+| nested, inner, local, anonymous class | a class of its own, with the analyzer's outer and capture fields (§7.12) |
+| `defmodule`, `defpackage` | nothing |
+
+### 4.6 Go-build variants
+
+JAVA-SURFACE.md's "rework" (about 300 lines of `RT`, `Compiler` and `Reflector`) and the cuts
+need the Go build's `arbace.lang` to differ in places from the JVM's. The source stays one: the
+differences are **variant files**, `arbace/lang/go/<Class>.clj` (and, for the translated JDK,
+whose class forms j2c regenerates, `go/arbace/jrt/variants/<path>.clj`), read by c2g only:
+
+```clojure
+(in-ns 'arbace.lang)
+(c2g/variant RT
+  (method ^:public ^:static classForName ^Class [^String name]     ; replaces RT.classForName(String)
+    (Class/forName name))
+  (c2g/cut ^:public ^:static loadClassForName ^Class [^String name]) ; removes a member: its head only
+  (c2g/add (field ^:public ^:static ^:final ^String PLATFORM "go")))  ; adds a member
+```
+
+- A member form in `c2g/variant` replaces the class's member of the same name and erased
+  signature (a static initializer replaces the static initializer); `c2g/cut` removes one;
+  `c2g/add` adds one. A variant naming no existing member is an error.
+- Variants are class forms like any other and are analyzed with the class. c2g reports the
+  number of replaced, cut and added members per class, and the differential tests (§3.1) cover
+  them as the rest.
+- c2g also reports every remaining reference to a cut or unknown class (§4.1), so the list of
+  what still needs a variant is always known.
+
+## 5. Types and objects
+
+### 5.1 The Go type of a Java type
+
+| Java static type | Go type | zero value |
+|---|---|---|
+| `boolean`, `byte`, `short`, `char` | `bool`, `int8`, `int16`, `uint16` | `false`, `0` |
+| `int`, `long`, `float`, `double` | `int32`, `int64`, `float32`, `float64` | `0` |
+| `java.lang.Object`, and a type variable erasing to it | `any` | `nil` |
+| `java.lang.String` | `*jrt.String` | `nil` |
+| a leaf class `C` (§5.3), final ones included | `*C` | `nil` |
+| any other class `C` | `C_I` (a Go interface) | `nil` |
+| an interface `J` | `J` (a Go interface) | `nil` |
+| `boolean[]` ... `double[]` | `*jrt.BooleanArray` ... `*jrt.DoubleArray` | `nil` |
+| any array of references | `*jrt.RefArray` | `nil` |
+| a type variable with a bound | the Go type of its erasure | |
+| `void` | no result | |
+
+A Java value has one Go representation whatever path it took, so that identity, `==` and
+reflection see the same thing: an object is always a pointer to its class's struct, held in a
+variable of the Go type of the static type. Generics are erased as the analyzer erases them:
+c2g's output has no Go type parameters (jrt's helpers may).
+
+### 5.2 Objects
+
+- **A class is a struct.** Its first field embeds the superclass's struct (`jrt.Object` at the
+  root), followed by its own instance fields in declaration order: `(struct APersistentVector
+  ^int32 F_cnt ...)`. Superclass fields are reached through Go's promotion (`t.F_hash` for a
+  field of `ASeq` in a subclass) or, when a subclass hides them, through the embedded struct
+  (`(.-F_x (.-B t))`).
+- **The header** is `jrt.Object`, one 64-bit word holding the identity hash and the lock state
+  (§5.8, §8.1). It also makes every object non-empty: Go may give distinct zero-size variables
+  the same address, Java's `new Object()` must be distinct.
+- **Allocation** is `C_New_...`: it runs `C_Init()` (§6.2), allocates the struct (`(addr (lit
+  C))`, all fields at Java's default values, which are Go's zero values) and calls the constructor
+  body `Ctor_...` with the new object. A constructor body begins with the superclass constructor
+  call the analyzer gives (`(super. ...)` or `(this. ...)`, with the outer instance and the
+  captures of §7.12), then the field initializers and instance initializers the analyzer folded
+  in, then the body; `Object`'s constructor is empty and not called.
+- An abstract class has no `C_New_*`. An interface has no struct.
+
+### 5.3 Leaf classes and class interfaces
+
+A class value must be usable as any of its superclasses, and Go has no subtyping of structs. So
+a class `C` with subclasses in the closed world gets a Go interface `C_I`, and values whose
+static type is `C` have that Go type. It lists:
+
+- `Self_C() *C`, the accessor of the `C` part of the object (promoted from `C`'s struct into
+  every subclass, it returns the embedded `C`), which is also `C`'s marker;
+- every virtual method of `C` (its own and inherited, abstract or not: the instance methods
+  that are not private, static or constructors), by their mangled names;
+- the superclass's interface, embedded (`jrt.Object_I` at the root), and the interfaces `C`
+  implements.
+
+A **leaf class** (no subclass in the closed world) needs no such interface: its values are
+`*C`, its virtual methods are Go methods on `*C`, and calls on them are direct and inlinable.
+Every final class is a leaf, and no abstract class is (it gets its interface even without
+subclasses, so that code using its type compiles). Most of `arbace.lang` is: 326 of its 352
+classes (the other 422 of the 774 class files of stage 2's `arbace/lang` are interfaces;
+measured by reflection over `target/stage2`), among them `PersistentVector` and its `Node`,
+`Keyword`, `Symbol`, `Cons`, `PersistentHashMap`'s nodes. The 26 others are `AFn`,
+`AFunction`, `RestFn`, `Obj`, `ASeq`, the abstract collections and references
+(`APersistentVector`, `ARef` ...), `PersistentTreeMap`'s nodes and the bases of `Compiler`'s
+expressions. This is class hierarchy analysis over the closed world (principle 4): it is sound
+because nothing can subclass a class at run time in B1a (deftype and reify implement
+interfaces only, §5.12; `proxy` and `gen-class` are cut, D6). A class made non-leaf by a later change changes the Go type of its uses, which c2g
+recomputes as a whole.
+
+### 5.4 Virtual dispatch
+
+Java dispatches a call `x.m(...)` on the dynamic class of `x`; inside the selected method `this`
+is the whole object, so a self-call is virtual too and `this` keeps its identity. Go embedding
+promotes the embedded struct's methods with the *embedded struct* as receiver, which loses
+both. So c2g writes, for a non-leaf class `C` and its subclasses:
+
+- **The implementation** of each method `m` that `C` declares with a body is a Go method on
+  `*C` named `Impl_m...`, taking the receiver twice: `t *C` (the struct, for field access) and
+  `this C_I` (the whole object, for self-calls, identity and passing `this` on). It is promoted
+  into subclasses, which is what makes `super` calls simple.
+- **The dispatch method** `m...` is a Go method on `*D` for every concrete (not abstract) class
+  `D` and every virtual method of `D`: on the declaring class it calls `t.Impl_m...(t, ...)`; on
+  a subclass that does not override `m` it is a **forwarder** to the inherited implementation,
+  the same call, which Go's promotion resolves to the nearest declaring ancestor's `Impl_m...`.
+  Go's interface call on `C_I` (or on any interface listing `m`) then reaches the most derived
+  implementation with the whole object as `this`: Java's dispatch. Only methods whose
+  implementation is promotable (jrt's `Object.hashCode` and `equals`, §5.8, §9.1) get no
+  forwarder.
+- A **leaf** class's own methods need no split: the dispatch method holds the body, `this` is
+  `t`. It still has forwarders for inherited methods.
+- **Abstract** classes have implementations but no dispatch methods (their struct does not
+  implement their own interface, and no instance exists); abstract methods have no Go method
+  at all until a concrete subclass's (the analyzer guarantees one, as javac does).
+- **Final** methods dispatch like the others (forwarders included); being final changes only
+  what the analyzer allows.
+- **Private** instance methods are not virtual: `Impl_m...` (or, in a leaf, the method on `*C`)
+  called through the declaring struct, `(.Impl_m t this args)`, never through an interface.
+- **Static** methods are package functions `C_m...` (§4.4).
+- **`super` calls** `(.m super args)` call the superclass's implementation on the embedded
+  struct: `(.Impl_m (.-B t) this args)`, where `B` is the direct superclass (promotion finds the
+  nearest declaring ancestor). `Outer/super` calls (§7.12) go through the outer instance the
+  same way.
+- **Bridge methods** (derived by the analyzer: covariant returns, generic overrides) are
+  dispatch methods that call the bridged method and convert its result (§5.6).
+
+Forwarders are the price of keeping Java's dispatch on Go's interfaces; they are small and gc
+inlines most of them. §13.6 measures the code size.
+
+### 5.5 Interfaces
+
+- A Java interface `J` is a Go interface listing `Is_J()` (its **marker**), its abstract and
+  default methods by mangled names, and, embedded, its superinterfaces and `jrt.Object_I`
+  (Java lets any interface-typed value call `Object`'s methods).
+- A class implementing `J` (directly or through a superinterface) has `Is_J` on its struct (an
+  empty method, promoted to subclasses). Without markers Go would let any struct with the same
+  method names satisfy `J`; with them, `x.(J)` succeeds exactly for Java's implementors.
+- **Default methods** are package functions `J_m...(this J, ...)`; a class that inherits a
+  default without overriding it has a forwarder to it (the maximally specific default, as the
+  analyzer selects it, JVMS 5.4.3.3). `(.m J/super args)` in a class calls `J_m...` directly.
+- **Static and private** interface methods are package functions, the private ones with the
+  receiver first.
+- **Constants** of interfaces are static fields of the interface (§6.1).
+
+### 5.6 `null`
+
+- `null` is Go's `nil` in every Go type of §5.1.
+- **The typed-nil rule.** A Go interface holding a nil pointer is not `nil`. So whenever a value
+  of a pointer Go type (a leaf class, `String`, an array) is converted to an interface Go type
+  (`any`, `C_I`, `J`) and may be `nil`, c2g converts it **nil-preservingly**: to `any` with the
+  generated method `Ref` (`(.Ref p)`, which every concrete struct has, §2), to another interface
+  with a function `Up_T_I(p) I` that c2g generates in the using package for each pair it needs.
+  The conversion is plain (implicit in Go) when the value cannot be `nil`: `this`, a `new`, a
+  string literal, a value just dereferenced or checked. This happens in every assignment
+  context: arguments, returns, field and array stores, bindings, operands of `identical?`.
+- **NullPointerException** comes from Go's own checks where Go makes them at Java's point
+  (§7.9.5): a method call on a nil interface, a field access or array access through a nil
+  pointer. A method call on a nil *pointer* is not checked by Go (the method runs with a nil
+  receiver), so c2g checks the receiver of a call with a pointer receiver with `(jrt/NN p)`
+  (an inlinable generic function that throws `NullPointerException` on `nil` and returns `p`),
+  after the arguments are evaluated (JLS 15.12.4.4: arguments with side effects go to
+  temporaries first), unless it is known not to be `nil`; gc removes the checks it can prove
+  redundant.
+
+### 5.7 `instanceof`, casts, conversions between reference types
+
+- **Up-casts** (to a supertype) are Go conversions, nil-preserving where §5.6 says.
+- **`instance?`** of a class or interface `T`: `(T_InstanceOf x)`, a generated function that is
+  a Go type assertion `x.(G)` to `T`'s Go type `G` (a pointer for a leaf class, else the
+  interface), with the dynamic-object check of §5.12 for interfaces dynamic objects can
+  implement. `nil` gives `false`.
+- **`cast`** (checkcast): `(T_Cast x)` returns `nil` for `nil`, the value converted to `G` if
+  it is an instance, and otherwise throws `ClassCastException` with the JVM's message
+  (`class X cannot be cast to class Y`). When the static type already guarantees the result
+  (the analyzer marks casts of `null` and up-casts, classes/SPEC.md §5.5), the cast is a plain
+  conversion.
+- Assertions are always comma-ok forms inside these functions: a failing `x.(T)` panics in Go
+  with a `*runtime.TypeAssertionError`, and on a nil interface, where Java's checkcast succeeds.
+- `instance?` and `cast` of array types compare the array's component class (§5.9).
+- gc's per-site caches make an assertion to an interface about 1-2 ns when the receiver's type
+  is predictable (§13.1).
+
+### 5.8 The `java.lang.Object` protocol
+
+`jrt.Object_I` is the interface every Java object implements: `Self_Object`, `GetClass__Class`,
+`HashCode__I`, `Equals_O__Z`, `ToString__String`, `Clone__O`. jrt's `Object` struct implements
+the ones that need no dynamic `this`, promoted into every class: `Self_Object`, `HashCode__I`
+(the identity hash) and `Equals_O__Z` (identity, comparing headers). Each concrete class
+gets, unless it overrides them: `GetClass__Class` (returns `C_class`), `ToString__String`
+(`getClass().getName() + "@" + Integer.toHexString(hashCode())`, through `jrt.Object_toString`,
+which calls the dynamic `hashCode`), `Clone__O` (a shallow copy of the struct with a fresh
+header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `Ref`.
+
+- On a value whose Go type is `any`, `Object`'s methods are calls of jrt helpers that assert
+  `jrt.Object_I` (`(jrt/Equals x y)`, `(jrt/HashCode x)`, `(jrt/ToString x)`,
+  `(jrt/GetClass x)`), throwing `NullPointerException` on `nil`. On any other Go type they are
+  direct calls.
+- **Identity** (`identical?`, `==` on references) is Go's `==` on the two values converted to a
+  common Go type (`any` when they differ), nil-preservingly (§5.6). Every Java object is a
+  pointer, so the comparison never panics.
+- **The identity hash** is assigned on first use from a per-thread xorshift sequence, as
+  HotSpot does, and stored in the header; it is never the address (gc may keep an object that
+  does not escape on the stack, and stacks move).
+- `wait`, `notify`, `notifyAll` are jrt functions on the header (§8.1); `finalize` is not used
+  (V8).
+
+### 5.9 Arrays
+
+- **Primitive arrays** are `*jrt.IntArray` and its kin: a struct with the header and `A []int32`
+  (`[]bool`, `[]int8`, `[]int16`, `[]uint16`, `[]int64`, `[]float32`, `[]float64`).
+- **Reference arrays** of every element type are one Go type, `*jrt.RefArray` (header, `Comp
+  *jrt.Class` the component class, `A []any`), because Java's arrays are covariant (`String[]`
+  is an `Object[]`) and Go's slices are not. Multi-dimensional arrays are reference arrays of
+  arrays.
+- `(new T/n d)` is `jrt.NewIntArray(d)` or `jrt.NewRefArray(T_class, d)` (`NegativeArraySize
+  Exception` for `d < 0`); several dimensions `jrt.NewMultiArray`; an initializer
+  `(new T/1 [a b])` a composite literal of the slice wrapped by `jrt.IntArrayOf` or
+  `jrt.RefArrayOf`.
+- `(aget a i)` is `(aget (.-A a) i)`, `(alength a)` is `(len (.-A a))`; Go's bounds check panics
+  at Java's point and becomes `ArrayIndexOutOfBoundsException` (§7.9.5). A read from a
+  reference array whose static element type is not `Object` converts the element to the
+  element's Go type with an unchecked comma-ok assertion (the array store check guarantees it).
+- **`aset`** into a reference array is `(.Store a i v)`, which checks the store against `Comp`
+  (`ArrayStoreException`) unless the static element type is final or a leaf class, or `Object`
+  with a statically `Object[]`-created array, where it cannot fail; then it is a plain slice
+  store.
+- `clone` of an array copies the slice; `System.arraycopy` is jrt's, with Java's checks and
+  overlapping copies.
+- `getClass` of an array is the array class for its component (jrt creates array classes on
+  demand, with Java's names `[I`, `[Ljava.lang.String;`).
+
+### 5.10 Generics
+
+Erased, as the analyzer erases them: a type variable is its bound's Go type, a parameterized
+type its class's. The analyzer has already written the erasure casts javac's `TransTypes`
+inserts (classes/SPEC.md §5.5), which are `C_Cast` calls here. `Signature` attributes have no
+counterpart; generic reflection is cut (JAVA-SURFACE.md).
+
+### 5.11 Class objects and member tables
+
+Reflection is hand-written in jrt over tables c2g generates (decision 1 of JAVA-SURFACE.md):
+`Compiler` and `Reflector` are translated unchanged and call `Class.getMethods` and the rest,
+which read these tables.
+
+**Per class**, the generated file `c2g_classes.go` of its package declares `C_class`, a
+`*jrt.Class`, and registers it at Go package initialization (Go's own `init`; data only, no Java
+code runs) with a `jrt.ClassInfo`:
+
+| field | content | used by |
+|---|---|---|
+| `Name` | the binary name, `"arbace.lang.PersistentVector$Node"` | `getName`, `forName`, printing |
+| `Modifiers` | `java.lang.reflect.Modifier` bits (from `InnerClasses` flags for nested classes, as `Class.getModifiers`) | `Modifier.isPublic` etc. |
+| `Kind` | class, interface, enum, record, annotation | `isInterface`, `isEnum` ... |
+| `Super`, `Interfaces` | the direct supertypes | `getSuperclass`, `getInterfaces`, `supers`, `isAssignableFrom` |
+| `Declaring`, `Simple` | the enclosing class for member classes; the simple name | `getDeclaringClass`, `getSimpleName` |
+| `Fields` | per field: name, type class, modifiers, `Get func(obj any) any`, `Set func(obj, v any)` (boxing as `Field.get`/`set` do) | `getFields`, `getField`, `Field.get/set` |
+| `Methods` | per method: name, parameter classes, return class, modifiers (varargs, bridge, synthetic among them), `Invoke func(this any, args []any) any` | `getMethods`, `Method.invoke` |
+| `Ctors` | per constructor: parameter classes, modifiers, `New func(args []any) any` | `getConstructors`, `newInstance` |
+| `IsInstance` | `C_InstanceOf` | `isInstance`, `cast`, `instance?` |
+| `Init` | `C_Init` | `Class.forName(name, true, ...)` |
+| `Enum` | the constants in order | `getEnumConstants`, `Enum.valueOf` |
+| `FromFn` | for a functional interface: wraps an `IFn` into its adapter (§7.11) | `Reflector`'s functional interface adaptation |
+
+- **Invokers.** `Invoke`, `New` and `Get`/`Set` are Go function literals generated per member:
+  they convert each argument from `any` to the parameter's Go type (unboxing a wrapper object,
+  with `Method.invoke`'s widening), call the member (a virtual call for an instance method, so
+  reflection dispatches as on the JVM), and box the result (`void` gives `nil`). jrt's
+  `Method.invoke` checks the receiver and arguments first (`IllegalArgumentException`) and
+  wraps an exception thrown by the method in `InvocationTargetException`, as the JVM's does.
+- **Which members.** All public members of every class, inherited ones listed where declared
+  (jrt's `getMethods` collects the public members of the class and its supertypes as Java
+  does); and all declared members of the classes a variant or the manifest names for
+  `getDeclared*` use. This is what `Compiler` and `Reflector` see on the JVM, where Clojure
+  reaches only public members (§16 Q13).
+- `Class` objects for primitive types, `void` and arrays are jrt's. The registry maps names to
+  classes for `Class.forName` and `RT.classForName` (§10.3).
+
+### 5.12 Dynamic objects
+
+The evaluator (plan step 5) must create, at run time, objects that implement interfaces of the
+closed world: `deftype`, `defrecord` and `reify` instances. Go cannot create types at run time,
+so c2g generates one Go type for all of them, **`Dyn`** in `arbace/lang`'s `c2g_dyn.go`:
+
+- `Dyn` is a struct with the header, a pointer to its run-time class (a `*jrt.Class` the
+  evaluator creates, with its name, supertypes and dynamic member tables) and its field values
+  (`[]any`).
+- It has a Go method for **every method of every interface of the closed world** a dynamic type
+  may implement (all public interfaces, with `Object`'s methods), and every interface marker
+  (no class accessor: a dynamic type extends only `Object`). Each method
+  looks its implementation up by a slot number c2g assigns to the mangled name
+  (`c2g_dyn.go` lists them) in the class's slot table (filled by the evaluator with closures)
+  and calls it with the object and the arguments; a missing one throws `AbstractMethodError`.
+  `Object`'s methods default to the header's.
+- So `x.(J)` succeeds for every `Dyn`. `J_InstanceOf` and `J_Cast` therefore add one check when
+  the assertion succeeded on a `Dyn` (a compare of Go's type word, about 0.3 ns): whether the
+  object's run-time class implements `J` (a bit test on the class's interface set). Interfaces
+  no dynamic type may implement (none in B1a's world besides those of jrt's internals) skip it.
+- Since `Dyn` satisfies all interfaces structurally, a translated method that receives a `Dyn`
+  through an interface it implements dispatches to the evaluator's closure, exactly as a JVM
+  class generated by `deftype` would be called.
+
+Functions (`fn*`) need no dynamic type: they are instances of ordinary evaluator classes (§10.2).
+
+## 6. Statics and initialization
+
+### 6.1 Static fields and constants
+
+- A static field is a package-level `go/var` named `C_f`, of its Go type, **without an
+  initializer**: its Java initializer runs in the class's initialization (§6.2), never in Go's
+  package initialization, whose order is not Java's.
+- A **constant** (a final static field with a constant initializer of primitive type, which the
+  analyzer gives a `ConstantValue`) is a `go/const` with its type and `:val`:
+  `(go/const ^{:tag int32 :val -862048943} Murmur3_C1 -862048943)`. The analyzer inlines
+  constant reads as javac does; c2g writes a folded constant as a Go literal of its value, never
+  as a Go constant expression (gc folds untyped constant expressions exactly and rejects
+  overflow, while Java's folded value has already wrapped).
+- A `String` constant is a `go/var` initialized at Go package initialization with the pooled
+  literal (§7.5), so that it is the same object as every equal literal.
+- `float` and `double` constants that Go constants cannot express (NaN, the infinities, `-0.0`:
+  Go constants have no negative zero) are `go/var`s initialized from jrt's
+  (`jrt.NaN64`, `jrt.NegZero64` ...).
+
+### 6.2 Class initialization
+
+Java initializes a class lazily, at its first active use (JVMS 5.5: `new`, a static method
+call, a non-constant static field access, a subclass's initialization, reflection), once,
+superclass first, with a per-class lock that lets the initializing thread re-enter (a class
+in progress is seen half-initialized by its own thread) and makes other threads wait. Clojure's
+runtime depends on this: `RT`'s static initializer loads `arbace/core`, which uses `Var`,
+`Namespace`, `Symbol`, `Compiler` and the collections, whose initializers in turn read `RT`'s
+statics; the JVM's order resolves these cycles. Go's package initialization is eager and orders
+variables by their dependencies, rejecting cycles, so it cannot do this. c2g reproduces Java's
+protocol:
+
+- A class `C` with **non-trivial** initialization has a state `C_init` (`jrt.ClassInit`) and a
+  function `C_Init()`, inlinable, whose fast path is one atomic load
+  (`(when (not (.Done C_init)) (.Run C_init C_clinit))`); `C_clinit` is the class's static
+  initializer: the superclass's `Super_Init()` first (and those of superinterfaces that declare
+  default methods and have non-trivial initialization), then the static field initializers and
+  `static-initializer` bodies in textual order, as the analyzer orders them for `<clinit>`.
+- `jrt.ClassInit.Run` is JVMS 5.5's procedure: done → return; in progress by the current thread
+  (the thread identity of §8.4) → return; in progress by another → wait; erroneous → throw
+  `NoClassDefFoundError`; otherwise run the initializer, and on an exception mark the class
+  erroneous and throw `ExceptionInInitializerError` wrapping it (unless it is an `Error`).
+- **Trivial** initialization (no static initializer code, no non-constant static field
+  initializer, a superclass and superinterfaces with trivial initialization) has no state and no
+  function: the class is always initialized. Most classes are trivial (`Murmur3`, `Reduced`).
+- **Where `C_Init()` is called**: at the start of every static method of `C` and of every
+  allocation function `C_New_*` (the callee checks, so call sites need nothing); before a static
+  field read or write of `C` from code outside `C` and its subclasses; in reflection's `Init`.
+  Not in `C`'s own static methods' calls to each other, not in instance code of `C` or its
+  subclasses for `C`'s statics (an instance exists, so initialization has begun; deviation V6),
+  not for constants (inlined).
+- The guard costs about 0.07 ns per access when inlined, 0.3 ns at a non-inlined static
+  method's entry (§13.4).
+
+### 6.3 Go's package initialization
+
+Go's own package initialization runs only data: the class registrations of §5.11, the string
+literal pool, jrt's tables. No Java code runs before `main` starts the program (§10.6), which
+then initializes classes as Java would.
+
+## 7. Code
+
+### 7.1 Overview
+
+| class forms (classes/SPEC.md §5.1) | Go forms |
+|---|---|
+| `(do s1 s2)`, a body | statements in sequence |
+| `(let [^T x e] ...)`, `^:mutable`, `^:const` | `(let [^G x e] ...)`; every Go variable is assignable; a `^:const` local is its folded value |
+| `(set! x e)`, compound assignment | `(set! x e)` |
+| `if`, `when`, `cond`, `if-not`, `when-not` | `if`, `when`, `cond` statements; as values, through a variable (§7.2) |
+| `while`, `loop`/`recur`, `for-each`, `dotimes` | `(while true ...)` with labeled `continue`/`break` (§7.7) |
+| `label`, `break`, `continue`, `return` | Go labels on `for` or `switch`, `(break :L)`, `(continue :L)`, `(return e)`; through `try`, control codes (§7.9) |
+| `switch`, `if-instance`, `when-instance` | `switch`, `type-switch`, `if` chains (§7.8) |
+| `throw`, `try`/`catch`/`finally`, `with-resources` | `(panic (jrt/Thrown e))`, a function literal with `(defer (jrt/Catch ...))` (§7.9) |
+| `locking`, `^:synchronized` | `jrt.MonitorEnter`/`MonitorExit` with `defer` (§8.1) |
+| `java-assert` | `(when (and (not C_assertionsDisabled) (not c)) (panic (jrt/Thrown ...)))` (§7.13) |
+| `letclass`, `anon` | classes of their own (§7.12) |
+| `this`, `Outer/this`, `super` | `t`/`this` (§5.4), the outer instance field, the embedded struct |
+| `(.-f x)`, `C/f`, `(.-f super)` | `(.-F_f x)`, `C_f`, `(.-F_f (.-B t))` |
+| `(.m x a)`, `(C/m a)`, `(.m super a)` | `(.M_..._R x a)`, `(C_M_..._R a)`, `(.Impl_M_..._R (.-B t) this a)` |
+| `(C. a)`, `(.new o I a)`, `anon` | `(C_New_... a)`, `(I_New_... o a)` |
+| `(new T/n d)`, `(new T/1 [a b])`, `aget`, `aset`, `alength` | jrt array constructors, `(aget (.-A a) i)`, `(.Store a i v)`, `(len (.-A a))` (§5.9) |
+| `(cast T e)`, primitive conversions | `(T_Cast e)`, `(conv G e)` or a jrt conversion (§7.4) |
+| `(instance? T e)` | `(T_InstanceOf e)` |
+| `identical?`, `nil?`, `some?` | `(== a b)` after §5.6's conversions, `(== x nil)`, `(!= x nil)` |
+| `==`, `<` ... on primitives, `not`, `and`, `or` | Go's operators |
+| the operators of classes/SPEC.md §5.4 | Go's operators with Java's corrections (§7.4) |
+| `(java-str a b)` | `(jrt/Concat ...)` (§7.5) |
+| `(lambda FI ...)`, `(method-ref ...)` | the functional interface's adapter with a Go function literal (§7.11) |
+| `T`, `Integer/TYPE`, `T/1` (class literals) | `T_class`, jrt's primitive and array classes |
+| literals | Go literals of the Go type (§7.4); string literals from the pool (§7.5) |
+
+### 7.2 Contexts, temporaries and the order of evaluation
+
+The analyzer's nodes are expressions (Clojure's `if`, `let`, `loop`, `try` have values); Go
+separates statements from expressions and has no conditional expression. c2g translates each
+node in one of four **contexts**, as the JVM back end does (`arbace.classes.emit`: `:stmt`,
+`:expr`, `:return`):
+
+- **statement**: the value is discarded;
+- **return**: the value is the enclosing Go function's result (a method, a function literal of
+  a lambda or of a `try` body, §7.9);
+- **assign v**: the value is stored into the Go variable `v`, declared before;
+- **expression**: the node becomes one Go expression.
+
+A node goes to expression context only if it is **simple**: constants, locals, field and static
+reads, calls, operators, casts and conversions over simple operands. Any other node (an `if`, a
+`let`, a loop, a `try`, a `switch`, a `throw`, a `label` used as a value) in an operand position
+is translated before the enclosing expression into a fresh temporary, in assign context.
+
+**The order of evaluation.** Java evaluates operands strictly left to right (JLS 15.7). Go
+orders only function calls, method calls, receive operations and `&&`/`||` among themselves;
+"the order of those events compared to the evaluation and indexing of x and the evaluation of y
+and z is not specified" (Go spec, "Order of evaluation"). So in `g(t.x, h())` Go may read `t.x`
+after calling `h`. c2g therefore moves an operand into a temporary when a later operand of the
+same expression (or a later argument, or the right side of an assignment) has a side effect
+(a call, an allocation, an assignment, a class initialization) and the operand reads state a
+side effect could change: a field, a static, an array element. Java locals cannot be changed
+by a callee (lambdas and inner classes capture only effectively final ones), so local reads stay
+in place; so do constants and reads of final fields outside their class's constructors (and,
+inside them, of final fields already assigned). gc keeps such temporaries in registers.
+
+The same rule orders a class initialization (§6.2) triggered by a static field access in the
+middle of an expression after the operands to its left, and an assignment's target before its
+right side (JLS 15.26: the array reference and index of `a[i] = f()` are evaluated before
+`f()`).
+
+### 7.3 Locals
+
+- A Java local is a Go variable declared by a `let` at the point Java declares it, scoping over
+  the rest of the block (Go forms SPEC §7.3), with its Go type: `(let [^int32 i 0] ...)`.
+  Untyped locals take the analyzer's type of their initializer.
+- A local declared before its first assignment (the converter's `^:mutable` locals with default
+  values, locals shared across `switch` arms) is declared with Java's default value, which is
+  Go's zero value: `(let [^int32 n (zero int32)] ...)`.
+- **Captured locals** (by a lambda's function literal, §7.11) are captured by reference in Go;
+  Java captures only effectively final locals, so the two agree. Anonymous and local classes
+  copy them into fields at construction, as javac does (§7.12). A `for-each` variable is
+  declared inside the loop body, so each iteration has its own.
+- Parameters are Go parameters; a `^:mutable` parameter is assigned in place.
+
+### 7.4 Primitive types, arithmetic and conversions
+
+Go's integer arithmetic is two's complement with wrap-around for signed types ("may legally
+overflow", Go spec), like Java's, so most operators translate directly. The table gives the
+exceptions.
+
+| Java (classes/SPEC.md §5.4) | Go forms | why |
+|---|---|---|
+| `+ - *` on `int`, `long` | `(+ a b)`, `(- a b)`, `(* a b)` | wrap as in Java |
+| `/`, `%` on `int`, `long` | `(/ a b)`, `(% a b)` | truncating like Java; `MIN_VALUE / -1` is `MIN_VALUE` and `MIN_VALUE % -1` is 0 in both; division by zero panics in Go and becomes `ArithmeticException("/ by zero")` (§7.9.5) |
+| `+ - /` on `float`, `double` | Go's operators at `float32`, `float64` | IEEE, rounded per operation |
+| `*` on `float`, `double` | `(conv float64 (* a b))` (`float32` likewise) | Go may fuse `x*y + z` into one fused multiply-add (Go spec, "Floating-point operators"); gc does on arm64 (`FMADDD`), and on amd64 with `GOAMD64=v3`; an explicit conversion forbids it (§13.5). Java rounds each operation |
+| `%` on `float`, `double` | `(math/Mod a b)` (for `float`, on the widened values, then narrowed: exact) | Java's `%` is C's `fmod`, not IEEE remainder; so is Go's `math.Mod`, NaN and infinities included |
+| `-a` | `(- a)` | |
+| `& \| ^ ~` | `bit-and`, `bit-or`, `bit-xor`, `bit-not` | |
+| `a << n`, `a >> n` on `int` | `(<< a (bit-and n 31))`, `(>> a (bit-and n 31))` | Java masks the count to 5 bits (to 6 bits, `63`, for `long`); Go shifts by the full count (giving 0 or -1 beyond the width) and panics on a negative one. A constant count is masked at translation |
+| `a >>> n` on `int` (`long`) | `(conv int32 (>> (conv uint32 a) (bit-and n 31)))` | Go has no unsigned shift of signed types |
+| `< <= > >= ==` and `!=` | Go's, at the promoted type | NaN compares as in Java |
+| widening `i2l`, `i2f`, `i2d`, `l2f`, `l2d`, `f2d` | `(conv int64 x)`, `(conv float32 x)` ... | Go rounds `int64` → `float32` and `float64` → `float32` to nearest, as Java |
+| narrowing `l2i`, `i2b`, `i2s`, `i2c` | `(conv int32 x)`, `(conv int8 x)`, `(conv int16 x)`, `(conv uint16 x)` | Go truncates two's complement, sign-extending signed sources first, as Java |
+| `f2i`, `f2l`, `d2i`, `d2l` | `(jrt/D2I x)` ... | Java saturates and maps NaN to 0; Go's result is "implementation-dependent" for values out of range |
+| `char` operands | `uint16`, promoted to `int32` as Java promotes (the analyzer gives each operator's type) | |
+| `boolean` `&`, `\|`, `^` | written by the converter as `let` and `and`/`or`/`not`, classes/SPEC.md §5.4 | |
+| `Math.addExact` and the other exact operations | jrt's `Math` (shim), with Go's overflow checks | |
+
+**Literals.** An integer literal or folded constant is written as a Go literal of its Java value
+at its Go type (the analyzer narrows Clojure's `long` literals where Java's context is `int`,
+`short`, `byte` or `char`); a `char` constant as a number or a Go rune literal in the BMP; a
+`float` or `double` as its shortest decimal representation (`Float/toString`,
+`Double/toString`), which Go's exact conversion of the decimal to `float32` or `float64` brings
+back to the same value. NaN, infinities and `-0.0` are jrt's variables (§6.1).
+
+**Conversions of constants.** Go rejects a conversion of a constant its target type cannot
+represent (`uint32(-8)` is a compile error, "constant -8 overflows uint32"), where Java would
+convert the value. So when c2g itself puts a conversion around an operand that is a constant (the
+`uint32` of `>>>` on `-8`, the `float64` of a product of constants the analyzer did not fold), it
+writes the converted value instead (`4294967288`). The prototype of §15 met this case.
+
+### 7.5 Strings
+
+- **`jrt.String`** is hand-written (D4): `(struct jrt/Object ^{:tag (slice uint16)} value ^int32
+  hash)`, immutable, final (`*jrt.String`), with Java's `String` API as the manifest declares it
+  (`length`, `charAt`, `hashCode` as `s[0]*31^(n-1) + ...`, `compareTo` by UTF-16 code units,
+  `equals`, `substring`, case mapping through the translated `Character` ...).
+- **Literals** are interned: every string literal (and folded constant string) of a package is
+  a variable of the package's pool `c2g_strings.go`, `Lit_<n>`, initialized at Go package
+  initialization by `jrt.Intern` from a Go string literal (or, when the Java string has unpaired
+  surrogates, which UTF-8 cannot hold, from a `uint16` slice). `jrt.Intern` keeps one global
+  table, so equal literals of all classes are one object, and `String.intern` uses it too.
+- **`java-str`** is `(jrt/Concat p1 ... pn)`, each operand converted to `*jrt.String` by its
+  static type as JLS 5.1.11 says: `(jrt/StrOfInt i)` (`byte`, `short`, `int`), `StrOfLong`,
+  `StrOfChar`, `StrOfBool`, `StrOfFloat` and `StrOfDouble` (Java's `Float.toString` and
+  `Double.toString`, translated from `jdk.internal.math`), and for references
+  `(jrt/StrOfObj x)`: `"null"` for `nil`, else `toString()` (`"null"` again if that returns
+  `null`). Each operand is converted as soon as it is evaluated, left to right, which is javac's
+  order since JDK 19 (JDK-8273914). Constant operands are already folded into literals by the
+  analyzer.
+- **`switch` on a string** follows javac's two steps: `(switch (.HashCode__I s) (case [h1] (when
+  (.Equals_O__Z s Lit_1) (set! k 0))) ...)` with the Java hash codes of the labels as constants,
+  then a `switch` on `k` holding the arms. A `nil` selector throws `NullPointerException`
+  through the call.
+- The host's text (files, standard streams, Go strings in jrt's internals) is converted at the
+  boundary: UTF-8 Go strings to and from UTF-16 by jrt's charset classes.
+
+### 7.6 Members, calls, boxing
+
+- **Field access**: `(.-F_f x)` for a pointer Go type; `(.-F_f (.Self_C x))` for a class
+  interface; `(.-F_f t)` for the class's own fields. Volatile fields are §8.2's.
+- **Calls**: `(.M_..._R x args)` on the receiver's Go type (a leaf's pointer, a class's or an
+  interface's Go interface): the analyzer's call names the static type of the receiver as its
+  owner, so the receiver has a Go type with the method, except for `Object`'s own methods on an
+  `Object`-typed receiver, which are jrt's helpers (§5.8). A call on a leaf class's pointer is a
+  direct call.
+- **Overloads** are the analyzer's choice, recorded on the node; c2g only names the chosen
+  method. Signature polymorphic calls (`MethodHandle.invoke`) are out of scope (§12).
+- **Variable arity**: the analyzer packs the array; it is an ordinary argument.
+- **Boxing and unboxing** are the analyzer's `valueOf` and `xxxValue` calls, translated like any
+  call: `Integer.valueOf` is jdk26u's, with its cache of -128 to 127, so `(identical?
+  (Integer/valueOf 5) (Integer/valueOf 5))` is true and `(identical? (Integer/valueOf 500)
+  (Integer/valueOf 500))` false, as on the JVM. Unboxing `nil` throws through the method call.
+- **Class literals** are `C_class`; `Integer/TYPE` and the other primitive classes are jrt's.
+
+### 7.7 Control flow
+
+- **`if`** in statement context is Go's `if`/`when`; in assign or return context each branch
+  assigns or returns. `cond` is an `else if` chain. Tests are Java booleans (the analyzer has
+  converted Clojure truth on references to `nil` checks, and `Boolean` tests to
+  `booleanValue`).
+- **`loop`/`recur`** (and `while`, `dotimes`, which the analyzer expands into loops): the loop's
+  bindings are Go variables declared, in a block of their own (`(do (let ...))`, so that they do
+  not collide with later declarations of the Go block), before a labeled `(while true ...)`; the
+  body is translated in a loop context where a tail `recur` assigns the new values (one parallel
+  `(set! (values a b) (values ...))`, temporaries per §7.2) and continues, and any other tail
+  value is assigned to the loop's result variable (when the loop has a value) followed by
+  `(break :L)`:
+
+  ```clojure
+  ;; (loop [^int i 0] (when (< i n) (f i) (recur (unchecked-inc-int i))))
+  (do
+    (let [^int32 i 0]
+      (label :L1
+        (while true
+          (when (< i n)
+            (f i)
+            (set! i (+ i 1))
+            (continue :L1))
+          (break :L1)))))
+  ```
+
+  gc compiles this as the obvious loop. `(continue args)` and `(continue :L args)` from any
+  position assign and continue the targeted loop's label.
+- **`for-each`** over an array is an index loop over a copy of the array reference and its
+  length; over an `Iterable`, `(.Iterator__Iterator xs)` with `HasNext__Z` and `Next__O`, the
+  element cast to the binding's type as the analyzer says. A loop without jumps out of its body
+  is a plain `(while cond ...)` without label (§15.1).
+- **`label`, `break`** on a non-loop form: `(label :L (switch (default ...)))`, a labeled
+  `switch` with only a `default` clause, which `(break :L)` leaves; an unlabeled `continue`
+  inside still reaches the enclosing loop (c2g labels every jump anyway). A labeled form with a
+  value assigns its result variable before `(break :L)`.
+- **`return`** is Go's `return`, with the method's result converted (§5.6), except inside a `try`
+  body (§7.9).
+- Forms that do not complete (classes/SPEC.md §5.7) end their Go statement list; where Go
+  requires a terminating statement (a function with results ending in a loop), c2g adds
+  `(panic "unreachable")`, which gc's termination analysis accepts.
+
+### 7.8 `switch` and patterns
+
+- On `int`-like selectors, `(switch sel (case [1 2] ...) (default ...))`: Go's `switch` on
+  constants, with each arm complete (class forms switches do not fall through; Go's do not
+  either without `fallthrough`). The analyzer's folded labels are the case constants.
+- On strings: §7.5. On enums: `(switch (.-F_ordinal e) ...)` (through `(.Self_Enum e)` when
+  the enum has constant bodies and so is an interface type), with the constants'
+  ordinals (whether javac would use a `$SwitchMap$` holder does not matter here: the ordinals of
+  the closed world are known); `nil` throws `NullPointerException`.
+- **Patterns** (`[^T x]`, record patterns, guards) and `nil` labels: when every label is a type
+  pattern without guard and no type is an interface a dynamic object may implement, a Go
+  `type-switch` (`(case [nil] ...)` for the `nil` label; the first matching case wins, as Java's
+  dominance order guarantees); otherwise an `if` chain of `T_InstanceOf` tests, binding the cast
+  values, with the guards, and record components read through their accessors (an exception
+  from one wrapped in `MatchException`, as javac does). `if-instance` and `when-instance` are the
+  one-pattern case.
+- Exhaustive switches carry the converter's explicit `MatchException` default (classes/SPEC.md
+  §5.8).
+
+### 7.9 Exceptions
+
+#### 7.9.1 Throwing
+
+Exceptions are Go panics whose value is the Java exception object (a `jrt.Throwable_I`).
+`(throw e)` is `(panic (jrt/Thrown e))`: `jrt.Thrown` returns `e`, or a new
+`NullPointerException` when `e` is `nil`, and the `panic` is written by c2g itself because a
+call of `panic` is a terminating statement for Go (a method with results may end in a `throw`)
+while a call of a jrt function that panics is not. The stack trace is captured when the
+`Throwable` is constructed (`fillInStackTrace`, §7.9.6), not when it is thrown, as in Java;
+rethrowing keeps it.
+
+#### 7.9.2 `try` and `catch`
+
+A Go `recover` only stops a panic in a deferred function, and a recovered panic resumes at the
+return of the function that deferred, so a `try` body must be a function of its own. c2g writes
+it as a **function literal called in place** (it does not escape, so its captured variables
+stay where they are), and runs the handlers **after** it returns, in the enclosing function:
+
+```clojure
+;; (try body (catch IOException e h1) (catch Throwable e h2))     in statement context
+(let [exc ((fn [] :results [^jrt/Throwable_I exc]
+             (defer (jrt/Catch (addr exc)))
+             <body>
+             (return)))]
+  (when (!= exc nil)
+    (cond
+      (jrt/IOException_InstanceOf exc) (let [e (jrt/IOException_Cast exc)] <h1>)
+      :else (let [e exc] <h2>))))       ; without a catch of Throwable: :else (panic exc)
+```
+
+- `jrt.Catch(&exc)` is the deferred function: it calls `recover` itself (Go requires the call to
+  be in the deferred function), stores a Java exception into `exc`, converts a Go run-time error
+  into its Java exception first (§7.9.5), and re-panics anything else (a bug in jrt). A body
+  that completes normally leaves `exc` `nil`.
+- The handlers are tested in order with `T_InstanceOf`; a multi-catch `(catch [A B] e ...)`
+  tests both; with no matching handler, `(panic exc)` rethrows the same object.
+- Handlers run in the enclosing function, so a `return`, `break` or `continue` in a handler is
+  an ordinary Go statement.
+
+#### 7.9.3 Control transfers out of a `try` body
+
+A `return`, `break`, `continue` or `recur` inside the body leaves the function literal, so it
+becomes a **control code**: the literal's results are `ctl int32`, the value `rv` (when needed)
+and `exc`; each exit sets `ctl` (0 normal completion, 1 return, 2 + k the k-th jump target
+outside) and returns; after the call, a `switch` on `ctl` performs the transfer in the
+enclosing function (`(return rv)`, `(break :L)`, `(continue :L)`). A `try` body without such
+exits has only `exc` (and `rv` if it has a value), as in the example. A `try` in expression
+position has a value: `rv`, or the handler's.
+
+#### 7.9.4 `finally`
+
+```clojure
+;; (try body (catch E e h) (finally f))
+(let [(values ctl rv exc) ((fn [] :results [^int32 ctl ^T rv ^jrt/Throwable_I exc]
+                             (defer (jrt/Catch (addr exc)))
+                             <the try and its handlers, as in §7.9.2, with control codes>))]
+  <f>                                   ; the finally code, in the enclosing function
+  (when (!= exc nil) (panic exc))       ; an exception from the body or a handler
+  (switch ctl ...))                     ; then the pending transfer
+```
+
+The body and its handlers run in a function literal whose own `jrt.Catch` takes whatever
+escapes them; the `finally` code runs once, on every path, in the enclosing function; then the
+pending exception is rethrown or the pending transfer performed. A `return`, `break` or `throw`
+inside the `finally` code takes effect before and so discards the pending one, as in Java.
+`with-resources` arrives from the analyzer already desugared into `try`, `catch Throwable`,
+`addSuppressed` and `close` (javac's pattern), and `:normal-finally` (code run only on normal
+completion) is translated in the same position as `finally`, without the rethrow path.
+
+#### 7.9.5 Implicit exceptions
+
+| Java's check | in Go | becomes |
+|---|---|---|
+| call, field or array access on `null` | the run-time panic "invalid memory address or nil pointer dereference", or c2g's receiver check (§5.6) | `NullPointerException` |
+| array index out of bounds | "index out of range [i] with length n" | `ArrayIndexOutOfBoundsException("Index i out of bounds for length n")` |
+| integer division or remainder by zero | "integer divide by zero" | `ArithmeticException("/ by zero")` |
+| negative array size | jrt's array constructors check | `NegativeArraySizeException("-1")` |
+| failed `checkcast` | `T_Cast` checks | `ClassCastException` |
+| array store | `RefArray.Store` checks | `ArrayStoreException` |
+| `String` index | jrt's `String` checks | `StringIndexOutOfBoundsException` |
+
+`jrt.Catch` recognizes Go's `runtime.Error` values and builds the Java exception (parsing the
+index and length from the message, which is the only place they are given); its stack trace is
+taken at that point, which lies inside the frame that failed. Go's fatal errors (stack
+overflow, out of memory, concurrent map writes in jrt) cannot be recovered (V1, V2).
+
+#### 7.9.6 Stack traces, chaining, uncaught exceptions
+
+- `Throwable` is jrt's (shim), with Java's API: cause, `initCause`, suppressed exceptions,
+  `getStackTrace`, `printStackTrace`. Its constructor captures the program counters with
+  `runtime.Callers` (about 240 ns, §13.3); `getStackTrace` maps them to `StackTraceElement`s
+  through a table c2g generates (Go function name → declaring class, method name), with the file
+  and line of the class forms (§4.3). Frames of forwarders, function literals of `try` bodies and
+  jrt's machinery are elided; frames of the evaluator show its Java methods (the evaluated
+  Clojure code's own frames are the evaluator's business, plan step 5).
+- An exception that leaves a thread's `run` (or `main`) is printed as the JVM prints it
+  (`Exception in thread "main" ...`) by jrt's thread entry, which then ends the program with
+  status 1 for `main` (the uncaught exception handler applies to other threads).
+
+### 7.10 Monitors in code
+
+`(locking x body)` and `^:synchronized` methods are in §8.1, with the memory model.
+
+### 7.11 Lambdas and method references
+
+- For each functional interface `F` the closed world uses as a lambda's or method reference's
+  target, c2g generates an **adapter** class `F_Fn`: a struct with the header and `Fn`, a Go
+  function of the erased SAM signature; it implements `F` (its marker, its SAM method calling
+  `Fn`, forwarders for `F`'s default methods) and has a `Class` named `F$$Lambda`. One adapter
+  serves all lambdas of `F` (V4).
+- `(lambda F params body)` is `(addr (lit F_Fn :Fn (fn ... )))`: a Go function literal over the
+  erased signature, whose parameters are cast to the lambda's instantiated types (as
+  `LambdaMetafactory` does) and whose result is converted to the erased return type. The literal
+  captures what the lambda captures: the enclosing method's `this` and `t`, and effectively
+  final locals (§7.3). `(return v)` inside returns from the literal.
+- `(method-ref F ...)`: a static method reference is a literal calling the function; a bound
+  receiver (`expr::m`) is evaluated once and null-checked (`Objects.requireNonNull`, as javac)
+  before the literal captures it; an unbound one takes the receiver from the first argument;
+  `C/new` allocates; the analyzer's lambda form of array constructor references is a lambda.
+- Marker interfaces of intersection targets (`(& Runnable Serializable)`) give the adapter their
+  markers; serializability itself is cut (§12).
+- `FromFn` in the functional interface's class (§5.11) wraps an `IFn` into the adapter, `Fn`
+  calling `invoke`: that is how jrt's `Reflector` support adapts a Clojure function passed where
+  a functional interface is expected, without `java.lang.reflect.Proxy` (cut).
+
+### 7.12 Nested, inner, local and anonymous classes
+
+- Every nested class is a class of its own (§4.4 names). Static nested classes need nothing
+  more.
+- **Inner, local and anonymous classes** get the fields the analyzer derives: the outer instance
+  `this$0` (Go `F_this_0`, of the outer class's Go type) and the captured locals `val$x`
+  (`F_val_x`), passed to the constructor in the analyzer's order (javac's, `ctor-real-desc`) and
+  stored before the superclass constructor call. `Outer/this` reads `F_this_0` (a chain of them
+  for deeper nesting, as the analyzer's `:this-path` says); `Outer/super` calls the outer
+  class's implementation through it; the converter's `this1` receivers are the outer instance
+  itself.
+- `(Inner. args)` in an instance context passes `this` as the outer instance; `(.new o Inner
+  args)` passes `o` after its null check.
+- An anonymous class's constructor passes its arguments to the superclass's constructor, as
+  the analyzer derives it. `anon` and `letclass` expressions are allocations of these classes.
+
+### 7.13 Enums, records, assertions, initializers
+
+- **Enums** extend jrt's `Enum` (shim: `F_name`, `F_ordinal`, the final methods). The constants
+  are static fields set by the class initialization in order; `values()` clones `$VALUES`;
+  `valueOf(String)` searches the constants (the analyzer derives both members; c2g writes their
+  bodies as `arbace.classes.emit` does). A constant with a body is an anonymous subclass, which
+  makes the enum non-leaf.
+- **Records** extend jrt's `Record`. Their fields, accessors and canonical constructor come from
+  the analyzer; `toString`, `hashCode` and `equals`, which javac links to
+  `ObjectMethods.bootstrap`, are generated as `java.lang.runtime.ObjectMethods` computes them in
+  jdk26u (`Name[a=1, b=x]`; `31 * h + hash(c)` over the components in order; component-wise
+  equality, `==` for primitives as `Float.compare`/`Double.compare` and `Objects.equals` for
+  references).
+- **`java-assert`**: each top-level class has `C_assertionsDisabled` (`true` unless jrt's
+  configuration enables assertions for it, as `-ea` does); a failed assertion throws
+  `AssertionError` with the analyzer's constructor overload.
+- **Instance initializers and field initializers** are already folded into the constructors by
+  the analyzer (§5.2); static ones into the class initializer (§6.2).
+- **Interfaces' static fields** and nested classes of interfaces are ordinary statics and classes.
+
+### 7.14 Clojure inside class bodies
+
+Class bodies may use Clojure outside the Java subset (classes/SPEC.md §5.13): vars, keywords,
+`fn`. The analyzer lowers these into Java: constants in synthetic static fields (initialized in
+the class initialization), `fn` into anonymous `AFunction` classes, var calls into
+`Var.getRawRoot().invoke(...)`. c2g translates the result like any other code. Calls the
+analyzer leaves reflective (`Reflector.invokeInstanceMethod`) go through jrt's reflection at run
+time, as on the JVM.
+
+## 8. Concurrency and the memory model
+
+### 8.1 Monitors
+
+- Every object can be locked. The **lock state lives in the header word** (§5.2): unlocked; a
+  **thin lock** holding the owner's thread number and a recursion count, taken and released by
+  compare-and-swap; or **inflated**, an index into jrt's monitor table, where a
+  `jrt.Monitor` (a `sync.Mutex`, the owner, the count and a condition queue for `wait`/`notify`)
+  lives while contended or waited on. jrt inflates on contention and on `wait`, and deflates when
+  the monitor is free with no waiters. Uncontended locking costs one compare-and-swap (about
+  5 ns, as `sync.Mutex`, §13.4) and the current thread's number (3.7 ns through the slot, §8.4):
+  monitors are reentrant, so they need the owner's identity, which `sync.Mutex` has not.
+- `(locking x body)` is `(jrt/MonitorEnter x)` (which throws `NullPointerException` on `nil`)
+  followed by the body in a function literal with `(defer (jrt/MonitorExit x))`, with control
+  codes as for `try` (§7.9.3): the monitor is released on every exit, exceptions included.
+- A `^:synchronized` method begins with `(jrt/MonitorEnter this)` (`C_class` for a static one)
+  and `(defer (jrt/MonitorExit this))`: Go's open-coded defers make this cheap, and they run on
+  panics.
+- `wait`, `notify` and `notifyAll` are `jrt.Wait(x)`, `jrt.Notify(x)`, `jrt.NotifyAll(x)`, with
+  `IllegalMonitorStateException` when the current thread does not own the monitor.
+
+### 8.2 `volatile`
+
+Java's `volatile` reads and writes are sequentially consistent; Go's `sync/atomic` operations
+are too ("all the atomic operations executed in a program behave as though executed in some
+sequentially consistent order", Go memory model). So a volatile field's Go type is an atomic
+one, and every access is an atomic load or store:
+
+| volatile field type | Go field type |
+|---|---|
+| `boolean`, `int`, `long` | `atomic.Bool`, `atomic.Int32`, `atomic.Int64` |
+| `byte`, `short`, `char`, `float`, `double` | `atomic.Int32`, `atomic.Uint32` or `atomic.Uint64` holding the value (bits for floats) |
+| a pointer Go type (leaf class, `String`, array) | `atomic.Pointer[T]` |
+| an interface Go type (`any`, `C_I`, `J`) | `jrt.Volatile[T]`: an `atomic.Pointer` to a boxed copy of the two-word value; a store allocates (16 bytes), a load is an atomic load and a copy |
+
+Volatile statics likewise. jrt's atomics (`AtomicInteger`, `AtomicReference` ...) and the
+`Unsafe` subset are built the same way.
+
+### 8.3 Data races and two-word references
+
+A Java program may race on a plain field and still be memory-safe: a reference is one word and
+reads see some written value. A Go interface value is two words (type and data), and a racing
+read can combine the two halves of different writes, which breaks memory safety. Pointers,
+`int32`, `int64` and smaller are single words on amd64 and arm64, so the risk is limited to
+**non-volatile fields of interface Go type written after construction without a lock**.
+
+- c2g lists those fields per class (a report, not an error): a non-final, non-volatile field of
+  interface Go type assigned outside constructors and not inside a `synchronized` method or
+  `locking` on `this`. Most of Clojure's racy idioms cache single-word values (`_hash`,
+  `_hasheq`, `Keyword._str` as `*jrt.String`).
+- jrt's and Arbace's tests run under Go's race detector (`-race`), which reports such races.
+- A field found racing becomes volatile in a variant (§4.6), or jrt.Volatile directly (§16 Q10).
+
+**Final fields.** Java guarantees that an object's final fields are seen initialized by any
+thread that obtains a reference to it, even through a race. Go makes no such promise for racy
+publication (and arm64 reorders stores). Arbace publishes shared objects through atoms, refs,
+vars and agents (atomic operations, which publish everything written before them in Go too), so
+this only matters for racy publication, which the race detector also finds.
+
+### 8.4 Threads and thread identity
+
+- `java.lang.Thread` is jrt's (shim). `start` runs `run` in a new goroutine, which first sets the
+  goroutine-local slot (§9.3) to its `Thread`. `currentThread()` reads the slot; a goroutine jrt
+  did not start (Go's own) gets a `Thread` created on first use. `join`, `sleep`, `interrupt`,
+  `isAlive` are implemented over channels and `time`.
+- `ThreadLocal.get` finds the current `Thread` through the slot (3.7 ns, §13.3) and its value in
+  the thread's map. `Var`'s dynamic bindings, `LockingTransaction` and `Agent`'s nesting use it.
+- **Stopgap** until the runtime patch is in the build: the goroutine id parsed from
+  `runtime.Stack`'s header, with a `sync.Map` from id to `Thread` (about 3 µs per lookup, §13.3),
+  entries removed at a jrt thread's end.
+- Executors, `CountDownLatch`, `LockSupport` and locks with `Condition` are jrt's shims over
+  `sync` and goroutines (JAVA-SURFACE.md decision 4); `ConcurrentHashMap` and the blocking
+  queues are translated over `Unsafe`'s compare-and-set (§9.2).
+
+## 9. The boundary to jrt
+
+### 9.1 The manifest
+
+`go/arbace/jrt/manifest.edn` (Clojure reader) declares, for each hand-written jrt class, what
+the translated code may use, as the analyzer needs it:
+
+```clojure
+{java.lang.String
+ {:flags #{:public :final}
+  :super java.lang.Object
+  :interfaces [java.io.Serializable java.lang.Comparable java.lang.CharSequence]
+  :members [[:ctor "([C)V" #{:public}]
+            [:method "length" "()I" #{:public}]
+            [:method "charAt" "(I)C" #{:public}]
+            [:method "valueOf" "(Ljava/lang/Object;)Ljava/lang/String;" #{:public :static}]
+            [:field "CASE_INSENSITIVE_ORDER" "Ljava/util/Comparator;" #{:public :static :final}]
+            ...]
+  :promotable #{"hashCode()I" "equals(Ljava/lang/Object;)Z"}}
+ ...}
+```
+
+- c2g enters these declarations into the class environment; a use of an undeclared member is a
+  translation error naming it, so jrt's coverage is checked before anything runs.
+- The jrt Go forms must define every declared member under its §4.4 name; the build fails
+  otherwise (gc reports the missing identifier), so manifest and implementation cannot drift.
+- `:promotable` lists the methods whose implementation needs no dynamic `this` (§5.4), for
+  which c2g writes no forwarders in subclasses (`Object`'s `hashCode` and `equals`, `Enum`'s
+  final methods).
+- **Natives.** A `^:native` method of a translated JDK class is a call of the jrt function
+  `C_M..._native`, hand-written; the manifest lists them. The closure has five, in three classes
+  (`java-surface.edn`, `:native`): `Double.longBitsToDouble` and `doubleToRawLongBits`,
+  `Float.intBitsToFloat` and `floatToRawIntBits`, `NullPointerException.getExtendedNPEMessage`.
+
+### 9.2 What c2g's output calls
+
+The functions and types of §11, and the hand-written classes through their Java API. The
+translated JDK code reaches jrt's edge through 69 boundary classes (JAVA-SURFACE.md, "Boundary";
+`String`, `StringBuilder`, `Unsafe`, `Math`, `Throwable`, `Class` ...), all declared in the
+manifest. `Unsafe`'s compare-and-set on reference slots (used by `ConcurrentHashMap`'s table)
+cannot be one hardware operation on a two-word interface value; jrt implements the `Unsafe`
+reference operations on array slots and fields under a striped lock keyed by the slot's address
+(64 stripes), and every reference access `ConcurrentHashMap` makes to its table goes through
+them (`tabAt`, `casTabAt`, `setTabAt`), so they are atomic with respect to each other.
+
+### 9.3 The goroutine-local slot
+
+The Go runtime held as forms (B1-PLAN.md, decision 5 of JAVA-SURFACE.md) gets one field and two
+functions, for `linux` now and `tamago` later:
+
+- `runtime2.go`: in `type g struct`, after `coroarg`, the field `arbaceLocal unsafe.Pointer`
+  (scanned by the GC as any pointer field of `g`).
+- `proc.go`: in `gdestroy`, `gp.arbaceLocal = nil` before the `g` is put on the free list, so
+  that a reused `g` starts empty.
+- a new file `arbace_local.go` in `runtime`:
+
+  ```go
+  //go:linkname arbace_getLocal
+  //go:nosplit
+  func arbace_getLocal() unsafe.Pointer { return getg().arbaceLocal }
+
+  //go:linkname arbace_setLocal
+  //go:nosplit
+  func arbace_setLocal(p unsafe.Pointer) { getg().arbaceLocal = p }
+  ```
+
+  (the one-argument `//go:linkname` pushes the symbol, as go1.23 and later require for pulling
+  runtime symbols), pulled by jrt with `//go:linkname getLocal runtime.arbace_getLocal`.
+
+New goroutines start with `nil`: Java threads do not inherit thread locals (`Inheritable
+ThreadLocal`, unused by the closure's run-time paths, would be copied by jrt's `Thread.start`).
+Checked with go1.27.1 (§13.3): the slot is per goroutine (100 goroutines, each reading back its
+own value), costs 3.7 ns per `currentThread()` (the linknamed function is not inlined), and
+works on arm64 (under `qemu-aarch64`). The build needs the three runtime files replaced: either
+`bin/g2c build` gains an overlay option (Go's `-overlay`) or the runtime package is part of the
+forms tree; that is an amendment to BUILD.md (§16 Q19).
+
+### 9.4 The host interface
+
+jrt's use of the operating system is one Go interface, `jrt.Host` (B1-PLAN.md, point 4):
+standard streams, files (open, read, write, close, stat, list, delete), the clocks
+(`currentTimeMillis`, `nanoTime`), the environment and system properties, the command line,
+exit, random seeds for `SecureRandom`, the embedded resources (§10.3). B1a's implementation is
+over Go's `os` and `time`; B1b replaces it with the monitor's host calls. Translated code never
+reaches the host except through jrt's classes (`FileInputStream`, `System`, `PrintStream` ...).
+
+## 10. The boundary to the evaluator
+
+The evaluator is plan step 5; this section fixes what c2g gives it.
+
+### 10.1 `Compiler` translated
+
+`arbace.lang.Compiler` is translated like any class: the reader, the analyzer (`analyze`, the
+`Expr` classes and their parsers), macroexpansion, `eval`. Its back end (the `emit` methods,
+`ObjExpr`'s class generation, `Intrinsics`, everything naming ASM) is cut by variants (§4.6),
+and its `eval` paths that load generated classes (`FnExpr`, `NewInstanceExpr`) are replaced by
+evaluator classes. Interop expressions resolve and run through reflection (§5.11):
+`InstanceMethodExpr`, `StaticMethodExpr`, `InstanceFieldExpr`, `NewExpr` find their `Method`,
+`Field` or `Constructor` with jrt's `Class.getMethods` and the rest at analysis, and their `eval`
+calls the invoker; un-hinted calls go through `Reflector` at run time, as on the JVM.
+
+### 10.2 Functions
+
+`fn*` evaluates to an instance of an **evaluator class**, written in class forms in a variant of
+`Compiler` (for example `Compiler$EvalFn extends AFunction` for fixed arities, `Compiler$EvalRestFn
+extends RestFn` for variadic ones), holding the analyzed `FnExpr` and the closed-over values;
+its `invoke` methods run the body. c2g translates these classes like the rest: an evaluated
+function is a Go value of a struct type implementing `IFn` (and `AFunction`'s other
+interfaces), and translated code calls it with a Go interface call, `(.Invoke_O__O f x)`. Plan
+step 7's closure compilation keeps the classes and replaces the tree walk with Go function
+values.
+
+### 10.3 Classes and resources by name
+
+`RT.classForName` and `Class.forName` look names up in jrt's registry (§5.11): the closed world
+and array classes (`"[Ljava.lang.String;"`, Clojure's `String/1`). `RT.load` reads a namespace's
+source from jrt's embedded resources (the `.clj` files of the REPL's namespaces, embedded with
+`//go:embed`) or from the file system through the host, and evaluates it; there are no `__init`
+classes. `DynamicClassLoader`, `FnLoaderThunk`, `Compile` are not translated.
+
+### 10.4 Types made at run time
+
+`deftype`, `defrecord` and `reify` create a `jrt.Class` at run time (name, `Object` as
+superclass, interfaces, fields, methods as closures, member tables for reflection) and their
+instances are `Dyn` objects (§5.12). Protocols work as on the JVM: `instance?` on the protocol's
+interface, and the class-keyed method cache on `Class` objects.
+
+### 10.5 Recursion depth
+
+Go's stack overflow is fatal (V1). The evaluator counts its own depth (fn invocations,
+`eval` of nested forms) per thread and throws `StackOverflowError` beyond a limit (§16 Q15);
+translated code does not count.
+
+### 10.6 The program
+
+`arbace/cmd/arbace`'s `main` (hand-written Go forms) sets up jrt (host, main thread, slot),
+then calls `arbace.main`'s entry through the evaluator as `clojure.main` would (`RT.init`,
+`require`, `apply`), inside jrt's thread entry (§7.9.6).
+
+## 11. jrt's API as c2g uses it
+
+The Go identifiers c2g's output refers to, all in package `arbace/jrt`. c2g checks that no Java
+class of the closed world has one of these names (§4.4).
+
+| group | names |
+|---|---|
+| object model | `Object` (the header struct), `Object_I`, `Class`, `ClassInfo`, `FieldInfo`, `MethodInfo`, `CtorInfo`, `Define` (registration), `Object_toString`, `Equals`, `HashCode`, `ToString`, `GetClass`, `IdentityHash` |
+| arrays | `BooleanArray` ... `DoubleArray`, `RefArray`; `NewIntArray` ..., `NewRefArray`, `NewMultiArray`, `IntArrayOf` ..., `RefArrayOf`; `RefArray.Store` |
+| class initialization | `ClassInit` (`Done`, `Run`) |
+| exceptions | `Throwable_I`, `Thrown`, `Catch`, `NN` (the receiver check, §5.6), `NPE`, `ClassCast` |
+| conversions | `D2I`, `D2L`, `F2I`, `F2L`; `NaN32`, `NaN64`, `PosInf32` ..., `NegZero32`, `NegZero64` |
+| strings | `String`, `Intern`, `Concat`, `StrOfInt`, `StrOfLong`, `StrOfChar`, `StrOfBool`, `StrOfFloat`, `StrOfDouble`, `StrOfObj` |
+| monitors, memory | `MonitorEnter`, `MonitorExit`, `Wait`, `Notify`, `NotifyAll`, `Volatile` |
+| threads | `CurrentThread`, `Thread` |
+
+The hand-written classes (`Object`, `String`, `StringBuilder`, `Class`, `Throwable`, `Enum`,
+`Record`, `Thread`, `Math`, `System`, the reflection classes, atomics, locks ...) are used through
+their Java API by the names of §4.4, like translated classes.
+
+## 12. Out of scope
+
+D6 and the evaluator make these unnecessary for B1a; each comes back when its Go-side meaning is
+defined.
+
+- **Class loading and bytecode**: `ClassLoader`, `defineClass`, `DynamicClassLoader`, class files,
+  ASM, `Compiler`'s back end, the class forms compiler at run time (`defclass` and the code forms
+  at the REPL), `gen-class`, `gen-interface`.
+- **`proxy`** and `java.lang.reflect.Proxy` (the functional interface adaptation is done by
+  adapters, §7.11).
+- **`invokedynamic` as such**: `java-str` and lambdas are compiled directly (§7.5, §7.11);
+  `KeywordInvokeSite`, `ReflectorCallSite`, `MethodHandle`, `VarHandle`, `MethodType` and
+  signature polymorphic calls are reworked or cut (JAVA-SURFACE.md). A signature polymorphic
+  call in translated code is a translation error.
+- **Serialization** (`writeReplace`, `readObject`, serializable lambdas' `$deserializeLambda$`):
+  cut with `ObjectInputStream`/`ObjectOutputStream`; their members are cut by variants.
+- **Annotations at run time** and generic reflection (`getAnnotation`, `ParameterizedType`).
+- **Modules and packages** as run-time objects (`Module`, `Package`), the security manager.
+- **Finalization** (V8), thread groups and priorities (V10).
+
+## 13. Performance
+
+Measured on this machine (AMD EPYC 7763, linux/amd64, go1.27.1 from `/root/tamago-go`,
+`go test -bench -cpu 1`, `GOAMD64=v1`), with the experiments in `.tmp/c2g-exp/` (scratch, not
+tracked; the programs are described with each number). The numbers are per operation and
+include the benchmark loop.
+
+### 13.1 Dispatch and type tests
+
+| operation | ns | experiment |
+|---|---:|---|
+| direct call of a non-inlined function | 1.9 | `dispatch`, `CallDirectNoinline` |
+| Go interface call, one receiver type | 3.5 | `CallIfaceMono` |
+| Go interface call, two types alternating | 4.1 | `CallIfacePoly` |
+| Go interface call, three types in a pseudo-random order | 10.2 | `HashViaObjIface` (branch misprediction, as for any indirect call) |
+| explicit vtable call (class pointer → table → function) | 1.9 | `VtableCall` (the table loads hoisted out of the loop by gc: a lower bound; §13.2 compares the two models on real work) |
+| `any` → interface assertion, then call, two types | 4.4 | `CallAnyAssertIfacePoly` |
+| the same, three types random | 14.7 | `HashViaAnyAssert` |
+| `instanceof` interface (comma-ok assertion), two types | 1.9 | `InstanceofIfacePoly` |
+| `instanceof` leaf class (pointer type assertion) | 1.3 | `InstanceofConcretePoly` |
+| up-cast interface → interface (`convI2I`) | 2.2 | `UpcastIfaceToIfacePoly` |
+| up-cast interface → `any` | 1.1 | `UpcastIfaceToAnyPoly` |
+| up-cast pointer → interface | 0.6 | `UpcastConcreteToIface` |
+| nil-preserving up-cast pointer → `any`: per-type method / generic / plain | 0.97 / 1.43 / 0.95 | `UpPerType`, `UpGeneric`, `UpRaw` |
+| field read on a pointer | 0.65 | `FieldConcrete` |
+| field read through a class interface's accessor, one type | 1.95 | `FieldViaAccessorMono` |
+
+Choices: Go interfaces for dispatch (an indirect call either way, §13.2; they give type tests
+and the itab cache for free); `any` for `Object` (up-casts to `Object` are the most frequent
+conversion and the cheapest); pointers for leaf classes (direct, inlinable calls and field
+reads, the largest win, §5.3); nil-preserving conversions as generated methods, not generics.
+
+### 13.2 References: interface values or thin pointers
+
+The alternative object model makes every reference a one-word pointer to a header holding a
+class pointer, with explicit vtables and interface tables and `unsafe` casts. A model of both
+(`model`: a 1M-element cons list of boxed longs, built and walked through an `ISeq` interface; a
+32-way trie of depth 3 indexed at random):
+
+| | interface values (chosen) | thin pointers |
+|---|---:|---:|
+| build 1M conses with boxed longs | 100 ms, 64 MiB | 100 ms, 56 MiB |
+| walk the list | 4.6 ms | 4.9 ms |
+| trie lookup (`nth`) | 57 ns | 54 ns |
+| `Object[]` slot | 16 bytes | 8 bytes |
+
+Speed is the same; thin pointers save memory where references dominate (an `Object[32]` vector
+node is 512 bytes against 256) and make every reference CAS-able and tear-free (§8.3, §9.2), but
+need `unsafe` in all translated code, an interface dispatch of jrt's own and the loss of Go's
+type tests. §16 Q1.
+
+### 13.3 Exceptions and threads
+
+| operation | ns | experiment |
+|---|---:|---|
+| a call | 2.0 | `exc`, `PlainCall` |
+| the same call inside a `try` (function literal, `defer`, `recover`), not throwing | 9.0 | `TryNoThrow` |
+| inside `try`/`finally`, not throwing | 6.0 | `TryFinallyNoThrow` |
+| throw and catch, one frame deep | 305 | `TryThrowCatch` |
+| throw and catch, 20 frames deep | 795 | `TryThrowCatchDepth20` |
+| capture a stack trace (`runtime.Callers`) | 240 | `CallersCapture` |
+| goroutine id from `runtime.Stack` (the stopgap) | 2,970 | `GoidRuntimeStack` |
+| `ThreadLocal` through that id and a `sync.Map` | 3,110 | `ThreadLocalViaGoidSyncMap` |
+| `currentThread()` through the runtime slot | 3.7 | `gls`, `CurrentThread`, with the runtime patch as an overlay |
+
+A JVM throw with a stack trace costs about a microsecond too; Clojure's runtime does not use
+exceptions for ordinary control flow, so the 9 ns of an entered `try` matters more than the
+throw. The slot is 800 times faster than the stopgap, which would cost about 3 µs on every
+dynamic var access while bindings exist.
+
+### 13.4 Statics, locks, allocation
+
+| operation | ns | experiment |
+|---|---:|---|
+| static field read, no guard / with an inlined `C_Init()` guard | 0.32 / 0.39 | `exc`, `StaticGetNoGuard`, `StaticGetGuardInline` |
+| non-inlined static method, without / with guard at entry | 1.9 / 2.2 | `StaticGetUnguardedCall`, `StaticGetGuardedCall` |
+| `sync.Mutex` lock and unlock | 5.5 | `SyncMutexLockUnlock` |
+| thin lock in the header (CAS), lock and unlock | 5.0 | `ThinLockUnlock` |
+| allocate a 16-byte object (a boxed `Long`) | 20 | `alloc`, `AllocLong16` |
+| allocate a 64-byte object (a `Cons`: header and three references) | 31 | `AllocCons56` |
+| build 1M conses with a large live heap, `GOGC=100` / `GOGC=400` | 100 / 53 ms | `model`, `FatBuildList` |
+
+Allocation is the main expected cost against the JVM (whose TLAB allocation is a pointer bump):
+Clojure allocates freely (seqs, boxed numbers, persistent updates). Remedies, in order: `GOGC`
+(and `GOMEMLIMIT`) tuned by jrt at start (halved the build time above), fewer allocations in
+hot paths (the evaluator's environments, plan step 7), and later Go's profile-guided
+optimization. Boxing follows Java (`Long.valueOf` caches -128 to 127); a larger cache is allowed
+by Java's specification and would be a jrt choice, not c2g's.
+
+### 13.5 Floating point
+
+gc fuses `x*y + z` into a fused multiply-add on arm64 (`FMADDD`, `FMADDS`) and on amd64 with
+`GOAMD64=v3` (`VFMADD231SD`), and not with `GOAMD64=v1`; `float64(x*y) + z` is never fused
+(checked with `go build -gcflags=-S`, experiment `fma`). Java forbids fusion, so c2g converts
+every floating-point product explicitly (§7.4). The conversion costs nothing where no fusion
+would happen.
+
+### 13.6 Code size and compile time
+
+A synthetic package shaped like c2g's output (`big`: 1,200 classes in random single-inheritance
+hierarchies, 30 methods each, implementation methods, forwarders for every inherited method,
+class interfaces with markers, 117,181 functions, 451,498 lines of Go) compiles as one package in
+34 s with 6 GB of peak memory, and links to a 60 MB executable when reflection keeps every
+method (4.5 MB when only reachable code is kept). The real closure is smaller (422 JDK classes
+and 774 runtime classes, most with far fewer methods, most of them leaves): jrt as one package is
+within gc's means. Member tables keep every method they list reachable, which is why §5.11 lists
+public members only.
+
+### 13.7 Choices and alternatives
+
+| choice | cost | alternative considered |
+|---|---|---|
+| Go interfaces for dispatch, forwarders | code size (forwarders), 2 words per reference | explicit vtables over thin pointers (§13.2, Q1) |
+| leaf classes as pointers | a closed-world analysis, recomputed as a whole | interfaces for every class: an interface call per field access of another object (§13.1) |
+| `any` for `Object` | an assertion for `Object`'s methods on `Object`-typed values | `jrt.Object_I`: direct `hashCode`/`equals`, but 2.2 ns instead of 1.1 for every up-cast |
+| lazy class initialization with guards | about 0.07-0.3 ns per guarded access | Go's eager package initialization: cannot express `RT`'s cycles (§6.2) |
+| exceptions as panics | 9 ns per entered `try` | Go-style error results on every call: the normal path pays everywhere |
+| monitors in the header word | 8 bytes per object (shared with the identity hash) | a `sync.Mutex` per object (8 bytes more); an external table (a map operation per lock) |
+
+## 14. Coverage
+
+These tables check the spec against the class forms spec and the analyzer's output.
+
+### 14.1 Declarations (classes/SPEC.md §4)
+
+| class forms | c2g |
+|---|---|
+| `defclass` (class, `^:interface`, `^:enum`, `^:record`, `^:annotation`) | §4.5, §5.2-§5.5, §7.13 |
+| record components | fields, accessors, canonical constructor from the analyzer; §7.13 |
+| `:extends`, `:implements`, `:permits`, `:type-params`, `:package` | struct embedding and class interface; markers; nothing (sealing is checked by the analyzer); erased; the Go package by §4.2 |
+| modifiers `public` `protected` `private` (package access) | checked by the analyzer; `Modifiers` in the member tables; private methods non-virtual (§5.4); package-private pairs across packages (§4.4) |
+| `static` | package members (§4.4, §6.1) |
+| `final` | classes: leaves (§5.3); fields: nothing beyond §8.3; methods: dispatch as others; locals, parameters: nothing |
+| `abstract` | no Go method, no allocation function (§5.2, §5.4) |
+| `synchronized` | §8.1 |
+| `native` | jrt natives (§9.1) |
+| `transient` | nothing (serialization cut) |
+| `volatile` | atomic field types (§8.2) |
+| `default`, `sealed`, `non-sealed`, `strictfp`, `deprecated`, `synthetic`, `bridge` | default methods (§5.5); nothing; nothing; nothing (Java has no other floating point mode, nor has this spec, §7.4); `Modifiers`; as members; bridges (§5.4) |
+| annotations | dropped (§12) |
+| `field`, initializer | §5.2, §6.1, §7.13 |
+| `method`, overloads, untyped methods, `:throws` | §4.4 names from the analyzer's descriptor; checked exceptions are not analyzed (as javac's don't run) |
+| `constructor`, `(super. ...)`, `(this. ...)`, `(.super o ...)` | §5.2, §7.12 |
+| `initializer`, `static-initializer` | folded by the analyzer (§5.2, §6.2) |
+| member classes, `anon`, `letclass` | §7.12 |
+| `constants` | §7.13 |
+| `defmodule`, `defpackage` | nothing (§4.5) |
+| member macros | expanded by the analyzer |
+
+### 14.2 Code (classes/SPEC.md §5)
+
+Every row of classes/SPEC.md §5.1's table is in §7.1. Further:
+
+| class forms | c2g |
+|---|---|
+| names in class bodies (§5.2) | resolved by the analyzer; Go names §4.4 |
+| `^:mutable`, `^:const`, exact primitive types, reference tags (§5.3) | §7.3; tags that were checkcasts are `C_Cast` |
+| literals, constant expressions (§5.4) | §7.4, §6.1 |
+| conversions, erasure casts, conditions, branch types (§5.5) | §7.4, §5.7, §5.10; branches typed by the analyzer |
+| qualifying types, accessibility, overloads, constants, array `clone`, null checks (§5.6) | the analyzer's; §7.6, §5.9, §5.6 |
+| control flow, `for-each`, forms that do not complete (§5.7) | §7.7 |
+| `switch`, patterns (§5.8) | §7.8 |
+| exceptions, `with-resources`, `locking`, `java-assert` (§5.9) | §7.9, §8.1, §7.13 |
+| `java-str` (§5.10) | §7.5 |
+| arrays (§5.11) | §5.9 |
+| `lambda`, `method-ref` (§5.12) | §7.11 |
+| Clojure inside class bodies (§5.13) | §7.14 |
+
+### 14.3 The analyzer's nodes
+
+The node kinds `arbace.classes.analyze` produces (the `:op`s of `emit` and `emit-extra`):
+
+| `:op` | Go forms |
+|---|---|
+| `:const` | a literal, a pooled string, a jrt float variable (§7.4, §7.5) |
+| `:local`, `:set-local` | the variable; `set!` |
+| `:this-path`, `:outer-param-path` | `t`/`this`; a chain of `F_this_0` reads (§7.12) |
+| `:class-lit` | `C_class`, jrt's primitive and array classes |
+| `:get-field`, `:set-field` | field access, atomic for volatile (§7.6, §8.2) |
+| `:get-static`, `:set-static` | `C_f`, guarded (§6.2) |
+| `:invoke` (`:static`, `:virtual`, `:interface`, `:special`) | a package function call; a method call; a `super`/private call on the struct (§5.4) |
+| `:new`, `:ctor-call` | `C_New_...`; the constructor body's superclass or `this.` call (§5.2) |
+| `:new-array`, `:array-init`, `:aget`, `:aset`, `:alength` | §5.9 |
+| `:arith`, `:compare`, `:convert` | §7.4 |
+| `:cast`, `:instance?`, `:null-checked` | §5.7; `Objects.requireNonNull` as called |
+| `:not`, `:and`, `:or`, `:nil?`, `:identical?`, `:bool=`, `:truth` | `not`, `and`, `or`, `(== x nil)`, §5.8's identity, `==`, nil and `Boolean` tests |
+| `:if`, `:do`, `:let`, `:loop`, `:recur`, `:label`, `:break`, `:return` | §7.2, §7.3, §7.7 |
+| `:try`, `:throw`, `:monitor` | §7.9, §8.1 |
+| `:switch`, `:if-instance` | §7.8 |
+| `:for-each` | §7.7 |
+| `:java-str` | §7.5 |
+| `:assert` | §7.13 |
+| `:lambda`, `:method-ref`, `:fi-adapter` | §7.11 (`:fi-adapter`, Clojure's conversion of a `fn` to a functional interface, is `F_Fn` around `invoke`) |
+| `:var-deref`, `:var-invoke` | calls of `Var`'s methods on the class's synthetic var fields (§7.14) |
+| `:deser-indy`, `:param0` | serialization: out of scope (§12) |
+| `:none` | nothing (a form that does not complete) |
+
+### 14.4 Class file attributes and flags
+
+None of classes/SPEC.md §8.2-§8.3's attributes and flags exist in Go. What they meant is kept
+as: access flags in `Modifiers` (§5.11); `ConstantValue` as Go constants (§6.1); `Code` as the
+translation of §7; `Signature`, annotations, `MethodParameters`, `Deprecated` dropped (generic
+reflection, annotations and parameter names are cut, §12); `InnerClasses`, `EnclosingMethod`,
+`NestHost` in `Declaring` and the modifiers of nested classes; `PermittedSubclasses`, `Record`
+in `Kind` and the record's members; `BootstrapMethods` unnecessary (§12); `Exceptions` dropped
+(`getExceptionTypes` is not used by the closure).
+
+## 15. Worked examples
+
+Written by hand from the current `arbace/lang` sources, as c2g should produce them. Only the
+interesting members are shown; every class also has its `Ref`, `GetClass__Class`,
+`ToString__String` and markers (§2), its member table (§5.11), and its file's `in-ns` and
+`go/file` forms. Forms in `arbace/lang` qualify jrt's names with `jrt/`.
+
+**Checked.** A prototype (`.tmp/c2g-proto/`, scratch) holds §15.1's `Murmur3` forms and §15.4's
+`Delay.realize` and `deref` as written here (and `LazySeq.sval`'s control code, on a `Delay`),
+the `Reduced` of §2, `Util`'s class initialization, a three-class
+hierarchy with implementations, forwarders and a `super` call (§5.4), and a minimal hand-written
+jrt (header, `String` over UTF-16, `Throwable`, `Catch` with the run-time error mapping of
+§7.9.5, `ClassInit`, `Volatile`, `RefArray`). `bin/g2c build` prints and builds it for
+linux/amd64 and linux/arm64; both executables print the same, and `hashInt`, `hashLong` and
+`hashCombine` give the JVM Arbace's values (`(Murmur3/hashInt 42)` is -1134849565,
+`(Murmur3/hashLong 1234567890123)` 1740798302, `(Util/hashCombine 17 99)` -1640530319). The
+inherited `describe` of the hierarchy's leaf calls the leaf's `area` through `this`; `Util`'s
+initializer runs once; a `nil` receiver, an index out of bounds and a division by zero arrive in
+Java's `catch` as `NullPointerException`, `ArrayIndexOutOfBoundsException` and
+`ArithmeticException("/ by zero")`; the `return` from inside `try`/`finally` runs the `finally`
+code first.
+
+### 15.1 `Murmur3`: statics, constants, arithmetic
+
+```clojure
+(defclass ^:public ^:final Murmur3
+  (field ^:private ^:static ^:final ^int seed 0)
+  (field ^:private ^:static ^:final ^int C1 (unchecked-int 0xcc9e2d51))
+  (field ^:private ^:static ^:final ^int C2 0x1b873593)
+  (method ^:public ^:static hashInt ^int [^int input]
+    (if (== input 0)
+        0
+        (let [k1 (Murmur3/mixK1 input) h1 (Murmur3/mixH1 seed k1)] (Murmur3/fmix h1 4))))
+  (method ^:public ^:static hashLong ^int [^long input]
+    (if (== input 0)
+        0
+        (let [low (unchecked-int input)
+              high (unchecked-int (unsigned-bit-shift-right input 32))
+              ^:mutable k1 (Murmur3/mixK1 low)
+              ^:mutable h1 (Murmur3/mixH1 seed k1)]
+          (set! k1 (Murmur3/mixK1 high))
+          (set! h1 (Murmur3/mixH1 h1 k1))
+          (Murmur3/fmix h1 8))))
+  (method ^:public ^:static hashOrdered ^int [^Iterable xs]
+    (let [^:mutable ^int n 0
+          ^:mutable ^int hash 1]
+      (for-each [x xs]
+        (set! hash (unchecked-add-int (unchecked-multiply-int 31 hash) (Util/hasheq x)))
+        (set! n (unchecked-inc-int n)))
+      (Murmur3/mixCollHash hash n)))
+  (method ^:private ^:static mixK1 ^int [^:mutable ^int k1]
+    (set! k1 (unchecked-multiply-int k1 C1))
+    (set! k1 (Integer/rotateLeft k1 15))
+    (set! k1 (unchecked-multiply-int k1 C2))
+    k1)
+  (method ^:private ^:static fmix ^int [^:mutable ^int h1 ^int length]
+    (set! h1 (bit-xor-int h1 length))
+    (set! h1 (bit-xor-int h1 (unsigned-bit-shift-right-int h1 16)))
+    (set! h1 (unchecked-multiply-int h1 (unchecked-int 0x85ebca6b)))
+    (set! h1 (bit-xor-int h1 (unsigned-bit-shift-right-int h1 13)))
+    (set! h1 (unchecked-multiply-int h1 (unchecked-int 0xc2b2ae35)))
+    (set! h1 (bit-xor-int h1 (unsigned-bit-shift-right-int h1 16)))
+    h1)
+  ;; mixH1, mixCollHash, hashUnordered, hashUnencodedChars alike
+  )
+```
+
+```clojure
+(go/type Murmur3 (struct jrt/Object))
+
+(go/const ^{:tag int32 :val 0} Murmur3_seed 0)
+(go/const ^{:tag int32 :val -862048943} Murmur3_C1 -862048943)
+(go/const ^{:tag int32 :val 461845907} Murmur3_C2 461845907)
+
+(go/func Murmur3_HashInt_I__I ^int32 [^int32 input]
+  (if (== input 0)
+    (return 0)
+    (let [k1 (Murmur3_MixK1_I__I input)
+          h1 (Murmur3_MixH1_I_I__I 0 k1)]            ; seed: a constant, inlined
+      (return (Murmur3_Fmix_I_I__I h1 4)))))
+
+(go/func Murmur3_HashLong_J__I ^int32 [^int64 input]
+  (if (== input 0)
+    (return 0)
+    (let [low (conv int32 input)
+          high (conv int32 (conv int64 (>> (conv uint64 input) 32)))
+          k1 (Murmur3_MixK1_I__I low)
+          h1 (Murmur3_MixH1_I_I__I 0 k1)]
+      (set! k1 (Murmur3_MixK1_I__I high))
+      (set! h1 (Murmur3_MixH1_I_I__I h1 k1))
+      (return (Murmur3_Fmix_I_I__I h1 8)))))
+
+(go/func Murmur3_HashOrdered_Iterable__I ^int32 [^jrt/Iterable xs]
+  (let [^int32 n 0
+        ^int32 hash 1]
+    (do
+      (let [it (.Iterator__Iterator xs)]
+        (while (.HasNext__Z it)
+          (let [x (.Next__O it)]
+            (set! hash (+ (* 31 hash) (Util_Hasheq_O__I x)))
+            (set! n (+ n 1))))))
+    (Murmur3_MixCollHash_I_I__I hash n)))
+
+(go/func Murmur3_MixK1_I__I ^int32 [^int32 k1]
+  (set! k1 (* k1 -862048943))
+  (set! k1 (jrt/Integer_RotateLeft_I_I__I k1 15))
+  (set! k1 (* k1 461845907))
+  k1)
+
+(go/func Murmur3_Fmix_I_I__I ^int32 [^int32 h1 ^int32 length]
+  (set! h1 (bit-xor h1 length))
+  (set! h1 (bit-xor h1 (conv int32 (>> (conv uint32 h1) 16))))
+  (set! h1 (* h1 -2048144789))
+  (set! h1 (bit-xor h1 (conv int32 (>> (conv uint32 h1) 13))))
+  (set! h1 (* h1 -1028477387))
+  (set! h1 (bit-xor h1 (conv int32 (>> (conv uint32 h1) 16))))
+  h1)
+```
+
+- `Murmur3` has only constants: its initialization is trivial (§6.2), so there is no
+  `Murmur3_Init` and no guard. `Util` and `Integer` have non-trivial initialization: their
+  static methods begin with their guards, and callers do nothing.
+- The constants are `go/const`s; their uses are the analyzer's inlined values (`0` for `seed`,
+  the folded `-862048943` for `(unchecked-int 0xcc9e2d51)`), never a Go expression gc would fold
+  and reject.
+- `int` multiplication wraps in Go as in Java; `>>>` is a shift of the `uint32` (`uint64`)
+  conversion; constant shift counts are already masked.
+- The `for-each` over an `Iterable` is the iterator loop in a block of its own (`do`), so that
+  `it` does not collide with a later declaration; `x` is declared inside the loop body. Reads of
+  the locals `hash` and `n` need no temporaries around the call `Util_Hasheq_O__I` (a callee
+  cannot change a Java local, §7.2).
+- A `NullPointerException` for a `nil` `xs` comes from Go's call on a nil interface.
+
+### 15.2 `Util`: an interface, anonymous classes, class initialization
+
+```clojure
+(defclass ^:public Util
+  (method ^:public ^:static equiv ^boolean [k1 k2]
+    (cond
+      (identical? k1 k2) true
+      (some? k1)
+        (cond
+          (and (instance? Number k1) (instance? Number k2))
+            (Numbers/equal (cast Number k1) (cast Number k2))
+          (or (instance? IPersistentCollection k1) (instance? IPersistentCollection k2))
+            (Util/pcequiv k1 k2)
+          :else (.equals k1 k2))
+      :else false))
+
+  (defclass ^:public ^:interface EquivPred
+    (method equiv ^boolean [this k1 k2]))
+
+  (field ^:static ^EquivPred equivNull
+    (anon EquivPred []
+      (method ^:public equiv ^boolean [this k1 k2] (nil? k2))))
+  ;; equivEquals, equivNumber, equivColl alike
+
+  (method ^:public ^:static hashCombine ^int [^:mutable ^int seed ^int hash]
+    (set! seed
+          (bit-xor-int seed
+                       (unchecked-add-int
+                         (unchecked-add-int (unchecked-add-int hash (unchecked-int 0x9e3779b9))
+                                            (bit-shift-left-int seed 6))
+                         (bit-shift-right-int seed 2))))
+    seed))
+```
+
+```clojure
+(go/type Util (struct jrt/Object))
+
+(go/type Util_EquivPred
+  (interface jrt/Object_I
+    (Is_Util_EquivPred [])
+    (Equiv_O_O__Z ^bool [^any k1 ^any k2])))
+
+(go/var ^Util_EquivPred Util_equivNull)
+;; Util_equivEquals, Util_equivNumber, Util_equivColl alike
+
+(go/var ^jrt/ClassInit Util_init)
+
+(go/func Util_Init []
+  (when (not (.Done Util_init))
+    (.Run Util_init Util_clinit)))
+
+(go/func Util_clinit []
+  (set! Util_equivNull (Util_1_New))
+  (set! Util_equivEquals (Util_2_New))
+  (set! Util_equivNumber (Util_3_New))
+  (set! Util_equivColl (Util_4_New)))
+
+(go/func Util_Equiv_O_O__Z ^bool [^any k1 ^any k2]
+  (Util_Init)
+  (cond
+    (== k1 k2) (return true)
+    (!= k1 nil) (cond
+                  (and (jrt/Number_InstanceOf k1) (jrt/Number_InstanceOf k2))
+                  (return (Numbers_Equal_Number_Number__Z (jrt/Number_Cast k1) (jrt/Number_Cast k2)))
+                  (or (IPersistentCollection_InstanceOf k1) (IPersistentCollection_InstanceOf k2))
+                  (return (Util_Pcequiv_O_O__Z k1 k2))
+                  :else (return (jrt/Equals k1 k2)))
+    :else (return false)))
+
+(go/func Util_HashCombine_I_I__I ^int32 [^int32 seed ^int32 hash]
+  (Util_Init)
+  (set! seed (bit-xor seed (+ hash -1640531527 (<< seed 6) (>> seed 2))))
+  seed)
+
+;; Util$1, the anonymous EquivPred of equivNull: a leaf class without outer instance
+(go/type Util_1 (struct jrt/Object))
+
+(go/func Util_1_New ^{:tag (* Util_1)} [] (addr (lit Util_1)))
+
+(go/method Equiv_O_O__Z ^bool [^{:tag (* Util_1)} t ^any k1 ^any k2] (== k2 nil))
+
+(go/method Is_Util_EquivPred [^{:tag (* Util_1)} t])
+```
+
+- `Util`'s static field initializers make its initialization non-trivial: `Util_clinit` runs
+  them in textual order, `Util_Init` guards every static method of `Util`. Inside them, `Util`'s
+  own statics need no guard.
+- `identical?` of two `any` values is Go's `==`; both are interface values holding pointers.
+- `Number` has subclasses, so it is an interface type (`jrt.Number_I`); `instance?` and `cast`
+  are its generated functions. `(.equals k1 k2)` on an `Object`-typed receiver is jrt's
+  `Equals`, which asserts `jrt.Object_I` (§5.8).
+- The `cond` arms in return context return; Go's `else if` chain is the `cond`.
+- The anonymous classes are created in a static context: no `F_this_0`. Their constructor
+  (`Object`'s) is empty.
+- `hashCombine`'s left-nested additions are one n-ary Go form, Java's association kept.
+
+### 15.3 `PersistentVector`: a leaf class, a nested class, an inner anonymous class
+
+```clojure
+(defclass ^:public PersistentVector
+  :extends APersistentVector
+  :implements [IObj IEditableCollection IReduce IKVReduce IDrop]
+  (defclass ^:public ^:static Node
+    :implements [Serializable]
+    (field ^:public ^:final ^:transient ^{:tag (AtomicReference Thread)} edit)
+    (field ^:public ^:final ^Object/1 array)
+    (constructor ^:public [this ^{:tag (AtomicReference Thread)} edit ^Object/1 array]
+      (set! (.-edit this) edit)
+      (set! (.-array this) array)))
+  (field ^:static ^:final ^{:tag (AtomicReference Thread)} NOEDIT (AtomicReference. nil))
+  (field ^:public ^:static ^:final ^Node EMPTY_NODE (Node. NOEDIT (new Object/1 32)))
+  (field ^:final ^int cnt)
+  (field ^:public ^:final ^int shift)
+  (field ^:public ^:final ^Node root)
+  (field ^:public ^:final ^Object/1 tail)
+  (field ^:final ^IPersistentMap _meta)
+  (field ^:public ^:static ^:final ^PersistentVector EMPTY
+    (PersistentVector. 0 5 EMPTY_NODE (new Object/1 [])))
+  (field ^:private ^:static ^:final ^IFn TRANSIENT_VECTOR_CONJ
+    (anon AFn [] ...))                                    ; PersistentVector$1
+  (constructor [this ^int cnt ^int shift ^Node root ^Object/1 tail]
+    (set! (.-_meta this) nil)
+    (set! (.-cnt this) cnt)
+    (set! (.-shift this) shift)
+    (set! (.-root this) root)
+    (set! (.-tail this) tail))
+  (method ^:final tailoff ^int [this]
+    (if (< cnt 32)
+        0
+        (bit-shift-left-int (unsigned-bit-shift-right-int (unchecked-subtract-int cnt 1) 5) 5)))
+  (method ^:public arrayFor ^Object/1 [this ^int i]
+    (if (and (>= i 0) (< i cnt))
+        (if (>= i (.tailoff this))
+            tail
+            (let [^:mutable node root]
+              (loop [^int level shift]
+                (when (> level 0)
+                  (set! node
+                        (cast Node
+                              (aget (.-array node)
+                                    (bit-and-int (unsigned-bit-shift-right-int i level) 0x01f))))
+                  (recur (unchecked-subtract-int level 5))))
+              (.-array node)))
+        (throw (IndexOutOfBoundsException.))))
+  (method rangedIterator ^Iterator [this ^:final ^int start ^:final ^int end]
+    (anon Iterator []
+      (field ^int i start)
+      (field ^int base (unchecked-subtract-int i (unchecked-remainder-int i 32)))
+      (field ^Object/1 array
+        (when (< start (.count PersistentVector/this)) (.arrayFor PersistentVector/this i)))
+      (method ^:public hasNext ^boolean [this] (< i end))
+      (method ^:public next [this]
+        (if (< i end)
+            (do
+              (when (== (unchecked-subtract-int i base) 32)
+                (set! array (.arrayFor PersistentVector/this i))
+                (set! base (unchecked-add-int base 32)))
+              (let [i-1 i] (set! i (unchecked-inc-int i)) (aget array (bit-and-int i-1 0x01f))))
+            (throw (NoSuchElementException.))))
+      (method ^:public remove ^void [this]
+        (throw (UnsupportedOperationException.)))))
+  ;; ...
+  )
+```
+
+```clojure
+(go/type PersistentVector
+  (struct APersistentVector
+          ^int32 F_cnt
+          ^int32 F_shift
+          ^{:tag (* PersistentVector_Node)} F_root
+          ^{:tag (* jrt/RefArray)} F_tail
+          ^IPersistentMap F__meta))
+
+(go/type PersistentVector_Node
+  (struct jrt/Object
+          ^{:tag (* jrt/AtomicReference)} F_edit
+          ^{:tag (* jrt/RefArray)} F_array))
+
+(go/var ^{:tag (* jrt/AtomicReference)} PersistentVector_NOEDIT)
+(go/var ^{:tag (* PersistentVector_Node)} PersistentVector_EMPTY_NODE)
+(go/var ^{:tag (* PersistentVector)} PersistentVector_EMPTY)
+(go/var ^IFn PersistentVector_TRANSIENT_VECTOR_CONJ)
+(go/const ^{:tag int64 :val -7896022351281214157} PersistentVector_serialVersionUID -7896022351281214157)
+(go/var ^jrt/ClassInit PersistentVector_init)
+
+(go/func PersistentVector_Init []
+  (when (not (.Done PersistentVector_init))
+    (.Run PersistentVector_init PersistentVector_clinit)))
+
+(go/func PersistentVector_clinit []
+  (set! PersistentVector_NOEDIT (jrt/AtomicReference_New_O nil))
+  (set! PersistentVector_EMPTY_NODE
+        (PersistentVector_Node_New_AtomicReference_O1 PersistentVector_NOEDIT
+                                                      (jrt/NewRefArray jrt/Object_class 32)))
+  (set! PersistentVector_EMPTY
+        (PersistentVector_New_I_I_PersistentVector_Node_O1 0 5 PersistentVector_EMPTY_NODE
+                                                          (jrt/RefArrayOf jrt/Object_class)))
+  (set! PersistentVector_TRANSIENT_VECTOR_CONJ (PersistentVector_1_New)))
+
+(go/func PersistentVector_New_I_I_PersistentVector_Node_O1 ^{:tag (* PersistentVector)}
+  [^int32 cnt ^int32 shift ^{:tag (* PersistentVector_Node)} root ^{:tag (* jrt/RefArray)} tail]
+  (PersistentVector_Init)
+  (let [t (addr (lit PersistentVector))]
+    (.Ctor_I_I_PersistentVector_Node_O1 t cnt shift root tail)
+    t))
+
+(go/method Ctor_I_I_PersistentVector_Node_O1
+  [^{:tag (* PersistentVector)} t ^int32 cnt ^int32 shift ^{:tag (* PersistentVector_Node)} root
+   ^{:tag (* jrt/RefArray)} tail]
+  (.Ctor (.-APersistentVector t) t)       ; super(): APersistentVector's body, this = the object
+  (set! (.-F__meta t) nil)
+  (set! (.-F_cnt t) cnt)
+  (set! (.-F_shift t) shift)
+  (set! (.-F_root t) root)
+  (set! (.-F_tail t) tail))
+
+(go/method Tailoff__I ^int32 [^{:tag (* PersistentVector)} t]
+  (if (< (.-F_cnt t) 32)
+    (return 0)
+    (return (<< (conv int32 (>> (conv uint32 (- (.-F_cnt t) 1)) 5)) 5))))
+
+(go/method ArrayFor_I__O1 ^{:tag (* jrt/RefArray)} [^{:tag (* PersistentVector)} t ^int32 i]
+  (if (and (>= i 0) (< i (.-F_cnt t)))
+    (if (>= i (.Tailoff__I t))
+      (return (.-F_tail t))
+      (let [node (.-F_root t)]
+        (do
+          (let [^int32 level (.-F_shift t)]
+            (label :L1
+              (while true
+                (when (> level 0)
+                  (set! node (PersistentVector_Node_Cast
+                               (aget (.-A (.-F_array node))
+                                     (bit-and (conv int32 (>> (conv uint32 i) (bit-and level 31))) 31))))
+                  (set! level (- level 5))
+                  (continue :L1))
+                (break :L1)))))
+        (return (.-F_array node))))
+    (panic (jrt/Thrown (jrt/IndexOutOfBoundsException_New)))))
+
+(go/method RangedIterator_I_I__Iterator ^jrt/Iterator [^{:tag (* PersistentVector)} t ^int32 start ^int32 end]
+  (PersistentVector_2_New_PersistentVector_I_I t start end))
+
+;; PersistentVector$2, the anonymous Iterator of rangedIterator: an inner class capturing two locals
+(go/type PersistentVector_2
+  (struct jrt/Object
+          ^int32 F_i
+          ^int32 F_base
+          ^{:tag (* jrt/RefArray)} F_array
+          ^{:tag (* PersistentVector)} F_this_0
+          ^int32 F_val_start
+          ^int32 F_val_end))
+
+(go/func PersistentVector_2_New_PersistentVector_I_I ^{:tag (* PersistentVector_2)}
+  [^{:tag (* PersistentVector)} this_0 ^int32 start ^int32 end]
+  (let [t (addr (lit PersistentVector_2))]
+    (.Ctor_PersistentVector_I_I t this_0 start end)
+    t))
+
+(go/method Ctor_PersistentVector_I_I
+  [^{:tag (* PersistentVector_2)} t ^{:tag (* PersistentVector)} this_0 ^int32 start ^int32 end]
+  (set! (.-F_val_start t) start)                        ; captures and outer instance first,
+  (set! (.-F_val_end t) end)                            ; before the superclass constructor
+  (jrt/Objects_RequireNonNull_O__O (.Ref this_0))
+  (set! (.-F_this_0 t) this_0)
+  (set! (.-F_i t) (.-F_val_start t))                    ; then the field initializers
+  (set! (.-F_base t) (- (.-F_i t) (% (.-F_i t) 32)))
+  (if (< (.-F_val_start t) (.Count__I (.-F_this_0 t)))
+    (set! (.-F_array t) (.ArrayFor_I__O1 (.-F_this_0 t) (.-F_i t)))
+    (set! (.-F_array t) nil)))
+
+(go/method HasNext__Z ^bool [^{:tag (* PersistentVector_2)} t]
+  (< (.-F_i t) (.-F_val_end t)))
+
+(go/method Next__O ^any [^{:tag (* PersistentVector_2)} t]
+  (if (< (.-F_i t) (.-F_val_end t))
+    (do
+      (when (== (- (.-F_i t) (.-F_base t)) 32)
+        (set! (.-F_array t) (.ArrayFor_I__O1 (.-F_this_0 t) (.-F_i t)))
+        (set! (.-F_base t) (+ (.-F_base t) 32)))
+      (let [i_1 (.-F_i t)]
+        (set! (.-F_i t) (+ (.-F_i t) 1))
+        (return (aget (.-A (.-F_array t)) (bit-and i_1 31)))))
+    (panic (jrt/Thrown (jrt/NoSuchElementException_New)))))
+
+(go/method Remove__V [^{:tag (* PersistentVector_2)} t]
+  (panic (jrt/Thrown (jrt/UnsupportedOperationException_New))))
+
+(go/method ForEachRemaining_Consumer__V [^{:tag (* PersistentVector_2)} t ^jrt/Consumer action]
+  (jrt/Iterator_ForEachRemaining_Consumer__V t action))   ; Iterator's default method
+
+(go/method Is_Iterator [^{:tag (* PersistentVector_2)} t])
+```
+
+- `PersistentVector` is not final, but nothing extends it: a leaf, so `*PersistentVector`
+  everywhere, `tailoff` a direct (inlined) call, `cnt` a direct field read. `APersistentVector`
+  has subclasses (`PersistentVector`, `AMapEntry`, `SubVector`): it is a struct embedded here
+  and an interface type elsewhere. `PersistentVector`'s own forwarders for the methods it
+  inherits from `APersistentVector` and `AFn` (about forty) are not shown.
+- `Node` is a static nested class and a leaf; `AtomicReference` (a jrt shim) too.
+- The class initialization runs the four static initializers in order. `EMPTY`'s allocation
+  calls `PersistentVector_Init` again from inside the initialization: the same thread, so it
+  returns at once and the half-initialized class is used, as on the JVM.
+- `arrayFor`'s `loop` is a labeled `while true`, `recur` an assignment and `continue`, its
+  bindings in a block of their own. The checked `cast` to `Node` is `PersistentVector_Node_Cast`,
+  the read of `Object[]` an element of `[]any`. `(throw ...)` is a `panic`, which is also what
+  Go requires to end a function with results.
+- The anonymous `Iterator` stores its captures (`val$start`, `val$end`) and the outer instance
+  (`this$0`, null-checked as the analyzer emits it) before the superclass constructor, then runs
+  its field initializers; `PersistentVector/this` is `F_this_0`. Its `i-1` local is munged to
+  `i_1`. It inherits `forEachRemaining` from `Iterator` as a default method, hence the forwarder.
+- In the constructor, `(< (.-F_val_start t) (.Count__I ...))` needs no temporary although a call
+  follows the field read: `val$start` is final and already assigned (§7.2).
+
+### 15.4 `Delay` and `LazySeq`: exceptions and `finally`
+
+```clojure
+(defclass ^:public Delay
+  :implements [IDeref IPending]
+  (field val)
+  (field ^Throwable exception)
+  (field ^IFn fn)
+  (field ^:volatile ^Lock lock)
+  (method ^:private realize ^void [this]
+    (let [l lock]
+      (when (some? l)
+        (.lock l)
+        (try
+          (when (some? fn)
+            (try (set! val (.invoke fn)) (catch Throwable t (set! exception t)))
+            (set! fn nil)
+            (set! lock nil))
+          (finally (.unlock l))))))
+  (method ^:public deref [this]
+    (when (some? lock) (.realize this))
+    (when (some? exception) (throw (Util/sneakyThrow exception)))
+    val))
+```
+
+```clojure
+(go/type Delay
+  (struct jrt/Object
+          ^any F_val
+          ^jrt/Throwable_I F_exception
+          ^IFn F_fn
+          ^{:tag (jrt/Volatile jrt/Lock)} F_lock))
+
+(go/method Realize__V [^{:tag (* Delay)} t]
+  (let [l (.Load (.-F_lock t))]
+    (when (!= l nil)
+      (.Lock__V l)
+      (let [exc ((fn [] :results [^jrt/Throwable_I exc]
+                   (defer (jrt/Catch (addr exc)))
+                   (when (!= (.-F_fn t) nil)
+                     (let [exc2 ((fn [] :results [^jrt/Throwable_I exc]
+                                   (defer (jrt/Catch (addr exc)))
+                                   (set! (.-F_val t) (.Invoke__O (.-F_fn t)))
+                                   (return)))]
+                       (when (!= exc2 nil)                ; catch Throwable: every exception
+                         (set! (.-F_exception t) exc2))
+                       (set! (.-F_fn t) nil)
+                       (.Store (.-F_lock t) nil)))
+                   (return)))]
+        (.Unlock__V l)                                    ; the finally code
+        (when (!= exc nil)
+          (panic exc))))))
+
+(go/method Deref__O ^any [^{:tag (* Delay)} t]
+  (when (!= (.Load (.-F_lock t)) nil)
+    (.Realize__V t))
+  (when (!= (.-F_exception t) nil)
+    (panic (jrt/Thrown (Util_SneakyThrow_Throwable__RuntimeException (.-F_exception t)))))
+  (.-F_val t))
+```
+
+`LazySeq.sval` returns from inside a `try` with a `finally`, which needs a control code:
+
+```clojure
+(method ^:private ^:final sval [this]
+  (let [l lock]
+    (when (some? l)
+      (.lock l)
+      (try (when (some? lock) (.force this) (return sv)) (finally (.unlock l))))
+    s))
+```
+
+```clojure
+(go/method Sval__O ^any [^{:tag (* LazySeq)} t]
+  (let [l (.Load (.-F_lock t))]
+    (when (!= l nil)
+      (.Lock__V l)
+      (let [(values ctl rv exc) ((fn [] :results [^int32 ctl ^any rv ^jrt/Throwable_I exc]
+                                   (defer (jrt/Catch (addr exc)))
+                                   (when (!= (.Load (.-F_lock t)) nil)
+                                     (.Force__V t)
+                                     (return 1 (.-F_sv t) nil))   ; ctl 1: the method returns rv
+                                   (return 0 nil nil)))]
+        (.Unlock__V l)
+        (when (!= exc nil)
+          (panic exc))
+        (when (== ctl 1)
+          (return rv))))
+    (.-F_s t)))
+```
+
+- The `volatile` `Lock` field is an interface type, so a `jrt.Volatile`: atomic loads, and a
+  store of `nil` that allocates nothing (a nil box).
+- Each `try` body is a function literal called in place, with `jrt.Catch` deferred; the
+  handlers and the `finally` code run after it, in the method. The inner `catch Throwable`
+  catches everything, so it needs no test.
+- `finally` runs on every path: after normal completion, after the `return` (control code 1,
+  performed only after `unlock`), and before rethrowing an exception with `panic`.
+- `(throw (Util/sneakyThrow ...))`: `sneakyThrow` throws itself (its generic `sneakyThrow0`
+  rethrows the `Throwable`); the `panic` after it is never reached but keeps Go's termination
+  rules and Java's meaning.
+
+### 15.5 A lambda and an enum switch
+
+From `Compiler$QualifiedMethodExpr.methodOverloads`, whose static method has the parameters
+`methodName` and `kind` (an enum `MethodKind` with the constants `CTOR`, `INSTANCE`, `STATIC`):
+
+```clojure
+(lambda Predicate ^boolean [^Executable m]
+  (.equals (.getName m) methodName))
+(lambda Predicate ^boolean [^Executable m]
+  (switch kind
+    STATIC (arbace.lang.Compiler/isStaticMethod m)
+    INSTANCE (arbace.lang.Compiler/isInstanceMethod m)
+    false))
+```
+
+```clojure
+(addr (lit jrt/Predicate_Fn
+        :Fn (fn ^bool [^any m0]
+              (let [m (jrt/Executable_Cast m0)]
+                (.Equals_O__Z (jrt/NN (.GetName__String m)) (.Ref methodName))))))
+
+(addr (lit jrt/Predicate_Fn
+        :Fn (fn ^bool [^any m0]
+              (let [m (jrt/Executable_Cast m0)]
+                (switch (.-F_ordinal kind)
+                  (case [2] (return (Compiler_IsStaticMethod_Executable__Z m)))
+                  (case [1] (return (Compiler_IsInstanceMethod_Executable__Z m)))
+                  (default (return false)))))))
+```
+
+and, generated once in jrt for `java.util.function.Predicate`:
+
+```clojure
+(go/type Predicate_Fn (struct Object ^{:tag (func [any] [bool])} Fn))
+
+(go/method Test_O__Z ^bool [^{:tag (* Predicate_Fn)} t ^any x] ((.-Fn t) x))
+(go/method And_Predicate__Predicate ^Predicate [^{:tag (* Predicate_Fn)} t ^Predicate other]
+  (Predicate_And_Predicate__Predicate t other))
+;; Negate__Predicate, Or_Predicate__Predicate alike; Is_Predicate; GetClass__Class (Predicate$$Lambda) ...
+```
+
+- The lambda's instantiated parameter type `Executable` is cast from the erased `Object`, as
+  `LambdaMetafactory`'s adaptation does; `Executable` has subclasses (`Method`,
+  `Constructor`), hence the interface type `jrt.Executable_I` its `Cast` returns.
+- The function literal captures `methodName` and `kind`, parameters that Java requires to be
+  effectively final.
+- `getName` returns a `String` (a pointer), the receiver of `equals`: `jrt.NN` checks it
+  (§5.6; the argument has no side effect, so checking before it is evaluated is the same).
+- `MethodKind` is an enum without constant bodies, so final, a leaf: `kind` is a pointer and
+  `F_ordinal` a field promoted from `jrt.Enum`; the switch is on the ordinals of the closed
+  world (`STATIC` is 2), and a `nil` `kind` is a `NullPointerException` from the field read.
+
+## 16. Open questions
+
+Each with a recommendation, which the text above follows, for the user's review.
+
+1. **References.** Go interface values for every non-leaf static type (two words; Go's dispatch,
+   type tests and itab caches; no `unsafe`), or one-word pointers to a header with a class
+   pointer, explicit vtables and interface tables, and `unsafe` casts (half the memory per
+   reference, every reference CAS-able and tear-free, but `unsafe` in all translated code and a
+   dispatch of jrt's own)? Measured equal in speed (§13.2). *Recommendation: interface values;
+   revisit if memory per reference turns out to matter (vector nodes, maps).*
+2. **The Go type of `Object`.** `any` (free up-casts, an assertion for `Object`'s methods), or
+   `jrt.Object_I` (direct `hashCode`/`equals`, 2.2 ns instead of 1.1 per up-cast)?
+   *Recommendation: `any`.*
+3. **Leaf classes as pointers.** Use the closed world's class hierarchy to type every class
+   without subclasses as a pointer (direct calls, field reads, inlining), or only declared-final
+   classes (stable under additions, but `PersistentVector`, its `Node`, `Delay` and most of
+   `arbace.lang` would be interfaces)? *Recommendation: the closed world's leaves; the
+   analysis is recomputed by every c2g run.*
+4. **Go packages.** One Go package per component of Java packages, grouped as `arbace/jrt` (the
+   JDK) and `arbace/lang` (Arbace), or everything in one package (no package boundary, one
+   larger compilation), or finer (impossible: `java.lang` and `java.util` form one cycle)?
+   *Recommendation: the two packages of §4.2.*
+5. **Method names.** Always mangled with the erased descriptor (`Equiv_O_O__Z`: stable, Java's
+   dispatch for free, bridges distinct), or bare names where a name has one descriptor in the
+   closed world (more readable, but adding an overload anywhere renames methods everywhere,
+   hand-written jrt included)? *Recommendation: always mangled.*
+6. **Fields as `F_name`.** A prefix keeps Java's spelling and makes fields unable to collide
+   with methods, embedded structs and generated members; capitalized names (`Cnt`) read better
+   but collide (a field `init`, a field named like a superclass). *Recommendation: `F_`.*
+7. **Class initialization.** Lazy per class with JVMS 5.5's protocol and guards (exact, as
+   `RT`'s cycles need; 0.07-0.3 ns per guarded access), or eager at start in an order computed
+   once (cheaper, but the JVM's order is not a static property and the cycles of `RT`,
+   `Compiler` and `Var` need the half-initialized states)? *Recommendation: lazy, with the
+   elisions of §6.2 (callee-side guards, none in instance code, none for trivial classes).*
+8. **Monitors.** In the header word, a thin lock inflating to a jrt monitor (8 bytes per object,
+   shared with the identity hash; 5 ns uncontended), a `sync.Mutex` per object (16 bytes), or
+   an external table (no memory per object, a map operation per lock: too slow for the locks of
+   `LazySeq` and `Delay`)? *Recommendation: the header word.*
+9. **Exceptions.** Panics carrying the Java exception, `try` bodies as function literals with
+   control codes (9 ns per entered `try`, 300-800 ns per throw), or Go-style error results on
+   every call (no `recover`, but every call pays and every signature changes)?
+   *Recommendation: panics.*
+10. **Two-word races.** Accept the risk for non-volatile interface fields (§8.3) with c2g's
+    report and the race detector, or make every non-final interface field a `jrt.Volatile`
+    (safe, but an allocation per store and atomic loads everywhere)? *Recommendation: accept,
+    report and test; make a racing field volatile by a variant when one is found.*
+11. **CAS on references** (`Unsafe` for `ConcurrentHashMap`, atomics): striped locks in jrt's
+    `Unsafe` (CHM translated as decided), or a hand-written CHM over a locked Go map?
+    *Recommendation: striped locks, as decision 4 of JAVA-SURFACE.md implies.*
+12. **Dynamic objects.** One generated `Dyn` type implementing every interface, with a nominal
+    check added to `instance?` and `cast` (0.3 ns), or per-combination types generated ahead of
+    time (impossible for `reify` at the REPL)? *Recommendation: `Dyn`.*
+13. **Member tables.** Public members of all classes plus declared members of listed classes
+    (what Clojure sees; keeps the executable small), or every member of every class (complete
+    `getDeclared*`, much larger)? *Recommendation: public plus listed.*
+14. **Go-build variants.** Variant files with replaced, cut and added members, read only by
+    c2g (one source, explicit differences), or edits in `arbace/lang` that work on both
+    platforms (no second file, but JVM code paths for Go's sake), or a fork of the runtime for
+    Go? *Recommendation: variant files.*
+15. **Stack overflow.** The evaluator counts its depth and throws `StackOverflowError` at a limit
+    (Clojure's tests and REPL users rely on it), translated code does not count (cost on every
+    call); or count everywhere? *Recommendation: the evaluator only, with a limit set so that
+    Go's 1 GB stack is never reached by the evaluator's frames.*
+16. **Fused multiply-add.** Convert every floating-point product (exact, as Java), or allow
+    fusion (faster on arm64, results differing from the JVM in the last bit)?
+    *Recommendation: convert, as Java's semantics and the differential tests require.*
+17. **String concatenation.** `jrt.Concat` over per-operand conversions (one allocation per
+    converted number), or a builder with typed appends (fewer allocations, more forms)?
+    *Recommendation: `Concat` first; a builder if profiles show it.*
+18. **Lambdas.** One adapter class per functional interface (V4: a lambda's class differs from
+    Java's per-site class), or a class per lambda site (javac's naming, much more code)?
+    *Recommendation: per interface.*
+19. **Where jrt's forms live, and the runtime patch.** jrt's hand-written Go forms as a forms
+    root `go/` at the repository's top (`go/arbace/jrt/*.clj`, the layout of BUILD.md), merged
+    with c2g's generated tree for the build; the patched runtime files given to the build by an
+    overlay option added to `bin/g2c build` (an amendment of BUILD.md), the patch held as Go
+    forms (the runtime's converted files with the three changes of §9.3). Alternatives:
+    hand-written jrt under `arbace/` (which holds Arbace's Clojure namespaces, not Go forms);
+    a copy of the whole runtime in the tree. *Recommendation: as described.*
+20. **The module path.** `arbace` (short, no network meaning; Go accepts a dot-less module
+    path for a main module, checked), or `github.com/arbace/arbace/...`? *Recommendation:
+    `arbace`.*
+21. **Stack traces.** Map Go frames to Java frames with a generated table and the forms' lines
+    (`--line-file` builds), or show Go's frames as they are? *Recommendation: mapped, as
+    Clojure's error reporting reads class and method names from them.*
+22. **Receivers that are pointers.** Check them for `nil` at each call unless provably non-null
+    (exact `NullPointerException`s), or rely on the callee's first field access (fewer checks,
+    but a method that touches no field runs on `nil`)? *Recommendation: check; gc removes
+    redundant checks.*
+23. **Temporaries for Go's order of evaluation.** Hoist an operand into a temporary whenever a
+    later one may have a side effect and it reads mutable state (exact, conservative), or only
+    where a static analysis shows the side effect can change that state (fewer temporaries,
+    harder to get right)? *Recommendation: the conservative rule of §7.2; gc's register
+    allocation makes temporaries free.*
+
+## 17. Sources
+
+- Arbace: `doc/classes/SPEC.md` (the source language; its §5.1 table and §6 derivations),
+  `doc/go/SPEC.md` (the target forms), `doc/go/B1-PLAN.md`, `doc/go/JAVA-SURFACE.md` and
+  `doc/go/java-surface.edn` (the closure: 422 translated classes with no simple-name collision
+  under §4.4's rule, checked with the edn's `:closure`; five native methods; the boundary),
+  `doc/go/BUILD.md`.
+- The class forms compiler, `arbace/classes/`: `analyze.clj` (the node kinds, `invoke-node`'s
+  kinds, `analyze-with-resources`' desugaring into `try` with `:normal-finally`,
+  `analyze-lambda`'s instantiated types and captures), `emit.clj` (the contexts `:stmt`,
+  `:expr`, `:return`, `children`, the `emit-extra` node kinds), `compiler.clj` (the
+  enter-analyze sequence c2g reuses).
+- Arbace's runtime: `arbace/lang/Reduced.clj`, `Murmur3.clj`, `Util.clj`,
+  `PersistentVector.clj`, `Delay.clj`, `LazySeq.clj`, `RT.clj` (the static initializer that
+  loads `arbace/core`), `Var.clj` (`dvals`), `Compiler.clj` (`Expr`, `QualifiedMethodExpr`'s
+  lambdas and `MethodKind`); `target/stage2`'s `PersistentVector$2.class` (`javap`: the
+  captures `val$start`, `val$end`, `this$0`, the constructor descriptor
+  `(Larbace/lang/PersistentVector;II)V`).
+- Go, go1.27.1 at `/root/tamago-go`: the language specification (`doc/go_spec.html`: "Order of
+  evaluation", "Floating-point operators", "Integer overflow", "Conversions between numeric
+  types", "Constant expressions", "Handling panics", "Defer statements", "Type assertions",
+  "Comparison operators", "Size and alignment guarantees" on zero-size variables); the memory
+  model (`doc/go_mem.html`: atomics sequentially consistent, races on multiword values);
+  `src/runtime/runtime2.go` (`type g struct`), `src/runtime/proc.go` (`gdestroy`),
+  `src/cmd/compile/doc.go` and the go1.23 linkname rules (push and pull).
+- Experiments in `.tmp/c2g-exp/` (scratch): `dispatch` (calls, assertions, conversions),
+  `model` (interface values against thin pointers), `exc` (exceptions, goroutine ids, guards,
+  locks), `gls` (the runtime patch through `go build -overlay`, on amd64 and arm64 under
+  `qemu-aarch64`), `fma` (fusion per architecture), `alloc` (allocation), `big` (a synthetic
+  package of c2g's shape), `modpath` (a main module named `arbace`), `leaves.clj` (the leaf
+  classes of stage 2's `arbace.lang`); `.tmp/c2g-proto/` (the
+  prototype of §15, built with `bin/g2c build` for both architectures and compared with
+  `bin/arbace`).
+- JDK: jdk26u (`/root/jdk26u`): `java/util/function/Predicate.java` (default and static
+  methods), `java/lang/runtime/ObjectMethods.java` (records' methods), JDK-8273914 (string
+  concatenation's order of conversion, fixed in JDK 19). The JVM specification 5.4.3.3 (default
+  method selection), 5.4.5 (overriding and package access), 5.5 (initialization); the JLS 5.1.11
+  (string conversion), 15.7 (evaluation order), 15.12.4 (method invocation), 15.26
+  (assignment), 17.5 (final field semantics).
