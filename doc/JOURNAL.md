@@ -437,3 +437,9 @@ decision (2026-10-08).
   to the Go runtime held as forms (the goroutine id from `runtime.Stack` as the stopgap); a
   trimmed REPL start; `#inst` over a small `Date` on Go's `time`. Recorded in JAVA-SURFACE.md
   and B1-PLAN.md (jrt now 10-15 days).
+
+## 2026-10-08: A name for B1a's freeze
+
+- The user proposed `arbace-for-go1.27.1` for the branch that will freeze B1a, after the
+  pinned Go toolchain, as `arbace-for-java-26` names the JDK. Recorded in B1-PLAN and the
+  agenda.
