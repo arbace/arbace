@@ -92,8 +92,8 @@ fallbacks of `arbace/core_classes.clj` are gone.
     1,705 `$GOROOT/test` programs, 0 type errors, read on Arbace), and the round-trip oracle
     (`tools/gocmp`, `bin/g2c-check`; tree, export data, object code; proven on identity,
     reprinted and respelled candidates, mutations caught).
-  - Waiting for the user's review: the Go forms spec `doc/go/SPEC.md` (draft, 20 open
-    questions; https://claude.ai/artifact/DuQmxZxEHAXV8S5R3GAYME).
+  - Done: the Go forms spec `doc/go/SPEC.md`; the user accepted all 20 recommendations of its
+    §15 (2026-10-08).
   - Then: the helper's structured types and other outputs the spec asks for (§11.3), the
     converter (`arbace.g2c`, helper output → Go forms) and the printer (Go forms → Go), until
     `bin/g2c-check` passes over std and `$GOROOT/test` from round-tripped sources.

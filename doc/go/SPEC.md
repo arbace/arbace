@@ -1,8 +1,8 @@
 # Go forms: Go programs written in Clojure
 
-Status: draft for review (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7).
-Nothing here is implemented yet. The decisions of 2026-10-07 (survey §9) bind it; the open
-questions it raises are in §15, each with a recommendation.
+Status: accepted (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7).
+Nothing here is implemented yet. The decisions of 2026-10-07 (survey §9) bind it; the user
+accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
 `go/types` see it, is written as Clojure data in ordinary `.clj` sources. It says what the forms
@@ -1840,7 +1840,8 @@ is cosmetic and comes from running gofmt on the output, which keeps the lines.
 
 ## 15. Open questions
 
-Each with the recommendation the spec follows.
+Each with the recommendation the spec follows. **Settled (2026-10-08):** the user accepted all
+20 recommendations; they are part of the spec.
 
 1. **Positions.** Mode `:lines` carries Go lines in the layout of the forms text (no metadata
    on most forms; `:line` on line-starting symbols, `:go/breaks`, `:go/end`), and `:full`

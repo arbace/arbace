@@ -155,3 +155,18 @@ decision (2026-10-08).
   error gc removed `/dev/null` and another process recreated it as a regular file. The agent
   restored the character device (`mknod c 1 3`, mode 666) within minutes, about 10:19 UTC;
   checked afterwards. Lesson: never give a compiler `/dev/null` as an output path.
+
+## 2026-10-08: The Go forms spec accepted
+
+- The user answered the 20 open questions of `doc/go/SPEC.md` §15, asked one by one, and
+  accepted every recommendation: positions `:lines` by default and `:full` for the gate; doc
+  comments and directives as data, other comments dropped by reading; no `^:mutable`; nested
+  `let`; `(set! place op v)`, `inc!`/`dec!`, `aset`; init statements as a leading vector; `for`
+  for Go's three-clause loop; implicit return of the last expression; `goto` and
+  `fallthrough` verbatim; package variables in source order with `:init-order`; constants as
+  source expression plus `:val`; embedded paths by name in `:go/via`; composite literal
+  elements positional, `[k v]` and `:field v`; test files converted behind an option; form
+  names win, with `go/call`, `go/id` and `inst` as escapes and `fn` for function literals;
+  the renamings of §15 question 16; only shifts of untyped constants get a `:tag`, more by
+  amendment; the helper extended now (§11.3) before the converter; embedded files by path and
+  hash; separate trees per architecture. The spec's status is now accepted.
