@@ -96,7 +96,8 @@ Beyond what the spec fixes:
   (`fixedbugs/bug257.go` → `go.test.fixedbugs.bug257`).
 - **Package form.** `:config` from the dump (`:go-version` as `:lang`); `:other-files` the
   sorted union of the helper's non-Go lists (`:s-files`, `:h-files`, `:syso-files`, and the
-  cgo-only lists, empty for tamago); `:embed-files` and the tests' embed files; `:test-files`
+  cgo-only lists, empty with cgo off, so in every configuration: L2, accepted 2026-10-08,
+  folded into SPEC §4.2); `:embed-files` and the tests' embed files; `:test-files`
   with `-tests`. A test-only package without Go files gets its last path element as name.
 - **`:init-order`.** One entry per initializer; a blank variable `["file.go" line col]`,
   also inside `(values ...)`.
@@ -274,7 +275,8 @@ printer: the configuration was already a parameter of the helper (`-goos`), writ
 dump and every package's `:config` (§4.2), and the printer's build takes its environment from
 there. What changed is the plumbing (`bin/g2c corpus linux-…`, `convert --goos/--goarch`,
 `roundtrip linux/ARCH`, `bin/g2c-check --goos`, `CGO_ENABLED=0` everywhere: on a linux host the
-go command turns cgo on for `GOOS=linux` by default) and one fix in the oracle: two programs
+go command turns cgo on for `GOOS=linux` by default; amendments L1 and L5, accepted
+2026-10-08, folded into SPEC §1 item 7 and §12.4) and one fix in the oracle: two programs
 passed the code level vacuously, their listings empty from the build cache
 ([ROUNDTRIP.md](ROUNDTRIP.md), "Known gaps"). The linux std's extra files (system calls and
 their generated tables, `os`, `net`, `internal/poll`, the runtime's linux files and vDSO

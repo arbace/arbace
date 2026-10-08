@@ -35,7 +35,8 @@ bin/g2c dump -goos linux -goarch arm64 -o DIR std
   needs a newer release (`//go:build go1.28`) are excluded by the configuration, as the go
   command does. Moving the pin is a recorded decision (journal, 2026-10-07).
 - **Configuration.** There is one per run, written into every dump: `-goos` (default
-  `tamago`; g2c's configurations are `tamago` and `linux`), `-goarch` (`amd64` or `arm64`) and
+  `tamago`; g2c's configurations are `tamago` and `linux`: amendments L1 and L2, accepted
+  2026-10-08, folded into SPEC §1 item 7 and §4.2), `-goarch` (`amd64` or `arm64`) and
   `-tags`. `CGO_ENABLED=0`, `GOFLAGS` is
   emptied, and `GOTOOLCHAIN=local`. `GOAMD64`/`GOARM64` and `GOEXPERIMENT` come from `go env`
   and are recorded.
@@ -388,7 +389,8 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   `maplinear.go`, `recover4.go`, `fixedbugs/issue15002.go`, `issue79874.go`, `issue8606b.go`
   are linux or unix only) and 1,707 on arm64. Everything type-checks and reads; the helper
   needed no change (cgo is off, `CGO_ENABLED=0`, so `CgoFiles` are empty: the packages' cgo
-  variants, `net`'s and `os/user`'s, are not this configuration). The linux std dumps in 1.3 s,
+  variants, `net`'s and `os/user`'s, are not this configuration; amendment L3, accepted
+  2026-10-08, folded into SPEC §9.4). The linux std dumps in 1.3 s,
   the first time 5 to 10 s (go list builds its export data).
 - **std with tests** (`bin/g2c corpus tests`, not run by default): every std package with its
   in-package test files, and the 175 external test packages. All type-check for tamago/amd64.

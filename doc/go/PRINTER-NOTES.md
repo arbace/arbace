@@ -89,6 +89,10 @@ from text) and `gofmt` otherwise (forms built by a program):
     free.
   - `--line-file` starts the file with `//line FORMS.clj:1`, so that gc's positions name the
     forms file with the forms' lines (§12.3's printer option for hand-written forms).
+    The build (`bin/g2c build`, [BUILD.md](BUILD.md)) names the forms file relative to the
+    package's forms directory, which keeps
+    `-trimpath` builds reproducible (amendment B3, accepted 2026-10-08, folded into SPEC
+    §12.3).
 
   The lines layout is gofmt's only when the forms leave gofmt's room (the converter's forms
   do: they have the lines of gofmt'd Go). Running gofmt over it is not safe in general: gofmt

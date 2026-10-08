@@ -54,7 +54,8 @@ round trip keeps its references under `test/g2c/` (`bin/g2c roundtrip`,
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md)). The environment overrides the defaults:
 `G2C_GOROOT` (`/root/tamago-go`), `G2C_GOOS` (`tamago`), `G2C_GOARCH` (`amd64`), and
 `G2C_GOCMP_FLAGS` passes flags to gocmp. The driver runs every go command with
-`CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off`.
+`CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off` (`CGO_ENABLED=0` explicitly:
+amendment L5, accepted 2026-10-08, folded into SPEC §12.4).
 
 `gocmp` alone:
 
@@ -85,7 +86,11 @@ B1a, the static executable (B1-PLAN.md, decided 2026-10-08). One toolchain serve
 tree differs from upstream go1.27.1 (the system `/usr/lib/go`, Alpine's package) outside `cmd`
 only by `tamago` build constraints, its own `*_tamago*` files, and the GOOS tables
 (`internal/goos`, `internal/syslist`, `internal/platform`), so for `linux` it compiles the same
-std as upstream, with the build cache and the converted tree shared with `tamago`.
+std as upstream, with the build cache and the converted tree shared with `tamago`. (The
+four configurations, cgo off in each, with this one toolchain, and one forms tree per
+configuration: amendments L1 and L4, accepted 2026-10-08, folded into SPEC §1 item 7, §4.1
+and §15 Q20; `:goos` `"tamago"` or `"linux"` and the cgo-only lists empty everywhere, L2,
+SPEC §4.2; cgo out of scope for every configuration, L3, SPEC §9.4.)
 
 - **Packages:** every package of `go list std` (which leaves out `cmd`) with Go files for the
   configuration: for tamago 373 of 379 on amd64, 372 on arm64; for linux 376 of 382 on amd64,

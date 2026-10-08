@@ -43,18 +43,21 @@ DIR/
   the path (`example.com/multi/internal/wc` → `internal/wc`). Local packages import each other
   by these paths, as in any module (`[wc "example.com/multi/internal/wc"]`); Go's `internal`
   rule applies. The program has no dependencies outside the module and the standard library
-  (`GOPROXY=off`; no `go.sum`).
+  (`GOPROXY=off`; no `go.sum`). (Amendment B1, accepted 2026-10-08, folded into SPEC §4.1
+  and §4.2.)
 - **Other and embedded files** (`:other-files`, `:embed-files`, SPEC §9.5-9.6): with no
   original package directory, they live in the package's forms directory, the package file's
   path without `.clj` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
-  against the SHA-256 the forms record.
+  against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
+  §9.5, §9.6 and §12.4.)
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
 - **Configuration.** The target is the command's: `GOOS=linux`, `GOARCH` from `--arch`. A
   package's `:config` (SPEC §4.2) is not needed; its `:goos` and `:goarch` are not used, so one
   forms tree builds for both architectures (files for one architecture only carry `:build`
   lines, which gc evaluates). The main package's `:config` `:tags` and `:goexperiment`, when
-  present, are passed to the build.
+  present, are passed to the build. (Amendment B4, accepted 2026-10-08, folded into SPEC
+  §4.2.)
 
 ## The build
 
@@ -65,7 +68,8 @@ DIR/
    with a `//line FILE.clj:1` directive first in each file, `FILE.clj` relative to the
    package's forms directory, so that gc's positions, and panics' tracebacks, name the forms
    file and its lines: `example.com/multi/greet/greet.clj:15` for
-   `DIR/go/example_com/multi/greet/greet.clj` line 15.
+   `DIR/go/example_com/multi/greet/greet.clj` line 15. (Amendment B3, accepted 2026-10-08,
+   folded into SPEC §12.3.)
 2. In `WORK/mod`, with only this environment set by the build (the rest inherited, `GOCACHE`
    and `HOME` included):
 

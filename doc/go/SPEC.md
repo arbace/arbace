@@ -69,8 +69,11 @@ what is derived · 12 The printer · 13 Coverage · 14 Worked examples · 15 Ope
    are kept (amendment, accepted 2026-10-08).
 7. **One configuration per conversion.** Build constraints are resolved by the helper. The forms
    of a package are for one GOOS, GOARCH and tag set, recorded in the forms (§4.2). The pinned
-   configurations are `GOOS=tamago` with `GOARCH=amd64` and `arm64`, toolchain go1.27.1
-   (`/root/tamago-go`).
+   configurations are `GOOS=tamago` and `GOOS=linux`, each with `GOARCH=amd64` and `arm64`,
+   cgo off (`CGO_ENABLED=0`): four configurations (amendment, accepted 2026-10-08). `tamago`
+   is the box's (B1b), `linux` the static executable's (B1a). One toolchain serves all four,
+   TamaGo's go1.27.1 (`/root/tamago-go`): it builds `linux` as upstream go1.27.1 does, its std
+   differing from upstream's only in TamaGo's own files and the GOOS tables.
 
 ## 2. A first example
 
@@ -226,7 +229,7 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 
 (go/package utf8
   :path "unicode/utf8"
-  :config {:goos "tamago" :goarch "amd64"}   ; and the rest, §4.2
+  :config {:goos "tamago" :goarch "amd64"}   ; and the rest, §4.2; one tree per configuration
   :files ["utf8.go"])
 
 (load "utf8/utf8")
@@ -244,8 +247,26 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 ...
 ```
 
-The forms of each configuration are a separate tree (for example under
-`target/go/tamago_amd64/`). Converted output is regenerated, not tracked (decision 9).
+The forms of each configuration are a separate tree, one per pinned configuration (§1, item
+7), so four: for example `target/go/tamago_amd64/`, `target/go/tamago_arm64/`,
+`target/go/linux_amd64/` and `target/go/linux_arm64/` (amendment, accepted 2026-10-08).
+Converted output is regenerated, not tracked (decision 9).
+
+**Programs written as Go forms** (amendment, accepted 2026-10-08). A program held as forms
+rather than converted (`bin/g2c build`, [BUILD.md](BUILD.md)) is a source root `DIR` with
+the packages laid out as above under `DIR/go/`. Its module is stated outside the forms, in
+`DIR/program.edn`, read with the Clojure reader:
+
+```clojure
+{:module "example.com/multi" :go "1.27"}
+```
+
+`:module` is `go.mod`'s module path and `:go` its `go` line. Without the file, or without a
+key, the module path is the main package's path and the `go` line the toolchain's language
+version (`go1.27.1` gives `1.27`). Every package's `:path` is the module path or below it, and
+packages of the module import each other by those paths, as in any module
+(`[wc "example.com/multi/internal/wc"]`), Go's `internal` rule included. There is no
+`go/module` form.
 
 ### 4.2 `go/package`
 
@@ -268,21 +289,31 @@ The forms of each configuration are a separate tree (for example under
 
 | key | example | meaning |
 |---|---|---|
-| `:goos`, `:goarch` | `"tamago"`, `"amd64"` | the target |
+| `:goos`, `:goarch` | `"tamago"`, `"amd64"` | the target: `:goos` is `"tamago"` or `"linux"`, `:goarch` `"amd64"` or `"arm64"` (§1, item 7; amendment, accepted 2026-10-08) |
 | `:goamd64` / `:goarm64` | `"v1"`, `"v8.0"` | the architecture level, which selects code and build tags |
 | `:toolchain` | `"go1.27.1"` | `go version` of the toolchain (TamaGo's go1.27.1) |
 | `:lang` | `"go1.27"` | the package's language version (`go.mod` or the standard library's) |
 | `:tags` | `[]` | the `-tags` given; the implicit tags follow from the other keys |
 | `:goexperiment` | `""` | `GOEXPERIMENT` |
-| `:cgo` | `false` | `CGO_ENABLED` |
+| `:cgo` | `false` | `CGO_ENABLED`, `false` in every pinned configuration (§9.4) |
 | `:compiler` | `"gc"` | always gc |
 
 The helper gives go list's file lists apart (`:s-files`, `:h-files`, `:syso-files`, and the
-cgo-only lists, empty for tamago); the converter merges them, sorted, into `:other-files`, since
+cgo-only lists, empty with cgo off, so in every configuration: amendment, accepted
+2026-10-08); the converter merges them, sorted, into `:other-files`, since
 the printer only copies them (amendment, accepted 2026-10-08). `:other-files`, `:embed-files`
 and `:test-files` are omitted when empty. The package's name is the package clause's; a
 package with test files only (no Go files for the configuration) is named by the last element
 of its path, with `.` and `-` replaced by `_` (amendment, accepted 2026-10-08).
+
+**`:config` of a program built for several targets** (amendment, accepted 2026-10-08). A
+program written as Go forms (§4.1) is built for the target the build names (`bin/g2c build`:
+`GOOS=linux`, `GOARCH` from `--arch amd64|arm64`): its packages' `:config` is optional, and
+`:goos` and `:goarch`, when present, are overridden by the build's target, so one tree
+builds for both architectures (files for one architecture only carry their `:build` lines,
+which gc evaluates). `:tags` and `:goexperiment` are taken from the main package's `:config`
+and apply to the whole build. Converted forms keep the full `:config` of their one
+configuration (§1, item 7).
 
 ### 4.3 `go/file`
 
@@ -1152,15 +1183,19 @@ forms: gc compiles them, and phase b's runtime transcription needs them verbatim
 
 ### 9.4 cgo
 
-Out of scope by configuration: `GOOS=tamago` builds with `CGO_ENABLED=0`, so files that import
-`"C"` are excluded and no package has cgo files. The `//go:cgo_*` directives of `runtime`,
+Out of scope by configuration, for every configuration (amendment, accepted 2026-10-08): each
+builds with `CGO_ENABLED=0`, `linux` included, so files that import `"C"` are excluded and no
+package has cgo files. The cgo variants of `linux` packages (`net`'s resolver, `os/user`'s
+lookups) are not converted; their pure Go variants are what the configuration builds. The `//go:cgo_*` directives of `runtime`,
 `syscall` and others are ordinary free-standing directives (§9.1).
 
 ### 9.5 Assembly and other files
 
 Assembly (`.s`), C headers for it (`.h`) and `.syso` files are not translated. A body-less
 `go/func ^:extern` is Go's declaration of an assembly function. `go/package`'s `:other-files`
-lists the files, and the printer copies them next to the printed Go files (§12.4). Assembler
+lists the files, and the printer copies them next to the printed Go files (§12.4), from the
+original package directory, or, for a package written by hand, from its forms directory
+(§9.6). Assembler
 forms (survey §5.3) are a later spec.
 
 ### 9.6 `go:embed`
@@ -1168,6 +1203,12 @@ forms (survey §5.3) are a later spec.
 The directive is kept on its variable (§9.1). The embedded files are not data in the forms:
 `go/package`'s `:embed-files` lists each matched file as `["path/in/package" "sha256"]`, and
 the printer copies them from the original package directory, checking the hashes.
+
+A package written by hand as Go forms has no original directory: its other and embedded files
+live in its **forms directory**, the package file's path without `.clj`
+(`go/example_com/multi/greet/banner.txt` beside `go/example_com/multi/greet/greet.clj`), at
+their paths in the package, and the printer copies them from there, checking the embedded
+files' hashes all the same (amendment, accepted 2026-10-08).
 
 ## 10. Positions and comments
 
@@ -1412,7 +1453,12 @@ expressions) is for consumers.
 - **No positions** (forms built by a program): the printer lays the code out as gofmt would.
 - Forms written by hand in an Arbace source: the printer may also emit
   `//line file.clj:N` directives, so that gc's positions name the forms file (a printer
-  option; not used by the round trip).
+  option; not used by the round trip). The file name is the forms file's path relative to the
+  package's forms directory (§9.6): `//line greet.clj:1` for
+  `go/example_com/multi/greet/greet.clj` (amendment, accepted 2026-10-08). gc resolves a
+  relative name in the package's directory, so `-trimpath` rewrites it to
+  `example.com/multi/greet/greet.clj` and the build stays reproducible; a name reaching outside
+  that directory (`../go/...`) would keep the host's path.
 
 ### 12.4 Building the printed package
 
@@ -1420,10 +1466,17 @@ For levels 2-4 of §3.1 the printed package is compiled exactly as the original:
 
 - The same toolchain (`/root/tamago-go/bin/go`, `GOROOT=/root/tamago-go`), environment
   (`GOOS`, `GOARCH`, `GOAMD64`/`GOARM64`, `CGO_ENABLED=0`, `GOEXPERIMENT`), tags and flags, with
-  `-trimpath`.
+  `-trimpath`. `CGO_ENABLED=0` is set explicitly, for both sides (amendment, accepted
+  2026-10-08): on a host with a C compiler the go command turns cgo on for `GOOS=linux` by
+  default.
 - The printed files replace the originals through `go build -overlay`, which keeps every path,
   file name and the package's import path unchanged; the non-Go files (`:other-files`, embedded
   files) are those of the original directory.
+- A program written as Go forms (§4.1) has no original to overlay: it is printed into a
+  module of its own (`go.mod` from `program.edn`), its other and embedded files copied from the
+  forms directories (§9.6), and built with the same pinned environment, `GOOS` and `GOARCH`
+  from the build's target (§4.2, `:config`) ([BUILD.md](BUILD.md)) (amendment, accepted
+  2026-10-08).
 - Comparison of export data and object files is the comparator's (`tools/`, developed in
   parallel).
 
@@ -2133,7 +2186,11 @@ ten by the printer (A1-A10, [PRINTER-NOTES.md](PRINTER-NOTES.md)) and eleven by 
 (C1-C11, [CONVERTER-NOTES.md](CONVERTER-NOTES.md)), with the converter's corrections of the
 spec's text and the documented choices of its notes that fix the spec. The user accepted all of
 them on 2026-10-08. They are folded into the text above, marked "(amendment, accepted
-2026-10-08)" where they apply:
+2026-10-08)" where they apply. B1a's step 0 raised nine more, five from the round trip for
+`GOOS=linux` (L1-L5, [ROUNDTRIP.md](ROUNDTRIP.md), with [CONVERTER-NOTES.md](CONVERTER-NOTES.md),
+[HELPER-NOTES.md](HELPER-NOTES.md) and [PRINTER-NOTES.md](PRINTER-NOTES.md)) and four from
+`bin/g2c build` (B1-B4, [BUILD.md](BUILD.md)); the user accepted them on 2026-10-08 too, and
+they are folded and marked the same way:
 
 - H1 `:dot` on type assertions too: §10.2, §11.3 (1), §13.1. H2 whether a `//go:` line
   attaches across blank lines: settled by C1, §9.1. H3 the type table with ids, local types
@@ -2156,6 +2213,22 @@ them on 2026-10-08. They are folded into the text above, marked "(amendment, acc
   `(binary-float M E)`: §8.2, §13.4, §13.5. C9 `:go/label` on the first target: §7.1, §7.3,
   §12.2, §13.1, §14.5. C10 `^:var (values a b)`: §7.1, §7.3, §13.1. C11 `:full` positions of
   spliced nodes: §10.2.
+- L1 the pinned configurations: `GOOS=tamago` and `GOOS=linux`, each `GOARCH=amd64` and
+  `arm64`, cgo off (`CGO_ENABLED=0`), one toolchain, TamaGo's go1.27.1, which builds `linux`
+  too: §1 (7). L2 `:goos` is `"tamago"` or `"linux"`; the cgo-only file lists are empty with
+  cgo off, in every configuration: §4.2. L3 cgo out of scope by configuration for every
+  configuration (`net`'s and `os/user`'s cgo variants not converted): §9.4. L4 one tree per
+  configuration, four: §4.1, §15 (20). L5 `CGO_ENABLED=0` set explicitly for the round trip:
+  §12.4.
+- B1 programs and modules: a program written as Go forms states its module outside the forms,
+  in `DIR/program.edn` (`{:module "example.com/x" :go "1.27"}`, defaults the main package's
+  path and the toolchain's language version), and the packages of the module import each other
+  by path: §4.1, §4.2. B2 other and embedded files of a hand-written package live in its forms
+  directory, hashes checked: §9.5, §9.6, §12.4. B3 the `//line` file name of hand-written forms
+  is the forms file relative to the package's forms directory, which keeps `-trimpath` builds
+  reproducible: §12.3. B4 for a program built for several targets, `:goos` and `:goarch` are
+  optional and overridden by the build's target, `:tags` and `:goexperiment` taken from the main
+  package: §4.2.
 - The spec's own text, corrected: `1.0E100` is exact by §8.1's rule (§8.2); `runeErrorByte0`
   is an untyped rune, so its `:val` is a character (§14.2); `acceptRange`'s field comments are
   line comments, not `:doc` (§6.5, §14.2); §14.1's lines are illustrative (§14); the spacing of
@@ -2263,9 +2336,11 @@ printer's over the helper's):
     forms self-contained but large (`unicode` tables are Go code, but `//go:embed` users embed
     whole trees). *Recommendation: path and hash for the round trip; revisit for the box (B1),
     where the forms are the source.*
-20. **One tree per architecture.** `tamago/amd64` and `tamago/arm64` are two conversions with
-    mostly identical forms (decision 7). *Recommendation: keep them separate; sharing is a
-    later optimisation (a diff of the trees shows what differs).*
+20. **One tree per configuration.** `tamago/amd64`, `tamago/arm64`, `linux/amd64` and
+    `linux/arm64` are four conversions with mostly identical forms (decision 7; amendment,
+    accepted 2026-10-08: the text said one tree per architecture, of `tamago` only).
+    *Recommendation: keep them separate; sharing is a later optimisation (a diff of the trees
+    shows what differs).* A program written as Go forms is one tree for every target (§4.2).
 
 ## 16. Sources
 
@@ -2298,7 +2373,8 @@ printer's over the helper's):
 - go-lisp `/root/go-lisp` (`2483a496`): `golisp/SPEC.md` (invariants I1-I4, the node tables,
   directives, round-trip normalisations, end positions F10), `golisp/DESIGN.md` §4.1.
 - The amendments of 2026-10-08: `doc/go/HELPER-NOTES.md`, `doc/go/PRINTER-NOTES.md`,
-  `doc/go/CONVERTER-NOTES.md`, and the oracle's normalizations in `doc/go/ROUNDTRIP.md`.
+  `doc/go/CONVERTER-NOTES.md`, the oracle's normalizations and configurations in
+  `doc/go/ROUNDTRIP.md`, and the program build in `doc/go/BUILD.md`.
 - Arbace: `doc/classes/SPEC.md` (structure, principles, tags, labels, `switch`),
   `doc/G2C-SURVEY.md`, the journal entry "Decisions on g2c's open questions" (2026-10-07, on
   the branch `arbace-for-java-26`).
