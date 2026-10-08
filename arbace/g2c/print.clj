@@ -163,7 +163,8 @@
   (let [lines? (case layout :lines true :gofmt false
                  (boolean (:line (meta file))))]
     (binding [e/*p* (e/new-state {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)})
-              e/*next* nil]
+              e/*next* nil
+              code/*explicit-groups* (code/uses-grouped? decls)]
       ;; §12.3: gc's positions name the forms file (lines are the forms' in this layout)
       (when (and lines? line-file src)
         (e/comment-line (str "//line " src ":1") 0)

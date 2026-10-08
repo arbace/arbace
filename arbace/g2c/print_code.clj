@@ -22,6 +22,20 @@
   literal of a type name needs parentheses there (§12.2)."
   false)
 
+(def ^:dynamic *explicit-groups*
+  "True when the file's forms mark grouped names with :go/grouped: then only marked names are
+  grouped (PRINTER-NOTES, amendment A1)."
+  false)
+
+(defn uses-grouped?
+  "Whether :go/grouped occurs in the metadata of forms."
+  [forms]
+  (letfn [(walk [x]
+            (or (contains? (meta x) :go/grouped)
+                (some walk (vals (dissoc (meta x) :line :column)))
+                (and (coll? x) (some walk (if (map? x) (vals x) x)))))]
+    (boolean (some walk forms))))
+
 (def ^:dynamic *generic*
   "True inside a generic declaration: field groups are kept (doc/go/ROUNDTRIP.md, known gaps)."
   false)
@@ -246,16 +260,22 @@
 (defn group-entries
   "Consecutive named entries of equal type (and no doc or tag, on one line) as one group
   {:names [...] ...}: Go's `a, b T`. Inside generic declarations the grouping must be the
-  source's; this is it when the source grouped what it could (PRINTER-NOTES)."
+  source's: when a name of the list carries :go/grouped (the amendment proposed in
+  PRINTER-NOTES: each name declared together with the one before it), exactly those names
+  join the group before them; otherwise the source is assumed to group what it can."
   [entries]
-  (reduce (fn [groups cur]
-            (let [prev (peek groups)]
-              (if (and prev (groupable? (peek (:entries prev)) cur))
+  (let [explicit? (or *explicit-groups* (some #(contains? (:meta %) :go/grouped) entries))]
+    (reduce (fn [groups cur]
+              (let [prev (peek groups)]
+                (if (and prev
+                         (if explicit?
+                           (and (:go/grouped (:meta cur)) (:name cur) (:name (peek (:entries prev))))
+                           (groupable? (peek (:entries prev)) cur)))
                 (conj (pop groups) (-> prev
                                        (update :names conj (:name cur))
                                        (update :entries conj cur)))
                 (conj groups (assoc cur :names (if (:name cur) [(:name cur)] []) :entries [cur])))))
-          [] entries))
+            [] entries)))
 
 (defn- variadic-elem [t]
   (if (and (seq? t) (= (op t) "slice")) (second t) (fail "variadic parameter not a slice" t)))
