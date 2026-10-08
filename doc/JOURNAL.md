@@ -543,3 +543,20 @@ decision (2026-10-08).
 - Thread identity uses the `runtime.Stack` stopgap until phase 2 (monitor enter+exit 8.9 µs
   for now). Helpful NPE messages are not reproduced. Proposed amendments for the user:
   C2G-SPEC A1-A10, BUILD.md B6 (in JRT-NOTES).
+
+## 2026-10-08: B1a step 3, phase 2b: reflection and the remaining shims
+
+- Agent, `d7ac556`, merged: reflection over member tables (`reflect.clj`: `Class` lookups
+  merged as the JDK does, `Method.invoke` with Java's unboxing, widening and messages,
+  `InvocationTargetException`, fields, constructors; `reflect_array.clj`), a minimal
+  `ClassLoader`, three charsets, a root-data `Locale`, and `Date` (Julian before 1582-10-15,
+  Gregorian after, `Date.UTC` as jdk26u normalizes) for `#inst`. The member-table format is
+  normative in `doc/go/JRT-NOTES.md`: per class its public members (plus listed declared ones),
+  raw JVM modifiers, one-call invokers over plain Go values, set in `init`. Generated tables
+  for 38 jrt classes; stand-ins for the wrapper classes until c2g.
+- Tests on amd64, arm64 under qemu and `-race`; 1,423 cases against the JVM (reflection,
+  charsets, locales, 883 date and `#inst` cases). The main session reran `bin/jrt test`.
+- Proposed amendments A11-A19 (value convention for invokers, the table format, no
+  `Proxy.newProxyInstance` with `jrt.AdaptFn` instead, API names, the declared-members list,
+  plain generic reflection, an en_US default locale with root data, three charsets, the
+  stand-in), collected for the user with phase 1's.
