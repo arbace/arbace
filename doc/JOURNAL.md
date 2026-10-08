@@ -97,3 +97,27 @@ decision (2026-10-08).
   `defclass`, `defclasses` and `defop` (whose plain-Clojure operator bodies were the frozen
   runtime's fallback) were removed; the operators are unchanged (inlined `arbace.lang.Numbers`
   calls). Stages identical at 5,740 classes; `bin/gate` passed.
+
+## 2026-10-08: g2c G1, the Go front end helper
+
+- The user started g2c's G0-G2 (front end and round trip), with up to 4 agents. Three ran in
+  parallel: the Go forms spec, the helper, the round-trip comparator.
+- The helper (agent, `b19f2fe`, merged): `tools/godump/` (Go, standard library only, EPL as
+  Arbace's own code), seeded from the experiment `.tmp/g2c/godump` (survey §2.4). Built with
+  TamaGo's go1.27.1 (`/root/tamago-go`, overridable with `G2C_GOROOT`); it requires go1.27.1
+  and rejects newer language versions (the user's pin). One `go list -e -json -export -deps`
+  call gives the files and the dependencies' export data; packages are type-checked by
+  go/types with gc sizes for the target GOARCH, in parallel. Output per package, for the
+  Clojure reader: a header with the configuration (GOOS, GOARCH, GOAMD64/GOARM64, tags,
+  GOEXPERIMENT, toolchain, word size), the files' trees as `(:kebab-type {...})` in go/ast
+  field order with the go/types annotations as metadata (`:mode`, `:t`, `:val` as exact
+  numbers, `:def`/`:use`, `:inst`, `:sel` with embedding paths, `:implicit`), each file's
+  comments as a separate positioned list, and the package view (`:directives`,
+  `:init-order`, `:types` with method sets and gc layouts). Details: `doc/go/HELPER-NOTES.md`.
+- `bin/g2c` (`build`, `dump`, `read`, `corpus`) and `arbace.g2c.read`, running on Arbace
+  (`bin/lib/tools.bash`, which now treats `arbace/g2c/` as a tool, like `classes/` and `j2c/`).
+- Coverage: std for tamago/amd64, 379 packages, 1,742 files, and tamago/arm64, 378, 0 type
+  errors; `$GOROOT/test`, 1,705 of 1,745 single-file programs (35 excluded by build
+  constraints, 5 need another GOEXPERIMENT). Dumps are byte-identical across runs. All 2,462
+  read on Arbace; runtime, the largest (27 MB, 233,403 nodes), in 2.0-2.7 s.
+- LICENSE.md and doc/ARBACE.md now name `arbace/g2c/` among Arbace's own tools.

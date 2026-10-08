@@ -11,7 +11,7 @@ full in this file. Source files keep the copyright and license notices they came
 §3 and the BSD 3-Clause License require it); this file is the one place that states which license
 covers what.
 
-- `arbace/`: the vendored Clojure in it (everything outside `arbace/classes/` and `arbace/j2c/`)
+- `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`, `arbace/j2c/` and `arbace/g2c/`)
   is derived from Clojure, https://github.com/clojure/clojure at
   `98d735fab02f337cee654cb0629bddc09883a75a`, with ASM, https://gitlab.ow2.org/asm/asm at
   `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
