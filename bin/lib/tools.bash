@@ -43,18 +43,23 @@ frozen_clojure() {
          "git fetch origin tag $tag" >&2
     return 1
   fi
+  mkdir -p "$root/.tmp"
+  # one extraction at a time: concurrent checks (bin/gate) share .tmp/frozen
+  exec 8> "$root/.tmp/frozen.lock"
+  flock 8
   if [ "$(cat "$dir/.rev" 2>/dev/null)" != "$rev" ]; then
-    mkdir -p "$root/.tmp"
-    tmp=$(mktemp -d "$root/.tmp/frozen.XXXXXX") || return 1
+    tmp=$(mktemp -d "$root/.tmp/frozen.XXXXXX") || { flock -u 8; return 1; }
     if ! git -C "$root" archive --format=tar "$rev" clojure | tar -x -C "$tmp"; then
       echo "could not extract clojure/ from $tag" >&2
       rm -rf "$tmp"
+      flock -u 8
       return 1
     fi
     find "$tmp/clojure" -name '*.class' -exec touch {} +
     echo "$rev" > "$tmp/.rev"
     rm -rf "$dir"
-    mv -T "$tmp" "$dir" || { rm -rf "$tmp"; return 1; }
+    mv -T "$tmp" "$dir" || { rm -rf "$tmp"; flock -u 8; return 1; }
   fi
+  flock -u 8
   echo "$dir"
 }

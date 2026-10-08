@@ -57,6 +57,11 @@ Prior art:
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
+- `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
+  concurrently Clojure's suite on stage 2 and `bin/class-forms-tests` (about 4 minutes).
+  `bin/gate --full` adds, concurrently, the suite on stage 1 and `bin/j2c-check --suite`
+  (about 6.5 minutes): run it when the class forms compiler or j2c change. Logs in
+  `.tmp/gate/`.
   - `arbace/j2c/`: the Java → class forms converter.
 
 ## Records

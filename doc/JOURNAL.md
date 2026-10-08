@@ -74,3 +74,26 @@ decision (2026-10-08).
   tests 47/2,780, the suite 20,750/20,750 on stages 1 and 2; `bin/class-forms-tests` 64/133;
   `bin/j2c-check --suite` no regressions. The new jar differs from the seed, as expected (boot's
   stage-0 path is gone).
+
+## 2026-10-08: A faster gate; the non-native fallbacks of the class forms' names removed
+
+- At the user's request ("more concurrency, or a reduced gate with the essentials, the full one
+  optional"), both: `bin/gate` runs `bin/seed --check` and `bin/build-arbace` (the stages, the
+  verifier, the native tests, the jar, the cache), then concurrently Clojure's suite on stage 2
+  and `bin/class-forms-tests`; `bin/gate --full` adds, concurrently, the suite on stage 1 and
+  `bin/j2c-check --suite`. Each suite run uses 24 test JVMs (`GATE_TEST_JOBS`). Logs in
+  `.tmp/gate/`. The suite on stage 1 is not essential: the build requires stage 2 = stage 3
+  and reports stage 1 = stage 2, and when they are equal it tests the same classes twice.
+  `bin/build-arbace --suite` stays, sequential, for a build with the suite.
+- Concurrent runs share two things, now locked with `flock`: the test libraries
+  (`.tmp/clojure-tests/lib`, `lib-arbace`) in `bin/clojure-tests`, and the extraction of the
+  frozen tree (`.tmp/frozen`) in `bin/lib/tools.bash`. Each suite run has its own directory.
+- Measured: `bin/gate --full` 6m25s at `3ef663a` on a quiet machine (build 1m28s, then suite on
+  stage 2 3m24s, class forms tests 7 s, suite on stage 1 3m27s, j2c-check 4m57s), against about
+  13 minutes for the same checks one after the other; `bin/gate` 3m40s with the change below,
+  under load average 95 from three g2c agents (build 1m28s, suite on stage 2 2m12s).
+- `arbace/core_classes.clj`: with stage 0 the seed, nothing runs the class forms on a compiler
+  without their special forms, so `class-forms-native?` and the non-native branches of
+  `defclass`, `defclasses` and `defop` (whose plain-Clojure operator bodies were the frozen
+  runtime's fallback) were removed; the operators are unchanged (inlined `arbace.lang.Numbers`
+  calls). Stages identical at 5,740 classes; `bin/gate` passed.

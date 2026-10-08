@@ -78,13 +78,20 @@ The journal up to the freeze is on that branch; main's [JOURNAL.md](JOURNAL.md) 
 Removed from main with it: `bin/vendor-arbace`, `bin/vendor-spec`, `bin/freeze`, the CI
 workflow, `doc/FREEZE.md` and `doc/MODERN-COMPILER.md` (all on the branch).
 
+## Done: a faster gate (2026-10-08)
+
+`bin/gate` (essential: the bootstrap, then Clojure's suite on stage 2 and the class forms tests,
+concurrently; 3m40s) and `bin/gate --full` (adding the suite on stage 1 and `bin/j2c-check
+--suite`; 6m25s, against about 13 minutes run one after the other). The unused non-native
+fallbacks of `arbace/core_classes.clj` are gone.
+
 ## Next
 
-- A faster gate (the user's request, 2026-10-08): `bin/gate`, the essential checks (the
-  bootstrap, then Clojure's suite on stage 2 and the class forms tests, concurrently), and
-  `bin/gate --full` (adding the suite on stage 1 and `bin/j2c-check --suite`, concurrently).
-- `arbace/core_classes.clj` keeps fallbacks for running without native class forms, unused
-  since stage 0 is the seed; removing them changes the runtime.
+- g2c, milestones G0-G2 (the user's go, 2026-10-08): the Go forms spec (`doc/go/SPEC.md`, for
+  the user's review), the Go helper (`tools/godump`, GOOS=tamago, go1.27.1) and reading on
+  Arbace (`bin/g2c`), the round-trip comparator (`tools/gocmp`, `bin/g2c-check`); then the
+  converter (typed AST → Go forms) and the printer (Go forms → Go), checked by the round trip
+  over `$GOROOT/src` and `$GOROOT/test`.
 
 ## Later
 
