@@ -202,13 +202,24 @@
         scan (jrt/scan jrt-dir)
         manifest (manifest-classes jrt-dir)
         jc (jrt-classes scan manifest)
+        ;; String.format over the translated Formatter (JRT-NOTES.md: "waiting for c2g"):
+        ;; c2g writes it into jrt's c2g_support when Formatter is translated
+        formatter? (and (contains? @(:compile-set world) "java/util/Formatter")
+                        (or (empty? (:slice opts)) (some #(re-find % "java/util/Formatter") (:slice opts))))
+        scan (cond-> scan
+               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"]))
         slice (:slice opts)
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})}
             t1 (now)
-            roots (vec (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f)))))
+            roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
+                               (when formatter?
+                                 [["java/util/Formatter" "<init>" "()V"]
+                                  ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]
+                                  ["java/util/Formatter" "format" "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/util/Formatter;"]
+                                  ["java/util/Formatter" "toString" "()Ljava/lang/String;"]])))
             slice? (fn [n] (boolean (in-slice? (top-of n))))
             ;; the stand-ins the translated classes replace: the members they define are roots
             ;; too (jrt's own code uses them), to a fixpoint
@@ -238,7 +249,7 @@
                   fname (out/go-file-name pkg (top-of n))]
               (binding [c/*pkgstate* (get pkgstates pkg)]
                 (try
-                  (let [forms (d/class-forms n)]
+                  (let [forms (if (m/reflected? n) (d/reflected-forms n) (d/class-forms n))]
                     (swap! files update [pkg fname] (fnil into []) forms))
                   (catch Throwable ex
                     (swap! errors conj [n (.getMessage ex)])

@@ -139,7 +139,7 @@
       "C" (long (int (unchecked-char v))) nil)))
 
 (declare expr expr-op expr-as stmt! assign! ret! cond-expr translate-ctx missing-reason missing-expr go-call?
-         prim-convert)
+         prim-convert box-val)
 
 (defn up-sym
   "The nil-preserving conversion of pointer type `from` (desc) to interface `to` (desc):
@@ -162,7 +162,14 @@
     (= from to) x
     ;; branches of a conditional keep their own primitive type (the JVM's int slot): widened
     (and (t/prim? from) (t/prim? to)) (prim-convert x from to)
-    (or (t/prim? from) (t/prim? to)) (fail (str "unexpected primitive coercion " from " -> " to))
+    ;; a primitive branch of a conditional whose value is a reference: boxed by its own type
+    (t/prim? from) (coerce (box-val x from) (str "L" (t/box-of from) ";") to true)
+    (and (t/prim? to) (t/unbox-of from))
+    (let [p (t/unbox-of from)]
+      (prim-convert (list (symbol (str "." (nm/method-base (str (t/prim-desc->name p) "Value") (str "()" p))))
+                          (if (m/pointer-desc? from) (list (jsym "NN") x) x))
+                    p to))
+    (t/prim? to) (fail (str "unexpected primitive coercion " from " -> " to))
     (and (m/pointer-desc? from) (m/iface-desc? to)) (if nn x (up-sym x from to))
     (and (m/pointer-desc? from) (m/pointer-desc? to))
     (if (= (gotype from) (gotype to)) x

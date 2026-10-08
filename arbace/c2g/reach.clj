@@ -127,6 +127,11 @@
                 ;; virtual calls already seen reach into the new class's subtypes when instantiated
                 true))))))
     (m/jrt-class n) true
+    ;; a JDK interface known only by reflection: declared, without code
+    (m/reflectable-interface? n)
+    (do (swap! (:T *st*) conj n)
+        (doseq [i (:interfaces (env/info n))] (binding [*current* [n "<class>" ""]] (use! i)))
+        true)
     :else (do (swap! (:missing *st*) update n (fnil conj #{}) *current*)
               (note-unavailable! (str "class " (str/replace n "/" ".") " is not in the closed world"))
               false)))
@@ -137,14 +142,14 @@
 (defn reach!
   "Marks method [c name desc] reached (its body will be translated)."
   [[c name desc :as k]]
-  (when (and c (m/translated? c) (*slice?* c) (not (contains? @(:reached *st*) k)))
+  (when (and c (m/translated? c) (a/decl c) (*slice?* c) (not (contains? @(:reached *st*) k)))
     (swap! (:reached *st*) conj k)
     (swap! (:queue *st*) conj k)))
 
 (defn init!
   "Class c is initialized: its static initializer is reached (and its superclass's)."
   [c]
-  (when (and c (m/translated? c) (not (contains? @(:inited *st*) c)))
+  (when (and c (m/translated? c) (a/decl c) (not (contains? @(:inited *st*) c)))
     (swap! (:inited *st*) conj c)
     (when-let [s (:super (a/decl c))] (init! s))
     (reach! [c "<clinit>" "()V"])))
@@ -175,8 +180,19 @@
   (let [k [o name desc]]
     (when-not (contains? @(:vcalls *st*) k)
       (swap! (:vcalls *st*) conj k)
-      (doseq [d @(:inst *st*) :when (env/subclass? d o)]
+      (doseq [d (concat @(:inst *st*) @(:lambda-fis *st*)) :when (env/subclass? d o)]
         (when-let [impl (java-impl-of d [name desc])] (reach! impl))))))
+
+(defn lambda!
+  "A lambda or method reference of functional interface fi: its adapter is an instance of fi,
+  whose default methods virtual calls reach."
+  [fi]
+  (when-not (contains? @(:lambda-fis *st*) fi)
+    (swap! (:lambda-fis *st*) conj fi)
+    (doseq [[o name desc] @(:vcalls *st*) :when (env/subclass? fi o)]
+      (when-let [impl (java-impl-of fi [name desc])] (reach! impl)))
+    (doseq [k (distinct (external-keys fi))]
+      (when-let [impl (java-impl-of fi k)] (reach! impl)))))
 
 (defn- check-hw-call!
   "A call of a method of jrt's hand-written class: jrt must have it."
@@ -243,9 +259,9 @@
       :class-lit (use-desc! (:class node))
       (:new-array :array-init) (use-desc! (:type node))
       :try (doseq [c (:catches node) cls (:classes c)] (use! cls))
-      :lambda (do (use! (:fi node)) (doseq [mk (:markers node)] (use! mk)))
+      :lambda (do (when (use! (:fi node)) (lambda! (:fi node))) (doseq [mk (:markers node)] (use! mk)))
       :method-ref
-      (do (use! (:fi node)) (use! (:owner node))
+      (do (when (use! (:fi node)) (lambda! (:fi node))) (use! (:owner node))
           (case (:kind node)
             :static (do (init! (:owner node)) (reach! [(:owner node) (:name node) (:desc node)]))
             :new (do (init! (:owner node)) (reach! [(:owner node) "<init>" (:desc node)])
@@ -348,12 +364,17 @@
   :instantiate). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
   [{:keys [roots instantiate classes slice?]}]
   (let [st {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
-            :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})}]
+            :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})
+            :lambda-fis (atom #{})}]
     (binding [*st* st
               *slice?* (or slice? (constantly true))
               m/*w* (assoc m/*w* :T (:T st))]
       (doseq [c classes] (use! c))
-      (doseq [[c :as k] roots] (when (use! c) (reach! k) (when (not= "<init>" (second k)) nil)))
+      (doseq [[c :as k] roots]
+        (when (use! c)
+          (reach! k)
+          ;; a root constructor: its class is instantiated (by the caller of the roots)
+          (when (and (= "<init>" (second k)) (*slice?* c)) (instantiate! c))))
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
       (loop []
         (when-let [k (first @(:queue st))]

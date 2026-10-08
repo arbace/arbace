@@ -77,13 +77,15 @@
       (let [params (first (filter vector? (rest f)))]
         [:ctor (mapv #(some-> (:tag (meta %)) str) (rest params))])
       "field" (let [nm (first (filter symbol? (rest f)))] [:field (name nm)])
-      "static-initializer" [:static-initializer]
+      "static-initializer" [:static-initializer (or (:c2g/nth (meta f)) 0)]
       "defclass" [:class (name (second f))]
       nil)))
 
 (defn- cut-key [x]
   (cond
     (and (seq? x) (= "field" (head-name x))) (param-key x)
+    ;; (c2g/cut (static-initializer n)): the class's n-th static initializer
+    (and (seq? x) (= "static-initializer" (head-name x))) [:static-initializer (or (second x) 0)]
     (symbol? (first x)) (param-key (cons 'c2g-cut-method x))
     :else (throw (ex-info (str "c2g: bad c2g/cut " (pr-str x)) {}))))
 
@@ -100,6 +102,12 @@
   counts]."
   [cf vforms]
   (let [[head members] (class-parts cf)
+        ;; static initializers are told apart by their position in the class form
+        members (let [n (atom -1)]
+                  (mapv (fn [m] (if (= "static-initializer" (head-name m))
+                                  (vary-meta m assoc :c2g/nth (swap! n inc))
+                                  m))
+                        members))
         counts (atom {:replaced 0 :cut 0 :added 0})
         members (reduce
                   (fn [ms vf]

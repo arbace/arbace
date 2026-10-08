@@ -209,7 +209,7 @@
   []
   (let [bool-translated (m/translated? "java/lang/Boolean")
         bool-init (and bool-translated (not (m/trivial-init? "java/lang/Boolean")))]
-    [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
+    (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
      (list 'go/func 'C2g_Missing :type-params ['T] (with-meta [(tag 'why 'string)] {:tag 'T})
@@ -227,17 +227,34 @@
            (list 'let ['y (list '.Cast_O__O 'cls 'x)]
                  (list 'assert 'T 'y)))
      (list 'go/func 'C2g_Discard (with-meta [(tag 'x 'any)] {:tag 'bool}) false)
+     '(go/func C2g_RefP "C2g_RefP is a pointer as an any, nil-preserving (§5.6).\n"
+        :type-params [T] ^any [^{:tag (* T)} p]
+        (when (== p nil) (return nil))
+        p)
+     (when (and (m/translated? "java/util/Formatter")
+                (not (contains? (:funcs (arbace.c2g.jrt/scan-file (java.io.File. "go/arbace/jrt/string.clj"))) "String_Format_String_O1__String")))
+       '(go/func String_Format_String_O1__String
+          "String_Format_String_O1__String is String.format: a new Formatter's format (c2g's, over the
+translated java.util.Formatter).\n"
+          ^{:tag (* String)} [^{:tag (* String)} format ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New) format args))))
+     (when (m/translated? "java/util/Formatter")
+       '(go/func String_Format_Locale_String_O1__String
+          "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
+          ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
      (list 'go/type 'C2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
      (list 'go/func 'C2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
-           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))]))
+           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))])))
 
 (defn- modifiers [n]
   (let [dd (a/decl n)
-        fl (if (and dd (not= :top (:nesting dd))) (:inner-flags dd) (:flags (m/info n)))]
+        fl (if (and dd (not= :top (:nesting dd))) (:inner-flags dd) (:flags (m/info n)))
+        fl (or fl 1)]
     (bit-and fl 0x761f)))
 
 (defn- kind-sym [pkg n]
-  (let [dd (a/decl n)]
+  (let [dd (or (a/decl n) {:kind (if (m/interface? n) :interface :class)})]
     (m/jrt-sym pkg (case (:kind dd)
                      :interface "KindInterface" :annotation "KindAnnotation" :enum "KindEnum"
                      :record "KindRecord" "KindClass"))))
@@ -249,7 +266,7 @@
 
 (defn- result-any [pkg d call]
   (cond (= d "V") nil
-        (m/pointer-desc? d) (list '.Ref call)
+        (m/pointer-desc? d) (list (m/jrt-sym pkg "C2g_RefP") call)
         :else call))
 
 (defn member-tables
@@ -316,11 +333,12 @@
   [pkg n]
   (binding [c/*f* {:pkg pkg}]
     (let [g (m/go-name n)
-          dd (a/decl n)
+          dd (or (a/decl n) (assoc (m/info n) :kind :interface :nesting (if (:outer (m/info n)) :member :top)
+                                   :simple (t/simple-name-of n) :reflected true))
           iface (m/interface? n)
           sup (:super dd)
           ifaces (filter m/in-world? (:interfaces dd))
-          tables (member-tables pkg n)
+          tables (if (:reflected dd) {} (member-tables pkg n))
           cls-sym (symbol (str g "_class"))]
       [(list 'go/var cls-sym
              (list (m/jrt-sym pkg "Define")
@@ -376,6 +394,7 @@
   cannot read back (names with _ or $)."
   [pkg classes]
   (let [entries (for [n classes
+                      :when (a/decl n)
                       :let [g (m/go-name n)]
                       mm (d/class-methods n)
                       :when (and (not= "<init>" (:name mm)) (re-find #"[_$]" (:name mm)))

@@ -379,6 +379,9 @@
                        (and reached (m/mdesc-in-world? (:desc (:bridge-of mm))))))
               (let [pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]
                 [pn (derived-body pkg n mm pn)])
+              ;; a void method without body forms is empty (as emit writes it)
+              (and reached (nil? ab) (= "V" r) (not (:analysis-failed @(:state (a/decl n)))))
+              [(vec (for [i (range (count ps))] (symbol (str "p" i)))) []]
               (and reached ab (not (:analysis-failed @(:state (a/decl n)))))
               (try
                 (method-code-forms pkg n mm ab {:t (when (and (not static) (not iface)) 't)
@@ -547,6 +550,37 @@
 
 ;; ---------------------------------------------------------------------------------------
 ;; one class
+
+(defn reflected-forms
+  "A JDK interface declared from reflection (no class forms): its Go interface with the
+  methods in the world, its default and static methods as stubs (no code to translate), and
+  instanceof/cast."
+  [n]
+  (let [pkg (m/pkg n)
+        g (m/go-name n)
+        info (m/info n)
+        ms (for [mm (:methods info) :when (m/mdesc-in-world? (:desc mm))] (assoc mm :owner n))]
+    (vec
+      (concat
+        [(list 'c2g/comment (str "---- " (str/replace n "/" ".") " (declared from reflection)"))
+         (list 'go/type (symbol g)
+               (apply list 'interface (m/jrt-sym pkg "Object_I")
+                      (concat
+                        (for [s (interface-closure n)] (m/class-sym pkg s))
+                        [(list (symbol (str "Is_" g)) [])]
+                        (for [mm ms
+                              :when (and (not (m/static? mm)) (not (m/private? mm)))
+                              :when (not (m/object-keys [(:name mm) (:desc mm)]))]
+                          (iface-method-elem pkg mm)))))]
+        (for [mm ms
+              :when (and (not (m/abstract-m? mm)) (not (m/private? mm)))
+              :let [[ps r] (t/parse-method-desc (:desc mm))
+                    pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
+                    plist (with-ret (param-list pkg ps pn) pkg r)
+                    plist (if (m/static? mm) plist (with-meta (vec (cons (tag 'this (symbol g)) plist)) (meta plist)))]]
+          (list* 'go/func (symbol (str g "_" (nm/method-base (:name mm) (:desc mm)))) plist
+                 (stub-body n (:name mm) (:desc mm))))
+        (instance-forms pkg n)))))
 
 (defn class-forms
   "All Go forms of translated class n (in package pkg), in order."

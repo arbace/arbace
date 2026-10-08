@@ -145,8 +145,15 @@
                              x))
       (contains? a :char) (if (t/prim? d) (long (:char a)) (box "C" (long (:char a))))
       (contains? a :static) (let [n (internal (:static a))
-                                  x (class-sym-main n (str "_" (nm/munge-name (:name a))))]
-                              x)
+                                  f (env/find-field n (:name a))
+                                  o (or (:owner f) n)
+                                  g (str (m/go-name o) "_" (nm/munge-name (:name a)))]
+                              (when-not (and f (m/in-world? o) (m/desc-in-world? (:desc f))
+                                             (or (m/translated? o)
+                                                 (contains? (:vars (:jrt m/*w*)) g)
+                                                 (contains? (:consts (:jrt m/*w*)) g)))
+                                (throw (ex-info (str "needs " o "." (:name a)) {})))
+                              (class-sym-main o (str "_" (nm/munge-name (:name a)))))
       (contains? a :biginteger) (do (need! "java/math/BigInteger" "<init>" "(Ljava/lang/String;)V")
                                     (list 'jrt/BigInteger_New_String (units-lit (:biginteger a))))
       (contains? a :bigdecimal) (do (need! "java/math/BigDecimal" "<init>" "(Ljava/lang/String;)V")
@@ -202,7 +209,11 @@
       (nil? mm) [:unavailable "member not found"]
       (#{:get-static :get} kind)
       (let [f mm o (:owner f)]
-        (if-not (and (m/in-world? o) (m/desc-in-world? (:desc f)) (or (m/translated? o) (= kind :get-static)))
+        (if-not (and (m/in-world? o) (m/desc-in-world? (:desc f))
+                     (or (m/translated? o)
+                         (and (= kind :get-static)
+                              (let [g (str (m/go-name o) "_" (nm/munge-name (:name f)))]
+                                (or (contains? (:vars (:jrt m/*w*)) g) (contains? (:consts (:jrt m/*w*)) g))))))
           [:unavailable (str "field " o "." (:name f))]
           (let [place (if (= kind :get-static)
                         (class-sym-main o (str "_" (nm/munge-name (:name f))))
@@ -420,6 +431,21 @@
         (= s "=") ""
         :else (apply str (map #(char (Integer/parseInt % 16)) (str/split s #",")))))
 
+(def ^:private normalizers
+  "The oracle runner's (test/oracle/runner.clj): what varies between runs and implementations."
+  [[#"(#object\[[^ \]]+ )0x[0-9a-f]+" "$10xN"]
+   [#"([A-Za-z_$][\w$.]*;?)@[0-9a-f]{4,}\b" "$1@N"]
+   [#"__\d+__auto__" "__N__auto__"]
+   [#"\bG__\d+" "G__N"]
+   [#"\$eval\d+" "\\$evalN"]
+   [#"\beval\d+([/$])" "evalN$1"]
+   [#"(\w)--\d+\b" "$1--N"]
+   [#"(DynamicClassLoader )@[0-9a-f]+" "$1@N"]
+   [#"\b(fn|reify|let|loop|p\d+|rest|x|y|seq|map|vec|deftype|cond|nth|first|ex|and|or)__\d+" "$1__N"]])
+
+(defn- normalize [x]
+  (if (string? x) (reduce (fn [s [re rep]] (str/replace s re rep)) x normalizers) x))
+
 (defn decode-line
   "A result line of the Go program as {:i :result|:throws|:unavailable}."
   [line]
@@ -434,11 +460,11 @@
       "V" (let [[ty v] (str/split rest-s #" ")]
             {:i i :result {:type ty :raw v}})
       "S" (let [[ty v] (str/split rest-s #" ")]
-            {:i i :result {:type ty :value (parse-units v)}})
+            {:i i :result {:type ty :value (normalize (parse-units v))}})
       "P" (let [[ty v] (str/split rest-s #" ")]
-            {:i i :result {:type ty :pr (parse-units v)}})
+            {:i i :result {:type ty :pr (normalize (parse-units v))}})
       "X" {:i i :throws (vec (for [part (str/split rest-s #" ; ")]
-                               (let [[c m] (str/split part #" " 2)] [c (parse-units m)])))}
+                               (let [[c m] (str/split part #" " 2)] [c (normalize (parse-units m))])))}
       {:i i :bad line})))
 
 (defn- value-match? [expected got]
@@ -547,7 +573,7 @@
                                f arch (count (:cases x)) (:pass counts 0) (:fail counts 0) (:unavailable counts 0) (:pr counts 0)
                                tb size))
               (when (System/getenv "C2G_SHOW")
-                (doseq [c (take 20 (filter #(= :fail (:status %)) cmp))]
+                (doseq [c (take (if (= "all" (System/getenv "C2G_SHOW")) 100000 20) (filter #(= :fail (:status %)) cmp))]
                   (println "   FAIL" (:i c) (:src c) "--" (:why c))))))))
       (spit (str out-dir "/results.edn") (with-out-str (arbace.pprint/pprint @results)))
       (shutdown-agents)

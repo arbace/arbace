@@ -38,6 +38,28 @@
   [n]
   (boolean (a/decl n)))
 
+(defn reflectable-interface?
+  "Is n a JDK interface c2g knows only by reflection (no class forms: outside the converted
+  closure), which it may declare: its methods, no code (C2G-NOTES.md, \"Reflected
+  interfaces\")?"
+  [n]
+  (and (not (a/decl n))
+       (or (str/starts-with? n "java/") (str/starts-with? n "javax/") (str/starts-with? n "jdk/") (str/starts-with? n "sun/"))
+       (not (str/includes? n "$$"))
+       (some? (env/info n))
+       (env/interface? n)
+       ;; annotation types are interfaces too: not these
+       (not (has? (:flags (env/info n)) 0x2000))
+       ;; marker interfaces only (RandomAccess): one with methods would bring the types of
+       ;; its methods (IntStream, TemporalField) and jrt's classes would lack them
+       (empty? (:methods (env/info n)))
+       (every? #(or (in-world? %) (reflectable-interface? %)) (:interfaces (env/info n)))))
+
+(defn reflected?
+  "Is n a translated class declared from reflection (no class forms)?"
+  [n]
+  (and (translated? n) (not (a/decl n))))
+
 (defn info [n] (env/info n))
 (defn interface? [n] (env/interface? n))
 
@@ -241,7 +263,7 @@
   :method m} for an interface's default method, or nil (abstract)."
   [n [name desc :as k]]
   (or (some (fn [c]
-              (when-let [m (find-method c name desc)]
+              (when-let [m (and (not (interface? c)) (find-method c name desc))]
                 (when (and (not (static? m)) (not (abstract-m? m))
                            (or (not (private? m)) (= c n)))
                   (cond
@@ -256,7 +278,7 @@
             (superclass-chain n))
       ;; default methods: the maximally specific one (JVMS 5.4.3.3)
       (let [cands (for [c (all-supertypes n)
-                        :when (and (not= c n) (interface? c))
+                        :when (interface? c)
                         :let [m (find-method c name desc)]
                         :when (and m (not (abstract-m? m)) (not (static? m)) (not (private? m)))
                         :when (or (not (hand-written? c))
@@ -275,6 +297,7 @@
       (get @cache n)
       (let [r (cond
                 (not (translated? n)) true
+                (nil? (a/decl n)) true
                 :else (let [d (a/decl n)
                             st @(:state d)]
                         (and (empty? (:clinit st))
