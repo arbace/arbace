@@ -1,0 +1,50 @@
+#!/bin/bash
+# Check the binary seed of the bootstrap, seed/arbace-seed.jar (doc/VENDOR-NOTES.md, "The binary
+# seed"): the target/arbace.jar that bin/build-arbace makes at the tag arbace-for-java-26-v1, the
+# frozen Arbace for Java 26 (doc/FREEZE.md). bin/build-arbace runs it as stage 0. Its SHA-256 is
+# pinned in seed/arbace-seed.jar.sha256 (sha256sum format).
+#
+# Usage: bin/seed --check    the committed jar has the pinned hash (fast)
+#        bin/seed --verify   rebuild the jar from the tag (bin/build-arbace in a temporary git
+#                            worktree under .tmp/, removed afterwards) and check that the
+#                            rebuilt jar has the pinned hash: the seed is the tag's jar (slow,
+#                            a few minutes; needs the tag in the repository)
+# Environment:
+#   ARBACE_SEED_TAG   the tag rebuilt by --verify (default arbace-for-java-26-v1)
+# Exit status: 0 when the hash matches.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+jar=seed/arbace-seed.jar
+pinned=$(cut -d' ' -f1 "$jar.sha256")
+tag=${ARBACE_SEED_TAG:-arbace-for-java-26-v1}
+
+case ${1:-} in
+  --check)
+    if (cd seed && sha256sum --quiet -c arbace-seed.jar.sha256 > /dev/null 2>&1); then
+      echo "$jar: $pinned, as pinned"
+    else
+      echo "$jar: SHA-256 $(sha256sum "$jar" | cut -d' ' -f1), pinned $pinned" >&2
+      exit 1
+    fi ;;
+  --verify)
+    wt=$root/.tmp/seed-verify
+    git worktree remove --force "$wt" 2> /dev/null; rm -rf "$wt"
+    git worktree add --detach "$wt" "$tag" > /dev/null 2>&1 || { echo "no worktree of $tag" >&2; exit 1; }
+    # checkout leaves the frozen clojure/ sources newer than their tracked classes (CLAUDE.md)
+    find "$wt/clojure" -name '*.class' -exec touch {} +
+    echo "== bin/build-arbace at $tag ($(git rev-parse --short "$tag^{commit}")), in $wt"
+    "$wt/bin/build-arbace" > "$root/.tmp/seed-verify.log" 2>&1
+    st=$?
+    got=$( [ -f "$wt/target/arbace.jar" ] && sha256sum "$wt/target/arbace.jar" | cut -d' ' -f1)
+    git worktree remove --force "$wt"
+    if [ $st != 0 ]; then
+      echo "the build failed (exit $st), see .tmp/seed-verify.log" >&2; exit 1
+    fi
+    if [ "$got" = "$pinned" ]; then
+      echo "rebuilt jar: $got, as pinned: $jar is the jar of $tag"
+    else
+      echo "rebuilt jar: $got, pinned $pinned: they differ" >&2; exit 1
+    fi ;;
+  *) echo "usage: bin/seed --check | --verify" >&2; exit 2 ;;
+esac
