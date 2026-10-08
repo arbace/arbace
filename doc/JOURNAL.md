@@ -325,3 +325,20 @@ decision (2026-10-08).
   and arm64, and speed. Measured for it: `arbace/lang` is 142 class-form files, about 36,000
   lines, using `java.lang.reflect`, `java.util`, `java.io`, concurrency, regex, `java.math`,
   `java.lang.invoke`. Six decisions are the user's (D1-D6), each with a recommendation.
+
+## 2026-10-08: B1 replanned: a native Go executable first; D1-D6 decided
+
+- The user proposed to postpone the box and arm64 and to reach first a standalone static
+  `linux/amd64` Go executable of Arbace, testable as an ordinary user process here, without
+  TamaGo. Agreed: it removes the monitor, the image and the second architecture from the
+  critical path, and lets every step be tested against the JVM Arbace as plain processes.
+  `doc/go/B1-PLAN.md` was rewritten: B1a (the executable, steps 0-7: g2c for `linux/amd64`,
+  the measured Java surface, the c2g spec, jrt, the c2g converter, the evaluator, the
+  executable, speed) and B1b (the box, later; jrt's OS use kept behind one host interface so
+  the move stays small). This changes, for now, g2c's configuration of 2026-10-07
+  (`GOOS=tamago`) to `linux/amd64` for B1a; `tamago` returns with B1b.
+- The user's decisions: D1 c2g + jrt (not a hand-written runtime); D2 an evaluator over
+  `Compiler`'s `Expr` tree first, AOT later; D4 Java's UTF-16 string semantics; D5 a port of
+  `java.util.regex` (against the recommendation of Go's RE2 first: exact Java semantics); D6 a
+  first REPL without `defclass`/the class forms, `gen-class`, `proxy`, JVM interop beyond
+  jrt's classes. D3 (go-whim) moves to B1b.

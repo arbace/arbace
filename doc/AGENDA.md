@@ -107,8 +107,11 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Open: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s directory
     tests.
 
-- B1, Arbace in the box via gc: plan in [go/B1-PLAN.md](go/B1-PLAN.md), for the user's review
-  (decisions D1-D6).
+- B1, Arbace on Go: plan in [go/B1-PLAN.md](go/B1-PLAN.md). First B1a, a static `linux/amd64`
+  Go executable of Arbace tested as a user process (the user's proposal, 2026-10-08); the box
+  (TamaGo, arm64) later as B1b. Decided: c2g + jrt, an evaluator first, Java's UTF-16 strings,
+  a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
+  Next: step 0, g2c for `linux/amd64`.
 
 ## Later
 
