@@ -28,6 +28,13 @@
 #            (.tmp/jrt/edge.edn, from bin/jrt-convert, when present) (test/jrt/manifest.clj)
 #        bin/jrt print OUTDIR
 #            print the module (with tests) into OUTDIR/mod only
+#        bin/jrt overlay [--check]
+#            print the patched Go runtime (overlay/go/runtime.clj: the goroutine-local slot,
+#            C2G-SPEC §9.3) into $JRT_WORK/overlay/runtime and write the overlay
+#            $JRT_WORK/overlay/overlay.json for $G2C_GOROOT (build and test use it; give it to
+#            bin/g2c build --overlay for a program using jrt); prints the overlay's path.
+#            --check also converts $G2C_GOROOT's runtime again (bin/g2c convert) and requires
+#            the forms of proc.go and runtime2.go to equal it but for the lines marked "; Arbace"
 # Environment: G2C_GOROOT (default /root/tamago-go, go1.27.1), JRT_WORK (default .tmp/jrt-go).
 # Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace).
 set -euo pipefail
@@ -61,6 +68,47 @@ print_module() {
   cp -r "$work/testdata" "$out/mod/jrt/testdata"
 }
 
+# make_overlay: the patched runtime printed from overlay/go (when missing or older than its
+# forms) and the overlay file naming it; prints the overlay file's path
+make_overlay() {
+  local dir=$work/overlay
+  local json=$dir/overlay.json
+  if [ ! -f "$json" ] || [ -n "$(find overlay -newer "$json")" ] || ! grep -q "\"$goroot/src/runtime/" "$json"; then
+    echo "== the patched runtime (overlay/go/runtime.clj)" >&2
+    rm -rf "$dir"; mkdir -p "$dir"
+    bin/g2c-print --layout gofmt overlay/go/runtime.clj "$dir/runtime" >&2
+    {
+      printf '{"Replace": {'
+      local sep=
+      for f in "$dir"/runtime/*.go; do
+        printf '%s\n "%s": "%s"' "$sep" "$goroot/src/runtime/$(basename "$f")" "$f"
+        sep=,
+      done
+      printf '}}\n'
+    } > "$json.new"
+    mv "$json.new" "$json"
+  fi
+  echo "$json"
+}
+
+# check_overlay: the overlay's converted runtime files equal a fresh conversion of
+# $G2C_GOROOT's runtime, but for the patch's lines (marked "; Arbace")
+check_overlay() {
+  local out=$work/overlay-check
+  rm -rf "$out"
+  G2C_GOROOT=$goroot bin/g2c convert --goos linux --goarch amd64 --out "$out" runtime >&2
+  local status=0 f
+  for f in proc runtime2; do
+    if diff <(grep -v '; Arbace' "overlay/go/runtime/$f.clj") "$out/go/runtime/$f.clj" > "$out/$f.diff"; then
+      echo "overlay: runtime/$f.clj is the conversion of $goroot/src/runtime/$f.go plus the patch" >&2
+    else
+      echo "overlay: runtime/$f.clj differs from the conversion (beyond the patch): $out/$f.diff" >&2
+      status=1
+    fi
+  done
+  return $status
+}
+
 goenv() {
   local arch=$1
   local level
@@ -86,12 +134,13 @@ case $cmd in
       case $1 in --arch) arch=$2; shift 2 ;; *) usage ;; esac
     done
     print_module "$work"
+    ovl=$(make_overlay)
     status=0
     for a in $(arches "$arch"); do
       echo "== linux/$a: go build, go vet" >&2
       # shellcheck disable=SC2046
-      (cd "$work/mod" && env $(goenv "$a") "$go" build -trimpath ./... &&
-         env $(goenv "$a") "$go" vet ./...) || status=1
+      (cd "$work/mod" && env $(goenv "$a") "$go" build -trimpath -overlay "$ovl" ./... &&
+         env $(goenv "$a") "$go" vet -overlay "$ovl" ./...) || status=1
     done
     exit $status ;;
   test)
@@ -105,13 +154,14 @@ case $cmd in
       esac
     done
     print_module "$work"
+    ovl=$(make_overlay)
     status=0
     for a in $(arches "$arch"); do
-      extra=()
+      extra=(-overlay "$ovl")
       if [ "$a" = arm64 ]; then
-        extra=(-exec "$qemu")
+        extra+=(-exec "$qemu")
       elif [ -n "$race" ]; then
-        extra=(-race)
+        extra+=(-race)
       fi
       echo "== linux/$a: go test ${extra[*]} ${flags[*]}" >&2
       if [ -n "$race" ] && [ "$a" = amd64 ]; then
@@ -135,6 +185,9 @@ case $cmd in
   standins)
     ARBACE_CLASSPATH="$root/test" bin/arbace -m jrt.standins go/arbace/jrt/standin_lang.clj \
       go/arbace/jrt/standin_character.clj ;;
+  overlay)
+    make_overlay
+    if [ "${1:-}" = --check ]; then check_overlay; fi ;;
   print)
     [ $# -eq 1 ] || usage
     print_module "$1" ;;

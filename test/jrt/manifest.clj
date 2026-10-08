@@ -64,7 +64,8 @@
 
 (defn defined
   "The Go names jrt's forms define (test files excluded): {:types #{T}, :methods #{[T M]},
-  :values #{f}} for go/type, go/method (by receiver type) and go/func, go/var, go/const."
+  :values #{f}} for go/type, go/method (by receiver type) and go/func, go/var, go/const; the
+  methods of an interface type count as its methods."
   [package-file]
   (let [pkg (p/collect package-file)
         tests (set (map str (:test-files (:package pkg))))
@@ -77,7 +78,14 @@
     (reduce
       (fn [acc d]
         (case (name (first d))
-          "type" (update acc :types into (names-of d))
+          "type" (let [tf (last d)
+                       imethods (when (and (seq? tf) (= 'interface (first tf)))
+                                  (for [e (rest tf)
+                                        :when (and (seq? e) (symbol? (first e)) (vector? (second e)))]
+                                    [(str (second d)) (str (first e))]))]
+                   (-> acc
+                       (update :types into (names-of d))
+                       (update :methods into imethods)))
           "method" (let [[_ m & xs] d
                          params (first (filter vector? xs))
                          recv (first params)]
@@ -108,7 +116,38 @@
    ["java.lang.reflect.Array" [] false]
    ["java.lang.StringLatin1" [] false]
    ["java.lang.StringUTF16" [] false]
-   ["jdk.internal.event.ThrowableTracer" [] false]])
+   ["jdk.internal.event.ThrowableTracer" [] false]
+   ;; phase 2a: threads, concurrency, Unsafe, the VM's services
+   ["java.lang.Thread" ["java.lang.Runnable"] true]
+   ["java.lang.Thread$UncaughtExceptionHandler" [] false]
+   ["java.lang.Thread$Builder$OfVirtual" [] false]
+   ["java.lang.ThreadLocal" [] true]
+   ["java.lang.InheritableThreadLocal" [] false]
+   ["java.lang.Runtime" [] false]
+   ["java.lang.ref.Reference" [] true]
+   ["java.lang.ref.WeakReference" [] false]
+   ["java.lang.ref.SoftReference" [] false]
+   ["java.lang.ref.ReferenceQueue" [] false]
+   ["jdk.internal.misc.Unsafe" [] false]
+   ["java.util.concurrent.atomic.AtomicInteger" ["java.io.Serializable"] false]
+   ["java.util.concurrent.atomic.AtomicLong" ["java.io.Serializable"] false]
+   ["java.util.concurrent.atomic.AtomicBoolean" ["java.io.Serializable"] false]
+   ["java.util.concurrent.atomic.AtomicReference" ["java.io.Serializable"] false]
+   ["java.util.concurrent.locks.Lock" [] false]
+   ["java.util.concurrent.locks.Condition" [] false]
+   ["java.util.concurrent.locks.ReentrantLock" ["java.util.concurrent.locks.Lock" "java.io.Serializable"] false]
+   ["java.util.concurrent.locks.ReentrantReadWriteLock" ["java.io.Serializable"] false]
+   ["java.util.concurrent.locks.ReentrantReadWriteLock$ReadLock" ["java.util.concurrent.locks.Lock" "java.io.Serializable"] false]
+   ["java.util.concurrent.locks.ReentrantReadWriteLock$WriteLock" ["java.util.concurrent.locks.Lock" "java.io.Serializable"] false]
+   ["java.util.concurrent.locks.LockSupport" [] false]
+   ["java.util.concurrent.ThreadFactory" [] false]
+   ["java.util.concurrent.Executor" [] false]
+   ["java.util.concurrent.ExecutorService" ["java.util.concurrent.Executor"] false]
+   ["java.util.concurrent.Executors" [] false]
+   ["java.util.concurrent.Future" [] false]
+   ["java.util.concurrent.FutureTask" ["java.lang.Runnable" "java.util.concurrent.Future"] false]
+   ["java.util.concurrent.CountDownLatch" [] false]
+   ["java.util.concurrent.ThreadLocalRandom" [] false]])
 
 (def promotable
   {"java.lang.Enum" #{"name()Ljava/lang/String;" "ordinal()I" "hashCode()I" "equals(Ljava/lang/Object;)Z"}
@@ -152,6 +191,8 @@
          :ok ok
          :ref (cond
                 static? (list 'go/var '_ (symbol (if (contains? values fname) fname (str fname "_native"))))
+                (.isInterface c)
+                (list 'go/var '_ (list 'method-expr (symbol t) (symbol g)))
                 (or (contains? methods [t g]) (prom (str (.getName m) desc)))
                 (list 'go/var '_ (list 'method-expr (list '* (symbol t)) (symbol g)))
                 :else (list 'go/var '_ (list 'method-expr (list '* (symbol t)) (symbol (str "Impl_" g)))))})

@@ -29,11 +29,17 @@
    ["NegativeArraySizeException" "RuntimeException" :leaf :n :s]
    ["IllegalArgumentException" "RuntimeException" :nonleaf :n :s :st :t]
    ["NumberFormatException" "IllegalArgumentException" :leaf :n :s]
-   ["IllegalStateException" "RuntimeException" :leaf :n :s :st :t]
+   ["IllegalStateException" "RuntimeException" :nonleaf :n :s :st :t]
    ["IllegalMonitorStateException" "RuntimeException" :leaf :n :s]
    ["UnsupportedOperationException" "RuntimeException" :leaf :n :s :st :t]
    ["CloneNotSupportedException" "Exception" :leaf :n :s]
    ["InterruptedException" "Exception" :leaf :n :s]
+   ;; phase 2a: threads and java.util.concurrent
+   ["IllegalThreadStateException" "IllegalArgumentException" :leaf :n :s]
+   ["java.util.concurrent.ExecutionException" "Exception" :leaf :n :s :st :t]
+   ["java.util.concurrent.CancellationException" "IllegalStateException" :leaf :n :s]
+   ["java.util.concurrent.TimeoutException" "Exception" :leaf :n :s]
+   ["java.util.concurrent.RejectedExecutionException" "RuntimeException" :leaf :n :s :st :t]
    ["ReflectiveOperationException" "Exception" :nonleaf :n :s :st :t]
    ["ClassNotFoundException" "ReflectiveOperationException" :leaf :n :s :st]
    ["LinkageError" "Error" :nonleaf :n :s :st]
@@ -78,7 +84,11 @@
     ["(Append_CharSequence__Appendable ^Appendable [^CharSequence csq])"
      "(Append_CharSequence_I_I__Appendable ^Appendable [^CharSequence csq ^int32 start ^int32 end])"
      "(Append_C__Appendable ^Appendable [^uint16 c])"]
-    []]])
+    []]
+   ;; phase 2a: the functional interfaces jrt's threads and executors take
+   ["Runnable" "java.lang" [] ["(Run__V [])"] []]
+   ["Callable" "java.util.concurrent" [] ["(Call__O ^any [])"] []]
+   ["Supplier" "java.util.function" [] ["(Get__O ^any [])"] []]])
 
 (defn- simple [n] (last (str/split n #"\.")))
 (defn- qualified [n] (if (str/includes? n ".") n (str "java.lang." n)))

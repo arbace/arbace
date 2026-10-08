@@ -550,3 +550,402 @@ when profiles show exceptions on hot paths.
 - The JVM oracle's notes ([ORACLE.md](ORACLE.md), "What the Go side should know"); the edge
   ([JRT-SOURCES.md](JRT-SOURCES.md)); the prototype `.tmp/c2g-proto/` (its `jrt.clj`, whose
   header, `Lit`, `Catch` and `ClassInit` this generalizes).
+
+# jrt, phase 2a: threads, concurrency, Unsafe, System and the host
+
+B1a step 3, phase 2a (branch `jrt-threads`, 2026-10-08): the goroutine-local slot of the patched
+Go runtime, `Thread` over it, thread locals, interrupts, the `java.util.concurrent` classes the
+translated JDK and Arbace use (atomics, locks, executors, latches), `Unsafe`, references,
+`System`, `Runtime` and the host interface. Phase 2b (reflection and the remaining shims) runs
+in parallel on another branch.
+
+State: the package builds and passes `go vet` for linux/amd64 and linux/arm64 with the patched
+runtime; its 46 Go tests (28 of phase 1, 18 new) pass on amd64, on arm64 under `qemu-aarch64`
+and under the race detector (amd64). Of the edge's 95 members of these classes, 89 are
+implemented; the 6 others wait for classes that are cut or not written yet (Coverage, below).
+
+## Structure
+
+| path | what |
+|---|---|
+| `overlay/go/runtime.clj` | the patched runtime files as Go forms (not a package of the program): `ns go.runtime`, `go/package runtime :files [...]` naming the three |
+| `overlay/go/runtime/arbace_local.clj` | the new file `arbace_local.go`: `arbace_getLocal`, `arbace_setLocal` (one-argument `//go:linkname`, `//go:nosplit`) |
+| `overlay/go/runtime/proc.clj`, `runtime2.clj` | `proc.go` and `runtime2.go` of the toolchain's runtime, converted by `bin/g2c convert --goos linux runtime` (the same forms for amd64 and arm64), with the patch's two lines, each marked `; Arbace` |
+| `go/arbace/jrt/thread.clj` | the slot (linkname pulls), thread numbers, `Thread` (non-leaf), `CurrentThread`, start/join/sleep/yield/interrupt, handlers, `RunMain`, `Go`, `RunnableOf`, `Thread.ofVirtual()`, `header` |
+| `threadlocal.clj` | `ThreadLocal` (non-leaf), `ThreadLocal$SuppliedThreadLocal`, `InheritableThreadLocal`, `ThreadLocalRandom`'s probes |
+| `threadid.clj` | `currentThreadID`, now the current `Thread`'s number (phase 1's file, body replaced) |
+| `atomic.clj` | `Volatile.CompareAndSet`/`Swap`, `AtomicInteger`, `AtomicLong`, `AtomicBoolean`, `AtomicReference` |
+| `locks.clj` | `Lock`, `Condition`, `ReentrantLock` and its conditions, `ReentrantReadWriteLock` (+ `ReadLock`, `WriteLock`), `LockSupport` |
+| `executor.clj` | `ThreadFactory`, `Executor`, `ExecutorService`, `Future`, `Executors`, the pools, `FutureTask`, `CountDownLatch` |
+| `unsafe.clj` | `jdk.internal.misc.Unsafe`, `RegisterGoType` |
+| `reference.clj` | `Reference`, `WeakReference`, `SoftReference`, `ReferenceQueue` |
+| `host.clj` | `Host`, `HostFile`, `HostFileInfo`, `OSHost`, `SetHost`/`CurrentHost`, the standard streams `Stdin`/`Stdout`/`Stderr` |
+| `system.clj` | `System`'s clocks, properties, `getenv`, `exit`, `gc`, `lineSeparator`; `Runtime`; `StderrPrint` pointed at `Stderr` |
+| `standin_timeunit.clj` | a hand-written stand-in for `java.util.concurrent.TimeUnit` (deleted when c2g translates it) |
+| `thread_test.clj`, `concurrent_test.clj`, `system_test.clj` | the tests and benchmarks |
+
+Hand-written: about 3,600 lines of jrt forms and 900 of tests; the overlay's converted files are
+5,800 lines of forms (370 KB).
+
+## The goroutine-local slot (C2G-SPEC §9.3)
+
+The patch is §9.3's, unchanged: a field `arbaceLocal unsafe.Pointer` after `coroarg` in `g`
+(`runtime2.go`), `gp.arbaceLocal = nil` in `gdestroy` (`proc.go`, with the other fields cleared
+there), and `arbace_local.go` with the two linknamed functions.
+
+**As Go forms.** `proc.go` and `runtime2.go` are held as the converter's forms of the toolchain's
+files plus the two lines; `arbace_local.go` as hand-written forms. This is §16 Q19's
+"the runtime's converted files with the three changes".
+
+**How it is built.** `bin/jrt overlay` prints the three files (`bin/g2c-print --layout gofmt`)
+into `$JRT_WORK/overlay/runtime/` and writes `$JRT_WORK/overlay/overlay.json`, which replaces
+`$G2C_GOROOT/src/runtime/proc.go` and `runtime2.go` and adds `arbace_local.go` (Go's `-overlay`,
+BUILD.md amendment B5). `bin/jrt build` and `bin/jrt test` make it when it is missing or older
+than the forms, and pass it to `go build`, `go vet` and `go test` (`-race` included). A program
+built with `bin/g2c build --overlay $JRT_WORK/overlay/overlay.json DIR` links. Without the
+overlay, jrt fails to link (`relocation target runtime.arbace_setLocal not defined`), so a build
+cannot silently miss the patch. Checked with a small program of Go forms using `RunMain`, a
+thread and a thread local, built for amd64 and arm64 (run under `qemu-aarch64`).
+
+**Pinned to the toolchain.** The forms are TamaGo's go1.27.1 `proc.go` (which differs from
+upstream go1.27.1's by TamaGo's `GOOS=tamago` paths) and `runtime2.go` (identical to
+upstream's). `bin/jrt overlay --check` converts `$G2C_GOROOT`'s runtime again and requires the
+two forms files to equal the conversion but for the lines marked `; Arbace`: with Alpine's
+upstream tree (`G2C_GOROOT=/usr/lib/go`) it fails on `proc.go`, as it should, and a toolchain
+update shows up the same way. The same forms serve `GOOS=tamago` (B1b): the files have no
+build constraints.
+
+## Threads (C2G-SPEC §8.4)
+
+- **`Thread`** is a non-leaf class (`ForkJoinWorkerThread` extends it): `Thread_I`, `Impl_...`,
+  `Ctor...`, the dispatch methods (§5.4). Its struct holds the whole object (`self`), the Java id
+  (`tid`, from 1, never reused), the lock number (`num`), the name, target, state (new, alive,
+  terminated), daemon flag, priority, `done` (closed at the end, for `join`), the interrupt token
+  `intr`, the permit `park`, the uncaught-exception handler and the thread-local maps.
+- **The current thread**: `CurrentThread()` reads the slot (3.4 ns). A goroutine jrt did not
+  start (Go's `main`, tests, a `go` statement in Go code) gets a Thread on first use
+  ("adopted"): a daemon named `Thread-N`, alive.
+- **Thread numbers** (the thin lock's 22-bit owner field; A7): numbers come from a free list.
+  A jrt thread frees its number when its run ends. An adopted goroutine's number is freed by a
+  `runtime.AddCleanup` on its Thread, which becomes unreachable when the goroutine ends and
+  `gdestroy` clears the slot. So numbers stay below the peak count of live threads (tested:
+  2,000 sequential threads use numbers below 1,000), and the inflation fallback for numbers
+  beyond 2^22 is never reached in practice.
+- **The thread entry** (`threadEntry`, every goroutine Java code starts): takes a number, puts
+  the Thread in the slot, runs `this.run()` under `Catch`, hands an uncaught exception to the
+  thread's handler, else the default handler, else `Uncaught` (`Exception in thread "NAME"
+  ...` on the standard error), then ends the thread (maps dropped, `done` closed, slot cleared,
+  number freed, the non-daemon count decremented).
+- **`RunMain(run) int`**: the program's main as the JVM runs it. The calling goroutine becomes
+  the thread `main` (#1 when first); an uncaught exception is reported and makes the status 1;
+  then it waits for the non-daemon threads and returns the status (`System.exit` ends the
+  process before). `Go(name, f)` starts a Go function as a daemon jrt thread; `RunnableOf(f)` is
+  a `Runnable` of a Go function.
+- **Start, join, sleep, yield**: `start` copies the `InheritableThreadLocal` values (through
+  `childValue`) and starts the goroutine; a second `start` throws
+  `IllegalThreadStateException`. `join([millis[, nanos]])` waits on `done`, a timer and the
+  interrupt token; `sleep` likewise, with Java's messages (`sleep interrupted`, `timeout value
+  is negative`, `nanosecond timeout value out of range`); `yield` is `runtime.Gosched`.
+- **Daemon status**: a new thread is a daemon when its creator is (adopted goroutines are
+  daemons, `main` is not), as Java's rule; `setDaemon` after `start` throws
+  `IllegalThreadStateException`.
+- **Interrupts**: the status is a token in `intr` (a channel of capacity 1). `interrupt` sends
+  it without blocking; `isInterrupted` is its length; `Thread.interrupted()` receives it without
+  blocking. Every interruptible wait (`Object.wait` through phase 1's `interruptChan`, `sleep`,
+  `join`, `lockInterruptibly`, `Condition.await`, `Future.get`, `CountDownLatch.await`,
+  `ReferenceQueue.remove`) selects on the token and consumes it when it throws
+  `InterruptedException`, which is Java's "the status is cleared when the exception is
+  thrown". `park` returns on it and puts it back (the status stays set, as Java's).
+- **Virtual threads**: goroutines like every thread, `isVirtual` true, always daemons, unnamed
+  unless the builder names them. `Thread.ofVirtual().name(prefix, start).factory()` (Agent's)
+  counts the names as Java's builder does.
+- **Names, priorities, ids, `toString`**: as Java's: `Thread[#21,name,5,main]`,
+  `VirtualThread[#22,name]/runnable`.
+- **`getStackTrace()`**: the current thread's Java frames (phase 1's frame mapping); another
+  thread's stack cannot be read from Go, so it is empty.
+- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md).
+
+## Thread locals
+
+- `ThreadLocal` (non-leaf: Var's dynamic bindings subclass it for `initialValue`) keeps its
+  values in the current Thread's map, keyed by the `ThreadLocal` struct. The map is the
+  thread's own, so no lock: `get` is a slot read and a map lookup (9.4 ns). Java's maps hold
+  their keys weakly; jrt's hold them strongly, so a `ThreadLocal` dropped by the program stays
+  in the maps of the threads that set it until they end (Arbace's are static).
+- `withInitial(Supplier)` is `ThreadLocal$SuppliedThreadLocal`; `InheritableThreadLocal` uses a
+  second map, copied by `start`.
+- `ThreadLocalRandom`'s probes (`getProbe`, `advanceProbe`, `localInit`, used by
+  `ConcurrentHashMap`'s counter cells) live in the Thread, with Java's constants.
+  `ThreadLocalRandom.current()` waits for the translated `Random`, its superclass.
+
+## Concurrency
+
+**Atomics** (§8.2): `AtomicInteger`, `AtomicLong`, `AtomicBoolean` are `sync/atomic` values;
+`AtomicReference` is a `Volatile[any]` with a compare-and-set. `Volatile.CompareAndSet` compares
+by identity (Go's `==` on the values as `any`: pointers for Java objects) and swaps the box
+pointer; if that CAS fails while the value is still identical (another store of the same
+reference), it retries, so it is linearizable as Java's. Java's `AtomicInteger` and `AtomicLong`
+extend `Number`, which is translated: until it joins, they embed `Object` and have `Number`'s
+methods themselves (A12).
+
+**Locks.** A lock's state is under a `sync.Mutex`; a thread that must wait takes the lock's
+*gate*, a channel the next release closes, and selects on it, its interrupt token and a timer.
+That gives `lockInterruptibly`, timed `tryLock` and timed `await` without polling.
+
+- `ReentrantLock`: owner and hold count; `unlock` by another thread throws
+  `IllegalMonitorStateException`; fairness is not kept (a fair lock is a non-fair one).
+- Its conditions: waiters first in, first out, one channel each. `await` releases the lock fully,
+  waits, takes it again uninterruptibly with its hold count, then throws
+  `InterruptedException` if it was interrupted; a signal that races with the interrupt or the
+  timeout wins and the interrupt status is set again, so no signal is lost (Java's
+  `transferAfterCancelledWait`). `signal` without the lock throws
+  `IllegalMonitorStateException`.
+- `ReentrantReadWriteLock`: reentrant read holds per thread, a reentrant writer that may take
+  the read lock (downgrading), and Java's non-fair rule against writer starvation: a waiting
+  writer blocks new readers that hold no read lock yet. The write lock's `newCondition` throws
+  `UnsupportedOperationException` (unused).
+- `LockSupport`: the permit is a channel of one; `park` may return spuriously, as Java's.
+
+**Executors.** `newCachedThreadPool` (no limit, idle workers kept 60 s),
+`newFixedThreadPool` (n workers, kept, an unbounded queue), `newSingleThreadExecutor`,
+`newThreadPerTaskExecutor(factory)` and `newVirtualThreadPerTaskExecutor()` (a new thread per
+task). Workers are jrt threads made by the pool's `ThreadFactory` (Agent's factories name them),
+so they are Java threads with their slot. A task given to `execute` that throws ends its worker,
+whose thread reports the exception (Java's `ThreadPoolExecutor`); `submit` wraps the task in a
+`FutureTask`, which keeps it. `shutdown`, `isShutdown`, `isTerminated`, `awaitTermination`,
+`close`; `shutdownNow` (it returns a `List`) and `invokeAll`/`invokeAny` are not there.
+Rejection: `RejectedExecutionException("Task ... rejected from ...")`.
+
+**`FutureTask`**: `get` (with `ExecutionException(cause)`, `CancellationException`,
+`InterruptedException`, and `TimeoutException` for the timed one), `cancel(mayInterrupt)`
+(succeeds on a running task, as Java's, and interrupts its runner), `isDone`, `isCancelled`.
+**`CountDownLatch`**: the count under a mutex, a channel closed at zero.
+`CyclicBarrier` and `Semaphore` are not used by Arbace or the translated classes.
+
+**References.** A `WeakReference` holds a `weak.Pointer` to the referent's header (every Java
+object's first field, so its address is the object's) and the referent's type word, from which
+`get` rebuilds the `any` (no allocation). With a queue, a `runtime.AddCleanup` on the referent
+enqueues the reference when the referent is collected (Keyword's and Symbol's tables;
+`Util.clearCache` polls). Tested with forced GCs: an unreachable referent is cleared and its
+reference enqueued, a reachable one stays, the referent's Java type survives. `SoftReference`
+holds its referent strongly: Go has no memory-pressure-sensitive pointers, so it is cleared only
+by `clear` (Arbace's soft references are `DynamicClassLoader`'s class cache, cut, and
+`CharacterName`'s cache). Go's caveat applies: an object without pointers smaller than 16 bytes
+may share a tiny-allocator block and never be collected separately; interned keywords and
+symbols have pointers.
+
+**Monitors with the slot.** Phase 1's monitors are unchanged but for two things: the thread
+number comes from the slot, and `MonitorEnter`/`MonitorExit` take the header by address (the
+`any`'s data word: every Java object begins with its header) instead of asserting `Object_I`
+and calling `Self_Object` (a change to phase 1's `monitor.clj`, two lines). A non-Java Go value
+is no longer rejected there; c2g passes only Java objects.
+
+**Memory model.** Go's `sync/atomic` operations are sequentially consistent, as Java's volatile
+accesses, so atomics, `Unsafe`'s int, long and pointer slots and `Volatile` give Java's
+guarantees. The locks, the gate channels and the striped locks give the happens-before edges
+of Java's locks (the race detector checks the tests' plain counters guarded by them). The
+weaker accesses (`lazySet`, `setRelease`, `getAcquire`, `putReferenceRelease`,
+`getReferenceAcquire`, `storeFence`) are the sequentially consistent ones: stronger than Java
+requires, correct. What §8.3 says of racy publication stays: a data race on an interface field
+outside `Unsafe` and `Volatile` is a bug the race detector finds.
+
+## `Unsafe` (C2G-SPEC §9.2)
+
+- **Array offsets** are the JVM's numbers: base 16, scales 1, 2, 4, 8 and 4 for references (as
+  compressed oops). Java's arithmetic on them holds (`ConcurrentHashMap`'s
+  `ABASE + ((long) i << ASHIFT)`, `ArraysSupport`'s byte offsets), and `Unsafe` maps an offset
+  back to the element of the Go slice, or to its bytes for the unaligned and byte accesses
+  (`getLongUnaligned`, `putCharUnaligned`, `putByte`), bounds-checked
+  (`ArrayIndexOutOfBoundsException`).
+- **Field offsets** are keys into jrt's table of fields: `objectFieldOffset(Class, name)` finds
+  `F_name` in the class's Go struct type (through embedded superclasses), and records its Go
+  offset and how its Go type is accessed. The struct type comes from `RegisterGoType(C_class,
+  reflect.TypeFor[C]())`, which c2g calls for the classes whose fields reach
+  `objectFieldOffset` (A11).
+- **Access by representation**: `int32`/`atomic.Int32` and `int64`/`atomic.Int64` slots with
+  `sync/atomic`; a pointer slot (a leaf class, `String`, an array, or `atomic.Pointer[T]` for a
+  volatile one) with atomic pointer operations and the pointer type's type word; an `any` slot
+  (array elements) or another interface slot (`C_I`, through `reflect`) under one of 64 striped
+  locks keyed by the slot's address; a `Volatile` field through its own CAS. `float32` and
+  `int8` fields for `putFloat`/`putByte`.
+- **Fences** are an atomic operation (Go has no weaker one); `isBigEndian` is false on both
+  targets.
+
+## `System`, `Runtime` and the host (C2G-SPEC §9.4)
+
+**The host interface** is `jrt.Host`, one Go interface in `host.clj`: the standard streams,
+files (`Open` with `os.O_*` flags, `Stat`, `ReadDir`, `Remove`, `Mkdir`, `Rename`, `Getwd`),
+the clocks (`Now`, `Nanotime`), the environment (`Getenv`, `Environ`), the command line
+(`Args`), `NumCPU`, `RandomBytes` (for `SecureRandom`), embedded resources (`Resource`), and
+`Exit`. `OSHost` is B1a's, over `os`, `time` and `crypto/rand` (its `Resources` field takes an
+`fs.FS`, such as an `embed.FS`). `SetHost` swaps it (B1b's monitor calls; the tests capture the
+standard error and the exit code this way). jrt reaches the operating system nowhere else
+(phase 1's `os.Stderr` in `StderrPrint` is replaced at init); the timed waits use Go's runtime
+timers (`time.NewTimer`, deadlines from `time.Now`), which TamaGo's runtime provides too.
+
+**The standard streams** are `jrt.Stdin`, `Stdout`, `Stderr` (`*HostStream`): unbuffered byte
+streams over the host's, one lock each, with `Write`, `WriteString`, `Read`. `System.in`,
+`out` and `err` are `InputStream` and `PrintStream` fields, classes that are translated (or are
+2b's shims): when they exist, `System_err` and the others are defined over these streams, and
+`StderrPrint` (now writing to `Stderr`) goes through `System.err`, so that `setErr` redirects
+`printStackTrace`.
+
+**`System`**: `nanoTime` (the host's monotonic clock), `currentTimeMillis`, `getenv(String)`,
+`exit` (runs the `Runtime` shutdown hooks, then the host's `Exit`), `gc`, `lineSeparator`,
+`getProperty` (both), `setProperty`, `clearProperty` with Java's checks (`key can't be null`,
+`key can't be empty`), and `PropertyNames` for Go. The properties are made from the host on
+first use: `java.version` 26, `java.class.version` 70.0, `os.name` Linux, `os.arch` (`amd64`,
+`aarch64` as the JVM names it), separators, encodings UTF-8, `java.io.tmpdir`, `user.dir`,
+`user.home`, `user.name`. `System.getProperties()` and `getenv()` return translated classes
+(`Properties`, a `Map`) and come with them.
+
+**`Runtime`**: `getRuntime`, `availableProcessors` (the host's), `freeMemory`, `totalMemory`,
+`maxMemory` (Go's memory limit), `gc`, `exit`, `halt`, `addShutdownHook`. `Runtime.version()`
+waits for `Runtime$Version`.
+
+## Coverage of the edge
+
+The members the translated JDK classes call (`.tmp/jrt/edge.edn`), for phase 2a's classes:
+
+| class | edge | done | not done, and why |
+|---|---:|---:|---|
+| `Unsafe` | 39 | 38 | `objectFieldOffset(Field)` (`Random`'s `readObject`, serialization; needs 2b's `Field`, then one line over the `Class, String` form) |
+| `Thread` | 10 | 7 | `<init>(ThreadGroup, ...)`, `getThreadGroup`, `setContextClassLoader`: `ForkJoinWorkerThread`'s, with `ForkJoinPool` cut (`ThreadGroup` cut, `ClassLoader` reworked) |
+| `ThreadLocal`, `ThreadLocalRandom` | 2, 4 | 2, 3 | `ThreadLocalRandom.current()` (`BigInteger`'s primality tests): its superclass `Random` is translated |
+| `AtomicInteger`, `AtomicLong`, `AtomicReference` | 7, 5, 3 | all | |
+| `ReentrantLock`, `Condition`, `LockSupport` | 7, 3, 2 | all | |
+| `Reference`, `SoftReference`, `WeakReference` | 2, 2, 1 | all | |
+| `System` | 6 | 5 | `err` (a `PrintStream`: with that class) |
+| `Runtime` | 2 | 2 | |
+
+Arbace's own uses (JAVA-SURFACE.md) of these classes are all there but `Thread`'s context class
+loader, `Runtime.version()`, `Runtime.exec` (cut), `System.in`/`out`/`err`,
+`System.getProperties()` and `loadLibrary` (cut). `sun.misc.Signal` (the REPL's interrupt
+handler) is not in phase 2a.
+
+The manifest (`bin/jrt manifest`) now lists 29 more classes, among them the interfaces jrt
+writes (`Lock`, `Condition`, `Executor`, `ExecutorService`, `Future`, `ThreadFactory`,
+`Thread$UncaughtExceptionHandler`, `Thread$Builder$OfVirtual`), whose methods
+`test/jrt/manifest.clj` now reads from the Go interface types.
+
+**Stand-ins added** (`test/jrt/standins.clj`): `IllegalThreadStateException`,
+`ExecutionException`, `CancellationException` (which made `IllegalStateException` non-leaf),
+`TimeoutException`, `RejectedExecutionException`, and the interfaces `Runnable`, `Callable`,
+`Supplier`. `TimeUnit` is a hand-written stand-in (`standin_timeunit.clj`, an enum with
+`toNanos` and `toMillis`), as the generator writes exceptions and interfaces only.
+
+## Tests
+
+| test | what |
+|---|---|
+| `TestCurrentThreadPerGoroutine` | 100 goroutines: each its own adopted Thread, stable, daemon, `Thread-N`; distinct numbers below 2^22 |
+| `TestThreadStartJoin` | start, run, join, timed join, a second start, `setDaemon` after start, `toString`, names, priorities, ids |
+| `TestThreadLocal` | per-thread values in 8 threads, `remove`, `withInitial` (one `initialValue` per thread), `InheritableThreadLocal` |
+| `TestInterrupts` | interrupted `sleep`, `Object.wait`, `join` and `park`; the status set, read, cleared by `interrupted()` and by the exception |
+| `TestUncaughtExceptions` | the message without a handler (through a captured host), the thread's and the default handler, `printStackTrace` on the standard error |
+| `TestRunMain` | status 1 after an uncaught exception, the message, waiting for a non-daemon thread |
+| `TestThreadNumbersRecycled` | 2,000 sequential threads keep their numbers below 1,000 |
+| `TestVirtualThreads` | the builder's counted names, `isVirtual`, daemon only, a started virtual thread |
+| `TestAtomics` | 8 threads × 5,000: `incrementAndGet`, a `compareAndSet` loop on a long and on a reference (boxes), `AtomicBoolean` as a spin lock around a plain counter; identity CAS (an equal but different `String` does not match) |
+| `TestUnsafeFields` | a class as c2g writes one: CAS on int, long and volatile int fields under contention; pointer, `atomic.Pointer`, `any`, interface and `Volatile` fields; `putFloat`, `putByte`; a superclass's field through a subclass |
+| `TestUnsafeArrays` | `ConcurrentHashMap`'s `tabAt`/`casTabAt`/`setTabAt` arithmetic under contention (8 threads × 2,000 CAS increments of boxes in 16 slots: no lost update); unaligned reads, `putCharUnaligned`, `putByte`, bounds |
+| `TestReentrantLock` | 8 threads × 2,000 nested lock/unlock around a plain counter; `tryLock`, timed `tryLock`, an interrupted `lockInterruptibly`, `unlock` by a non-owner |
+| `TestCondition` | a bounded buffer (3 producers, 3 consumers, `notFull`/`notEmpty`); `awaitNanos` timing out with the hold count restored; an interrupted `await`; `signal` without the lock |
+| `TestReadWriteLock` | 8 threads mixing reads and writes (no reader inside a write), downgrading, a timed write lock against a reader, the read unlock's message |
+| `TestExecutors` | fixed pool (at most 3 at once, 3 threads, 20 futures), rejection after `shutdown`, `awaitTermination`; cached pool reusing one worker, `ExecutionException`, `TimeoutException`, `cancel(true)` interrupting the runner, `CancellationException`, a throwing `execute` task reported; per-task executor with named virtual threads |
+| `TestCountDownLatch` | 4 waiters released at zero, a timed await, a negative count |
+| `TestWeakReferences` | forced GCs: cleared and enqueued when unreachable, kept when reachable; the referent's type; `SoftReference`, `clear`, `enqueue`, timed `remove` |
+| `TestSystem` | properties and their checks, `nanoTime`, `currentTimeMillis`, `getenv`, `availableProcessors`, `exit` through the host after a shutdown hook, the host's standard error |
+
+Results (2026-10-08, `bin/jrt test`):
+
+| architecture | result | time (wall, with printing) |
+|---|---|---:|
+| linux/amd64 | 46 tests pass | 2.0 s (6.7 s) |
+| linux/arm64 (qemu-aarch64) | 46 tests pass | 17 s (22 s) |
+| linux/amd64 with `-race` | 46 tests pass | 21 s (28 s) |
+
+The concurrency tests also pass with `-count 5`, and under `-race` with `-cpu 1,2,8 -count 3`.
+(Phase 1's `TestClasses` defines a class by name and cannot run twice in one process.)
+
+## Measurements
+
+`bin/jrt test --arch amd64 -run X -bench ... -cpu 1 -benchmem`, AMD EPYC 7763, go1.27.1,
+`GOAMD64=v1`:
+
+| operation | ns/op | allocs |
+|---|---:|---:|
+| `Thread.currentThread()` (the slot) | 3.4 | 0 |
+| the current thread's number (phase 1's stopgap: 2,900) | 3.6 | 0 |
+| `MonitorEnter` + `MonitorExit`, uncontended (phase 1: 8,900) | 14.4 | 0 |
+| `ReentrantLock` lock + unlock, uncontended | 14.5 | 0 |
+| `ThreadLocal.get` | 9.4 | 0 |
+| `AtomicInteger.incrementAndGet` | 2.4 | 0 |
+| `AtomicReference.compareAndSet`, succeeding | 35 | 1 (the 16-byte box) |
+| `Unsafe.compareAndSetInt` on a field | 5.4 | 0 |
+| `Unsafe.compareAndSetReference` on an `Object[]` slot (striped lock) | 13.9 | 0 |
+| new `Thread`, `start`, `join` | 964 | 8 |
+
+The slot is as §13.3 measured (3.7 ns): the linknamed function is not inlined. An uncontended
+monitor is 14 ns rather than §8.1's estimate of about 10: two thread-number reads (7 ns) and two
+CAS on the header (the exit must CAS: another thread may inflate the word or set the identity
+hash meanwhile). Before taking the header by address it was 21 ns (an `Object_I` assertion and
+an interface call each way). The tabAt path of `ConcurrentHashMap` costs a striped lock per
+access (about 10 ns); a single-word representation of reference array slots would remove it,
+if profiles ask.
+
+## Decisions where the spec was silent
+
+- The interrupt status as a channel token, consumed by the waits that throw (above).
+- Thread numbers recycled, adopted goroutines' through `runtime.AddCleanup`.
+- `MonitorEnter`/`MonitorExit` take the header by address.
+- Locks over a mutex and gates rather than `sync.Mutex` alone (which has no owner, no timeout,
+  no interruption) or a translated `AbstractQueuedSynchronizer` (JAVA-SURFACE.md decision 4).
+- `SoftReference` strong; weak references through the header's address and the type word.
+- Unsafe's field offsets as table keys, array offsets as the JVM's numbers.
+- Executors' workers made by the factory, as Java's, so that Arbace's factories name them and
+  its threads are Java threads.
+
+## Proposed amendments (for the user's review)
+
+- **A11** (§9.2, §5.11): c2g calls `jrt.RegisterGoType(C_class, reflect.TypeFor[C]())` in its
+  init for every class whose fields reach `Unsafe.objectFieldOffset` (or every class, if
+  simpler); field offsets are keys of jrt's field table, array offsets the JVM's numbers (base
+  16, reference scale 4). A `Type` field of `ClassInfo` would serve as well, and reflection
+  (2b) may want it.
+- **A12** (§5.3): `AtomicInteger` and `AtomicLong` embed `Object`, with `Number`'s methods, until
+  the translated `Number` joins; then they embed it (`Number` is non-leaf, so they become
+  `Number_I` values).
+- **A13** (§8.4, §11): the threads API as implemented: `CurrentThread() *Thread` (the struct;
+  `Thread_CurrentThread__Thread()` is Java's, returning `Thread_I`), `RunMain(func()) int` for
+  §10.6's program entry, `Go(name, func()) *Thread`, `RunnableOf(func()) Runnable`,
+  `WaitNonDaemon()`; the interrupt token; `Thread_defaultHandler`.
+- **A14** (§9.4): the host interface as implemented (`Host`, `HostFile`, `HostFileInfo`,
+  `OSHost`, `SetHost`, `CurrentHost`, `Stdin`/`Stdout`/`Stderr`); `System.in`/`out`/`err` are
+  defined with `PrintStream`/`InputStream` over these streams.
+- **A15** (§9.3): the patched runtime files live in `overlay/go/runtime/` (a forms root of
+  their own, outside `go/`, whose package files `bin/g2c build` would otherwise collect), are
+  printed by `bin/jrt overlay`, and are checked against the toolchain by `bin/jrt overlay
+  --check`; BUILD.md's overlay section can name them.
+- **A16** (§8.1): `MonitorEnter`/`MonitorExit` require a Java object (the header at offset 0),
+  as c2g's output guarantees; the uncontended cost is about 14 ns, not 10.
+
+## Sources (phase 2a)
+
+- TamaGo's go1.27.1 tree (`/root/tamago-go`, https://github.com/usbarmory/tamago-go, `VERSION`
+  go1.27.1, 2026-08-28): `src/runtime/proc.go` (SHA-256 `94814182...67ca`, TamaGo's
+  `GOOS=tamago` changes over upstream's), `src/runtime/runtime2.go` (`7d66ed91...66da`, as
+  upstream's), converted as the overlay's forms; `src/weak`, `src/runtime/mcleanup.go`
+  (`AddCleanup`'s rules); the overlay experiment `.tmp/c2g-exp/gls/` (C2G-SPEC §13.3).
+- jdk26u (`/root/jdk26u`, `baf63fb`), `src/java.base/share/classes/`:
+  `jdk/internal/misc/Unsafe.java` (the members, `ARRAY_*` constants as `long` bases and `int`
+  scales), `java/lang/Thread.java` (messages, `toString`, daemon inheritance),
+  `java/lang/ThreadLocal.java`, `java/util/concurrent/ThreadLocalRandom.java` (`localInit`,
+  `advanceProbe`, `PROBE_INCREMENT`, `SEEDER_INCREMENT`), `java/util/concurrent/FutureTask.java`,
+  `java/util/concurrent/ThreadPoolExecutor.java` (rejection's message, a worker ending on an
+  exception), `java/util/concurrent/locks/ReentrantLock.java`,
+  `ReentrantReadWriteLock.java` (the non-fair reader rule), `AbstractQueuedSynchronizer.java`
+  (`await`'s interrupt modes), `java/util/concurrent/CountDownLatch.java`,
+  `java/lang/System.java` (`checkKey`'s messages); the translated classes' uses of `Unsafe` in
+  `.tmp/jrt/conv` (`ConcurrentHashMap`, `BufferedInputStream`, `BigInteger`, `BigDecimal`,
+  `HashMap`, `Random`, `ArraysSupport`, `DecimalDigits`).
