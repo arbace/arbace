@@ -23,6 +23,7 @@ The tools are Arbace's own code (EPL, standard library only):
 ```sh
 bin/g2c-check CANDIDATE                     # all of the corpus, three levels, tamago/amd64
 bin/g2c-check --arch arm64 CANDIDATE        # tamago/arm64
+bin/g2c-check --goos linux --arch arm64 CANDIDATE   # linux/arm64 (or --arch linux/arm64)
 bin/g2c-check --levels tree --only '^fmt$' CANDIDATE
 bin/g2c-check --reference OLD.edn CANDIDATE # fail only on regressions against OLD.edn
 bin/g2c-check --record REF.edn CANDIDATE    # also write the results as a reference
@@ -53,21 +54,22 @@ round trip keeps its references under `test/g2c/` (`bin/g2c roundtrip`,
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md)). The environment overrides the defaults:
 `G2C_GOROOT` (`/root/tamago-go`), `G2C_GOOS` (`tamago`), `G2C_GOARCH` (`amd64`), and
 `G2C_GOCMP_FLAGS` passes flags to gocmp. The driver runs every go command with
-`GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off`.
+`CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off`.
 
 `gocmp` alone:
 
 ```sh
 GOROOT=/root/tamago-go GOOS=tamago GOARCH=amd64 \
   gocmp [-levels tree,export,code] [-keep-positions] [-tests] A B
-GOOS=tamago GOARCH=amd64 gocmp tests [-v] $GOROOT/test
+GOOS=linux GOARCH=amd64 gocmp tests [-v] $GOROOT/test
 ```
 
 A is the original, a package directory or a program (a `.go` file, or `F.go,G.go,...`: files of
 one directory, the others named relative to F's) that the go command can build for the
 configuration in the environment; B is the candidate, a directory with a file of the same
 name for each of A's files for the configuration (other files in B are ignored), or the files
-of a program, spelled as A. With `-tests`, A is a package directory with its `_test.go` files
+of a program, spelled as A. gocmp sets `CGO_ENABLED=0` unless the environment sets it (on a
+linux host the go command would otherwise turn cgo on for `GOOS=linux`). With `-tests`, A is a package directory with its `_test.go` files
 (see "Test files" below). `gocmp tests` prints the corpus's test programs (below). The go command is `$GOCMP_GO`, else `$GOROOT/bin/go`, else `go`. The output gives, per
 level, `pass`, `fail` with the first difference (path to the node, the symbol or the export data
 element, with both sides' source or listing), `error` or `skip`, then a line
@@ -76,11 +78,21 @@ original does not build (export and code skipped). Its unit tests: `cd tools/goc
 
 ## The corpus and the configuration
 
-The configuration is `GOOS=tamago`, `GOARCH=amd64` or `arm64`, go1.27.1, TamaGo's toolchain at
-`/root/tamago-go` (`VERSION` go1.27.1, 2026-08-28), the decisions of the survey's §9.
+A configuration is `GOOS/GOARCH`: `tamago` or `linux`, `amd64` or `arm64`, cgo off
+(`CGO_ENABLED=0`), go1.27.1, TamaGo's toolchain at `/root/tamago-go` (`VERSION` go1.27.1,
+2026-08-28). `tamago` is the configuration of the survey's §9 (the box, B1b); `linux` that of
+B1a, the static executable (B1-PLAN.md, decided 2026-10-08). One toolchain serves both: TamaGo's
+tree differs from upstream go1.27.1 (the system `/usr/lib/go`, Alpine's package) outside `cmd`
+only by `tamago` build constraints, its own `*_tamago*` files, and the GOOS tables
+(`internal/goos`, `internal/syslist`, `internal/platform`), so for `linux` it compiles the same
+std as upstream, with the build cache and the converted tree shared with `tamago`.
 
 - **Packages:** every package of `go list std` (which leaves out `cmd`) with Go files for the
-  configuration: 373 of 379 on amd64, 372 on arm64. The six without Go files are test-only
+  configuration: for tamago 373 of 379 on amd64, 372 on arm64; for linux 376 of 382 on amd64,
+  374 of 380 on arm64 (linux adds `internal/cgrouptest`, `internal/runtime/syscall/linux` and,
+  on amd64, `runtime/race/internal/amd64v1`; its std has 1,834 Go files on amd64 against
+  tamago's 1,742: 173 files for linux only, the system calls, `os`, `net`, `internal/poll`,
+  `internal/syscall/unix` and the runtime's linux files, 81 for tamago only). The six without Go files are test-only
   (`crypto/internal/fips140test`, `embed/internal/embedtest`, `internal/copyright`,
   `internal/coverage/test`, `internal/runtime/wasitest`, `net/internal/cgotest`). The files
   compared are the package's `GoFiles` for the configuration (not its `_test.go` files).
@@ -91,7 +103,8 @@ The configuration is `GOOS=tamago`, `GOARCH=amd64` or `arm64`, go1.27.1, TamaGo'
   as the driver reads it, `//run` too) is `run`, `runoutput`, `build`, `buildrun`, `compile`
   or `asmcheck`, that need no other `GOEXPERIMENT` (`-goexperiment` on the action line), and
   that go/build matches for the configuration (build constraints and file name, cgo off):
-  1,707 on amd64, 1,702 on arm64. The extra files an action line names join the program
+  for tamago 1,707 on amd64, 1,702 on arm64; for linux 1,713 on amd64 (29 left out by their
+  build constraints or names, against tamago's 35), 1,707 on arm64. The extra files an action line names join the program
   (`cmplxdivide.go,cmplxdivide1.go`). Programs are compiled as the test driver compiles them,
   without `-complete` (`-gcflags=-complete=false` after the go command's own `-complete`), so
   that the 18 `compile` programs declaring functions without bodies build; the flag only
@@ -269,7 +282,9 @@ Candidates made without forms, on tamago/amd64 and tamago/arm64 (2026-10-08, 64 
 (packages + test programs passing, amd64; arm64 the same with 372 and 371 packages; the one
 package fewer at export and code is `unsafe`, skipped. With the corpus of `gocmp tests`, the
 same three candidates on amd64 pass 373 + 1,707, 372 + 1,707, 372 + 1,707, re-run
-2026-10-08.)
+2026-10-08.) For linux (2026-10-08) `reprint` and `canon` pass every entry at every level:
+376 + 1,713, 375 + 1,713, 375 + 1,713 on amd64, 374 + 1,707, 373 + 1,707, 373 + 1,707 on
+arm64.
 
 - **reprint** is `gocmp reprint`: each file parsed, its comments dropped except the directives,
   every position reset, printed again by `go/printer`, the directives put back before what they
@@ -311,7 +326,9 @@ same three candidates on amd64 pass 373 + 1,707, 372 + 1,707, 372 + 1,707, re-ru
   | const, seed 2 | 1,611 | 1,611 | 279 | 1,441 | 93 |
   | drop, seed 2 | 1,763 | 1,763 | 551 | 1,666 | 369 |
 
-  On arm64 (seed 1): swap 1,384/182/627, const 1,611/293/1,425, drop 1,763/563/1,670. The
+  On arm64 (seed 1): swap 1,384/182/627, const 1,611/293/1,425, drop 1,763/563/1,670. On
+  linux/amd64 (seed 1, mutated/export/code): swap 1,387/182/614, const 1,614/295/1,428, drop
+  1,770/557/1,677, every mutant caught by the tree level. The
   rest (entries without a site) have no binary expression, integer literal or droppable
   statement. Export catches what changes the package's interface or an inlinable body; code
   misses what compiles the same: swapped operands of commutative operators, constants and
@@ -321,8 +338,9 @@ same three candidates on amd64 pass 373 + 1,707, 372 + 1,707, 372 + 1,707, re-ru
 Timings (64 cores): a run over the whole corpus at three levels takes about 10 s with a warm
 build cache, 56 s from an empty one (the cache grows by about 1.5 GB: the standard library
 compiled with `-d=syncframes=0`, and each package's two canonical compiles). The first run for
-a new configuration takes about a minute (it also finds the test programs that compile). `--make reprint` takes
-2.4 s; `--mutations` 30 to 40 s for its three operations.
+a new configuration takes about a minute (it also finds the test programs that compile): 49 s
+for linux/amd64 and 46 s for linux/arm64 (2026-10-08), 10 to 11 s after. `--make reprint` takes
+2.4 s; `--mutations` 30 to 45 s for its three operations.
 
 ## Known gaps
 
@@ -347,6 +365,15 @@ a new configuration takes about a minute (it also finds the test programs that c
 - **The code level** compares gc's `-S` listing, not the object file: the object's own
   metadata (header, build ID, symbol indexes) and what the linker makes of it (dead code
   elimination, final addresses) are not compared, and DWARF only under the canonical layout.
+- **The build cache's replay.** The go command prints a cached compile's `-S` listing from
+  the build cache, and prints nothing, silently, when that entry is missing
+  (`cmd/go/internal/work/buildid.go`, `showStdout`). Two programs (`chanlinear.go`,
+  `maplinear.go`, linux/amd64, 2026-10-08) were found with compiles cached without their
+  output: both sides listed nothing, and the code level passed vacuously. gocmp now compiles a
+  side again under a fresh cache key when a package's listing is empty (each file with a
+  comment appended, which changes no position or code), and reports `error` if it is still
+  empty. Re-run with the guard, every entry of the four configurations' round trips has
+  non-empty listings and passes.
 - **gc's own nondeterminism** under equal positions (above) is avoided by the layout, not
   excluded in general: a difference that comes and goes between two runs of the same comparison
   would be gc's.

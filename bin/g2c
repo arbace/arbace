@@ -9,30 +9,34 @@
 #   bin/g2c read [--jobs N] [--quiet] FILE|DIR...
 #                                 read dumps with Arbace's reader (arbace.g2c.read), print a
 #                                 summary; needs a prior bin/build-arbace
-#   bin/g2c corpus [amd64|arm64|test|test-arm64|tests]...
-#                                 dump $GOROOT/src outside cmd (std) for tamago/amd64 and
-#                                 tamago/arm64, $GOROOT/test's single-file programs (the
-#                                 oracle's list, bin/g2c-check --list-tests) for amd64 (test)
-#                                 and arm64 (test-arm64, not by default), and (tests, not by
-#                                 default) std for tamago/amd64 with its _test.go files
-#                                 (godump -tests), into .tmp/godump/corpus/, then read every
-#                                 dump on Arbace
-#   bin/g2c convert [--full] [--tests] [--out DIR] PKG...
-#                                 dump the packages (godump [-tests]) into .tmp/g2c/dumps, then
+#   bin/g2c corpus [CORPUS]...
+#                                 dump a corpus into .tmp/godump/corpus/CORPUS, then read every
+#                                 dump on Arbace. CORPUS is [GOOS-]WHAT, GOOS tamago (the
+#                                 default, no prefix) or linux, WHAT one of: amd64, arm64 (std
+#                                 outside cmd for GOOS/ARCH), test, test-arm64 ($GOROOT/test's
+#                                 single-file programs, the oracle's list, bin/g2c-check
+#                                 --list-tests, for amd64 or arm64), tests (std for GOOS/amd64
+#                                 with its _test.go files, godump -tests). Default: amd64 arm64
+#                                 test. E.g. linux-amd64, linux-test-arm64. cgo is off.
+#   bin/g2c convert [--full] [--tests] [--goos GOOS] [--goarch ARCH] [--out DIR] PKG...
+#                                 dump the packages (godump [-tests], for GOOS/ARCH, default
+#                                 tamago/amd64) into .tmp/g2c/dumps, then
 #                                 convert them to Go forms (arbace.g2c.main) under DIR (default
 #                                 .tmp/g2c/forms/pkgs), each file read back and checked
-#   bin/g2c convert [--full] --corpus amd64|arm64|test|tests
+#   bin/g2c convert [--full] --corpus CORPUS
 #                                 convert a corpus of `bin/g2c corpus` (dumped first if missing)
 #                                 into .tmp/g2c/forms/CORPUS[-full]; report in
 #                                 .tmp/g2c/forms/CORPUS[-full].report.edn
-#   bin/g2c roundtrip [amd64|arm64] [--record]
+#   bin/g2c roundtrip [[GOOS/]ARCH] [--goos GOOS] [--record]
 #                                 the round trip: convert std and $GOROOT/test's programs for
-#                                 tamago/ARCH (default amd64), print the forms
-#                                 (arbace.g2c.print) into the candidate .tmp/g2c/cand-ARCH, and
+#                                 GOOS/ARCH (default tamago/amd64; GOOS tamago or linux, ARCH
+#                                 amd64 or arm64), print the forms (arbace.g2c.print) into the
+#                                 candidate .tmp/g2c/cand-ARCH (tamago) or cand-GOOS-ARCH, and
 #                                 compare with bin/g2c-check against the reference
-#                                 test/g2c/roundtrip-ARCH.edn: exits non-zero on a regression
-#                                 (an entry and level passing there and not now). --record
-#                                 writes the results as the new reference. --tests: std for
+#                                 test/g2c/roundtrip-ARCH.edn (tamago) or
+#                                 roundtrip-GOOS-ARCH.edn: exits non-zero on a regression (an
+#                                 entry and level passing there and not now). --record writes
+#                                 the results as the new reference. --tests: std for
 #                                 tamago/amd64 with its _test.go files (corpus tests) into
 #                                 .tmp/g2c/cand-tests, checked with g2c-check --with-tests,
 #                                 reference test/g2c/roundtrip-tests.edn, known differences
@@ -41,7 +45,8 @@
 #   bin/g2c test                  the converter's tests (test/g2c/convert_test.clj and the spec's
 #                                 examples, test/g2c/convert/)
 #
-# Environment: G2C_GOROOT, the TamaGo Go tree (go1.27.1, default /root/tamago-go);
+# Environment: G2C_GOROOT, the TamaGo Go tree (go1.27.1, default /root/tamago-go), also for
+# linux (its std differs from upstream's only by build constraints and GOOS tables);
 # G2C_JVM_OPTS, the JVM's heap options for read (default -Xmx16g).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -90,39 +95,60 @@ test_programs() {
   "$root/bin/g2c-check" --arch "$1" --list-tests
 }
 
+# corpus_config CORPUS: sets cgoos, cwhat (amd64, arm64, test, test-arm64, tests) and carch
+corpus_config() {
+  cgoos=tamago
+  cwhat=$1
+  case $1 in
+    tamago-*) cwhat=${1#tamago-} ;;
+    linux-*) cgoos=linux; cwhat=${1#linux-} ;;
+  esac
+  case $cwhat in
+    amd64|test|tests) carch=amd64 ;;
+    arm64|test-arm64) carch=arm64 ;;
+    *) echo "corpus: [linux-]amd64, arm64, test, test-arm64 or tests, not $1" >&2; return 2 ;;
+  esac
+}
+
+# corpus_name GOOS WHAT: the corpus's directory name (tamago's without a prefix)
+corpus_name() {
+  if [ "$1" = tamago ]; then echo "$2"; else echo "$1-$2"; fi
+}
+
 corpus() {
-  local what out t0 t1
+  local what out t0 t1 cgoos cwhat carch name
   build
   [ $# -gt 0 ] || set -- amd64 arm64 test
   mkdir -p "$work/corpus"
   for what in "$@"; do
-    out=$work/corpus/$what
+    corpus_config "$what"
+    name=$(corpus_name "$cgoos" "$cwhat")
+    out=$work/corpus/$name
     rm -rf "$out"
     t0=$(date +%s.%N)
-    case $what in
+    case $cwhat in
       amd64|arm64)
-        godump -goarch "$what" -o "$out" std > "$out.tsv" || true ;;
+        godump -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
       tests)
-        godump -tests -goarch amd64 -o "$out" std > "$out.tsv" || true ;;
+        godump -tests -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
       test|test-arm64)
-        local tarch=amd64
-        [ "$what" = test-arm64 ] && tarch=arm64
-        test_programs "$tarch" > "$work/corpus/$what-programs.txt"
-        (cd "$goroot/test" && xargs -a "$work/corpus/$what-programs.txt" \
-           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goarch "$tarch" -files -o "$out") \
+        G2C_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
+        (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
+           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
           > "$out.tsv" || true ;;
-      *) echo "corpus: amd64, arm64, test, test-arm64 or tests, not $what" >&2; return 2 ;;
     esac
     t1=$(date +%s.%N)
-    awk -F'\t' -v what="$what" -v secs="$(echo "$t1 - $t0" | bc)" '
+    awk -F'\t' -v what="$name" -v secs="$(echo "$t1 - $t0" | bc)" '
       { n[$1]++ } $1 == "ok" || $1 == "errors" { files += $3; bytes += $4 } $4 > max { max = $4; big = $2 }
       END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed, %d excluded by the configuration), %d files, %.1f MB (largest %s, %.1f MB), %.1f s\n",
             what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"], n["excluded"], files, bytes / 1e6, big, max / 1e6, secs }' "$out.tsv"
     grep -v -P '^(ok|excluded)\t' "$out.tsv" || true
   done
   for what in "$@"; do
-    echo "reading $what on Arbace:"
-    read_dumps --jobs "$(nproc)" --quiet "$work/corpus/$what"
+    corpus_config "$what"
+    name=$(corpus_name "$cgoos" "$cwhat")
+    echo "reading $name on Arbace:"
+    read_dumps --jobs "$(nproc)" --quiet "$work/corpus/$name"
   done
 }
 
@@ -134,7 +160,7 @@ convert_main() {
 }
 
 convert() {
-  local full="" tests="" out="" corpus="" print="" jobs
+  local full="" tests="" out="" corpus="" print="" jobs cfg=()
   jobs=${G2C_JOBS:-$(( $(nproc) / 2 ))}
   while [ $# -gt 0 ]; do
     case $1 in
@@ -143,10 +169,15 @@ convert() {
       --out) out=$2; shift 2 ;;
       --corpus) corpus=$2; shift 2 ;;
       --print) print=$2; shift 2 ;;
+      --goos) cfg+=(-goos "$2"); shift 2 ;;
+      --goarch) cfg+=(-goarch "$2"); shift 2 ;;
       *) break ;;
     esac
   done
   if [ -n "$corpus" ]; then
+    local cgoos cwhat carch
+    corpus_config "$corpus"
+    corpus=$(corpus_name "$cgoos" "$cwhat")
     local dumps=$work/corpus/$corpus
     [ -d "$dumps" ] || corpus "$corpus"
     out=${out:-$root/.tmp/g2c/forms/$corpus${full:+-full}}
@@ -159,28 +190,34 @@ convert() {
     local dumps=$root/.tmp/g2c/dumps
     rm -rf "$dumps"
     mkdir -p "$dumps"
-    godump $tests -o "$dumps" "$@" > "$dumps.tsv" || true
+    godump $tests ${cfg[@]+"${cfg[@]}"} -o "$dumps" "$@" > "$dumps.tsv" || true
     out=${out:-$root/.tmp/g2c/forms/pkgs}
     convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" $full ${print:+--print "$print"} "$dumps"
   fi
 }
 
 roundtrip() {
-  local arch=amd64 record="" tests=test cand ref t0 t1 t2 status with_tests="" check
+  local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix
   while [ $# -gt 0 ]; do
     case $1 in
       amd64|arm64) arch=$1; shift ;;
+      tamago/amd64|tamago/arm64|linux/amd64|linux/arm64) goos=${1%/*}; arch=${1#*/}; shift ;;
+      --goos) goos=$2; shift 2 ;;
       --record) record=1; shift ;;
       --tests) with_tests=1; shift ;;
-      *) echo "roundtrip: [amd64|arm64] [--tests] [--record], not $1" >&2; return 2 ;;
+      *) echo "roundtrip: [[GOOS/]amd64|arm64] [--goos tamago|linux] [--tests] [--record], not $1" >&2; return 2 ;;
     esac
   done
-  [ "$arch" = arm64 ] && tests=test-arm64
-  cand=$root/.tmp/g2c/cand-$arch
-  ref=$root/test/g2c/roundtrip-$arch.edn
-  check=("$root/bin/g2c-check" --arch "$arch")
+  case $goos in
+    tamago) prefix= ;;
+    linux) prefix=linux- ;;
+    *) echo "roundtrip: GOOS tamago or linux, not $goos" >&2; return 2 ;;
+  esac
+  cand=$root/.tmp/g2c/cand-$prefix$arch
+  ref=$root/test/g2c/roundtrip-$prefix$arch.edn
+  check=("$root/bin/g2c-check" --goos "$goos" --arch "$arch")
   if [ -n "$with_tests" ]; then
-    [ "$arch" = amd64 ] || { echo "roundtrip --tests: amd64 only (the corpus tests)" >&2; return 2; }
+    [ "$goos/$arch" = tamago/amd64 ] || { echo "roundtrip --tests: tamago/amd64 only (the corpus tests)" >&2; return 2; }
     cand=$root/.tmp/g2c/cand-tests
     ref=$root/test/g2c/roundtrip-tests.edn
     check+=(--with-tests --no-tests --known "$root/test/g2c/roundtrip-tests-known.edn")
@@ -190,8 +227,10 @@ roundtrip() {
   if [ -n "$with_tests" ]; then
     convert --corpus tests --print "$cand" || true
   else
-    convert --corpus "$arch" --print "$cand" || true
-    convert --corpus "$tests" --print "$cand" || true
+    local tests=test
+    [ "$arch" = arm64 ] && tests=test-arm64
+    convert --corpus "$prefix$arch" --print "$cand" || true
+    convert --corpus "$prefix$tests" --print "$cand" || true
   fi
   t1=$(date +%s.%N)
   status=0
@@ -204,7 +243,7 @@ roundtrip() {
     "${check[@]}" "$cand" || status=$?
   fi
   t2=$(date +%s.%N)
-  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$arch${with_tests:+ with tests}" \
+  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$goos/$arch${with_tests:+ with tests}" \
     "$(echo "$t1 - $t0" | bc)" "$(echo "$t2 - $t1" | bc)"
   return $status
 }
