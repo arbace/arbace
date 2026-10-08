@@ -73,8 +73,10 @@ The current state of the work. This file is rewritten as things change. For the 
      Clojure's full overload matching, and the `SecurityManager` import.
   4. Done: benchmarks against Clojure 1.12.6 ([BENCHMARKS.md](BENCHMARKS.md)), the GitHub
      Actions gate (only on `arbace-for-java-26` and by hand), and the freeze kit
-     ([FREEZE.md](FREEZE.md), `bin/freeze`). Open lead: `reduce`/transducer/transient
-     benchmarks run 15-60% slower than Clojure; cause not found.
+     ([FREEZE.md](FREEZE.md), `bin/freeze`). The 15-60% slowdowns of `reduce`,
+     transducers and transients came from the AOT cache's method profiles; the cache is now
+     trained without them (2026-10-08). Open: `into` through a transducer 1.31x (javac 26's
+     baseline too) and `apply str` 1.16x.
 - The freeze itself, waiting for the user's confirmation: have the gate pass on the main commit,
   then `bin/freeze --yes` creates and pushes `arbace-for-java-26` and the tag
   `arbace-for-java-26-v1` (the README's section advertising it is on main).

@@ -86,17 +86,18 @@ workflow caches the test libraries and uploads the suite logs when a step fails.
 
 ## Benchmark summary
 
-From `doc/BENCHMARKS.md` (2026-10-07, Arbace `e311a30`, JDK 26.0.2.1, a quiet 64-core
+From `doc/BENCHMARKS.md` (2026-10-08, Arbace `fc77cba`, JDK 26.0.2.1, a quiet 64-core
 machine; ratios against Clojure 1.12.6 on the same JDK, below 1 is faster):
 
-- **Startup**: `bin/arbace -e 1` 184 ms against 571 ms, a REPL session 417 ms against
-  1,070 ms. The gain is the JDK AOT cache that Arbace builds and uses by default; Clojure 1.12.6
-  given a cache trained the same way starts as fast (190 ms).
+- **Startup**: `bin/arbace -e 1` 201 ms against 558 ms, a REPL session 457 ms against
+  1,039 ms. The gain is the JDK AOT cache that Arbace builds and uses by default; Clojure 1.12.6
+  given a cache trained the same way starts as fast (202 ms). The cache holds classes, not
+  method profiles: profiles from the short training session made long hot loops 15-60 %
+  slower.
 - **Steady state**, 33 benchmarks: un-hinted interop about 580x faster (`invokedynamic`
-  reflective sites), multi-argument `str` about 10x, keyword lookups 20-33 % faster. Most of
-  the rest is equal within the noise. **Slower**: `into []` through a transducer 1.61x,
-  `(reduce + v)` over a vector 1.17x, `conj!` into a transient vector 1.15x; the cause is not
-  found (the bytecode of the hot paths matches javac's but for a few bytes). Without the two
+  reflective sites), multi-argument `str` about 10x, keyword lookups on maps 24 % faster. Most
+  of the rest is equal within the noise. **Slower**: `into []` through a transducer 1.31x (as
+  for the frozen baseline compiled by javac 26; bimodal), `apply str` 1.16x. Without the two
   10x outliers, the geometric mean is 0.98 (the frozen baseline: 0.96).
 
 ## Known limits and open ends at the freeze
@@ -122,7 +123,7 @@ machine; ratios against Clojure 1.12.6 on the same JDK, below 1 is faster):
 - `bin/vendor-arbace` no longer reproduces `arbace/` where hand changes apply; the hand changes
   are recorded one by one in `doc/VENDOR-NOTES.md`.
 - Performance: `doc/BENCHMARKS.md`, "Reading the results", lists where Arbace is slower than
-  Clojure 1.12.6 (vector reduction and transient building, 15-60 %).
+  Clojure 1.12.6 (`into` through a transducer 1.31x, `apply str` 1.16x; causes open).
 
 ## What changes on main after the break
 

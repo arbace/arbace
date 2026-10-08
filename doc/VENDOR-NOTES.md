@@ -201,6 +201,10 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   class path at creation, hence the jar. It is tied to the JDK build, the jar (path, size, mtime)
   and the JVM options (e.g. compact headers), so every build remakes it; it is not compared
   between stages (it is not reproducible and holds nothing of Arbace's own making).
+  Since 2026-10-08 it holds no method profiles: the training run passes
+  `-XX:-AOTRecordTraining`. With the profiles (JEP 515) the JIT trusted those of the short
+  training session, and long hot loops (`into` with a transducer, `conj!`) ran 15-30% slower;
+  without them a short REPL session warms up about 40 ms slower, and startup is unchanged.
 - **`bin/arbace`** runs `arbace.lang.Main` from the jar with `-XX:+UseCompactObjectHeaders`
   (JEP 519; also used for the training run, since the cache must match), and with
   `-XX:AOTCache=target/arbace.aot` when the cache is newer than the jar. If the JVM rejects the

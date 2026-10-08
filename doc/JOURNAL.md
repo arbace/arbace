@@ -1090,3 +1090,36 @@ recommended:
   `arbace-for-java-26-v1`, pinned by hash, as stage 0 of the bootstrap.
 - The alternative, a pinned fetch of upstream `98d735fab02f` plus the recorded patches, is not
   taken. `clojure/` stays on `arbace-for-java-26` for good.
+
+## 2026-10-08: The AOT cache is trained without method profiles
+
+- At the user's request, the main session looked into the slowdowns that the benchmarks
+  (2026-10-07) left unexplained: `into-xform` 1.61x, `reduce-vector` 1.17x,
+  `vector-transient` 1.15x against Clojure 1.12.6.
+- Found: the steady-state runs of Arbace used its JDK AOT cache, and Clojure's did not. The
+  cache held method profiles from the training run (JEP 515, the default of
+  `-XX:AOTCacheOutput`), and the JIT trusted them. Focused check (4 interleaved rounds, 4 s
+  of warm-up; the three benchmarks in µs): profiled cache about 930 / 390 / 855; the same cache
+  with `-XX:+UnlockDiagnosticVMOptions -XX:-AOTReplayTraining` about 745 / 380 / 680; no cache
+  about 745 / 380 / 680; Clojure 1.12.6 about 530-730 / 390 / 635.
+- The remaining gap of `vector-transient` (about 10 % in some forks) was looked at too:
+  `TransientVector.conj`, `pushTail` and `newPath` are 195, 95 and 32 bytes against javac's
+  190, 92 and 31, and `-XX:+PrintInlining` shows the same decisions; it reads as JIT path
+  noise, and the full rerun shows it even (1.00x).
+- Options put to the user: train without profiles; keep them and add long hot loops to
+  `test/aot-training.clj` (keeps the warm-up gain, but guesswork for untrained paths); keep as
+  is and document. **The user chose to train without profiles.** `bin/arbace --aot-train` (and
+  so `bin/build-arbace` and `bin/arbace-image`) passes `-XX:+UnlockDiagnosticVMOptions
+  -XX:-AOTRecordTraining`; `bin/arbace-bench` trains its `clojure-aot` cache the same way. The
+  cache is 2 MB smaller (39.4 MB), startup is unchanged (0.18-0.20 s for the jar and the
+  image), and a short REPL session warms up about 40 ms slower.
+- The full benchmark run was repeated (`--forks 5`, 05:34-06:50 UTC, load 1-7) and
+  `doc/BENCHMARKS.md` rewritten from it, with a section on the profiles; `doc/FREEZE.md`'s
+  summary follows. Now `reduce-vector` 0.99x and `vector-transient` 1.00x; still slower:
+  `into-xform` 1.31x (bimodal, and the frozen baseline compiled by javac 26 is as slow, so not
+  the class forms compiler) and `str-apply` 1.16x (1.00x with the profiles). The profiles had
+  helped `keyword-record` (0.80x, now 1.00x). Geometric means unchanged: 0.75, and 0.98
+  without the two 10x outliers.
+- Per the user, the gate is not run for this change: it runs at the freeze on the final main
+  commit. Checked: the build and the image with the new training (`bin/build-arbace`,
+  `bin/arbace-image`), and the benchmark run.
