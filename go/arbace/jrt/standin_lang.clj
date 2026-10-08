@@ -609,6 +609,70 @@
     (when (not ok) (panic (ClassCast x NumberFormatException_class)))
     v))
 
+;; ---- java.nio.charset.UnsupportedCharsetException
+
+(go/type UnsupportedCharsetException (struct IllegalArgumentException))
+(go/var UnsupportedCharsetException_class
+  (Define (addr (lit ClassInfo :Name "java.nio.charset.UnsupportedCharsetException" :Kind KindClass :Modifiers AccPublic
+                     :Super IllegalArgumentException_class :Go "arbace/jrt.UnsupportedCharsetException"))))
+(go/func UnsupportedCharsetException_New_String ^{:tag (* UnsupportedCharsetException)} [^{:tag (* String)} s]
+  (let [t (addr (lit UnsupportedCharsetException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* UnsupportedCharsetException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-IllegalArgumentException t) t s))
+(go/method Ref ^any [^{:tag (* UnsupportedCharsetException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* UnsupportedCharsetException)} t] UnsupportedCharsetException_class)
+(go/method Clone__O ^any [^{:tag (* UnsupportedCharsetException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* UnsupportedCharsetException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* UnsupportedCharsetException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* UnsupportedCharsetException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* UnsupportedCharsetException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* UnsupportedCharsetException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* UnsupportedCharsetException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* UnsupportedCharsetException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* UnsupportedCharsetException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* UnsupportedCharsetException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* UnsupportedCharsetException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* UnsupportedCharsetException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* UnsupportedCharsetException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func UnsupportedCharsetException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* UnsupportedCharsetException) x)] ok))
+(go/func UnsupportedCharsetException_Cast ^{:tag (* UnsupportedCharsetException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* UnsupportedCharsetException) x)]
+    (when (not ok) (panic (ClassCast x UnsupportedCharsetException_class)))
+    v))
+
+;; ---- java.nio.charset.IllegalCharsetNameException
+
+(go/type IllegalCharsetNameException (struct IllegalArgumentException))
+(go/var IllegalCharsetNameException_class
+  (Define (addr (lit ClassInfo :Name "java.nio.charset.IllegalCharsetNameException" :Kind KindClass :Modifiers AccPublic
+                     :Super IllegalArgumentException_class :Go "arbace/jrt.IllegalCharsetNameException"))))
+(go/func IllegalCharsetNameException_New_String ^{:tag (* IllegalCharsetNameException)} [^{:tag (* String)} s]
+  (let [t (addr (lit IllegalCharsetNameException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* IllegalCharsetNameException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-IllegalArgumentException t) t s))
+(go/method Ref ^any [^{:tag (* IllegalCharsetNameException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* IllegalCharsetNameException)} t] IllegalCharsetNameException_class)
+(go/method Clone__O ^any [^{:tag (* IllegalCharsetNameException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* IllegalCharsetNameException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* IllegalCharsetNameException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* IllegalCharsetNameException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* IllegalCharsetNameException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* IllegalCharsetNameException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* IllegalCharsetNameException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* IllegalCharsetNameException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* IllegalCharsetNameException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* IllegalCharsetNameException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* IllegalCharsetNameException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* IllegalCharsetNameException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* IllegalCharsetNameException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func IllegalCharsetNameException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* IllegalCharsetNameException) x)] ok))
+(go/func IllegalCharsetNameException_Cast ^{:tag (* IllegalCharsetNameException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* IllegalCharsetNameException) x)]
+    (when (not ok) (panic (ClassCast x IllegalCharsetNameException_class)))
+    v))
+
 ;; ---- java.lang.IllegalStateException
 
 (go/type IllegalStateException (struct RuntimeException))
@@ -889,6 +953,150 @@
   (when (== x nil) (return nil))
   (let [(values v ok) (assert (* ClassNotFoundException) x)]
     (when (not ok) (panic (ClassCast x ClassNotFoundException_class)))
+    v))
+
+;; ---- java.lang.NoSuchMethodException
+
+(go/type NoSuchMethodException (struct ReflectiveOperationException))
+(go/var NoSuchMethodException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.NoSuchMethodException" :Kind KindClass :Modifiers AccPublic
+                     :Super ReflectiveOperationException_class :Go "arbace/jrt.NoSuchMethodException"))))
+(go/func NoSuchMethodException_New ^{:tag (* NoSuchMethodException)} []
+  (let [t (addr (lit NoSuchMethodException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* NoSuchMethodException)} t]
+  (.Ctor (.-ReflectiveOperationException t) t))
+(go/func NoSuchMethodException_New_String ^{:tag (* NoSuchMethodException)} [^{:tag (* String)} s]
+  (let [t (addr (lit NoSuchMethodException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* NoSuchMethodException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-ReflectiveOperationException t) t s))
+(go/method Ref ^any [^{:tag (* NoSuchMethodException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* NoSuchMethodException)} t] NoSuchMethodException_class)
+(go/method Clone__O ^any [^{:tag (* NoSuchMethodException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* NoSuchMethodException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* NoSuchMethodException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* NoSuchMethodException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* NoSuchMethodException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* NoSuchMethodException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* NoSuchMethodException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* NoSuchMethodException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* NoSuchMethodException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* NoSuchMethodException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* NoSuchMethodException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* NoSuchMethodException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* NoSuchMethodException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func NoSuchMethodException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* NoSuchMethodException) x)] ok))
+(go/func NoSuchMethodException_Cast ^{:tag (* NoSuchMethodException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* NoSuchMethodException) x)]
+    (when (not ok) (panic (ClassCast x NoSuchMethodException_class)))
+    v))
+
+;; ---- java.lang.NoSuchFieldException
+
+(go/type NoSuchFieldException (struct ReflectiveOperationException))
+(go/var NoSuchFieldException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.NoSuchFieldException" :Kind KindClass :Modifiers AccPublic
+                     :Super ReflectiveOperationException_class :Go "arbace/jrt.NoSuchFieldException"))))
+(go/func NoSuchFieldException_New ^{:tag (* NoSuchFieldException)} []
+  (let [t (addr (lit NoSuchFieldException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* NoSuchFieldException)} t]
+  (.Ctor (.-ReflectiveOperationException t) t))
+(go/func NoSuchFieldException_New_String ^{:tag (* NoSuchFieldException)} [^{:tag (* String)} s]
+  (let [t (addr (lit NoSuchFieldException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* NoSuchFieldException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-ReflectiveOperationException t) t s))
+(go/method Ref ^any [^{:tag (* NoSuchFieldException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* NoSuchFieldException)} t] NoSuchFieldException_class)
+(go/method Clone__O ^any [^{:tag (* NoSuchFieldException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* NoSuchFieldException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* NoSuchFieldException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* NoSuchFieldException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* NoSuchFieldException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* NoSuchFieldException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* NoSuchFieldException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* NoSuchFieldException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* NoSuchFieldException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* NoSuchFieldException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* NoSuchFieldException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* NoSuchFieldException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* NoSuchFieldException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func NoSuchFieldException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* NoSuchFieldException) x)] ok))
+(go/func NoSuchFieldException_Cast ^{:tag (* NoSuchFieldException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* NoSuchFieldException) x)]
+    (when (not ok) (panic (ClassCast x NoSuchFieldException_class)))
+    v))
+
+;; ---- java.lang.IllegalAccessException
+
+(go/type IllegalAccessException (struct ReflectiveOperationException))
+(go/var IllegalAccessException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.IllegalAccessException" :Kind KindClass :Modifiers AccPublic
+                     :Super ReflectiveOperationException_class :Go "arbace/jrt.IllegalAccessException"))))
+(go/func IllegalAccessException_New ^{:tag (* IllegalAccessException)} []
+  (let [t (addr (lit IllegalAccessException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* IllegalAccessException)} t]
+  (.Ctor (.-ReflectiveOperationException t) t))
+(go/func IllegalAccessException_New_String ^{:tag (* IllegalAccessException)} [^{:tag (* String)} s]
+  (let [t (addr (lit IllegalAccessException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* IllegalAccessException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-ReflectiveOperationException t) t s))
+(go/method Ref ^any [^{:tag (* IllegalAccessException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* IllegalAccessException)} t] IllegalAccessException_class)
+(go/method Clone__O ^any [^{:tag (* IllegalAccessException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* IllegalAccessException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* IllegalAccessException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* IllegalAccessException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* IllegalAccessException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* IllegalAccessException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* IllegalAccessException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* IllegalAccessException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* IllegalAccessException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* IllegalAccessException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* IllegalAccessException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* IllegalAccessException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* IllegalAccessException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func IllegalAccessException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* IllegalAccessException) x)] ok))
+(go/func IllegalAccessException_Cast ^{:tag (* IllegalAccessException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* IllegalAccessException) x)]
+    (when (not ok) (panic (ClassCast x IllegalAccessException_class)))
+    v))
+
+;; ---- java.lang.InstantiationException
+
+(go/type InstantiationException (struct ReflectiveOperationException))
+(go/var InstantiationException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.InstantiationException" :Kind KindClass :Modifiers AccPublic
+                     :Super ReflectiveOperationException_class :Go "arbace/jrt.InstantiationException"))))
+(go/func InstantiationException_New ^{:tag (* InstantiationException)} []
+  (let [t (addr (lit InstantiationException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* InstantiationException)} t]
+  (.Ctor (.-ReflectiveOperationException t) t))
+(go/func InstantiationException_New_String ^{:tag (* InstantiationException)} [^{:tag (* String)} s]
+  (let [t (addr (lit InstantiationException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* InstantiationException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-ReflectiveOperationException t) t s))
+(go/method Ref ^any [^{:tag (* InstantiationException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* InstantiationException)} t] InstantiationException_class)
+(go/method Clone__O ^any [^{:tag (* InstantiationException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* InstantiationException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* InstantiationException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* InstantiationException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* InstantiationException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* InstantiationException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* InstantiationException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* InstantiationException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* InstantiationException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* InstantiationException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* InstantiationException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* InstantiationException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* InstantiationException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func InstantiationException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* InstantiationException) x)] ok))
+(go/func InstantiationException_Cast ^{:tag (* InstantiationException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* InstantiationException) x)]
+    (when (not ok) (panic (ClassCast x InstantiationException_class)))
     v))
 
 ;; ---- java.lang.LinkageError
@@ -1363,6 +1571,8 @@
   (set! (.-IsInstance (.Info NegativeArraySizeException_class)) NegativeArraySizeException_InstanceOf)
   (set! (.-IsInstance (.Info IllegalArgumentException_class)) IllegalArgumentException_InstanceOf)
   (set! (.-IsInstance (.Info NumberFormatException_class)) NumberFormatException_InstanceOf)
+  (set! (.-IsInstance (.Info UnsupportedCharsetException_class)) UnsupportedCharsetException_InstanceOf)
+  (set! (.-IsInstance (.Info IllegalCharsetNameException_class)) IllegalCharsetNameException_InstanceOf)
   (set! (.-IsInstance (.Info IllegalStateException_class)) IllegalStateException_InstanceOf)
   (set! (.-IsInstance (.Info IllegalMonitorStateException_class)) IllegalMonitorStateException_InstanceOf)
   (set! (.-IsInstance (.Info UnsupportedOperationException_class)) UnsupportedOperationException_InstanceOf)
@@ -1370,6 +1580,10 @@
   (set! (.-IsInstance (.Info InterruptedException_class)) InterruptedException_InstanceOf)
   (set! (.-IsInstance (.Info ReflectiveOperationException_class)) ReflectiveOperationException_InstanceOf)
   (set! (.-IsInstance (.Info ClassNotFoundException_class)) ClassNotFoundException_InstanceOf)
+  (set! (.-IsInstance (.Info NoSuchMethodException_class)) NoSuchMethodException_InstanceOf)
+  (set! (.-IsInstance (.Info NoSuchFieldException_class)) NoSuchFieldException_InstanceOf)
+  (set! (.-IsInstance (.Info IllegalAccessException_class)) IllegalAccessException_InstanceOf)
+  (set! (.-IsInstance (.Info InstantiationException_class)) InstantiationException_InstanceOf)
   (set! (.-IsInstance (.Info LinkageError_class)) LinkageError_InstanceOf)
   (set! (.-IsInstance (.Info ExceptionInInitializerError_class)) ExceptionInInitializerError_InstanceOf)
   (set! (.-IsInstance (.Info NoClassDefFoundError_class)) NoClassDefFoundError_InstanceOf)

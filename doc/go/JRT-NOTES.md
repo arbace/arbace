@@ -550,3 +550,382 @@ when profiles show exceptions on hot paths.
 - The JVM oracle's notes ([ORACLE.md](ORACLE.md), "What the Go side should know"); the edge
   ([JRT-SOURCES.md](JRT-SOURCES.md)); the prototype `.tmp/c2g-proto/` (its `jrt.clj`, whose
   header, `Lit`, `Catch` and `ClassInit` this generalizes).
+
+# Phase 2b: reflection and the remaining shims
+
+B1a step 3, phase 2b (branch `jrt-reflect`, 2026-10-08; phase 2a, threads, concurrency,
+`Unsafe`, `System` and the host, is a parallel branch): reflection over the member tables, the
+member-table format c2g generates, and the edge's remaining shims (charsets, locales, `Date`,
+`ClassLoader`), as hand-written Go forms in new files of `go/arbace/jrt/`.
+
+State: the package builds and passes `go vet` for linux/amd64 and linux/arm64; all its tests
+pass on amd64, on arm64 under `qemu-aarch64` and under the race detector. Phase 2b adds 6 Go
+tests and 1,423 differential cases computed by the JVM. Every edge member of the classes it owns
+is implemented; what the edge still lacks is phase 2a's or c2g's (Coverage).
+
+## Structure (phase 2b)
+
+| path | what |
+|---|---|
+| `reflect.clj` | the tables' value convention (`As`, `Box`, `Unbox`); `AccessibleObject`, `Executable`, `Method`, `Constructor`, `Field`, `Member`, `InvocationHandler`, `Proxy`; `Class`'s reflective methods (`getMethods` ... `forName(name, init, loader)`); `AdaptFn`; the `Class` objects of `Math`, `StrictMath`, `StringLatin1`, `StringUTF16`, `ThrowableTracer`, `foreign.Utils`; `Math.PI`, `E`, `TAU` |
+| `reflect_array.clj` | `java.lang.reflect.Array` (phase 1 had `newInstance(Class, int)`) |
+| `reflect_tables.clj` | **generated** (`test/jrt/tables.clj`): the member tables of jrt's hand-written classes, as c2g writes tables |
+| `classloader.clj` | `ClassLoader` (minimal), the application and platform loaders; `jdk.internal.foreign.Utils.checkNonNegativeArgument` |
+| `charset.clj` | `Charset`, `sun.nio.cs.Unicode`, `UTF_8`, `ISO_8859_1`, `US_ASCII`, `StandardCharsets`, `String`'s `Charset` overloads |
+| `locale.clj` | `Locale`, `Locale.Category`, `DecimalFormatSymbols`, `LocaleProviderAdapter`, `LocaleResources`, `ResourceBundleBasedAdapter`, `String`'s `Locale` overloads |
+| `date.clj` | `java.util.Date` |
+| `standin_reflect.clj` | **generated** (`test/jrt/standins_reflect.clj`): stand-ins for the wrapper classes (`Number`, `Boolean`, `Character`, `Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`, `Void`), `java.lang.reflect.Type` and `InvocationTargetException` |
+| `reflect_test.clj`, `shims_test.clj` | the tests |
+| `test/jrt/testdata_reflect.clj` | the differential data: `reflect.txt`, `charsets.txt`, `locales.txt`, `dates.txt` (made by `jrt.testdata` with the others) |
+
+Hand-written forms: about 2,000 lines, tests 950; generated 1,700 (`reflect_tables.go` prints
+as 1,200 lines of Go: 487 methods, 38 constructors, 18 fields).
+
+Changes to phase 1's files, each small:
+
+- `codec.clj`: `charsetOf` looks names up through `lookupCharset` (JDK 26's names and aliases;
+  phase 1's list had `DEFAULT`, `US_ASCII` and `ISO-LATIN-1`, which JDK 26 rejects, and lacked
+  some aliases).
+- `test/jrt/standins.clj`: six more exceptions (`NoSuchMethodException`,
+  `NoSuchFieldException`, `IllegalAccessException`, `InstantiationException`,
+  `UnsupportedCharsetException`, `IllegalCharsetNameException`).
+- `test/jrt/manifest.clj`: the new classes; interfaces' methods count as defined; a method a
+  hand-written class inherits from the hand-written superclass its struct embeds counts as
+  defined (Go promotes it: `Method.getParameterTypes` is `Executable`'s); an interface's
+  member is referred to as `(method-expr J M)`; `Class` implements `java.lang.reflect.Type`.
+- `test/jrt/testdata.clj` calls `jrt.testdata-reflect`; `bin/jrt standins` and `bin/jrt
+  manifest` run the two new generators; `jrt.clj` lists the new files.
+
+## The member tables (normative for c2g)
+
+Per class, c2g's `c2g_classes.go` sets `C_class.Info()`'s `Methods`, `Ctors` and `Fields` in an
+`init` function (A1), with the types of `class.clj`, unchanged from phase 1:
+
+```clojure
+(go/type MethodInfo (struct ^string Name ^{:tag (slice (* Class))} Params ^{:tag (* Class)} Return
+                            ^int32 Modifiers ^{:tag (func [any (slice any)] [any])} Invoke))
+(go/type CtorInfo (struct ^{:tag (slice (* Class))} Params ^int32 Modifiers
+                          ^{:tag (func [(slice any)] [any])} New))
+(go/type FieldInfo (struct ^string Name ^{:tag (* Class)} Type ^int32 Modifiers
+                           ^{:tag (func [any] [any])} Get ^{:tag (func [any any])} Set))
+```
+
+**Which members.** Every public member the class declares (methods, constructors, fields,
+static or not), bridges and synthetic methods included; and, for the classes in c2g's list of
+declared members (C2G-SPEC §16 Q13), every member it declares. A member appears once, in the
+table of the class that declares it; jrt computes inheritance (`getMethods` merges as
+`java.lang.PublicMethods` does). The order is the table's (the JVM's is unspecified); jrt's
+own tables sort by name and descriptor. Interfaces list their abstract, default and static
+methods and their constants. An enum's `values`, `valueOf` and constants are ordinary members.
+
+**Fields of an entry.**
+
+- `Name`: the Java name (`"charAt"`; constructors have none).
+- `Params`, `Return`, `Type`: `Class` objects, as expressions valid at `init`: `Prim_int` ...
+  `Prim_void`, `C_class`, `(.ArrayClass X)` for arrays. `Params` is nil for no parameters.
+- `Modifiers`: the JVM's access flags as `getModifiers` reports them: for methods
+  `ACC_BRIDGE` (0x40), `ACC_VARARGS` (0x80) and `ACC_SYNTHETIC` (0x1000) included, which
+  `isBridge`, `isVarArgs` and `isSynthetic` read; `native` as the class file has it; for
+  fields `ACC_ENUM` and `ACC_SYNTHETIC` too. `toString` masks them as the JDK does.
+- `Invoke`, `New`, `Get`, `Set`: Go function literals, **in the tables' value convention**
+  (below). `Set` is nil for a final field (`Field.set` throws `IllegalAccessException`). `New`
+  is nil for an abstract class (`newInstance` throws `InstantiationException` anyway).
+  `Invoke` is never nil as c2g writes it; jrt throws `AbstractMethodError` for a nil one.
+
+**The value convention** (A11). Invokers take and return values in their Go representation
+(§5.1), not boxed:
+
+- a primitive as the Go value of its type: `bool`, `int8`, `uint16`, `int16`, `int32`,
+  `int64`, `float32`, `float64`; `void` as nil;
+- a reference as itself (`any`; nil for null).
+
+jrt converts before calling: it checks the receiver (instance methods: `NullPointerException`
+for null, `IllegalArgumentException("object of type X is not an instance of C")`), the argument
+count (`"wrong number of arguments: n expected: m"`), and each argument: a primitive parameter
+gets `Unbox` (unboxing, then widening, JLS 5.1.2; null or anything else is
+`IllegalArgumentException`), a reference parameter an instance check (`"argument type
+mismatch"`). It boxes a primitive result with `Box` (the wrappers' `valueOf`, with their
+caches). So an invoker is one call:
+
+```clojure
+;; String.charAt(int), an instance method of a leaf class
+(lit MethodInfo :Name "charAt" :Params (lit (slice (* Class)) Prim_int) :Return Prim_char :Modifiers 0x1
+     :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CharAt_I__C (assert (* String) this) (assert int32 (aget args 0)))))
+;; a static method: the receiver is ignored
+(lit MethodInfo :Name "valueOf" :Params (lit (slice (* Class)) Object_class) :Return String_class :Modifiers 0x9
+     :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (String_ValueOf_O__String (aget args 0))))
+;; void: the call, then nil
+(lit MethodInfo :Name "printStackTrace" :Return Prim_void :Modifiers 0x1
+     :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PrintStackTrace__V (assert Throwable_I this)) nil))
+(lit CtorInfo :Params (lit (slice (* Class)) String_class) :Modifiers 0x1
+     :New (fn ^any [^{:tag (slice any)} args] (String_New_String ((inst As (* String)) (aget args 0)))))
+(lit FieldInfo :Name "PI" :Type Prim_double :Modifiers 0x19 :Get (fn ^any [^any o] Math_PI))
+(lit FieldInfo :Name "id" :Type Prim_int :Modifiers 0x1
+     :Get (fn ^any [^any o] (.-F_id (.Self_Base (assert Base_I o))))
+     :Set (fn [^any o ^any v] (set! (.-F_id (.Self_Base (assert Base_I o))) (assert int32 v))))
+```
+
+- The receiver is asserted to the class's Go type: `(* C)` for a leaf, `C_I` for a non-leaf
+  class, `J` for an interface. The call is the method's ordinary call, so it dispatches
+  virtually: `Base.name`'s `Method` invoked on a `Square` runs `Square`'s override.
+- A primitive argument is `(assert T (aget args i))`; a reference argument
+  `((inst jrt/As T) (aget args i))`, which maps nil to T's zero value; an `Object` argument is
+  `(aget args i)` itself.
+- A default method's invoker is the interface call; a static method of an interface `J` calls
+  `J_M...`; a bridge's invoker calls the bridge's own Go method.
+- A static field's `Get`/`Set` read and write the package variable `C_f` (or the constant);
+  jrt runs `C_Init` before a static field access and before `newInstance` (`ClassInfo.Init`).
+
+jrt's own tables (`reflect_tables.clj`) are generated exactly so by `test/jrt/tables.clj` from
+the manifest; `reflect_test.clj` writes a small hierarchy (an interface with a constant, a
+default and a static method, an abstract class with overloads and a protected method, a leaf
+with a covariant override and its bridge, a varargs static) as c2g would.
+
+## Reflection: what is implemented
+
+The members Arbace's `Reflector`, `Compiler` (its interop analysis, `FISupport`,
+`NewInstanceExpr.gatherMethods`), `RT`, `core` and the translated JDK call
+(`java-surface.edn`'s runtime and REPL groups, the edge):
+
+- **`Class`**: `getMethods`, `getMethod` (the most specific return type among same-signature
+  methods, as `getMethod` picks over a bridge), `getDeclaredMethods`, `getDeclaredMethod`,
+  `getFields` (the class's, then its superinterfaces' recursively, then its superclass's),
+  `getField`, `getDeclaredFields`, `getDeclaredField`, `getConstructors`, `getConstructor`,
+  `getDeclaredConstructors`, `getDeclaredConstructor`, `getDeclaringClass`, `getEnclosingClass`,
+  `isMemberClass`, `getTypeName`, `getCanonicalName`, `getPackageName`, `isSynthetic`,
+  `isAnnotationPresent`, `getGenericInterfaces`, `getGenericSuperclass`, `getEnumConstants`,
+  `getClassLoader`, `forName(String, boolean, ClassLoader)`; phase 1's `getName`,
+  `getSimpleName`, `getSuperclass`, `getInterfaces`, `isInterface`, `isArray`,
+  `getComponentType`, `isPrimitive`, `isAssignableFrom`, `isInstance`, `cast`, `getModifiers`,
+  `forName(String)`. `NoSuchMethodException` and `NoSuchFieldException` carry the JVM's
+  messages (`java.lang.String.nope(int,java.lang.String)`, `C.<init>(int)`, the field's name).
+  `getMethods` is computed once per class (a `sync.Map`); each call returns new `Method`
+  objects, as the JVM's copies.
+- **`Method`**: `invoke` (above; an exception the method throws, Go run-time errors mapped as
+  `Catch` maps them, becomes an `InvocationTargetException`), `getName`, `getModifiers`,
+  `getDeclaringClass`, `getParameterTypes`, `getParameterCount`, `getReturnType`,
+  `getExceptionTypes` (empty), `isBridge`, `isVarArgs`, `isSynthetic`, `isDefault`, `toString`
+  (the JVM's text without the throws clause), `toGenericString` (the same), `equals`,
+  `hashCode`, and `AccessibleObject`'s `setAccessible`, `trySetAccessible`, `isAccessible`,
+  `canAccess` (true), `isAnnotationPresent` (false).
+- **`Constructor`**: `newInstance` (`InstantiationException` for an abstract class), the same
+  accessors; **`Field`**: `get`, `set` (the JVM's `Can not set [static] [final] T field C.f to
+  X` messages, `null value`, `IllegalAccessException` for a final field), `getType`,
+  `isEnumConstant`, `toString`.
+- **`java.lang.reflect.Array`**: `get`, `set`, the eight `getX` and `setX`, `getLength`,
+  `newInstance(Class, int...)`, with HotSpot's order of checks and messages (`Argument is not
+  an array`, `Argument is not an array of primitive type`, `argument type mismatch`, `array
+  element type mismatch`, an `ArrayIndexOutOfBoundsException` without message).
+- **`Modifier`** is plain Java and translated (the closure has `Modifier.java`); jrt keeps its
+  `Acc...` constants.
+- **`InvocationHandler`** is an interface; **`Proxy.newProxyInstance`** throws
+  `UnsupportedOperationException`: classes cannot be made at run time. `Reflector.boxArg`'s
+  adaptation of an `IFn` to a functional interface goes through `jrt.AdaptFn(c, f)`, which is
+  `ClassInfo.FromFn` (A13).
+- **`ClassLoader`**: the application loader (`getSystemClassLoader`, `getClassLoader` of
+  Arbace's classes) and the platform loader (its parent); `loadClass` reads the registry
+  without initializing. `getResource*` are the host's (phase 2a).
+
+Arbace's `Reflector` itself is tested in Go (`rGetMethods`, `rMatch`: its `getMethods`,
+`isCongruent`, `paramArgTypeMatch` and `Compiler.subsumes`, transcribed): arity, staticness,
+the bridge set aside, interface methods with `Object`'s added, overloads by argument class
+(`over(String)` over `over(Object)` for a String).
+
+## Charsets, locales, dates
+
+**Charsets.** `Charset.forName` (with `Charset.lookup`'s checks: `Null charset name`,
+`IllegalCharsetNameException` for an illegal name, `UnsupportedCharsetException` for an unknown
+one), `forName(name, fallback)`, `isSupported`, `defaultCharset` (UTF-8, JEP 400), `name`,
+`displayName`, `aliases` (as Go strings), `contains`, `canEncode`, `isRegistered`, `equals`,
+`hashCode`, `compareTo`, `toString`; the classes `sun.nio.cs.UTF_8` (extending `Unicode`),
+`ISO_8859_1`, `US_ASCII` with their `INSTANCE`s; `StandardCharsets.UTF_8`, `ISO_8859_1`,
+`US_ASCII`; `new String(byte[], Charset)`, `new String(byte[], int, int, Charset)`,
+`getBytes(Charset)` over phase 1's coding. jrt has these three charsets only (V9);
+`StandardCharsets.UTF_16*` are left out. Encoders, decoders and buffers (`java.nio`) are cut.
+
+**Locales** (root locale data only, as decided for `Formatter`):
+
+- `Locale`: `ROOT`, `ENGLISH`, `US`, `UK`, `of` and the deprecated constructors (language
+  lower case, country upper case), `getLanguage`, `getCountry`, `getVariant`, `toString`,
+  `toLanguageTag` (`und`, a malformed variant as `x-lvariant-V`), `equals`, `hashCode`
+  (BaseLocale's), `clone`.
+- **The default locale is `en_US`** (`getDefault()`, `getDefault(Category)`): `Formatter`
+  takes its `Locale.US` path for grouping, which needs no `DecimalFormat` (cut), and a JVM
+  started in an English, US environment has the same default.
+- `Locale.Category` is an enum (`DISPLAY`, `FORMAT`).
+- `DecimalFormatSymbols`: the root locale's symbols (`0 , . - % ‰ # ; ∞ NaN E`), the currency
+  `$`/`USD` for the United States and `¤`/`XXX` otherwise.
+- `LocaleProviderAdapter.getAdapter`, `getResourceBundleBased`, `getLocaleResources` and
+  `LocaleResources.getNumberPatterns` (`#,##0.###`, `¤ #,##0.00`, `#,##0%`) exist for
+  `Formatter`'s declarations; the path that uses them needs `DecimalFormat`, which is cut.
+- `String.toLowerCase(Locale)` and `toUpperCase(Locale)` apply the root locale's mapping for
+  every locale: no Turkish, Azerbaijani or Lithuanian rules (a deviation for those locales,
+  which jrt cannot name in the JDK's way anyway).
+
+**`Date`** (the user's decision: `#inst` over a small `Date` on Go's `time`):
+
+- `Date()`, `Date(long)`, the deprecated `Date(y, m, d[, h, mi[, s]])`, `getTime`, `setTime`,
+  `before`, `after`, `equals`, `hashCode`, `compareTo`, `clone`, `toString` (`Thu Jan 01
+  00:00:00 GMT 1970`), `toGMTString`, the deprecated getters `getYear` ... `getSeconds`,
+  `getDay`, `getTimezoneOffset` (0) and `Date.UTC`.
+- The default time zone is GMT, so the deprecated getters and `Date.UTC` are UTC.
+- The calendar is Java's: Julian before the cutover 1582-10-15, Gregorian from it.
+  - `Date.UTC` normalizes as jdk26u's `Date.normalize` does: out-of-range fields count on,
+    the year's calendar is chosen first and the other one when the result falls across the
+    cutover, the year 1582 as `GregorianCalendar` (Gregorian when the date is on or after
+    the cutover, else Julian).
+  - Printed years are years of the era (`toString` of 1 BC prints 1).
+- **What the `arbace.instant` rework needs** (a Go-build variant, c2g's, later):
+  - **Reading** `#inst`: the regex and `validated` as they are, then `Date.UTC(years - 1900,
+    months - 1, days, hours, minutes, seconds)`, minus the offset (sign × (hours × 60 +
+    minutes) × 60,000), plus nanoseconds ÷ 10^6. This equals the JVM's
+    `GregorianCalendar` construction (tested on 15 timestamps, the cutover's included).
+  - **Printing** (`print-method`, `print-dup` of `Date`): `#inst "yyyy-MM-ddTHH:mm:ss.SSS-00:00"`
+    from `getYear() + 1900` (zero-padded to 4 digits; already the year of the era), `getMonth()
+    + 1`, `getDate`, `getHours`, `getMinutes`, `getSeconds`, and `getTime()` mod 1000
+    (floored). `Date.InstantText` (Go) is the same text, for jrt's own use.
+  - The `Calendar` and `Timestamp` readers and printers are cut: `read-instant-calendar` and
+    `read-instant-timestamp` are dropped by the variant.
+  - `ThreadLocal`, `SimpleDateFormat`, `TimeZone` and `GregorianCalendar` are no longer
+    needed by it.
+
+## Coverage of the edge
+
+Phase 2b's classes, the members the translated JDK calls (`.tmp/jrt/edge.edn`), all
+implemented:
+
+| class | edge | done |
+|---|---:|---:|
+| `Class` | 9 | 8 (`getResourceAsStream`: the host, phase 2a) |
+| `reflect.Array` | 1 | 1 (and the 20 Arbace uses) |
+| `Charset`, `sun.nio.cs.UTF_8`, `ISO_8859_1` | 2, 1, 1 | all |
+| `String` (`Charset` and `Locale` overloads) | 4 | 4 |
+| `Locale`, `Locale$Category` | 6, 1 | all |
+| `DecimalFormatSymbols` | 6 | 6 |
+| `LocaleProviderAdapter`, `LocaleResources`, `ResourceBundleBasedAdapter` | 3, 1, class | all |
+| `Date` | 1 (`<init>()`) | 1 |
+| `ClassLoader` (rework) | 1 (`getSystemClassLoader`) | 1 |
+| `jdk.internal.foreign.Utils` | 1 | 1 |
+
+`bin/jrt manifest` reports 7 edge members of the hand-written classes undefined, none of them
+phase 2b's: `Class.getResourceAsStream`, `System.err`, `getProperty`, `lineSeparator`,
+`nanoTime` (phase 2a), `String.format` (after c2g, over the translated `Formatter`),
+`String.lines` (`Stream`: cut).
+
+Arbace's reflective uses (`java-surface.edn`, runtime and REPL): all of `Class`'s 23 and 19
+except `getAnnotation`, `getModule`, `getPackage`, `getNestHost`, `getRecordComponents`,
+`getTypeParameters` (annotations, modules and generics are cut, §12); all of `Method`'s,
+`Executable`'s, `Field`'s, `Constructor`'s and `Array`'s except `Method.getAnnotation` (used for
+`WarnBoxedMath`: the `Compiler` variant drops it), `getGenericParameterTypes` and
+`getTypeParameters`.
+
+**The rework items** (JRT-SOURCES.md):
+
+- `ClassLoader`: minimal, above.
+- `VarHandle` and `MethodHandles.byteArrayViewVarHandle` (`jdk.internal.util.ByteArray`,
+  `ByteArrayLittleEndian`): no jrt code; c2g's variants of the two classes write the
+  accesses as shifts.
+- `SerializedLambda` (`$deserializeLambda$` of `Comparator`, `Map`, `TreeMap`),
+  `ConstantDescs` and `DynamicConstantDesc` (`describeConstable` of the wrappers): unreached,
+  so c2g's reachability pass stubs the methods and the references disappear (the user's
+  decision for the closure); no jrt code.
+- `ObjectMethods.bootstrap` (a record's `equals`, `hashCode`, `toString`): c2g generates them
+  (§7.13); no jrt code.
+
+**Left to phase 2a** (the host and `SharedSecrets`): `SecureRandom` (seeded by the host),
+`JavaObjectInputStreamAccess.checkArray` and `JavaUtilCollectionAccess` (with
+`SharedSecrets`), `PrintStream`, `OutputStreamWriter`, `FileOutputStream`, `File`. `System`'s
+`Class` object `System_class` is also 2a's: once it exists, `bin/jrt manifest` generates
+`System`'s member table.
+
+**`Objects`, `Arrays`** are translated (both in the closure): no jrt code.
+
+## Tests (phase 2b)
+
+| test | what |
+|---|---|
+| `TestReflectLookups` | the hand-written hierarchy: `getMethods`' merge (overrides, the bridge, the default method, an interface's static method not inherited, `Object`'s methods), `getMethod`'s choice of the covariant method over the bridge, `getDeclaredMethods` with a protected member, `Reflector`'s `getMethods` and `matchMethod`, varargs and modifiers, `getFields`' order, constructors, `Method.equals` |
+| `TestReflectInvoke` | 23 cases: virtual dispatch through a superclass's and an interface's `Method`, a default method, widening (`Integer` to `long`, `Short` to `int`), mismatches, null arguments, a static varargs method, receivers of another class and null, a Go run-time error wrapped in `InvocationTargetException`, constructors (widening, a thrown exception, an abstract class), fields (widening, final, null, another class, statics, an interface's constant) |
+| `TestBoxing` | `Box`'s caches, `Unbox`'s widenings and refusals |
+| `TestClassLoaders` | the loaders, `loadClass`, `getClassLoader`, `forName` of an array class, `checkNonNegativeArgument` |
+| `TestReflectAgainstJVM` | 279 cases of `reflect.txt`: `getMethods` of 17 jrt classes (the signatures the JVM lists that jrt's tables hold), `getMethod`, `getConstructor`, `getField`, `getFields`, `getConstructors` (their `toString`), 61 `Method.invoke`, `newInstance`, `Field.get`/`set`, `Class`'s names, modifiers, loaders and enum constants, 38 `Array` operations |
+| `TestCharsetsAgainstJVM` | 148 cases: names and aliases, the checks, encoding and decoding (malformed input), `Charset`'s methods |
+| `TestLocalesAgainstJVM` | 113 cases: `Locale`'s methods, the default, `DecimalFormatSymbols`, case mapping |
+| `TestDatesAgainstJVM` | 883 cases: 536 instants (fixed ones around the cutover, years 1 BC to 292,278,994, the extremes of `long`, 500 random) each with `toString`, `toGMTString`, the getters, `hashCode`, the `#inst` text (`InstantText` and the getters' composition); 332 `Date.UTC` (the cutover, overflowing fields, 300 random); 15 `#inst` readings through `Date.UTC` |
+
+The JVM's helpful `NullPointerException` messages are accepted as the bare class (A6). The
+JVM's charset `UTF-16` is skipped (V9).
+
+Results (2026-10-08), the whole package: linux/amd64 2.0 s, linux/arm64 under `qemu-aarch64`
+17 s, linux/amd64 with `-race`: all pass.
+
+## Decisions (phase 2b)
+
+- **Boxing lives in jrt, not in the invokers** (A11): one `Unbox` and one `Box` instead of a
+  conversion per parameter of every generated invoker, and the evaluator can call an invoker
+  with Go values directly (no boxing on hinted interop).
+- **The wrappers are stand-ins** (`standin_reflect.clj`) until c2g translates jdk26u's
+  `Integer` and the others; jrt's `Box`/`Unbox` use their final names (`F_value`,
+  `Integer_ValueOf_I__Integer`), and `valueOf` caches as jdk26u's do, so that
+  `(identical? (Integer/valueOf 5) (Integer/valueOf 5))` holds through reflection too.
+- **Annotations**: none kept, except that `Class.isAnnotationPresent(FunctionalInterface)` is
+  answered by `ClassInfo.FromFn != nil`, which `Compiler.FISupport.maybeFIMethod` needs.
+- **`getExceptionTypes` is empty** and `toString` has no throws clause: `NewInstanceExpr`'s
+  `exclasses` only feed the class writer, which the evaluator does not have.
+- **`getGenericInterfaces`** returns the interfaces as `Class` objects in a `Type[]`; generic
+  types are cut, so `HashMap.comparableClassFor` finds no `ParameterizedType` and orders tree
+  bins of comparable keys by `tieBreakOrder`, not `compareTo` (iteration order unchanged).
+- **`Proxy`** is unsupported; `AdaptFn` replaces it for functional interfaces.
+- **Access** is not checked: the tables hold what Clojure may reach; `canAccess` is true,
+  `setAccessible` records a flag, a final field's `Set` is nil.
+- **`Object`'s table** lists its 9 public methods and its protected `clone` (a declared member
+  `NewInstanceExpr.gatherMethods` offers `deftype` and `reify`).
+
+## Proposed amendments (phase 2b, for the user's review)
+
+- **A11** (§5.11): the tables' value convention above: invokers take and return Go
+  representations; jrt's `Method.invoke`, `Constructor.newInstance` and `Field.get`/`set` unbox
+  and widen arguments and box results. §5.11's "boxing as Field.get/set do" in the invokers is
+  replaced. `Invoke` is never nil; `Set` is nil for final fields; `New` nil for abstract classes.
+- **A12** (§5.11): the normative format of "The member tables": the modifiers as
+  `getModifiers` reports them (bridge, varargs, synthetic, native kept), `Params` nil for no
+  parameters, class expressions valid at `init`, one entry per member in its declaring class's
+  table.
+- **A13** (§5.11, §10.1): `Proxy.newProxyInstance` throws `UnsupportedOperationException`; the
+  `Reflector` variant's `boxArg` calls `jrt.AdaptFn(paramType, arg)` (the interface's
+  `FromFn`) instead. c2g sets `FromFn` on every interface `Compiler.FISupport` may adapt (the
+  `@FunctionalInterface` ones), and `isAnnotationPresent(FunctionalInterface)` reads it.
+- **A14** (§11, A5): jrt's new API names: `As`, `Box`, `Unbox`, `AdaptFn`, `Method.Info`,
+  `Constructor.Info`, `Field.Info`, `Charset.Aliases`, `Date.InstantText`; the classes of the
+  structure table; `Math_PI`, `Math_E`, `Math_TAU` (and `StrictMath`'s) as constants.
+- **A15** (§16 Q13): c2g's list of classes whose declared members the tables hold, so far:
+  `java.util.Random` (`getDeclaredField("seed")`, with phase 2a's `Unsafe`). `Object`'s
+  protected `clone` is jrt's.
+- **A16** (§12): `getExceptionTypes` empty, `Method.toString` without throws clause, no
+  annotations but `FunctionalInterface` through `FromFn`, generic reflection returning plain
+  `Class` objects.
+- **A17** (JAVA-SURFACE.md decision 2): the default locale is `en_US` with the root locale's
+  data, and `String`'s `Locale` overloads use the root mapping for every locale.
+- **A18** (V9): jrt's charsets are UTF-8, ISO-8859-1 and US-ASCII; `Charset.forName` throws
+  `UnsupportedCharsetException` for the others.
+- **A19** (A9): `standin_reflect.clj` (the wrappers, `Type`, `InvocationTargetException`)
+  joins the stand-in files deleted when c2g's output joins the build.
+
+## Sources (phase 2b)
+
+- jdk26u (`/root/jdk26u`, openjdk/jdk26u at `baf63fb`), `src/java.base/share/classes/`:
+  `java/lang/PublicMethods.java` (`MethodList.merge`), `java/lang/Class.java`
+  (`privateGetPublicMethods`, `getMethod`'s search, `methodToString`, the field search),
+  `java/lang/reflect/Executable.java` (`sharedToString`), `Method.java`, `Field.java`,
+  `Modifier.java` (`toString`, `methodModifiers`), `InvocationTargetException.java`,
+  `jdk/internal/reflect/DirectMethodHandleAccessor.java` and
+  `DirectConstructorHandleAccessor.java` (the argument checks' messages),
+  `FieldAccessorImpl.java` (`getSetMessage`), `java/util/Date.java` (`normalize`, `UTC`,
+  `toString`, `toGMTString`, `getCalendarSystem`), `java/util/GregorianCalendar.java`
+  (`computeTime`'s cutover rule), `java/util/Locale.java`, `sun/util/locale/BaseLocale.java`
+  (`hashCode`), `java/util/Formatter.java` (its locale uses),
+  `jdk/internal/foreign/Utils.java`.
+- The JVM (JDK 26 as Arbace runs on it) for the differential data: charset aliases, locale
+  hash codes and tags, `DecimalFormatSymbols`, the reflection messages, the `#inst` texts.
+- Arbace: `arbace/lang/Reflector.clj`, `Compiler.clj` (`FISupport`, `QualifiedMethodExpr`,
+  `NewInstanceExpr.gatherMethods`, `subsumes`), `arbace/instant.clj`.

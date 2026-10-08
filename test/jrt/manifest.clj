@@ -77,7 +77,12 @@
     (reduce
       (fn [acc d]
         (case (name (first d))
-          "type" (update acc :types into (names-of d))
+          "type" (let [body (last d)
+                       t (str (second d))]
+                   (cond-> (update acc :types into (names-of d))
+                     ;; an interface's methods, as [T M] (interfaces jrt hand-writes)
+                     (and (seq? body) (= 'interface (first body)))
+                     (update :methods into (for [x (rest body) :when (seq? x)] [t (str (first x))]))))
           "method" (let [[_ m & xs] d
                          params (first (filter vector? xs))
                          recv (first params)]
@@ -97,7 +102,7 @@
   [["java.lang.String" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence"] false]
    ["java.lang.StringBuilder" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.Appendable"] false]
    ["java.lang.StringBuffer" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.Appendable"] false]
-   ["java.lang.Class" ["java.io.Serializable"] false]
+   ["java.lang.Class" ["java.io.Serializable" "java.lang.reflect.Type"] false]
    ["java.lang.Throwable" ["java.io.Serializable"] true]
    ["java.lang.StackTraceElement" ["java.io.Serializable"] false]
    ["java.lang.Enum" ["java.lang.Comparable" "java.io.Serializable"] true]
@@ -108,7 +113,31 @@
    ["java.lang.reflect.Array" [] false]
    ["java.lang.StringLatin1" [] false]
    ["java.lang.StringUTF16" [] false]
-   ["jdk.internal.event.ThrowableTracer" [] false]])
+   ["jdk.internal.event.ThrowableTracer" [] false]
+   ;; phase 2b: reflection, class loaders, charsets, locales, dates
+   ["java.lang.reflect.AccessibleObject" [] true]
+   ["java.lang.reflect.Executable" ["java.lang.reflect.Member"] true]
+   ["java.lang.reflect.Method" [] false]
+   ["java.lang.reflect.Constructor" [] false]
+   ["java.lang.reflect.Field" ["java.lang.reflect.Member"] false]
+   ["java.lang.reflect.Member" [] false]
+   ["java.lang.reflect.InvocationHandler" [] false]
+   ["java.lang.reflect.Proxy" [] false]
+   ["java.lang.ClassLoader" [] true]
+   ["java.nio.charset.Charset" ["java.lang.Comparable"] true]
+   ["sun.nio.cs.Unicode" [] true]
+   ["sun.nio.cs.UTF_8" [] false]
+   ["sun.nio.cs.ISO_8859_1" [] false]
+   ["sun.nio.cs.US_ASCII" [] false]
+   ["java.nio.charset.StandardCharsets" [] false]
+   ["java.util.Locale" ["java.lang.Cloneable" "java.io.Serializable"] false]
+   ["java.util.Locale$Category" [] false]
+   ["java.text.DecimalFormatSymbols" ["java.lang.Cloneable" "java.io.Serializable"] false]
+   ["sun.util.locale.provider.LocaleProviderAdapter" [] false]
+   ["sun.util.locale.provider.LocaleResources" [] false]
+   ["sun.util.locale.provider.ResourceBundleBasedAdapter" [] false]
+   ["java.util.Date" ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable"] false]
+   ["jdk.internal.foreign.Utils" [] false]])
 
 (def promotable
   {"java.lang.Enum" #{"name()Ljava/lang/String;" "ordinal()I" "hashCode()I" "equals(Ljava/lang/Object;)Z"}
@@ -126,6 +155,10 @@
         prom (promotable cname #{})
         ;; the public methods inherited from non-public superclasses below Object
         ;; (AbstractStringBuilder's), which jrt defines on the class itself
+        iface? (.isInterface c)
+        ;; jrt's structs embed their hand-written superclass's, so its methods are promoted
+        supers (map #(go-type-name (.getName ^Class %)) (take-while some? (iterate #(.getSuperclass ^Class %) c)))
+        has-method (fn [g] (some #(contains? methods [% g]) supers))
         own (set (map #(str (.getName ^Method %) (descriptor (.getParameterTypes ^Method %) (.getReturnType ^Method %)))
                       (remove #(.isSynthetic ^Method %) (.getDeclaredMethods c))))
         inherited (for [^Class s (take-while #(and % (not= % Object)) (iterate #(.getSuperclass ^Class %) (.getSuperclass c)))
@@ -146,13 +179,15 @@
                   ok (cond
                        static? (or (contains? values fname) (contains? values (str fname "_native")))
                        (prom (str (.getName m) desc)) true
-                       :else (or (contains? methods [t g]) (contains? methods [t (str "Impl_" g)])))]]
+                       :else (or (has-method g) (contains? methods [t (str "Impl_" g)])))]]
         {:entry [:method (.getName m) desc (disj (flags mods) :native)]
          :sig (str (.getName m) desc)
          :ok ok
+         :member m
          :ref (cond
                 static? (list 'go/var '_ (symbol (if (contains? values fname) fname (str fname "_native"))))
-                (or (contains? methods [t g]) (prom (str (.getName m) desc)))
+                iface? (list 'go/var '_ (list 'method-expr (symbol t) (symbol g)))
+                (or (has-method g) (prom (str (.getName m) desc)))
                 (list 'go/var '_ (list 'method-expr (list '* (symbol t)) (symbol g)))
                 :else (list 'go/var '_ (list 'method-expr (list '* (symbol t)) (symbol (str "Impl_" g)))))})
       (for [^Constructor k (.getDeclaredConstructors c)
@@ -166,6 +201,7 @@
         {:entry [:ctor (descriptor params nil) (disj (flags (.getModifiers k)) :native)]
          :sig (str "<init>" (descriptor params nil))
          :ok ok
+         :member k
          :ref (if (or abstract? non-leaf?)
                 (list 'go/var '_ (list 'method-expr (list '* (symbol t)) (symbol (str "Ctor" sfx))))
                 (list 'go/var '_ (symbol new-name)))})
@@ -175,6 +211,7 @@
         {:entry [:field (.getName f) (subs (descriptor [(.getType f)] nil) 1 (- (count (descriptor [(.getType f)] nil)) 2)) (flags (.getModifiers f))]
          :sig (.getName f)
          :ok (contains? values n)
+         :member f
          :ref (list 'go/var '_ (symbol n))}))))
 
 (defn manifest [defs]

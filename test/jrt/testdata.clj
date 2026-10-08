@@ -13,7 +13,8 @@
   as 8; booleans true/false; an exception is !CLASS or !CLASS: MESSAGE."
   (:require [arbace.string :as str]
             [jrt.testdata-util :refer [esc result line write]]
-            [jrt.testdata-numbers :as numbers])
+            [jrt.testdata-numbers :as numbers]
+            [jrt.testdata-reflect :as reflect])
   (:import [java.io File]))
 
 ;; ---------------------------------------------------------------------------------------
@@ -245,4 +246,5 @@
     (write d "exceptions.txt" (exception-lines))
     (write d "chars.txt" (char-lines))
     (numbers/write-all d)
+    (reflect/write-all d)
     (shutdown-agents)))

@@ -2,8 +2,7 @@
 ;; rules; phase 2's Charset shim (sun.nio.cs.UTF_8, ISO_8859_1) uses them too.
 (in-ns 'go.arbace.jrt)
 
-(go/file "codec.go"
-  :imports [[strings "strings"]])
+(go/file "codec.go")
 
 (go/func DecodeUTF8
   "DecodeUTF8 is Java's UTF-8 decoding with replacement (String.decodeUTF8_UTF16): malformed
@@ -134,13 +133,12 @@ subsequence, as JDK 26 consumes them), surrogates encoded in 3 bytes too.\n"
   [^{:val 2} csLatin1]
   [^{:val 3} csASCII])
 
-(go/func charsetOf "charsetOf: jrt's charsets by Java's names and aliases (case-insensitive).\n"
+(go/func charsetOf "charsetOf: jrt's charsets by Java's names and aliases (case-insensitive; charset.clj).\n"
   ^int [^{:tag (* String)} name]
-  (switch (strings/ToUpper (.String name))
-    (case ["UTF-8" "UTF8"] (return csUTF8))
-    (case ["ISO-8859-1" "ISO8859_1" "ISO_8859_1" "ISO8859-1" "LATIN1" "L1" "ISO-LATIN-1" "8859_1" "CP819" "IBM819"] (return csLatin1))
-    (case ["US-ASCII" "ASCII" "US_ASCII" "ISO646-US" "646" "ASCII7" "DEFAULT" "CP367" "IBM367"] (return csASCII)))
-  csUnknown)
+  (let [cs (lookupCharset (.String name))]
+    (when (== cs nil)
+      (return csUnknown))
+    (.-kind (.Self_Charset cs))))
 
 (go/func DecodeBytes
   "DecodeBytes decodes with the named charset (UTF-8, ISO-8859-1, US-ASCII: bytes above 0x7F
