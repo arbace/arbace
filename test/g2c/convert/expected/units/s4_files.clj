@@ -1,0 +1,7 @@
+;; Expected forms of test/g2c/convert/units/s4_files.go (bin/g2c-convert-tests --regen; reviewed)
+(go/file "s4_files.go" :build ["//go:build !purego"] :directives ["//go:debug panicnil=1"] :doc "Package main tests the file header (SPEC §4.3): build lines, header directives, the\npackage doc and the import specs.\n" :imports [[errors "errors"] [_ "embed"] [. "math"] ^:alias [r "math/rand"] ^:alias [str "strings"] [fmt "fmt"]])
+(go/var _ errors/New)
+(go/var _ Pi)
+(go/var _ r/Int)
+(go/var _ str/ToUpper)
+(go/func main [] (fmt/Println))

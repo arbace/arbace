@@ -1,0 +1,45 @@
+#!/bin/bash
+# Tests of g2c's converter (test/g2c/convert_test.clj, doc/go/CONVERTER-NOTES.md): dumps the
+# Go inputs with the helper (test/g2c/convert/*.go and units/*.go as single files, sort and
+# unicode/utf8 from std) into .tmp/g2c-convert-tests/dumps, then runs the tests on Arbace
+# (bin/lib/tools.bash: target/stage2, built by bin/build-arbace).
+# Usage: bin/g2c-convert-tests [--regen]
+#   --regen  rewrite the expected forms of the unit files (test/g2c/convert/expected/units/)
+#            from the converter's output, without layout metadata; review the diff
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+goroot=${G2C_GOROOT:-/root/tamago-go}
+work=$root/.tmp/g2c-convert-tests
+"$root/bin/g2c" build
+rm -rf "$work/dumps"
+mkdir -p "$work/dumps/std"
+(cd "$root/test/g2c/convert" &&
+   GOROOT="$goroot" "$root/.tmp/godump/godump" -go "$goroot/bin/go" -files -o "$work/dumps" \
+     sample.go search.go units/*.go > "$work/dumps.tsv")
+GOROOT="$goroot" "$root/.tmp/godump/godump" -go "$goroot/bin/go" -o "$work/dumps/std" \
+  sort unicode/utf8 >> "$work/dumps.tsv"
+. "$root/bin/lib/tools.bash"
+arbace_runtime
+cd "$root"
+if [ "${1:-}" = --regen ]; then
+  exec java -Xss16m -cp "$ARBACE_CP:$root/test" -Dg2c.dumps="$work/dumps" arbace.lang.Main -e "
+(require 'g2c.convert-test)
+(in-ns 'g2c.convert-test)
+(defn strip [x]
+  (let [m (some-> (meta x) (as-> m (apply dissoc m :column layout-keys)) not-empty)
+        x (cond (seq? x) (apply list (map strip x)) (vector? x) (mapv strip x)
+                (map? x) (into {} (map (fn [[k v]] [k (strip v)])) x) :else x)
+        m (when m (into {} (map (fn [[k v]] [k (strip v)])) m))]
+    (if (instance? arbace.lang.IObj x) (with-meta x m) x)))
+(doseq [u units]
+  (let [fs (decls (first (:files (convert (str \"units/\" u \".go.edn\")))))]
+    (spit (str expected-dir \"/units/\" u \".clj\")
+          (apply str \";; Expected forms of test/g2c/convert/units/\" u \".go (bin/g2c-convert-tests --regen; reviewed)\n\"
+                 (for [f fs] (str (arbace.g2c.layout/text (strip f)) \"\n\"))))))
+(shutdown-agents)"
+fi
+exec java -Xss16m -cp "$ARBACE_CP:$root/test" -Dg2c.dumps="$work/dumps" arbace.lang.Main -e "
+(require 'arbace.test 'g2c.convert-test)
+(let [r (arbace.test/run-tests 'g2c.convert-test)]
+  (shutdown-agents)
+  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"

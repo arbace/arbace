@@ -133,6 +133,16 @@
 
 (defn line [x] (::l (meta x)))
 
+(defn with-pos
+  "x with more positions for mode :full: m maps keys to position strings (nil ones skipped)."
+  [x m]
+  (let [ps (into {} (keep (fn [[k v]] (when-let [p (parse-pos v)] [k p]))) m)]
+    (if (and (seq ps) (instance? arbace.lang.IObj x))
+      (vary-meta x update ::pos #(merge (or % (sorted-map)) ps))
+      x)))
+
+(defn block-pos [b] (when b {:lbrace (:lbrace (nf b)) :rbrace (:rbrace (nf b))}))
+
 (defn with-line [l x]
   (if (and (instance? arbace.lang.IObj x) (not (line x))) (vary-meta x assoc ::l l) x))
 
@@ -250,8 +260,24 @@
   amendment: gc's output depends on field groups there)."
   [syms]
   (if *generic*
-    (cons (first syms) (map #(vary-meta % assoc :go/group true) (rest syms)))
+    (cons (first syms) (map #(vary-meta % assoc :go/grouped true) (rest syms)))
     syms))
+
+(defn mark-ungrouped
+  "Inside generic declarations, a name declared apart from the name before it although of an
+  equal type gets :go/grouped false, so that the printer does not group them (A1)."
+  [elems names-only]
+  (if-not *generic*
+    elems
+    (vec (map-indexed
+          (fn [i x]
+            (let [prev (when (pos? i) (nth elems (dec i)))]
+              (if (and (symbol? x) (symbol? prev) (not (contains? (meta x) :go/grouped))
+                       (or (not names-only) (and (:tag (meta x)) (:tag (meta prev))))
+                       (= (:tag (meta x)) (:tag (meta prev))))
+                (vary-meta x assoc :go/grouped false)
+                x)))
+          elems))))
 
 (defn doc-of
   "The kept doc text of a comment group position, recording it as kept; nil when empty."
@@ -270,7 +296,8 @@
   docs), :variadic (an Ellipsis type is the last parameter)."
   [field-list {:keys [struct?]}]
   (count-node! field-list)
-  (vec
+  (mark-ungrouped
+   (vec
    (mapcat
     (fn [fld]
       (count-node! fld)
@@ -291,7 +318,8 @@
             (for [nm names]
               (-> (ident nm) (tagged t) (add-meta extra))))
            [(add-meta t extra)]))))
-    (:list (nf field-list)))))
+    (:list (nf field-list))))
+   true))
 
 (defn interface-elems [field-list]
   (count-node! field-list)
@@ -367,19 +395,23 @@
   [ft]
   (let [f (nf ft)
         l (line-of ft)
-        ps (vec-at (or (pos-line (:opening (nf (:params f)))) l) (fields (:params f) {}))
+        ps (-> (vec-at (or (pos-line (:opening (nf (:params f)))) l) (fields (:params f) {}))
+               (with-pos (select-keys (nf (:params f)) [:opening :closing])))
         rlist (when (:results f) (:list (nf (:results f))))]
     (cond
       (empty? rlist) (do (when (:results f) (count-node! (:results f))) [ps])
       (and (= 1 (count rlist)) (empty? (:names (nf (first rlist)))))
       (do (count-node! (first rlist)) (count-node! (:results f))
           [(vary-meta ps assoc :tag (type-form (:type (nf (first rlist)))))])
-      :else [ps :results (vec-at l (fields (:results f) {}))])))
+      :else [ps :results (-> (vec-at l (fields (:results f) {}))
+                             (with-pos (select-keys (nf (:results f)) [:opening :closing])))])))
 
 (defn type-params [field-list]
   (when field-list (count-node! field-list))
   (when (and field-list (seq (:list (nf field-list))))
-    (vec
+    (binding [*generic* true]
+     (mark-ungrouped
+      (vec
      (mapcat (fn [fld]
                (count-node! fld)
                (let [{:keys [names type]} (nf fld)
@@ -390,7 +422,8 @@
                            (type-form type)))]
                  (binding [*generic* true]
                    (group-marks (for [nm names] (tagged (ident nm) c))))))
-             (:list (nf field-list))))))
+             (:list (nf field-list))))
+      false))))
 
 ;;; Expressions (§7)
 
@@ -427,6 +460,15 @@
                            (every? untyped-const? (:args f)))
            false))))
 
+(defn as-inst
+  "A generic type instance (G T...) as (inst G T...): in operands the printer reads as
+  expressions too (new, method-expr; PRINTER-NOTES A5)."
+  [t]
+  (if (and (seq? t) (symbol? (first t)) (not (#{'inst} (first t)))
+           (not (and (nil? (namespace (first t))) (ty/reserved-type-heads (first t)))))
+    (with-meta (apply list 'inst t) (meta t))
+    t))
+
 (defn selection-via [a]
   (when-let [via (:via (:sel a))]
     {:go/via (mapv symbol via)}))
@@ -445,11 +487,13 @@
     (when (pkg-ident? x) (count-node! (unparen x)))
     (cond
       (pkg-ident? x) (-> (symbol (ident-name (unparen x)) (ident-name sel))
-                         (at n l) (add-meta (inst-meta sel 0)))
-      (= k :method-expr) (form n l 'method-expr (type-form x) (symbol (ident-name sel)))
+                         (at n l) (add-meta (inst-meta sel 0))
+                         (with-pos {:x-pos (start x) :name-pos (start sel)}))
+      (= k :method-expr) (form n l 'method-expr (as-inst (type-form x)) (symbol (ident-name sel)))
       (#{:field :method} k) (-> (form n l (-> (symbol (str ".-" (ident-name sel))) (add-meta (inst-meta sel 0)))
                                       (expr x))
-                                (add-meta (selection-via a)))
+                                (add-meta (selection-via a))
+                                (with-pos {:name-pos (start sel)}))
       :else (fail "selector" n))))
 
 (defn call-args [args ellipsis]
@@ -482,7 +526,9 @@
       (= :builtin (:mode fa))
       (let [head (builtin-name fun)
             [a0 & more] args
-            a0f (when a0 (if (= :type (:mode (an (unparen a0)))) (type-form a0) (expr a0)))]
+            a0f (when a0 (if (= :type (:mode (an (unparen a0))))
+                           (cond-> (type-form a0) (= 'new head) as-inst)
+                           (expr a0)))]
         (if (= :selector-expr (nt u))
           (do (count-node! u) (count-node! (:sel (nf u))) (count-node! (unparen (:x (nf u)))))
           (count-node! u))
@@ -498,7 +544,8 @@
                      (-> (symbol (str "." (ident-name (:sel ua)))) (add-meta (inst-meta (:sel ua) 0)))
                      (expr (:x ua))
                      (call-args args ellipsis))
-              (add-meta (selection-via fa))))
+              (add-meta (selection-via fa))
+              (with-pos {:dot (:dot ua) :name-pos (start (:sel ua))})))
 
       (= :ident (nt u))
       (let [callee (ident u)]
@@ -569,7 +616,8 @@
         sig (fn-sig-forms type)
         body-forms (stmt-list body {:tail (boolean has-results)})]
     (-> (apply form n l 'fn (concat sig body-forms))
-        (add-meta {:go/end (pos-line (:rbrace (nf body)))}))))
+        (add-meta {:go/end (pos-line (:rbrace (nf body)))})
+        (with-pos (merge {:func (:func (nf type))} (block-pos body))))))
 
 (defn expr
   "The form of an expression node."
@@ -619,13 +667,20 @@
           (let [op (or (binary-ops (:op f)) (fail "binary operator" n))]
             (count-node! n)
             (if (nary-ops op)
-              (let [operands (loop [x (:x f) acc (list (expr (:y f))) nodes [n]]
+              (let [logical (#{'and 'or} op)
+                    operand (fn [x] (if (and logical (= :paren-expr (nt x)))
+                                      (let [fx (expr x)]
+                                        (note! :logical-paren)
+                                        (if (instance? arbace.lang.IObj fx) (add-meta fx {:go/paren true}) fx))
+                                      (expr x)))
+                    operands (loop [x (:x f) acc (list (operand (:y f))) nodes [n]]
                                (let [u (unparen x)]
-                                 (when (and (not= x u) (= op (binary-ops (:op (nf u))))) (count-node! x))
-                                 (if (and (= :binary-expr (nt u)) (= op (binary-ops (:op (nf u)))))
+                                 (when (and (not= x u) (not logical) (= op (binary-ops (:op (nf u))))) (count-node! x))
+                                 (if (and (= :binary-expr (nt u)) (= op (binary-ops (:op (nf u))))
+                                          (not (and logical (not= x u))))
                                    (do (count-node! u)
-                                       (recur (:x (nf u)) (cons (expr (:y (nf u))) acc) (conj nodes u)))
-                                   (cons (expr x) acc))))]
+                                       (recur (:x (nf u)) (cons (operand (:y (nf u))) acc) (conj nodes u)))
+                                   (cons (operand x) acc))))]
                 (apply form n l op operands))
               (let [fm (form n l op (expr (:x f)) (expr (:y f)))]
                 (if (and (#{'<< '>>} op) (not= :const (:mode a)) (untyped-const? (:x f))
@@ -701,7 +756,7 @@
          specs))]
       "const"
       [:let
-       (loop [specs specs prev nil acc [] iota 0]
+       (loop [specs specs prev nil acc [] iota 0 specs* specs]
          (if-let [sp (first specs)]
            (let [{:keys [names type values]} (nf sp)
                  _ (count-node! sp)
@@ -714,12 +769,16 @@
                                 (type-form type)))
                  mk (fn [nm] (-> (ident nm) (tagged t) (vary-meta assoc :const true)
                                  (add-meta (const-val nm))))
-                 tg (targets names l mk)
+                 tg (cond-> (targets names l mk)
+                      ;; local const groups stay groups for gc's tree (ROUNDTRIP.md):
+                      ;; proposed amendment
+                      (and (> (count specs*) 1) (pos? iota)) (vary-meta assoc :go/grouped true)
+                      implicit (vary-meta assoc :go/implicit true))
                  init (if implicit
                         (binding [*stats* nil] (relined l (inits values l)))
                         (inits values l))]
-             (recur (rest specs) (if implicit prev (nf sp)) (conj acc tg init) (inc iota)))
-           (do (when (> (count specs) 1) (note! :local-const-group))
+             (recur (rest specs) (if implicit prev (nf sp)) (conj acc tg init) (inc iota) specs*))
+           (do (when (> (count specs*) 1) (note! :local-const-group))
                (when (> iota 1) (note! :local-const-group-split))
                acc)))]
       "type"
@@ -733,8 +792,8 @@
                (let [tps (type-params tparams)
                      nm (cond-> (ident name)
                           assign (vary-meta assoc :alias true)
-                          tps (do (note! :local-generic-type)
-                                  (vary-meta assoc :type-params (vec-at (line-of sp) tps))))]
+                          tps (vary-meta assoc :type-params (vec-at (line-of sp) tps)))
+                     _ (when tps (note! :local-generic-type))]
                  [nm (type-form type)]))))
          specs))])))
 
@@ -797,6 +856,11 @@
                                              :let-type :let))
                           kind (kind-of s)
                           [_ bs] (bindings-of s)
+                          ;; L: x := e (PRINTER-NOTES A9): the label on the first target
+                          bs (if (= :labeled-stmt (nt s))
+                               (do (note! :labeled-declaration) (count-node! s)
+                                   (update bs 0 #(vary-meta % assoc :go/label (label-kw (:label (nf s))))))
+                               bs)
                           [j bs] (loop [j (inc i) bs bs]
                                    (if (and (< j n) (decl-stmt? (stmts j)) (empty? (get gaps j))
                                             (not= :labeled-stmt (nt (stmts j)))
@@ -807,10 +871,7 @@
                           lf (apply form nil l (if (= kind :let) 'let 'let-type)
                                     (vec-at l bs) (build j))]
                       (concat pre
-                              [(if (= :labeled-stmt (nt s))
-                                 (do (note! :labeled-declaration) (count-node! s)
-                                     (form s l 'label (label-kw (:label (nf s))) lf))
-                                 lf)]))
+                              [lf]))
                     (concat pre
                             (keep identity [(stmt s (and tail (= i (dec n)) (empty? (get gaps n))))])
                             (build (inc i)))))))]
@@ -861,22 +922,25 @@
         [tests final] chain]
     (cond
       (nil? else)
-      (apply form n l 'when (concat (when init [(init-vec init l)]) [(expr test)] (stmt-list body {})))
+      (-> (apply form n l 'when (concat (when init [(init-vec init l)]) [(expr test)] (stmt-list body {})))
+          (with-pos (block-pos body)))
 
-      (and (nil? init) (>= (count tests) 2))
+      (and (nil? init) (>= (count tests) 2) (not= :if-stmt (nt final)))
       (do (note! :cond)
           (doseq [[_ _ e] (rest tests)] (count-node! e))
           (apply form n l 'cond
                  (concat (mapcat (fn [[c b]] [(expr c) (branch b false)]) tests)
                          (when final
-                           [(lit/lit ":else" :else)
-                            (if (= :if-stmt (nt final)) (if-form final) (branch final true))]))))
+                           [(lit/lit ":else" :else) (branch final true)]))))
 
       :else
-      (apply form n l 'if
-             (concat (when init [(init-vec init l)])
-                     [(expr test) (branch body false)
-                      (if (= :if-stmt (nt else)) (if-form else) (branch else true))])))))
+      (-> (apply form n l 'if
+                 (concat (when init [(init-vec init l)])
+                         [(expr test) (branch body false)
+                          (if (= :if-stmt (nt else)) (if-form else) (branch else true))]))
+          (with-pos (merge (block-pos body)
+                           (when (= :block-stmt (nt else))
+                             {:else-lbrace (:lbrace (nf else)) :else-rbrace (:rbrace (nf else))})))))))
 
 (defn clause-bound
   "The end bound of clause i of a switch or select body: the next clause, or the }."
@@ -943,9 +1007,18 @@
   [s]
   (stmt s false))
 
+(declare stmt*)
+
 (defn stmt
   "The form of a statement (not a declaration). tail: the last of a function body with
   results."
+  [n tail]
+  (let [x (stmt* n tail)]
+    (if (#{:for-stmt :range-stmt :switch-stmt :type-switch-stmt :select-stmt} (nt n))
+      (with-pos x (block-pos (:body (nf n))))
+      x)))
+
+(defn stmt*
   [n tail]
   (let [f (nf n)
         l (line-of n)]
@@ -1113,7 +1186,8 @@
                  (concat (when docstr [docstr])
                          (when tps [:type-params (vec-at l tps)])
                          [ps] rs body-forms))
-          (add-meta (when body {:go/end (pos-line (:rbrace (nf body)))}))))))
+          (add-meta (when body {:go/end (pos-line (:rbrace (nf body)))}))
+          (with-pos (merge {:func (:func (nf type))} (block-pos body)))))))
 
 (defn value-spec-target
   "The target of a package-level value spec: a name or (values ...); docs and directive
@@ -1176,7 +1250,10 @@
   (let [prefix (str name ":")]
     (vec (for [[p text] (:directives dump)
                :when (str/starts-with? p prefix)
-               :let [[l c] (parse-pos (subs p (count prefix)))]]
+               :let [[l c] (parse-pos (subs p (count prefix)))]
+               ;; gc reads //line only at the start of a line (cmd/compile/doc.go): elsewhere
+               ;; it is an ordinary comment
+               :when (not (and (str/starts-with? text "//line ") (not= c 1)))]
            [l c text]))))
 
 (defn decl-name
@@ -1341,13 +1418,17 @@
          (one (first lhs))
          (apply list 'values (map one lhs)))))))
 
+(defn- munge-name [s] (str/replace s #"[.-]" "_"))
+
 (defn package-form [dump {:keys [positions]}]
   (let [c (:config dump)
         files (vec (:go-files dump))
         others (vec (sort (mapcat #(get dump %) [:s-files :h-files :syso-files :c-files :cxx-files
                                                  :m-files :f-files :swig-files :swig-cxx-files])))
         embeds (vec (concat (:embed-files dump) (:test-embed-files dump)))]
-    (apply list 'go/package (symbol (:name dump))
+    (apply list 'go/package (symbol (if (empty? (:name dump))
+                                       (munge-name (last (str/split (:package dump) #"/")))
+                                       (:name dump)))
            (concat
             [:path (:package dump)
              :config (array-map :goos (:goos c) :goarch (:goarch c)

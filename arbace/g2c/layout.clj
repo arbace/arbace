@@ -88,7 +88,7 @@
 (declare text)
 
 (def ^:private key-order
-  [:line :alias :extern :const :var :assign :go/group :tag :val :inst :go/via :go/tag :doc])
+  [:line :alias :extern :const :var :assign :go/grouped :tag :val :inst :go/via :go/tag :doc])
 
 (defn- key-rank [k]
   (let [i (.indexOf ^java.util.List key-order k)]
@@ -113,8 +113,8 @@
   (let [pm (public-meta x)]
     (when (seq pm)
       (let [ks (sort-keys (keys pm))
-            flags (filter #(true? (pm %)) ks)
-            rest-ks (remove #(true? (pm %)) ks)
+            flags (filter #(and (true? (pm %)) (not= % :val)) ks)
+            rest-ks (remove #(and (true? (pm %)) (not= % :val)) ks)
             sb (StringBuilder.)]
         (doseq [k flags] (.append sb (str "^" k " ")))
         (cond
@@ -139,7 +139,12 @@
     (instance? BigInteger x) (str x "N")
     (integer? x) (str x)
     (boolean? x) (str x)
-    (instance? Double x) (str x)
+    (instance? Double x) (let [d (double x)]
+                           (cond (Double/isNaN d) "##NaN"
+                                 (Double/isInfinite d) (if (pos? d) "##Inf" "##-Inf")
+                                 :else (str x)))
+    (instance? java.math.BigDecimal x) (str x "M")
+    (ratio? x) (str x)
     :else (throw (ex-info (str "can't write " (class x)) {:x x}))))
 
 (defn text

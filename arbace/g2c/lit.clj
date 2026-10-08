@@ -367,6 +367,15 @@
       (if (neg? e) (rational m (pow2 (- e))) (rational (.shiftLeft m (int e)) BigInteger/ONE)))
     :else (throw (ex-info (str "not a numeric value: " (pr-str v)) {:v v}))))
 
+(defn untyped-float-form
+  "An untyped float value of the helper: a float literal (§8.1), or (binary-float M E) for
+  M·2^E when go/types holds it as a big.Float beyond a rational's range (its decimal or ratio
+  would have up to hundreds of millions of digits: proposed amendment)."
+  [v]
+  (if (and (seq? v) (= :float (first v)) (= 3 (count v)))
+    (list 'binary-float (integer-lit (nth v 1)) (integer-lit (nth v 2)))
+    (float-lit (val-rational v))))
+
 (defn const-form
   "The representation (§8.2) of the helper's exact value v at the constant kind k: :bool,
   :string, :int, :rune, :float, :untyped-float, :complex, :untyped-complex (typed :float and
@@ -391,11 +400,12 @@
                (throw (ex-info (str "integer constant with value " (pr-str v)) {:v v}))))
       :rune (rune-form (val-rational v))
       :float (double-lit (val-rational v))
-      :untyped-float (float-lit (val-rational v))
+      :untyped-float (untyped-float-form v)
       (:complex :untyped-complex)
       (let [[re im] (if (and (seq? v) (= :complex (first v)))
-                      [(val-rational (nth v 1)) (val-rational (nth v 2))]
-                      [(val-rational v) 0])
-            f (if (= k :complex) double-lit float-lit)]
+                      [(nth v 1) (nth v 2)]
+                      [v 0])
+            [re im] (if (= k :complex) [(val-rational re) (val-rational im)] [re im])
+            f (if (= k :complex) double-lit untyped-float-form)]
         (list 'complex (f re) (f im)))
       nil)))

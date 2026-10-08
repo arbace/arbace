@@ -104,9 +104,26 @@
   (.mkdirs (.getParentFile f))
   (spit f text))
 
+(defn candidate-dir
+  "Where the printed Go files of a dump go in a candidate laid out like GOROOT."
+  [cand dump]
+  (let [dir (:dir dump)]
+    (if (str/starts-with? dir "$GOROOT/")
+      (str cand "/" (subs dir (count "$GOROOT/")))
+      (str cand "/test/" dir))))
+
+(defn print-candidate
+  "Prints the forms of the package file pkg-file (arbace.g2c.print, loaded on first use) into
+  the candidate; nil or an error message."
+  [pkg-file dir]
+  (try
+    ((requiring-resolve 'arbace.g2c.print/print-package) pkg-file dir {})
+    nil
+    (catch Throwable e (str (.getName (class e)) ": " (.getMessage e)))))
+
 (defn convert-dump
   "Converts the dump at path into out; returns a result map."
-  [path rel {:keys [out positions goroot check]}]
+  [path rel {:keys [out positions goroot check print]}]
   (let [t0 (System/nanoTime)]
     (try
       (let [d (rd/read-dump path)
@@ -136,13 +153,16 @@
         (doseq [fl files]
           (swap! bytes + (count (.getBytes ^String (:text fl) "UTF-8")))
           (spit-file (File. (str out "/" dir "/" (:stem fl) ".clj")) (:text fl)))
-        (let [dump-nodes (frequencies (map first (mapcat (comp rd/nodes :ast) (:files d))))]
+        (let [print-fail (when print
+                           (print-candidate (str out "/" dir ".clj") (candidate-dir print d)))
+              dump-nodes (frequencies (map first (mapcat (comp rd/nodes :ast) (:files d))))]
           {:path path :package (:package d) :ns ns-sym :files (count files)
            :bytes @bytes :ms (/ (- (System/nanoTime) t0) 1e6) :read-ms (/ (- t1 t0) 1e6)
            :stats (:stats r) :layout @layout-stats :dump-nodes dump-nodes
            :unplaced (vec (for [fl files u (:unplaced fl)] [(:name fl) u]))
            :bad (vec (concat (keep (fn [fl] (when (:bad fl) [(:name fl) (:bad fl)])) files)
-                             (when pkg-bad [["package" pkg-bad]])))}))
+                             (when pkg-bad [["package" pkg-bad]])
+                             (when print-fail [["print" print-fail]])))}))
       (catch Throwable e
         {:path path :fail (str (.getName (class e)) ": " (.getMessage e))
          :trace (vec (take 12 (map str (.getStackTrace e))))}))))
@@ -175,10 +195,12 @@
                          "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
                          "--goroot" (recur (assoc opts :goroot (first more)) (rest more))
                          "--no-check" (recur (assoc opts :check false) more)
+                         "--print" (recur (assoc opts :print (first more)) (rest more))
                          "--report" (recur (assoc opts :report (first more)) (rest more))
                          "--quiet" (recur (assoc opts :quiet true) more)
                          [opts args]))
         files (dump-files paths)
+        _ (when (:print opts) (require 'arbace.g2c.print))
         t0 (System/nanoTime)
         pool (Executors/newFixedThreadPool (:jobs opts))
         futs (mapv (fn [[p rel]] (.submit pool ^Callable (fn [] (convert-dump p rel opts)))) files)
