@@ -211,3 +211,34 @@ decision (2026-10-08).
   groups; `:go/breaks` indexes; `/*line :N:C*/`; conversion parentheses; `(inst G T)` for
   instances; non-`//go:` directives verbatim; doc text and directives; lines inside metadata;
   labeled `:=`; gofmt not safe on the output), collected for the user with the helper's seven.
+
+## 2026-10-08: g2c's converter, helper dumps → Go forms
+
+- Agent, branch `g2c-converter`: `arbace.g2c.convert` (files, declarations, statements with
+  §7.3's `let` scoping, expressions, types from the source), `arbace.g2c.types` (type forms
+  from the type table, for `:inst` and `:tag`), `arbace.g2c.lit` (§8's literals and constant
+  values, exact), `arbace.g2c.layout` (the forms text: mode `:lines` puts every form on its Go
+  line, mode `:full` writes `:go/pos`/`:go/apos`), `arbace.g2c.main` (command line, a check
+  that every file read back with Arbace's reader equals the forms in memory, metadata and the
+  lines of lists included). `bin/g2c convert`, `bin/g2c roundtrip`, `bin/g2c print`,
+  `bin/g2c test` (`bin/g2c-convert-tests`: the spec's §2 and §14 examples and one Go file per
+  spec section, 6 tests, 150 assertions). Notes: `doc/go/CONVERTER-NOTES.md`.
+- Corpus (64 cores, 32 threads): std amd64 379 packages → 30.7 MB of forms in 8.7 s, arm64
+  alike, `$GOROOT/test` 1,705 programs in 2.6 s, std with tests 554 dumps in 10.6 s, mode
+  `:full` 86.4 MB; 0 failures, every file reads back exactly, every node of the dumps
+  consumed, two runs byte-identical.
+- Verified in gc (`cmd/compile/internal/syntax/parser.go`, `clearPragma`/`takePragma`;
+  `noder/noder.go`, `pragma`) that `//go:` directives attach to the next declaration across
+  blank lines: the converter attaches them so (C1).
+- Round trip with the printer (merged from main): std amd64 336/373 equal at the tree level,
+  355 at the code level; `$GOROOT/test` 1,660/1,705; arm64 337/372. The remaining
+  differences are forms the printer does not print yet (local const groups, labeled `:=`,
+  local generic types, `&&` parentheses, ...), and 19 programs the oracle compiles but the
+  helper excludes by build constraints.
+- Eleven proposed amendments (C1-C11 in CONVERTER-NOTES): directives across blank lines;
+  local const groups kept (`^:go/grouped`, `^:go/implicit`; N6 against the oracle and gc);
+  `^:go/paren` on `&&`/`||` operands (gc's dead-code removal); directives among the imports;
+  tagged `go/id` names; local generic types; `x.go.clj` on file-name collisions (9 in std);
+  `(binary-float M E)` for huge constants; `:go/label`; `^:var (values ...)`; the positions
+  of spliced nodes in `:full`. Also the spec's text: `1.0E100` is exact by §8.1's rule;
+  §14.2's `runeErrorByte0` is an untyped rune.

@@ -94,9 +94,15 @@ fallbacks of `arbace/core_classes.clj` are gone.
     reprinted and respelled candidates, mutations caught).
   - Done: the Go forms spec `doc/go/SPEC.md`; the user accepted all 20 recommendations of its
     §15 (2026-10-08).
-  - Then: the helper's structured types and other outputs the spec asks for (§11.3), the
-    converter (`arbace.g2c`, helper output → Go forms) and the printer (Go forms → Go), until
-    `bin/g2c-check` passes over std and `$GOROOT/test` from round-tripped sources.
+  - Done: the helper's format 2 (§11.3), the printer (`arbace.g2c.print`,
+    [go/PRINTER-NOTES.md](go/PRINTER-NOTES.md)) and the converter (`arbace.g2c.convert`,
+    `bin/g2c convert`, [go/CONVERTER-NOTES.md](go/CONVERTER-NOTES.md)): all of std (amd64,
+    arm64, with tests) and `$GOROOT/test` convert, read back exactly, every node kind covered.
+    The round trip `bin/g2c roundtrip`: std amd64 336/373 packages equal at the tree level,
+    355 at the code level; `$GOROOT/test` 1,660/1,705.
+  - Then: the printer's support of the converter's markers (CONVERTER-NOTES C2-C6, C9) and the
+    forms it rejects, until `bin/g2c-check` passes over std and `$GOROOT/test`; the proposed
+    amendments (helper's 7, printer's A1-A10, converter's C1-C11) for the user.
 
 ## Later
 

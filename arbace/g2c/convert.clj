@@ -524,7 +524,8 @@
           (form n l 'conv (type-form fun) (expr (first args))))
 
       (= :builtin (:mode fa))
-      (let [head (builtin-name fun)
+      (let [_ (loop [x fun] (when (= :paren-expr (nt x)) (count-node! x) (recur (:x (nf x)))))
+            head (builtin-name fun)
             [a0 & more] args
             a0f (when a0 (if (= :type (:mode (an (unparen a0))))
                            (cond-> (type-form a0) (= 'new head) as-inst)
@@ -569,12 +570,17 @@
                                       (count-node! (unparen (:x (nf x))))
                                       (symbol (ident-name (unparen (:x (nf x)))) (ident-name (:sel (nf x)))))
                                   (at x (line-of x)) (add-meta (inst-meta (:sel (nf x)) (count idx))))
- (-> (form x (line-of x)
+                              (if (= :method-expr (:kind (:sel (an x))))
+                                (do (count-node! x) (count-node! (:sel (nf x)))
+                                    (form x (line-of x) 'method-expr (as-inst (type-form (:x (nf x))))
+                                          (-> (symbol (ident-name (:sel (nf x))))
+                                              (add-meta (inst-meta (:sel (nf x)) (count idx))))))
+                              (-> (form x (line-of x)
                                         (-> (do (count-node! x) (count-node! (:sel (nf x)))
                                                 (symbol (str ".-" (ident-name (:sel (nf x))))))
                                             (add-meta (inst-meta (:sel (nf x)) (count idx))))
                                         (expr (:x (nf x))))
-                                  (add-meta (selection-via (an x)))))
+                                  (add-meta (selection-via (an x))))))
              (expr x))]
     (apply form n (line-of n) 'inst fx (map type-form idx))))
 
@@ -1266,6 +1272,7 @@
     nil))
 
 (defn imports-of [decls]
+  (doseq [d decls :when (and (= :gen-decl (nt d)) (= "import" (:tok (nf d))))] (count-node! d))
   (vec
    (for [d decls
          :when (and (= :gen-decl (nt d)) (= "import" (:tok (nf d))))
@@ -1274,7 +1281,6 @@
            l (line-of sp)
            p (string-value path)
            pv (lit/lit (lit/string-text p) p)]
-       (when (identical? sp (first (:specs (nf d)))) (count-node! d))
        (count-node! sp) (count-node! path)
        (cond
          (nil? name) (vec-at l [(symbol (:name (:implicit (an sp)))) pv])
