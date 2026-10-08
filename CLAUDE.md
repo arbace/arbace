@@ -65,9 +65,9 @@ Prior art:
 - `doc/JOURNAL.md` is append-only. Add a dated entry for every important decision or action: what
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
-  Correct them with a new entry. Write it so the progress could be recreated from it. The one
-  exception, decided by the user: after the freeze, main's journal starts over, the history
-  up to it staying in git and on `arbace-for-java-26`.
+  Correct them with a new entry. Write it so the progress could be recreated from it. At the
+  freeze (2026-10-08) main's journal started over, by the user's decision; the history up to
+  it is on `arbace-for-java-26` and in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.clj` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.

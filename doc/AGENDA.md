@@ -63,24 +63,20 @@ Other documents refer to these step numbers.
      to `arbace-for-java-26` and by hand; main is gated by running the checks locally). The
      freeze kit ([FREEZE.md](FREEZE.md), `bin/freeze`).
 
-## Next: the `arbace-for-java-26` freeze
+## Done: the `arbace-for-java-26` freeze (2026-10-08)
 
-The freeze waits for the user's confirmation: have the gate pass on the final main commit
-(`gh workflow run gate.yml --ref main`, or `bin/freeze --run-gate`), then `bin/freeze --yes`
-creates and pushes the branch `arbace-for-java-26` and the tag `arbace-for-java-26-v1`. The
-README's "Arbace for Java 26" section advertising them is on main already.
+The branch `arbace-for-java-26` and the tag `arbace-for-java-26-v1` hold Arbace on the JVM, at
+main `38a652d`, after the gate passed on it ([FREEZE.md](FREEZE.md)). The repository is public.
+The journal up to the freeze is on that branch; main's [JOURNAL.md](JOURNAL.md) starts over.
 
 ## Later
 
-- `clojure/` stays until the freeze and remains on `arbace-for-java-26` for good, so that branch
-  builds and verifies from its own checkout. On main after the break it is replaced by a
+- Next: `clojure/` remains on `arbace-for-java-26` for good, so that branch builds and
+  verifies from its own checkout. On main it is replaced by a
   Go-style binary seed (the user's decision, 2026-10-08): stage 0 becomes the jar built from the
   freeze tag, pinned by hash. Its other roles (j2c's regression corpus, the suite's reference
   results, the replay of the derivation) move to the frozen branch or are re-anchored on the
   seed.
-- `doc/JOURNAL.md` starts over on main after the freeze (the user's decision, 2026-10-08): the
-  history up to the freeze stays in git and on `arbace-for-java-26`; the new journal opens with
-  an entry pointing there.
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
