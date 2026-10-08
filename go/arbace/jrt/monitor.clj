@@ -301,13 +301,13 @@ ready) until phase 2's Thread sets it; a receive means the thread was interrupte
   "MonitorEnter is monitorenter: (locking x ...), synchronized methods. NullPointerException
 on null.\n"
   [^any x]
-  (.monitorEnter (.Self_Object (asObject x))))
+  (.monitorEnter (header x)))
 
 (go/func MonitorExit
   "MonitorExit is monitorexit; IllegalMonitorStateException when the current thread does not
 own x's monitor.\n"
   [^any x]
-  (.monitorExit (.Self_Object (asObject x))))
+  (.monitorExit (header x)))
 
 (go/func Wait "Wait is Object.wait().\n" [^any x]
   (.monitorWait (.Self_Object (asObject x)) 0))

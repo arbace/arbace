@@ -57,11 +57,11 @@
     (for [i 0] (< i (.-N b)) (inc! i)
       (set! sinkI (IdentityHash o)))))
 
-(go/func BenchmarkCurrentThreadID "phase 1's stopgap (runtime.Stack)\n" [^{:tag (* testing/B)} b]
+(go/func BenchmarkCurrentThreadID "the current thread's number (the slot, phase 2a; phase 1: runtime.Stack)\n" [^{:tag (* testing/B)} b]
   (for [i 0] (< i (.-N b)) (inc! i)
     (set! sinkI (conv int32 (currentThreadID)))))
 
-(go/func BenchmarkMonitorUncontended "MonitorEnter and MonitorExit, thin, with the stopgap thread id\n"
+(go/func BenchmarkMonitorUncontended "MonitorEnter and MonitorExit, thin, with the slot's thread number\n"
   [^{:tag (* testing/B)} b]
   (let [o (Object_New)]
     (for [i 0] (< i (.-N b)) (inc! i)

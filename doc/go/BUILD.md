@@ -115,7 +115,10 @@ its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the 
 `$G2C_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
 `arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
 is C2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
-reproducible: the overlay's files are inputs of gc's build IDs like any source.
+reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
+forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md); `bin/jrt overlay` prints them and
+writes the overlay file for `$G2C_GOROOT`, and `bin/jrt overlay --check` compares them with the
+toolchain's runtime.
 
 Checked (2026-10-08) with the experiment's overlay of `.tmp/c2g-exp/gls/` (C2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link

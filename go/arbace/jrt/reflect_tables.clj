@@ -1231,4 +1231,669 @@
     (lit (slice MethodInfo)
         (lit MethodInfo :Name "checkNonNegativeArgument" :Params (lit (slice (* Class)) Prim_long String_class) :Return Prim_void :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Utils_CheckNonNegativeArgument_J_String__V (assert int64 (aget args 0)) ((inst As (* String)) (aget args 1))) nil))))
+  ;; java.lang.Thread
+  (set! (.-Methods (.Info Thread_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "currentThread" :Params nil :Return Thread_class :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_CurrentThread__Thread)))
+        (lit MethodInfo :Name "getDefaultUncaughtExceptionHandler" :Params nil :Return Thread_UncaughtExceptionHandler_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_GetDefaultUncaughtExceptionHandler__Thread_UncaughtExceptionHandler)))
+        (lit MethodInfo :Name "getId" :Params nil :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetId__J (assert Thread_I this))))
+        (lit MethodInfo :Name "getName" :Params nil :Return String_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetName__String (assert Thread_I this))))
+        (lit MethodInfo :Name "getPriority" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetPriority__I (assert Thread_I this))))
+        (lit MethodInfo :Name "getStackTrace" :Params nil :Return (.ArrayClass StackTraceElement_class) :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetStackTrace__StackTraceElement1 (assert Thread_I this))))
+        (lit MethodInfo :Name "getUncaughtExceptionHandler" :Params nil :Return Thread_UncaughtExceptionHandler_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler (assert Thread_I this))))
+        (lit MethodInfo :Name "holdsLock" :Params (lit (slice (* Class)) Object_class) :Return Prim_boolean :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_HoldsLock_O__Z (aget args 0))))
+        (lit MethodInfo :Name "interrupt" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Interrupt__V (assert Thread_I this)) nil))
+        (lit MethodInfo :Name "interrupted" :Params nil :Return Prim_boolean :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_Interrupted__Z)))
+        (lit MethodInfo :Name "isAlive" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsAlive__Z (assert Thread_I this))))
+        (lit MethodInfo :Name "isDaemon" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDaemon__Z (assert Thread_I this))))
+        (lit MethodInfo :Name "isInterrupted" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsInterrupted__Z (assert Thread_I this))))
+        (lit MethodInfo :Name "isVirtual" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsVirtual__Z (assert Thread_I this))))
+        (lit MethodInfo :Name "join" :Params nil :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Join__V (assert Thread_I this)) nil))
+        (lit MethodInfo :Name "join" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Join_J__V (assert Thread_I this) (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "join" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Join_J_I__V (assert Thread_I this) (assert int64 (aget args 0)) (assert int32 (aget args 1))) nil))
+        (lit MethodInfo :Name "ofVirtual" :Params nil :Return Thread_Builder_OfVirtual_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_OfVirtual__Thread_Builder_OfVirtual)))
+        (lit MethodInfo :Name "onSpinWait" :Params nil :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_OnSpinWait__V) nil))
+        (lit MethodInfo :Name "run" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Run__V (assert Thread_I this)) nil))
+        (lit MethodInfo :Name "setDaemon" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetDaemon_Z__V (assert Thread_I this) (assert bool (aget args 0))) nil))
+        (lit MethodInfo :Name "setDefaultUncaughtExceptionHandler" :Params (lit (slice (* Class)) Thread_UncaughtExceptionHandler_class) :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_SetDefaultUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V ((inst As Thread_UncaughtExceptionHandler) (aget args 0))) nil))
+        (lit MethodInfo :Name "setName" :Params (lit (slice (* Class)) String_class) :Return Prim_void :Modifiers 0x31
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetName_String__V (assert Thread_I this) ((inst As (* String)) (aget args 0))) nil))
+        (lit MethodInfo :Name "setPriority" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetPriority_I__V (assert Thread_I this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "setUncaughtExceptionHandler" :Params (lit (slice (* Class)) Thread_UncaughtExceptionHandler_class) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V (assert Thread_I this) ((inst As Thread_UncaughtExceptionHandler) (aget args 0))) nil))
+        (lit MethodInfo :Name "sleep" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_Sleep_J__V (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "sleep" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_Sleep_J_I__V (assert int64 (aget args 0)) (assert int32 (aget args 1))) nil))
+        (lit MethodInfo :Name "start" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Start__V (assert Thread_I this)) nil))
+        (lit MethodInfo :Name "threadId" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ThreadId__J (assert Thread_I this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert Thread_I this))))
+        (lit MethodInfo :Name "yield" :Params nil :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Thread_Yield__V) nil))))
+  (set! (.-Ctors (.Info Thread_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Thread_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Runnable_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Thread_New_Runnable ((inst As Runnable) (aget args 0)))))
+        (lit CtorInfo :Params (lit (slice (* Class)) Runnable_class String_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Thread_New_Runnable_String ((inst As Runnable) (aget args 0)) ((inst As (* String)) (aget args 1)))))
+        (lit CtorInfo :Params (lit (slice (* Class)) String_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Thread_New_String ((inst As (* String)) (aget args 0)))))))
+  ;; java.lang.Thread$UncaughtExceptionHandler
+  (set! (.-Methods (.Info Thread_UncaughtExceptionHandler_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "uncaughtException" :Params (lit (slice (* Class)) Thread_class Throwable_class) :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.UncaughtException_Thread_Throwable__V (assert Thread_UncaughtExceptionHandler this) ((inst As Thread_I) (aget args 0)) ((inst As Throwable_I) (aget args 1))) nil))))
+  ;; java.lang.Thread$Builder$OfVirtual
+  (set! (.-Methods (.Info Thread_Builder_OfVirtual_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "name" :Params (lit (slice (* Class)) String_class) :Return Thread_Builder_OfVirtual_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Name_String__Thread_Builder_OfVirtual (assert Thread_Builder_OfVirtual this) ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "name" :Params (lit (slice (* Class)) String_class Prim_long) :Return Thread_Builder_OfVirtual_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Name_String_J__Thread_Builder_OfVirtual (assert Thread_Builder_OfVirtual this) ((inst As (* String)) (aget args 0)) (assert int64 (aget args 1)))))))
+  ;; java.lang.ThreadLocal
+  (set! (.-Methods (.Info ThreadLocal_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert ThreadLocal_I this))))
+        (lit MethodInfo :Name "remove" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Remove__V (assert ThreadLocal_I this)) nil))
+        (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Object_class) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Set_O__V (assert ThreadLocal_I this) (aget args 0)) nil))
+        (lit MethodInfo :Name "withInitial" :Params (lit (slice (* Class)) Supplier_class) :Return ThreadLocal_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (ThreadLocal_WithInitial_Supplier__ThreadLocal ((inst As Supplier) (aget args 0)))))))
+  (set! (.-Ctors (.Info ThreadLocal_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ThreadLocal_New)))))
+  ;; java.lang.InheritableThreadLocal
+  (set! (.-Ctors (.Info InheritableThreadLocal_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (InheritableThreadLocal_New)))))
+  ;; java.lang.Runtime
+  (set! (.-Methods (.Info Runtime_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "addShutdownHook" :Params (lit (slice (* Class)) Thread_class) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AddShutdownHook_Thread__V (assert (* Runtime) this) ((inst As Thread_I) (aget args 0))) nil))
+        (lit MethodInfo :Name "availableProcessors" :Params nil :Return Prim_int :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AvailableProcessors__I (assert (* Runtime) this))))
+        (lit MethodInfo :Name "exit" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Exit_I__V (assert (* Runtime) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "freeMemory" :Params nil :Return Prim_long :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.FreeMemory__J (assert (* Runtime) this))))
+        (lit MethodInfo :Name "gc" :Params nil :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Gc__V (assert (* Runtime) this)) nil))
+        (lit MethodInfo :Name "getRuntime" :Params nil :Return Runtime_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Runtime_GetRuntime__Runtime)))
+        (lit MethodInfo :Name "halt" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Halt_I__V (assert (* Runtime) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "maxMemory" :Params nil :Return Prim_long :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.MaxMemory__J (assert (* Runtime) this))))
+        (lit MethodInfo :Name "totalMemory" :Params nil :Return Prim_long :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TotalMemory__J (assert (* Runtime) this))))))
+  ;; java.lang.ref.Reference
+  (set! (.-Methods (.Info Reference_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "clear" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Clear__V (assert Reference_I this)) nil))
+        (lit MethodInfo :Name "enqueue" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Enqueue__Z (assert Reference_I this))))
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert Reference_I this))))
+        (lit MethodInfo :Name "isEnqueued" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsEnqueued__Z (assert Reference_I this))))
+        (lit MethodInfo :Name "refersTo" :Params (lit (slice (* Class)) Object_class) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.RefersTo_O__Z (assert Reference_I this) (aget args 0))))))
+  ;; java.lang.ref.WeakReference
+  (set! (.-Ctors (.Info WeakReference_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params (lit (slice (* Class)) Object_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (WeakReference_New_O (aget args 0))))
+        (lit CtorInfo :Params (lit (slice (* Class)) Object_class ReferenceQueue_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (WeakReference_New_O_ReferenceQueue (aget args 0) ((inst As (* ReferenceQueue)) (aget args 1)))))))
+  ;; java.lang.ref.SoftReference
+  (set! (.-Methods (.Info SoftReference_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert (* SoftReference) this))))))
+  (set! (.-Ctors (.Info SoftReference_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params (lit (slice (* Class)) Object_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (SoftReference_New_O (aget args 0))))
+        (lit CtorInfo :Params (lit (slice (* Class)) Object_class ReferenceQueue_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (SoftReference_New_O_ReferenceQueue (aget args 0) ((inst As (* ReferenceQueue)) (aget args 1)))))))
+  ;; java.lang.ref.ReferenceQueue
+  (set! (.-Methods (.Info ReferenceQueue_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "poll" :Params nil :Return Reference_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Poll__Reference (assert (* ReferenceQueue) this))))
+        (lit MethodInfo :Name "remove" :Params nil :Return Reference_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Remove__Reference (assert (* ReferenceQueue) this))))
+        (lit MethodInfo :Name "remove" :Params (lit (slice (* Class)) Prim_long) :Return Reference_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Remove_J__Reference (assert (* ReferenceQueue) this) (assert int64 (aget args 0)))))))
+  (set! (.-Ctors (.Info ReferenceQueue_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ReferenceQueue_New)))))
+  ;; jdk.internal.misc.Unsafe
+  (set! (.-Methods (.Info Unsafe_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "addressSize" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AddressSize__I (assert (* Unsafe) this))))
+        (lit MethodInfo :Name "arrayBaseOffset" :Params (lit (slice (* Class)) Class_class) :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ArrayBaseOffset_Class__J (assert (* Unsafe) this) ((inst As (* Class)) (aget args 0)))))
+        (lit MethodInfo :Name "arrayIndexScale" :Params (lit (slice (* Class)) Class_class) :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ArrayIndexScale_Class__I (assert (* Unsafe) this) ((inst As (* Class)) (aget args 0)))))
+        (lit MethodInfo :Name "compareAndSetInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int Prim_int) :Return Prim_boolean :Modifiers 0x111
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSetInt_O_J_I_I__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2)) (assert int32 (aget args 3)))))
+        (lit MethodInfo :Name "compareAndSetLong" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long Prim_long) :Return Prim_boolean :Modifiers 0x111
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSetLong_O_J_J_J__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2)) (assert int64 (aget args 3)))))
+        (lit MethodInfo :Name "compareAndSetReference" :Params (lit (slice (* Class)) Object_class Prim_long Object_class Object_class) :Return Prim_boolean :Modifiers 0x111
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSetReference_O_J_O_O__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2) (aget args 3))))
+        (lit MethodInfo :Name "fullFence" :Params nil :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.FullFence__V (assert (* Unsafe) this)) nil))
+        (lit MethodInfo :Name "getAndAddInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndAddInt_O_J_I__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2)))))
+        (lit MethodInfo :Name "getAndAddLong" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndAddLong_O_J_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2)))))
+        (lit MethodInfo :Name "getAndSetInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndSetInt_O_J_I__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2)))))
+        (lit MethodInfo :Name "getByte" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_byte :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetByte_O_J__B (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_char :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCharUnaligned_O_J__C (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getInt" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetInt_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetIntUnaligned_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getIntVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetIntVolatile_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getLong" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLong_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongUnaligned_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getLongVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongVolatile_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getReference" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Object_class :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReference_O_J__O (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getReferenceAcquire" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Object_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReferenceAcquire_O_J__O (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getReferenceVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Object_class :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReferenceVolatile_O_J__O (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getUnsafe" :Params nil :Return Unsafe_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Unsafe_GetUnsafe__Unsafe)))
+        (lit MethodInfo :Name "isBigEndian" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsBigEndian__Z (assert (* Unsafe) this))))
+        (lit MethodInfo :Name "loadFence" :Params nil :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LoadFence__V (assert (* Unsafe) this)) nil))
+        (lit MethodInfo :Name "objectFieldOffset" :Params (lit (slice (* Class)) Class_class String_class) :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ObjectFieldOffset_Class_String__J (assert (* Unsafe) this) ((inst As (* Class)) (aget args 0)) ((inst As (* String)) (aget args 1)))))
+        (lit MethodInfo :Name "putByte" :Params (lit (slice (* Class)) Object_class Prim_long Prim_byte) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutByte_O_J_B__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int8 (aget args 2))) nil))
+        (lit MethodInfo :Name "putCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_char) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutCharUnaligned_O_J_C__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert uint16 (aget args 2))) nil))
+        (lit MethodInfo :Name "putFloat" :Params (lit (slice (* Class)) Object_class Prim_long Prim_float) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutFloat_O_J_F__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert float32 (aget args 2))) nil))
+        (lit MethodInfo :Name "putInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutInt_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
+        (lit MethodInfo :Name "putIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutIntUnaligned_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
+        (lit MethodInfo :Name "putIntVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutIntVolatile_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
+        (lit MethodInfo :Name "putLong" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLong_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
+        (lit MethodInfo :Name "putLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLongUnaligned_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
+        (lit MethodInfo :Name "putLongVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLongVolatile_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
+        (lit MethodInfo :Name "putReference" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReference_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
+        (lit MethodInfo :Name "putReferenceRelease" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReferenceRelease_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
+        (lit MethodInfo :Name "putReferenceVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x101
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReferenceVolatile_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
+        (lit MethodInfo :Name "storeFence" :Params nil :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.StoreFence__V (assert (* Unsafe) this)) nil))))
+  (set! (.-Fields (.Info Unsafe_class))
+    (lit (slice FieldInfo)
+        (lit FieldInfo :Name "ADDRESS_SIZE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ADDRESS_SIZE))
+        (lit FieldInfo :Name "ARRAY_BOOLEAN_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_BOOLEAN_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_BOOLEAN_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_BOOLEAN_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_BYTE_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_BYTE_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_BYTE_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_BYTE_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_CHAR_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_CHAR_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_CHAR_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_CHAR_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_DOUBLE_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_DOUBLE_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_DOUBLE_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_DOUBLE_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_FLOAT_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_FLOAT_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_FLOAT_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_FLOAT_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_INT_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_INT_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_INT_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_INT_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_LONG_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_LONG_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_LONG_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_LONG_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_OBJECT_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_OBJECT_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_OBJECT_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_OBJECT_INDEX_SCALE))
+        (lit FieldInfo :Name "ARRAY_SHORT_BASE_OFFSET" :Type Prim_long :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_SHORT_BASE_OFFSET))
+        (lit FieldInfo :Name "ARRAY_SHORT_INDEX_SCALE" :Type Prim_int :Modifiers 0x19
+         :Get (fn ^any [^any o] Unsafe_ARRAY_SHORT_INDEX_SCALE))))
+  ;; java.util.concurrent.atomic.AtomicInteger
+  (set! (.-Methods (.Info AtomicInteger_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "addAndGet" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AddAndGet_I__I (assert (* AtomicInteger) this) (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "compareAndExchange" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndExchange_I_I__I (assert (* AtomicInteger) this) (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "compareAndSet" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSet_I_I__Z (assert (* AtomicInteger) this) (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "decrementAndGet" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.DecrementAndGet__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "doubleValue" :Params nil :Return Prim_double :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.DoubleValue__D (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "floatValue" :Params nil :Return Prim_float :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.FloatValue__F (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "get" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "getAcquire" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAcquire__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "getAndAdd" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndAdd_I__I (assert (* AtomicInteger) this) (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "getAndDecrement" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndDecrement__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "getAndIncrement" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndIncrement__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "getAndSet" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndSet_I__I (assert (* AtomicInteger) this) (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "getPlain" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetPlain__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "incrementAndGet" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IncrementAndGet__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "intValue" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IntValue__I (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "lazySet" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LazySet_I__V (assert (* AtomicInteger) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "longValue" :Params nil :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LongValue__J (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Set_I__V (assert (* AtomicInteger) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "setPlain" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetPlain_I__V (assert (* AtomicInteger) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "setRelease" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetRelease_I__V (assert (* AtomicInteger) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* AtomicInteger) this))))
+        (lit MethodInfo :Name "weakCompareAndSetPlain" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetPlain_I_I__Z (assert (* AtomicInteger) this) (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "weakCompareAndSetVolatile" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetVolatile_I_I__Z (assert (* AtomicInteger) this) (assert int32 (aget args 0)) (assert int32 (aget args 1)))))))
+  (set! (.-Ctors (.Info AtomicInteger_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicInteger_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_int) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicInteger_New_I (assert int32 (aget args 0)))))))
+  ;; java.util.concurrent.atomic.AtomicLong
+  (set! (.-Methods (.Info AtomicLong_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "addAndGet" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AddAndGet_J__J (assert (* AtomicLong) this) (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "compareAndSet" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSet_J_J__Z (assert (* AtomicLong) this) (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "decrementAndGet" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.DecrementAndGet__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "doubleValue" :Params nil :Return Prim_double :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.DoubleValue__D (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "floatValue" :Params nil :Return Prim_float :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.FloatValue__F (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "get" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "getAcquire" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAcquire__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "getAndAdd" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndAdd_J__J (assert (* AtomicLong) this) (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "getAndDecrement" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndDecrement__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "getAndIncrement" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndIncrement__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "getAndSet" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndSet_J__J (assert (* AtomicLong) this) (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "getPlain" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetPlain__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "incrementAndGet" :Params nil :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IncrementAndGet__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "intValue" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IntValue__I (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "lazySet" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LazySet_J__V (assert (* AtomicLong) this) (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "longValue" :Params nil :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LongValue__J (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Set_J__V (assert (* AtomicLong) this) (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "setPlain" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetPlain_J__V (assert (* AtomicLong) this) (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "setRelease" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetRelease_J__V (assert (* AtomicLong) this) (assert int64 (aget args 0))) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* AtomicLong) this))))
+        (lit MethodInfo :Name "weakCompareAndSetPlain" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetPlain_J_J__Z (assert (* AtomicLong) this) (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "weakCompareAndSetVolatile" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetVolatile_J_J__Z (assert (* AtomicLong) this) (assert int64 (aget args 0)) (assert int64 (aget args 1)))))))
+  (set! (.-Ctors (.Info AtomicLong_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicLong_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_long) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicLong_New_J (assert int64 (aget args 0)))))))
+  ;; java.util.concurrent.atomic.AtomicBoolean
+  (set! (.-Methods (.Info AtomicBoolean_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "compareAndSet" :Params (lit (slice (* Class)) Prim_boolean Prim_boolean) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSet_Z_Z__Z (assert (* AtomicBoolean) this) (assert bool (aget args 0)) (assert bool (aget args 1)))))
+        (lit MethodInfo :Name "get" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__Z (assert (* AtomicBoolean) this))))
+        (lit MethodInfo :Name "getAndSet" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndSet_Z__Z (assert (* AtomicBoolean) this) (assert bool (aget args 0)))))
+        (lit MethodInfo :Name "lazySet" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LazySet_Z__V (assert (* AtomicBoolean) this) (assert bool (aget args 0))) nil))
+        (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Set_Z__V (assert (* AtomicBoolean) this) (assert bool (aget args 0))) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* AtomicBoolean) this))))
+        (lit MethodInfo :Name "weakCompareAndSetVolatile" :Params (lit (slice (* Class)) Prim_boolean Prim_boolean) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetVolatile_Z_Z__Z (assert (* AtomicBoolean) this) (assert bool (aget args 0)) (assert bool (aget args 1)))))))
+  (set! (.-Ctors (.Info AtomicBoolean_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicBoolean_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_boolean) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicBoolean_New_Z (assert bool (aget args 0)))))))
+  ;; java.util.concurrent.atomic.AtomicReference
+  (set! (.-Methods (.Info AtomicReference_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "compareAndSet" :Params (lit (slice (* Class)) Object_class Object_class) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSet_O_O__Z (assert (* AtomicReference) this) (aget args 0) (aget args 1))))
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert (* AtomicReference) this))))
+        (lit MethodInfo :Name "getAcquire" :Params nil :Return Object_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAcquire__O (assert (* AtomicReference) this))))
+        (lit MethodInfo :Name "getAndSet" :Params (lit (slice (* Class)) Object_class) :Return Object_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetAndSet_O__O (assert (* AtomicReference) this) (aget args 0))))
+        (lit MethodInfo :Name "getPlain" :Params nil :Return Object_class :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetPlain__O (assert (* AtomicReference) this))))
+        (lit MethodInfo :Name "lazySet" :Params (lit (slice (* Class)) Object_class) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LazySet_O__V (assert (* AtomicReference) this) (aget args 0)) nil))
+        (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Object_class) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Set_O__V (assert (* AtomicReference) this) (aget args 0)) nil))
+        (lit MethodInfo :Name "setPlain" :Params (lit (slice (* Class)) Object_class) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetPlain_O__V (assert (* AtomicReference) this) (aget args 0)) nil))
+        (lit MethodInfo :Name "setRelease" :Params (lit (slice (* Class)) Object_class) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetRelease_O__V (assert (* AtomicReference) this) (aget args 0)) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* AtomicReference) this))))
+        (lit MethodInfo :Name "weakCompareAndSetPlain" :Params (lit (slice (* Class)) Object_class Object_class) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetPlain_O_O__Z (assert (* AtomicReference) this) (aget args 0) (aget args 1))))
+        (lit MethodInfo :Name "weakCompareAndSetVolatile" :Params (lit (slice (* Class)) Object_class Object_class) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetVolatile_O_O__Z (assert (* AtomicReference) this) (aget args 0) (aget args 1))))))
+  (set! (.-Ctors (.Info AtomicReference_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicReference_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Object_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (AtomicReference_New_O (aget args 0))))))
+  ;; java.util.concurrent.locks.Lock
+  (set! (.-Methods (.Info Lock_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "lock" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Lock__V (assert Lock this)) nil))
+        (lit MethodInfo :Name "lockInterruptibly" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LockInterruptibly__V (assert Lock this)) nil))
+        (lit MethodInfo :Name "newCondition" :Params nil :Return Condition_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert Lock this))))
+        (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert Lock this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert Lock this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert Lock this)) nil))))
+  ;; java.util.concurrent.locks.Condition
+  (set! (.-Methods (.Info Condition_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "await" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await__V (assert Condition this)) nil))
+        (lit MethodInfo :Name "await" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await_J_TimeUnit__Z (assert Condition this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "awaitNanos" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AwaitNanos_J__J (assert Condition this) (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "awaitUninterruptibly" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AwaitUninterruptibly__V (assert Condition this)) nil))
+        (lit MethodInfo :Name "signal" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Signal__V (assert Condition this)) nil))
+        (lit MethodInfo :Name "signalAll" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SignalAll__V (assert Condition this)) nil))))
+  ;; java.util.concurrent.locks.ReentrantLock
+  (set! (.-Methods (.Info ReentrantLock_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "getHoldCount" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetHoldCount__I (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "getWaitQueueLength" :Params (lit (slice (* Class)) Condition_class) :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetWaitQueueLength_Condition__I (assert (* ReentrantLock) this) ((inst As Condition) (aget args 0)))))
+        (lit MethodInfo :Name "hasWaiters" :Params (lit (slice (* Class)) Condition_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HasWaiters_Condition__Z (assert (* ReentrantLock) this) ((inst As Condition) (aget args 0)))))
+        (lit MethodInfo :Name "isFair" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsFair__Z (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "isHeldByCurrentThread" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsHeldByCurrentThread__Z (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "isLocked" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsLocked__Z (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "lock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Lock__V (assert (* ReentrantLock) this)) nil))
+        (lit MethodInfo :Name "lockInterruptibly" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LockInterruptibly__V (assert (* ReentrantLock) this)) nil))
+        (lit MethodInfo :Name "newCondition" :Params nil :Return Condition_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert (* ReentrantLock) this)) nil))))
+  (set! (.-Ctors (.Info ReentrantLock_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ReentrantLock_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_boolean) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ReentrantLock_New_Z (assert bool (aget args 0)))))))
+  ;; java.util.concurrent.locks.ReentrantReadWriteLock
+  (set! (.-Methods (.Info ReentrantReadWriteLock_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "getReadHoldCount" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReadHoldCount__I (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "getReadLockCount" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReadLockCount__I (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "getWriteHoldCount" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetWriteHoldCount__I (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "isWriteLocked" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsWriteLocked__Z (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "isWriteLockedByCurrentThread" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsWriteLockedByCurrentThread__Z (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "readLock" :Params nil :Return ReentrantReadWriteLock_ReadLock_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ReadLock__ReentrantReadWriteLock_ReadLock (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantReadWriteLock) this))))
+        (lit MethodInfo :Name "writeLock" :Params nil :Return ReentrantReadWriteLock_WriteLock_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WriteLock__ReentrantReadWriteLock_WriteLock (assert (* ReentrantReadWriteLock) this))))))
+  (set! (.-Ctors (.Info ReentrantReadWriteLock_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params nil :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ReentrantReadWriteLock_New)))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_boolean) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (ReentrantReadWriteLock_New_Z (assert bool (aget args 0)))))))
+  ;; java.util.concurrent.locks.ReentrantReadWriteLock$ReadLock
+  (set! (.-Methods (.Info ReentrantReadWriteLock_ReadLock_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "lock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Lock__V (assert (* ReentrantReadWriteLock_ReadLock) this)) nil))
+        (lit MethodInfo :Name "lockInterruptibly" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LockInterruptibly__V (assert (* ReentrantReadWriteLock_ReadLock) this)) nil))
+        (lit MethodInfo :Name "newCondition" :Params nil :Return Condition_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert (* ReentrantReadWriteLock_ReadLock) this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantReadWriteLock_ReadLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert (* ReentrantReadWriteLock_ReadLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantReadWriteLock_ReadLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert (* ReentrantReadWriteLock_ReadLock) this)) nil))))
+  ;; java.util.concurrent.locks.ReentrantReadWriteLock$WriteLock
+  (set! (.-Methods (.Info ReentrantReadWriteLock_WriteLock_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "getHoldCount" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetHoldCount__I (assert (* ReentrantReadWriteLock_WriteLock) this))))
+        (lit MethodInfo :Name "isHeldByCurrentThread" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsHeldByCurrentThread__Z (assert (* ReentrantReadWriteLock_WriteLock) this))))
+        (lit MethodInfo :Name "lock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Lock__V (assert (* ReentrantReadWriteLock_WriteLock) this)) nil))
+        (lit MethodInfo :Name "lockInterruptibly" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LockInterruptibly__V (assert (* ReentrantReadWriteLock_WriteLock) this)) nil))
+        (lit MethodInfo :Name "newCondition" :Params nil :Return Condition_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert (* ReentrantReadWriteLock_WriteLock) this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantReadWriteLock_WriteLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert (* ReentrantReadWriteLock_WriteLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantReadWriteLock_WriteLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert (* ReentrantReadWriteLock_WriteLock) this)) nil))))
+  ;; java.util.concurrent.ThreadFactory
+  (set! (.-Methods (.Info ThreadFactory_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "newThread" :Params (lit (slice (* Class)) Runnable_class) :Return Thread_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewThread_Runnable__Thread (assert ThreadFactory this) ((inst As Runnable) (aget args 0)))))))
+  ;; java.util.concurrent.Executor
+  (set! (.-Methods (.Info Executor_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "execute" :Params (lit (slice (* Class)) Runnable_class) :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Execute_Runnable__V (assert Executor this) ((inst As Runnable) (aget args 0))) nil))))
+  ;; java.util.concurrent.ExecutorService
+  (set! (.-Methods (.Info ExecutorService_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "awaitTermination" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AwaitTermination_J_TimeUnit__Z (assert ExecutorService this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "close" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Close__V (assert ExecutorService this)) nil))
+        (lit MethodInfo :Name "isShutdown" :Params nil :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsShutdown__Z (assert ExecutorService this))))
+        (lit MethodInfo :Name "isTerminated" :Params nil :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsTerminated__Z (assert ExecutorService this))))
+        (lit MethodInfo :Name "shutdown" :Params nil :Return Prim_void :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Shutdown__V (assert ExecutorService this)) nil))
+        (lit MethodInfo :Name "submit" :Params (lit (slice (* Class)) Runnable_class) :Return Future_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Submit_Runnable__Future (assert ExecutorService this) ((inst As Runnable) (aget args 0)))))
+        (lit MethodInfo :Name "submit" :Params (lit (slice (* Class)) Runnable_class Object_class) :Return Future_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Submit_Runnable_O__Future (assert ExecutorService this) ((inst As Runnable) (aget args 0)) (aget args 1))))
+        (lit MethodInfo :Name "submit" :Params (lit (slice (* Class)) Callable_class) :Return Future_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Submit_Callable__Future (assert ExecutorService this) ((inst As Callable) (aget args 0)))))))
+  ;; java.util.concurrent.Future
+  (set! (.-Methods (.Info Future_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "cancel" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Cancel_Z__Z (assert Future this) (assert bool (aget args 0)))))
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert Future this))))
+        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert Future this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "isCancelled" :Params nil :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsCancelled__Z (assert Future this))))
+        (lit MethodInfo :Name "isDone" :Params nil :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDone__Z (assert Future this))))))
+  ;; java.util.concurrent.FutureTask
+  (set! (.-Methods (.Info FutureTask_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "cancel" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Cancel_Z__Z (assert (* FutureTask) this) (assert bool (aget args 0)))))
+        (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert (* FutureTask) this))))
+        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert (* FutureTask) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "isCancelled" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsCancelled__Z (assert (* FutureTask) this))))
+        (lit MethodInfo :Name "isDone" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDone__Z (assert (* FutureTask) this))))
+        (lit MethodInfo :Name "run" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Run__V (assert (* FutureTask) this)) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* FutureTask) this))))))
+  (set! (.-Ctors (.Info FutureTask_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params (lit (slice (* Class)) Runnable_class Object_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (FutureTask_New_Runnable_O ((inst As Runnable) (aget args 0)) (aget args 1))))
+        (lit CtorInfo :Params (lit (slice (* Class)) Callable_class) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (FutureTask_New_Callable ((inst As Callable) (aget args 0)))))))
+  ;; java.util.concurrent.CountDownLatch
+  (set! (.-Methods (.Info CountDownLatch_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "await" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await__V (assert (* CountDownLatch) this)) nil))
+        (lit MethodInfo :Name "await" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await_J_TimeUnit__Z (assert (* CountDownLatch) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
+        (lit MethodInfo :Name "countDown" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CountDown__V (assert (* CountDownLatch) this)) nil))
+        (lit MethodInfo :Name "getCount" :Params nil :Return Prim_long :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCount__J (assert (* CountDownLatch) this))))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* CountDownLatch) this))))))
+  (set! (.-Ctors (.Info CountDownLatch_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_int) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (CountDownLatch_New_I (assert int32 (aget args 0)))))))
 )

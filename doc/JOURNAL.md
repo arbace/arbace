@@ -560,3 +560,23 @@ decision (2026-10-08).
   `Proxy.newProxyInstance` with `jrt.AdaptFn` instead, API names, the declared-members list,
   plain generic reflection, an en_US default locale with root data, three charsets, the
   stand-in), collected for the user with phase 1's.
+
+## 2026-10-08: B1a step 3, phase 2a: threads, concurrency, the host; step 3 done
+
+- Agent, `5dcf84f`, merged: the goroutine-local slot as a patch of Go's runtime held as forms
+  (`overlay/go/runtime/`: TamaGo go1.27.1's `proc.go` and `runtime2.go` converted by g2c with
+  two marked lines, plus `arbace_local.go`), built through `go build -overlay` (`bin/jrt
+  overlay [--check]`; without it the link fails, so a build cannot miss the patch);
+  `LICENSE.md` gains Go's BSD license for the converted runtime files. `Thread` and
+  `currentThread` over the slot (3.4 ns; the stopgap was 2,900), `ThreadLocal`, interrupts,
+  executors and futures, `CountDownLatch`, atomics, `ReentrantLock` and read-write locks with
+  conditions, `LockSupport`, `Unsafe` (JVM array offsets, field offsets by registered Go
+  types, striped locks for two-word slots), weak references over `weak.Pointer` (soft
+  references held strongly), `System`, `Runtime`, and the host interface `jrt.Host` (`OSHost`
+  over `os`/`time`, swappable for B1b). Uncontended monitor enter+exit 14.4 ns (target ~10).
+- The main session merged it onto phase 2b: the shared lists (`jrt.clj`, the stand-in and
+  manifest generators, JRT-NOTES) conflicted and were resolved as unions, keeping phase 2b's
+  manifest logic (a superset); the generated stand-ins and manifest were regenerated. `bin/jrt
+  build`, `bin/jrt test` (amd64, arm64 under qemu) and `--race` pass.
+- Step 3 (jrt's hand-written part) is done. The translated JDK classes join with c2g (step 4),
+  which then deletes the stand-ins. Proposed amendments from the three phases, for the user.

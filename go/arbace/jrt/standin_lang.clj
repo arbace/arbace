@@ -87,6 +87,51 @@
     (when (not ok) (panic (ClassCast x Appendable_class)))
     v))
 
+;; ---- java.lang.Runnable
+
+(go/type Runnable
+  (interface Object_I (Is_Runnable [])
+    (Run__V [])))
+(go/var Runnable_class
+  (Define (addr (lit ClassInfo :Name "java.lang.Runnable" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Runnable"))))
+(go/func Runnable_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Runnable x)] ok))
+(go/func Runnable_Cast ^Runnable [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Runnable x)]
+    (when (not ok) (panic (ClassCast x Runnable_class)))
+    v))
+
+;; ---- java.util.concurrent.Callable
+
+(go/type Callable
+  (interface Object_I (Is_Callable [])
+    (Call__O ^any [])))
+(go/var Callable_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.Callable" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Callable"))))
+(go/func Callable_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Callable x)] ok))
+(go/func Callable_Cast ^Callable [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Callable x)]
+    (when (not ok) (panic (ClassCast x Callable_class)))
+    v))
+
+;; ---- java.util.function.Supplier
+
+(go/type Supplier
+  (interface Object_I (Is_Supplier [])
+    (Get__O ^any [])))
+(go/var Supplier_class
+  (Define (addr (lit ClassInfo :Name "java.util.function.Supplier" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Supplier"))))
+(go/func Supplier_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Supplier x)] ok))
+(go/func Supplier_Cast ^Supplier [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Supplier x)]
+    (when (not ok) (panic (ClassCast x Supplier_class)))
+    v))
+
 ;; ---- java.lang.Exception
 
 (go/type Exception (struct Throwable))
@@ -676,25 +721,27 @@
 ;; ---- java.lang.IllegalStateException
 
 (go/type IllegalStateException (struct RuntimeException))
+(go/type IllegalStateException_I (interface RuntimeException_I (Self_IllegalStateException ^{:tag (* IllegalStateException)} [])))
+(go/method Self_IllegalStateException ^{:tag (* IllegalStateException)} [^{:tag (* IllegalStateException)} t] t)
 (go/var IllegalStateException_class
   (Define (addr (lit ClassInfo :Name "java.lang.IllegalStateException" :Kind KindClass :Modifiers AccPublic
                      :Super RuntimeException_class :Go "arbace/jrt.IllegalStateException"))))
 (go/func IllegalStateException_New ^{:tag (* IllegalStateException)} []
-  (let [t (addr (lit IllegalStateException))] (.Ctor t) t))
-(go/method Ctor [^{:tag (* IllegalStateException)} t]
-  (.Ctor (.-RuntimeException t) t))
+  (let [t (addr (lit IllegalStateException))] (.Ctor t t) t))
+(go/method Ctor [^{:tag (* IllegalStateException)} t ^IllegalStateException_I this]
+  (.Ctor (.-RuntimeException t) this))
 (go/func IllegalStateException_New_String ^{:tag (* IllegalStateException)} [^{:tag (* String)} s]
-  (let [t (addr (lit IllegalStateException))] (.Ctor_String t s) t))
-(go/method Ctor_String [^{:tag (* IllegalStateException)} t ^{:tag (* String)} s]
-  (.Ctor_String (.-RuntimeException t) t s))
+  (let [t (addr (lit IllegalStateException))] (.Ctor_String t t s) t))
+(go/method Ctor_String [^{:tag (* IllegalStateException)} t ^IllegalStateException_I this ^{:tag (* String)} s]
+  (.Ctor_String (.-RuntimeException t) this s))
 (go/func IllegalStateException_New_String_Throwable ^{:tag (* IllegalStateException)} [^{:tag (* String)} s ^Throwable_I cause]
-  (let [t (addr (lit IllegalStateException))] (.Ctor_String_Throwable t s cause) t))
-(go/method Ctor_String_Throwable [^{:tag (* IllegalStateException)} t ^{:tag (* String)} s ^Throwable_I cause]
-  (.Ctor_String_Throwable (.-RuntimeException t) t s cause))
+  (let [t (addr (lit IllegalStateException))] (.Ctor_String_Throwable t t s cause) t))
+(go/method Ctor_String_Throwable [^{:tag (* IllegalStateException)} t ^IllegalStateException_I this ^{:tag (* String)} s ^Throwable_I cause]
+  (.Ctor_String_Throwable (.-RuntimeException t) this s cause))
 (go/func IllegalStateException_New_Throwable ^{:tag (* IllegalStateException)} [^Throwable_I cause]
-  (let [t (addr (lit IllegalStateException))] (.Ctor_Throwable t cause) t))
-(go/method Ctor_Throwable [^{:tag (* IllegalStateException)} t ^Throwable_I cause]
-  (.Ctor_Throwable (.-RuntimeException t) t cause))
+  (let [t (addr (lit IllegalStateException))] (.Ctor_Throwable t t cause) t))
+(go/method Ctor_Throwable [^{:tag (* IllegalStateException)} t ^IllegalStateException_I this ^Throwable_I cause]
+  (.Ctor_Throwable (.-RuntimeException t) this cause))
 (go/method Ref ^any [^{:tag (* IllegalStateException)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* IllegalStateException)} t] IllegalStateException_class)
 (go/method Clone__O ^any [^{:tag (* IllegalStateException)} t] (panic (CloneNotSupported t)))
@@ -710,10 +757,10 @@
 (go/method PrintStackTrace__V [^{:tag (* IllegalStateException)} t] (.Impl_PrintStackTrace__V t t))
 (go/method AddSuppressed_Throwable__V [^{:tag (* IllegalStateException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
 (go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* IllegalStateException)} t] (.Impl_GetSuppressed__Throwable1 t t))
-(go/func IllegalStateException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* IllegalStateException) x)] ok))
-(go/func IllegalStateException_Cast ^{:tag (* IllegalStateException)} [^any x]
+(go/func IllegalStateException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert IllegalStateException_I x)] ok))
+(go/func IllegalStateException_Cast ^IllegalStateException_I [^any x]
   (when (== x nil) (return nil))
-  (let [(values v ok) (assert (* IllegalStateException) x)]
+  (let [(values v ok) (assert IllegalStateException_I x)]
     (when (not ok) (panic (ClassCast x IllegalStateException_class)))
     v))
 
@@ -867,6 +914,202 @@
   (when (== x nil) (return nil))
   (let [(values v ok) (assert (* InterruptedException) x)]
     (when (not ok) (panic (ClassCast x InterruptedException_class)))
+    v))
+
+;; ---- java.lang.IllegalThreadStateException
+
+(go/type IllegalThreadStateException (struct IllegalArgumentException))
+(go/var IllegalThreadStateException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.IllegalThreadStateException" :Kind KindClass :Modifiers AccPublic
+                     :Super IllegalArgumentException_class :Go "arbace/jrt.IllegalThreadStateException"))))
+(go/func IllegalThreadStateException_New ^{:tag (* IllegalThreadStateException)} []
+  (let [t (addr (lit IllegalThreadStateException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* IllegalThreadStateException)} t]
+  (.Ctor (.-IllegalArgumentException t) t))
+(go/func IllegalThreadStateException_New_String ^{:tag (* IllegalThreadStateException)} [^{:tag (* String)} s]
+  (let [t (addr (lit IllegalThreadStateException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* IllegalThreadStateException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-IllegalArgumentException t) t s))
+(go/method Ref ^any [^{:tag (* IllegalThreadStateException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* IllegalThreadStateException)} t] IllegalThreadStateException_class)
+(go/method Clone__O ^any [^{:tag (* IllegalThreadStateException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* IllegalThreadStateException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* IllegalThreadStateException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* IllegalThreadStateException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* IllegalThreadStateException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* IllegalThreadStateException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* IllegalThreadStateException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* IllegalThreadStateException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* IllegalThreadStateException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* IllegalThreadStateException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* IllegalThreadStateException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* IllegalThreadStateException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* IllegalThreadStateException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func IllegalThreadStateException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* IllegalThreadStateException) x)] ok))
+(go/func IllegalThreadStateException_Cast ^{:tag (* IllegalThreadStateException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* IllegalThreadStateException) x)]
+    (when (not ok) (panic (ClassCast x IllegalThreadStateException_class)))
+    v))
+
+;; ---- java.util.concurrent.ExecutionException
+
+(go/type ExecutionException (struct Exception))
+(go/var ExecutionException_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ExecutionException" :Kind KindClass :Modifiers AccPublic
+                     :Super Exception_class :Go "arbace/jrt.ExecutionException"))))
+(go/func ExecutionException_New ^{:tag (* ExecutionException)} []
+  (let [t (addr (lit ExecutionException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* ExecutionException)} t]
+  (.Ctor (.-Exception t) t))
+(go/func ExecutionException_New_String ^{:tag (* ExecutionException)} [^{:tag (* String)} s]
+  (let [t (addr (lit ExecutionException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* ExecutionException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-Exception t) t s))
+(go/func ExecutionException_New_String_Throwable ^{:tag (* ExecutionException)} [^{:tag (* String)} s ^Throwable_I cause]
+  (let [t (addr (lit ExecutionException))] (.Ctor_String_Throwable t s cause) t))
+(go/method Ctor_String_Throwable [^{:tag (* ExecutionException)} t ^{:tag (* String)} s ^Throwable_I cause]
+  (.Ctor_String_Throwable (.-Exception t) t s cause))
+(go/func ExecutionException_New_Throwable ^{:tag (* ExecutionException)} [^Throwable_I cause]
+  (let [t (addr (lit ExecutionException))] (.Ctor_Throwable t cause) t))
+(go/method Ctor_Throwable [^{:tag (* ExecutionException)} t ^Throwable_I cause]
+  (.Ctor_Throwable (.-Exception t) t cause))
+(go/method Ref ^any [^{:tag (* ExecutionException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ExecutionException)} t] ExecutionException_class)
+(go/method Clone__O ^any [^{:tag (* ExecutionException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* ExecutionException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* ExecutionException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* ExecutionException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* ExecutionException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* ExecutionException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* ExecutionException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* ExecutionException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* ExecutionException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* ExecutionException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* ExecutionException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* ExecutionException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* ExecutionException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func ExecutionException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ExecutionException) x)] ok))
+(go/func ExecutionException_Cast ^{:tag (* ExecutionException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* ExecutionException) x)]
+    (when (not ok) (panic (ClassCast x ExecutionException_class)))
+    v))
+
+;; ---- java.util.concurrent.CancellationException
+
+(go/type CancellationException (struct IllegalStateException))
+(go/var CancellationException_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.CancellationException" :Kind KindClass :Modifiers AccPublic
+                     :Super IllegalStateException_class :Go "arbace/jrt.CancellationException"))))
+(go/func CancellationException_New ^{:tag (* CancellationException)} []
+  (let [t (addr (lit CancellationException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* CancellationException)} t]
+  (.Ctor (.-IllegalStateException t) t))
+(go/func CancellationException_New_String ^{:tag (* CancellationException)} [^{:tag (* String)} s]
+  (let [t (addr (lit CancellationException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* CancellationException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-IllegalStateException t) t s))
+(go/method Ref ^any [^{:tag (* CancellationException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* CancellationException)} t] CancellationException_class)
+(go/method Clone__O ^any [^{:tag (* CancellationException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* CancellationException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* CancellationException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* CancellationException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* CancellationException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* CancellationException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* CancellationException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* CancellationException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* CancellationException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* CancellationException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* CancellationException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* CancellationException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* CancellationException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func CancellationException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* CancellationException) x)] ok))
+(go/func CancellationException_Cast ^{:tag (* CancellationException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* CancellationException) x)]
+    (when (not ok) (panic (ClassCast x CancellationException_class)))
+    v))
+
+;; ---- java.util.concurrent.TimeoutException
+
+(go/type TimeoutException (struct Exception))
+(go/var TimeoutException_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.TimeoutException" :Kind KindClass :Modifiers AccPublic
+                     :Super Exception_class :Go "arbace/jrt.TimeoutException"))))
+(go/func TimeoutException_New ^{:tag (* TimeoutException)} []
+  (let [t (addr (lit TimeoutException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* TimeoutException)} t]
+  (.Ctor (.-Exception t) t))
+(go/func TimeoutException_New_String ^{:tag (* TimeoutException)} [^{:tag (* String)} s]
+  (let [t (addr (lit TimeoutException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* TimeoutException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-Exception t) t s))
+(go/method Ref ^any [^{:tag (* TimeoutException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* TimeoutException)} t] TimeoutException_class)
+(go/method Clone__O ^any [^{:tag (* TimeoutException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* TimeoutException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* TimeoutException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* TimeoutException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* TimeoutException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* TimeoutException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* TimeoutException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* TimeoutException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* TimeoutException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* TimeoutException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* TimeoutException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* TimeoutException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* TimeoutException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func TimeoutException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* TimeoutException) x)] ok))
+(go/func TimeoutException_Cast ^{:tag (* TimeoutException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* TimeoutException) x)]
+    (when (not ok) (panic (ClassCast x TimeoutException_class)))
+    v))
+
+;; ---- java.util.concurrent.RejectedExecutionException
+
+(go/type RejectedExecutionException (struct RuntimeException))
+(go/var RejectedExecutionException_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.RejectedExecutionException" :Kind KindClass :Modifiers AccPublic
+                     :Super RuntimeException_class :Go "arbace/jrt.RejectedExecutionException"))))
+(go/func RejectedExecutionException_New ^{:tag (* RejectedExecutionException)} []
+  (let [t (addr (lit RejectedExecutionException))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* RejectedExecutionException)} t]
+  (.Ctor (.-RuntimeException t) t))
+(go/func RejectedExecutionException_New_String ^{:tag (* RejectedExecutionException)} [^{:tag (* String)} s]
+  (let [t (addr (lit RejectedExecutionException))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* RejectedExecutionException)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-RuntimeException t) t s))
+(go/func RejectedExecutionException_New_String_Throwable ^{:tag (* RejectedExecutionException)} [^{:tag (* String)} s ^Throwable_I cause]
+  (let [t (addr (lit RejectedExecutionException))] (.Ctor_String_Throwable t s cause) t))
+(go/method Ctor_String_Throwable [^{:tag (* RejectedExecutionException)} t ^{:tag (* String)} s ^Throwable_I cause]
+  (.Ctor_String_Throwable (.-RuntimeException t) t s cause))
+(go/func RejectedExecutionException_New_Throwable ^{:tag (* RejectedExecutionException)} [^Throwable_I cause]
+  (let [t (addr (lit RejectedExecutionException))] (.Ctor_Throwable t cause) t))
+(go/method Ctor_Throwable [^{:tag (* RejectedExecutionException)} t ^Throwable_I cause]
+  (.Ctor_Throwable (.-RuntimeException t) t cause))
+(go/method Ref ^any [^{:tag (* RejectedExecutionException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* RejectedExecutionException)} t] RejectedExecutionException_class)
+(go/method Clone__O ^any [^{:tag (* RejectedExecutionException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* RejectedExecutionException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* RejectedExecutionException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* RejectedExecutionException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* RejectedExecutionException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* RejectedExecutionException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* RejectedExecutionException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* RejectedExecutionException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* RejectedExecutionException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* RejectedExecutionException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* RejectedExecutionException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* RejectedExecutionException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* RejectedExecutionException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func RejectedExecutionException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* RejectedExecutionException) x)] ok))
+(go/func RejectedExecutionException_Cast ^{:tag (* RejectedExecutionException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* RejectedExecutionException) x)]
+    (when (not ok) (panic (ClassCast x RejectedExecutionException_class)))
     v))
 
 ;; ---- java.lang.ReflectiveOperationException
@@ -1558,6 +1801,9 @@
   (set! (.-IsInstance (.Info Comparable_class)) Comparable_InstanceOf)
   (set! (.-IsInstance (.Info CharSequence_class)) CharSequence_InstanceOf)
   (set! (.-IsInstance (.Info Appendable_class)) Appendable_InstanceOf)
+  (set! (.-IsInstance (.Info Runnable_class)) Runnable_InstanceOf)
+  (set! (.-IsInstance (.Info Callable_class)) Callable_InstanceOf)
+  (set! (.-IsInstance (.Info Supplier_class)) Supplier_InstanceOf)
   (set! (.-IsInstance (.Info Exception_class)) Exception_InstanceOf)
   (set! (.-IsInstance (.Info RuntimeException_class)) RuntimeException_InstanceOf)
   (set! (.-IsInstance (.Info Error_class)) Error_InstanceOf)
@@ -1578,6 +1824,11 @@
   (set! (.-IsInstance (.Info UnsupportedOperationException_class)) UnsupportedOperationException_InstanceOf)
   (set! (.-IsInstance (.Info CloneNotSupportedException_class)) CloneNotSupportedException_InstanceOf)
   (set! (.-IsInstance (.Info InterruptedException_class)) InterruptedException_InstanceOf)
+  (set! (.-IsInstance (.Info IllegalThreadStateException_class)) IllegalThreadStateException_InstanceOf)
+  (set! (.-IsInstance (.Info ExecutionException_class)) ExecutionException_InstanceOf)
+  (set! (.-IsInstance (.Info CancellationException_class)) CancellationException_InstanceOf)
+  (set! (.-IsInstance (.Info TimeoutException_class)) TimeoutException_InstanceOf)
+  (set! (.-IsInstance (.Info RejectedExecutionException_class)) RejectedExecutionException_InstanceOf)
   (set! (.-IsInstance (.Info ReflectiveOperationException_class)) ReflectiveOperationException_InstanceOf)
   (set! (.-IsInstance (.Info ClassNotFoundException_class)) ClassNotFoundException_InstanceOf)
   (set! (.-IsInstance (.Info NoSuchMethodException_class)) NoSuchMethodException_InstanceOf)
