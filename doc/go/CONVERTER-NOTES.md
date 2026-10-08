@@ -128,41 +128,60 @@ Beyond what the spec fixes:
 - **Instances in `new` and `method-expr`** are written `(inst G T...)` (A5), so that they
   read the same in any position.
 
-## Deviations from the spec: proposed amendments
+## Deviations from the spec: amendments (accepted 2026-10-08)
 
-The converter follows these; none is accepted yet. The printer's A1-A10 are in
-[PRINTER-NOTES.md](PRINTER-NOTES.md) (the converter applies A1, A2, A5, A8, A9). The helper's
-author's notes, applied: type assertions carry `:dot`; constant representation from `:t`;
-`:go/via` from the helper's `:via`; file lists merged into `:other-files`; `p_test` →
-`go.<path>_test`; gc attaches `//go:` lines across blank lines (verified, C1).
+The converter follows these. The user accepted all eleven on 2026-10-08, with the printer's
+A1-A10 ([PRINTER-NOTES.md](PRINTER-NOTES.md); the converter applies A1, A2, A5, A8, A9) and
+the helper's author's H1-H7 ([HELPER-NOTES.md](HELPER-NOTES.md), applied: type assertions
+carry `:dot`; constant representation from `:t`; `:go/via` from the helper's `:via`; file
+lists merged into `:other-files`; `p_test` → `go.<path>_test`; gc attaches `//go:` lines
+across blank lines, verified as C1). All are folded into SPEC.md, marked "(amendment, accepted
+2026-10-08)" (SPEC §15, "Amendments (2026-10-08)"). Where two disagreed, the converter's won
+over the printer's over the helper's: C1 settles H2; free-standing `go/directive` forms for
+non-`//go:` directives over A6's metadata; C9 over A9; the converter's use of `:go/grouped`
+(generic declarations only, `false` for names declared apart, local const groups) over A1's;
+the value's kind for named types of other packages refines H4. The choices under "Decisions"
+above that fix the spec are folded too: single-file namespaces (§4.1), test-only package
+names (§4.2), blank variables in `:init-order` (§6.3), doc text (§6.5), negative literals
+(§7.5), `cond` (§7.8), float literals and characters (§8.1), directive placement (§9.1,
+§9.2), layout (§10.1), `/*line*/` in expressions (§10.3), comments (§10.4).
 
 - **C1. Directives attach across blank lines** (§9.1 says "no blank line or other code
   between"): gc's parser keeps pragmas from the end of one declaration to the next
   (`syntax/parser.go`, `clearPragma` after each top-level declaration, `takePragma` at the
-  next), so a blank line does not detach them. The forms follow gc.
+  next), so a blank line does not detach them. The forms follow gc. *Accepted 2026-10-08,
+  folded into SPEC §9.1.*
 - **C2. Local const groups** (N6 says local groups become one declaration per spec): gc and
   the oracle keep a `const ( ... )` group of several specs (iota and implicit repetition
   depend on it; ROUNDTRIP.md, normalization 4). The bindings of a local group after the
   first carry `^:go/grouped`, and a spec without init (its type and init written out, as N6
   says) `^:go/implicit`; the printer can then print the group as written. 79 groups in std.
+  *Accepted 2026-10-08, folded into SPEC §7.3 (and §3.2 N6, §12.2, §13.1, §14.5).*
 - **C3. Parentheses around `&&` and `||` operands** (N1 removes all parentheses): gc removes
   dead branches by syntax and does not look through parentheses (ROUNDTRIP.md, "logical";
   `bytes.IndexRune` and `strings.IndexRune` compile differently without them). The operand
   form gets `^:go/paren`, and a parenthesized operand is not merged into the chain.
+  *Accepted 2026-10-08, folded into SPEC §7.5 (and §3.2 N1, §11.1, §12.2, §13.1, §14.5).*
 - **C4. Directives among the imports** are `(go/directive "...")` elements of `:imports`,
   in order (`crypto/internal/fips140/mlkem`'s `//go:generate` between the package clause and
-  the imports).
+  the imports). *Accepted 2026-10-08, folded into SPEC §4.3 (and §9.1, §12.2, §13.1).*
 - **C5. `(go/id "x")` as a name.** In parameter, field and binding positions a tagged
   `(go/id "true")` is a name like a tagged symbol (`text/template/parse`'s parameter `true`).
+  *Accepted 2026-10-08, folded into SPEC §4.4 and §5.3 (and §13.1).*
 - **C6. Local generic types** (`$GOROOT/test`, and std's tests): a `let-type` name carries
-  `:type-params [...]` as metadata, keeping the vector's pairs.
+  `:type-params [...]` as metadata, keeping the vector's pairs. *Accepted 2026-10-08,
+  folded into SPEC §7.3 (and §13.1).*
 - **C7. File-name collisions**: `x.go.clj` when the package directory has a subdirectory
-  `x` (above).
+  `x` (above). *Accepted 2026-10-08, folded into SPEC §4.1.*
 - **C8. `(binary-float M E)`** for constant values beyond a rational's range (above).
+  *Accepted 2026-10-08, folded into SPEC §8.2 (and §13.4, §13.5).*
 - **C9. `:go/label` (the printer's A9)**: a labeled `:=` or `var` (`L: x := 1`, 20 in std,
   e.g. `internal/runtime/maps`) is `^{:go/label :L}` on the first target of its `let`.
+  *Accepted 2026-10-08, folded into SPEC §7.3 (and §7.1, §12.2, §13.1, §14.5); it wins over
+  the printer's A9.*
 - **C10. Multi-name `var` without type**: `var a, b = f()` in a function is
-  `^:var (values a b) (f)`, the marker on the `values` form.
+  `^:var (values a b) (f)`, the marker on the `values` form. *Accepted 2026-10-08,
+  folded into SPEC §7.3 (and §7.1, §13.1).*
 - **C11. `:full` positions of spliced nodes.** A function form carries its `func` keyword
   and its body's braces (`:func`, `:lbrace`, `:rbrace`); a parameter or result vector its
   field list's `:opening`/`:closing`; `when`, loops, `switch`, `type-switch` and `select`
@@ -170,12 +189,16 @@ author's notes, applied: type assertions carry `:dot`; constant representation f
   also its name (`:name-pos`) and a qualified symbol `:x-pos`. A binding target carries its
   statement's `:tok-pos`. Lost: the positions of parentheses (N1), of the `return` keyword of
   an implicit return, of a merged chain's inner operators, and of literals beyond their own
-  (`:go/apos` holds one position per child).
+  (`:go/apos` holds one position per child). *Accepted 2026-10-08,
+  folded into SPEC §10.2.*
 - **The spec's text.** §8.2 calls `1.0E100` inexact, but by §8.1's rule the double text
   `1.0E100` denotes exactly 10^100, so it is written as a double. §14.2 shows `:val 239` for
   `runeErrorByte0`, an untyped rune (`t3 | RuneError>>12`), which §8.2 writes as a character
   (`\ï`), and `:doc` for acceptRange's line comments. §14.1's `:go/end` and lines are
   illustrative (the printer's notes say the same). The examples' docs are shortened.
+  *Accepted 2026-10-08, folded into SPEC §8.2 (`1.0E100`), §14.2 and §6.5 (`runeErrorByte0`
+  as a character, `acceptRange`'s comments as `;` comments, doc text with its newline) and §14
+  (the lines of §14.1 illustrative).*
 
 ## Coverage
 
