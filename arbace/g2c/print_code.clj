@@ -186,9 +186,11 @@
     (nil? f) (tok "nil")
     (true? f) (tok "true")
     (false? f) (tok "false")
+    ;; a raw string spanning lines only in the gofmt layout: in the lines layout the forms do
+    ;; not say whether the source spelled it raw, and an interpreted string never pushes what
+    ;; follows to later lines
     (string? f) (let [nl? (str/includes? f "\n")]
-                  (if (and nl? (text/raw-string-ok? f)
-                           (e/room? (count (filter #(= % \newline) f))))
+                  (if (and nl? (not (e/lines?)) (text/raw-string-ok? f))
                     (e/raw-tok (str "`" f "`"))
                     (tok (text/go-string f))))
     (char? f) (tok (text/go-rune (long (int f))))
@@ -962,7 +964,8 @@
                                                           {:next (or (line-of els)
                                                                      (when-not (if-like? els)
                                                                        (next-line (branch-forms els))))
-                                                           :else-follows? (if-like? els)}))
+                                                           :else-follows? (if-like? els)
+                                                           :else-block? (not (if-like? els))}))
                    (else-part els (branch-opts f (inc ti) els)))
                  (block-body (branch-forms then) (branch-opts f ti then)))))
       "when" (let [[_ & xs] f
@@ -980,7 +983,8 @@
                          (let [[nt nb] (first more)
                                nl (if (= nt :else) (next-line (branch-forms nb)) (line-of nt))]
                            (block-body (branch-forms b) (merge (branch-opts f bi b)
-                                                               {:next nl :else-follows? (not= nt :else)}))
+                                                               {:next nl :else-follows? (not= nt :else)
+                                                                :else-block? (= nt :else)}))
                            (sp) (tok "else") (sp)
                            (recur more (+ bi 2)))
                          (block-body (branch-forms b) (branch-opts f bi b))))))))))
@@ -1302,15 +1306,23 @@
     (binding [e/*next* (if (integer? end) end (or next e/*next*))]
       (when (seq forms)
         (if one-line?
-          (binding [e/*next* nil]
+          ;; nothing may break the line: no room before the next line
+          (binding [e/*next* (when (e/lines?) (e/line))]
             (sp)
             (stmt-list-one-line forms results? (inc indent)))
           (stmt-list forms {:indent (inc indent) :results? results? :parent parent :offset offset})))
       (e/pop-open!)
       (if one-line?
         (do (when (seq forms) (sp)) (tok "}"))
-        (do (when-not (e/close-break! end (> (e/line) start) true indent) (sp))
-            (tok "}"))))))
+        ;; before `else if`, the brace goes to the line of the else-if (its recorded line)
+        ;; before a plain else block, the line before its first statement (when free)
+        (let [close-end (or end
+                            (when (and (:else-follows? opts) (integer? next) (> (long next) (e/line)))
+                              next)
+                            (when (and (:else-block? opts) (integer? next) (> (dec (long next)) (e/line)))
+                              (dec (long next))))]
+          (when-not (e/close-break! close-end (> (e/line) start) true indent) (sp))
+          (tok "}"))))))
 
 (defn- stmt-list-one-line
   "A function body on one line: statements separated by semicolons (go/printer's funcBody)."
