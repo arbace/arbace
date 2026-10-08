@@ -1,0 +1,28 @@
+;; Harvested by bin/oracle harvest (test/oracle/harvest.clj) from Clojure's test suite,
+;; clojure/clojure 98d735fab02f337cee654cb0629bddc09883a75a test/clojure/test_clojure/macros.clj,
+;; renamed to arbace.* by bin/clojure-tests: the expressions of its assertions that are
+;; self-contained and deterministic. Eclipse Public License 1.0 (LICENSE.md). Do not edit.
+(meta (macroexpand-1 (list (quote ->) (with-meta (quote quoted-symbol) {:hardy :har, :har :-D}))))
+(meta (macroexpand-1 (list (quote ->>) (with-meta (quote quoted-symbol) {:hardy :har, :har :-D}))))
+(nil? (some-> nil))
+(some-> 0)
+(some-> 1 (- 2))
+(nil? (some->> nil))
+(some->> 0)
+(some->> 1 (- 2))
+(cond-> 0)
+(cond-> 0 true inc true (- 2))
+(cond-> 0 false inc)
+(cond-> 1 true (- 2) false inc)
+(cond->> 0)
+(cond->> 0 true inc true (- 2))
+(cond->> 0 false inc)
+(cond->> 1 true (- 2) false inc)
+(as-> 0 x)
+(as-> 0 x (inc x))
+(as-> [0 1] x (map inc x) (reverse x) (first x))
+(nil? (loop [] (as-> 0 x (when-not (zero? x) (recur)))))
+(nil? (loop [x nil] (some-> x recur)))
+(nil? (loop [x nil] (some->> x recur)))
+(loop [x 0] (cond-> x false recur))
+(loop [x 0] (cond->> x false recur))
