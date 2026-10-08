@@ -179,7 +179,9 @@
     (vreset! (:semi p) false)
     (nl indent)))
 
-(defn- set-line! [l] (vreset! (:line *p*) l))
+(defn set-line!
+  "Sets the line of the cursor as gc will see it (after a //line directive)."
+  [l] (vreset! (:line *p*) l))
 
 (defn line-directive-inline
   "/*line :N:1*/ before the next token: gc puts it on line N (a column keeps the file name)."

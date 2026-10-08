@@ -169,3 +169,44 @@
         (is (contains? metas k) (str "no case uses metadata " k)))
       (doseq [k spec-options]
         (is (contains? opts k) (str "no case uses option " k))))))
+
+(defn- strip-lines
+  "Forms without the reader's :line and :column, as a program would build them."
+  [x0]
+  (let [x (cond
+            (seq? x0) (apply list (map strip-lines x0))
+            (vector? x0) (mapv strip-lines x0)
+            :else x0)]
+    (if-let [m (meta x0)]
+      (let [m (into {} (for [[k v] (dissoc m :line :column)] [k (strip-lines v)]))]
+        (if (seq m) (with-meta x m) (with-meta x nil)))
+      x)))
+
+(deftest forms-in-memory
+  ;; the converter's path: forms in memory, without lines, printed in gofmt's layout
+  (when (or (nil? only) (re-find only "in-memory"))
+    (let [forms (map strip-lines (print/read-forms (str root "/test/g2c/cases/sample.clj")))
+          pkg (print/collect-forms forms)
+          files (print/print-forms pkg {})
+          out (File. (str work "/in-memory"))]
+      (.mkdirs out)
+      (is (= ["sample.go"] (keys files)))
+      (spit (File. out "sample.go") (get files "sample.go"))
+      (let [[s o] (run [(str goroot "/bin/gofmt") "-l" (str out "/sample.go")] {})]
+        (is (and (zero? s) (str/blank? o)) (str "gofmt: " o)))
+      (let [[s o] (run [(str work "/bin/gocmp") "-levels" "tree,export,code"
+                        (str root "/test/g2c/cases/sample.go") (str out "/sample.go")] gocmp-env)]
+        (is (zero? s) o)))))
+
+(deftest line-file
+  ;; SPEC §12.3: //line FORMS.clj:1 makes gc's positions the forms file's; in the lines
+  ;; layout they are the lines of the forms
+  (when (or (nil? only) (re-find only "line-file"))
+    (let [src (str root "/test/g2c/cases/sample_lines.clj")
+          out (File. (str work "/line-file"))
+          _ (print/print-package src (.getPath out) {:layout :lines :line-file true})
+          text (slurp (File. out "sample.go"))]
+      (is (str/starts-with? text (str "//line " src ":1\n")))
+      (let [[s o] (run [(str work "/bin/golines") (str root "/test/g2c/cases/sample.go")
+                        (str out "/sample.go")] {})]
+        (is (zero? s) (str "golines: " o))))))

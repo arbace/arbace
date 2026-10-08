@@ -17,6 +17,8 @@
                           $G2C_GOROOT (default /root/tamago-go), the :config's environment,
                           -trimpath, go build -overlay, in DIR
     --gofmt               run each printed file through $G2C_GOROOT/bin/gofmt
+    --line-file           (layout lines) start each file with //line FORMS-FILE:1, so that
+                          gc's positions name the forms file and its lines (§12.3)
 
   The library: print-package, print-forms (forms in memory to {name text}), print-file."
   (:require [arbace.g2c.print-code :as code]
@@ -54,52 +56,65 @@
               :when (:as m)]
           (name (:as m)))))
 
-(defn- top-op [f]
-  (binding [code/*go-ns* code/*go-ns*] (code/op f)))
+(def ^:private ^:dynamic *src* "The forms file being collected." nil)
+
+(defn- add-form
+  "Adds one top-level form to the collected package state; load-fn handles load forms."
+  [state f load-fn]
+  (binding [code/*go-ns* (:aliases @state)]
+    (let [o (when (seq? f) (code/op f))]
+      (cond
+        (= o "ns") (vswap! state update :aliases into (go-ns-aliases f))
+        (= o "in-ns") nil
+        (= o "load") (doseq [p (rest f)] (load-fn (str p)))
+        (= o "go/package")
+        (let [[_ nm & opts] f]
+          (vswap! state assoc :package (apply hash-map opts) :name nm))
+        (= o "go/file")
+        (let [[_ nm & opts] f]
+          (vswap! state update :files conj {:name nm :file f :opts (apply hash-map opts) :decls []
+                                            :src *src*}))
+        (and (seq? f) (str/starts-with? (str o) "go/"))
+        (if (empty? (:files @state))
+          (throw (ex-info (str "a declaration before any go/file: " (pr-str f)) {:form f}))
+          (vswap! state update :files (fn [fs] (conj (pop fs) (update (peek fs) :decls conj f)))))
+        (nil? f) nil
+        :else (throw (ex-info (str "not a Go forms top-level form: " (pr-str f)) {:form f}))))))
+
+(defn- new-package-state []
+  (volatile! {:package nil :name nil :files [] :aliases #{"go" "arbace.go"}}))
+
+(defn collect-forms
+  "The package of top-level forms in memory (the converter's output: ns, go/package, go/file
+  and declaration forms, no load), as collect gives it."
+  [forms]
+  (let [state (new-package-state)]
+    (doseq [f forms]
+      (add-form state f (fn [p] (throw (ex-info (str "load in forms in memory: " p) {:path p})))))
+    (dissoc @state :aliases)))
 
 (defn collect
-  "The package of a forms file: {:package {opts} :name sym :files [{:file form :decls [...]}]},
-  following load forms (relative to the loading file's directory, or with a leading / to
-  the root the ns name implies)."
+  "The package of a forms file: {:package {opts} :name sym :files [{:name :file :opts
+  :decls}]}, following load forms (relative to the loading file's directory, which is
+  Clojure's rule for the package file's namespace, or with a leading / to the root the ns
+  name implies)."
   [path]
-  (let [state (volatile! {:package nil :files [] :aliases #{"go" "arbace.go"}})
+  (let [state (new-package-state)
         root (volatile! nil)]
     (letfn [(walk [^File file]
-              (doseq [f (read-forms file)]
-                (binding [code/*go-ns* (:aliases @state)]
-                  (let [o (when (seq? f) (code/op f))]
-                    (cond
-                      (= o "ns")
-                      (let [nsname (str (second f))
-                            depth (count (re-seq #"\." nsname))]
-                        (vswap! state update :aliases into (go-ns-aliases f))
-                        (when-not @root
-                          (vreset! root (nth (iterate #(.getParentFile ^File %) (.getAbsoluteFile file))
-                                             (inc depth)))))
-                      (= o "in-ns") nil
-                      (= o "load")
-                      (doseq [p (rest f)]
-                        (let [p (str p)
-                              target (if (str/starts-with? p "/")
-                                       (File. ^File @root (str (subs p 1) ".clj"))
-                                       (File. (.getParentFile (.getAbsoluteFile file)) (str p ".clj")))]
-                          (walk target)))
-                      (= o "go/package")
-                      (let [[_ nm & opts] f]
-                        (vswap! state assoc :package (apply hash-map opts) :name nm))
-                      (= o "go/file")
-                      (let [[_ nm & opts] f]
-                        (vswap! state update :files conj {:name nm :file f :opts (apply hash-map opts)
-                                                          :decls []}))
-                      (and (seq? f) (str/starts-with? (str o) "go/"))
-                      (if (empty? (:files @state))
-                        (throw (ex-info (str "a declaration before any go/file: " (pr-str f)) {:form f}))
-                        (vswap! state update :files
-                                (fn [fs] (conj (pop fs) (update (peek fs) :decls conj f)))))
-                      (nil? f) nil
-                      :else (throw (ex-info (str "not a Go forms top-level form: " (pr-str f)) {:form f})))))))]
+              (doseq [f (binding [*src* (.getPath file)] (read-forms file))]
+                (when (and (nil? @root) (seq? f) (= 'ns (first f)))
+                  (let [depth (count (re-seq #"\." (str (second f))))]
+                    (vreset! root (nth (iterate #(.getParentFile ^File %) (.getAbsoluteFile file))
+                                       (inc depth)))))
+                (binding [*src* (.getPath file)]
+                  (add-form state f
+                          (fn [p]
+                            (walk (if (str/starts-with? p "/")
+                                    (File. ^File @root (str (subs p 1) ".clj"))
+                                    (File. (.getParentFile (.getAbsoluteFile file)) (str p ".clj")))))))))]
       (walk (File. (str path)))
-      @state)))
+      (dissoc @state :aliases))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Files (§4.3, §12.2)
@@ -144,11 +159,15 @@
 (defn print-file
   "The Go text of one file: {:name :opts :decls} as collect gives it. pkg-name is the
   package clause's name unless the file's :package says otherwise."
-  [{:keys [opts decls file]} pkg-name {:keys [layout line-directives?] :as popts}]
+  [{:keys [opts decls file src]} pkg-name {:keys [layout line-directives? line-file] :as popts}]
   (let [lines? (case layout :lines true :gofmt false
                  (boolean (:line (meta file))))]
     (binding [e/*p* (e/new-state {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)})
               e/*next* nil]
+      ;; §12.3: gc's positions name the forms file (lines are the forms' in this layout)
+      (when (and lines? line-file src)
+        (e/comment-line (str "//line " src ":1") 0)
+        (e/set-line! 1))
       (doseq [b (:build opts)] (e/comment-line (str b) 0))
       (when (seq (:build opts)) (e/nl 0))
       (doseq [d (:directives opts)] (e/comment-line (str d) 0))
@@ -292,9 +311,10 @@
         "--src" (recur (nnext as) (assoc opts :src (second as)))
         "--build" (recur (next as) (assoc opts :build true))
         "--gofmt" (recur (next as) (assoc opts :gofmt true))
+        "--line-file" (recur (next as) (assoc opts :line-file true))
         (let [[forms out] as]
           (when-not (and forms out (= 2 (count as)))
-            (println "usage: bin/g2c-print [--layout lines|gofmt] [--no-line-directives] [--src DIR [--build]] [--gofmt] FORMS.clj OUTDIR")
+            (println "usage: bin/g2c-print [--layout lines|gofmt] [--no-line-directives] [--line-file] [--src DIR [--build]] [--gofmt] FORMS.clj OUTDIR")
             (System/exit 2))
           (let [{:keys [package files]} (print-package forms out opts)
                 outf (File. ^String out)]
