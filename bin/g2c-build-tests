@@ -1,0 +1,109 @@
+#!/bin/bash
+# The tests of g2c's program build (bin/g2c build, arbace.g2c.build, doc/go/BUILD.md): each
+# program test/g2c/build/PROG (Go forms) is built for linux/amd64 and linux/arm64 and
+#   - checked static (file: "statically linked"; readelf: no INTERP segment, no dynamic
+#     section),
+#   - built a second time from a copy of PROG at another path, with --line-file layout too,
+#     and compared byte for byte (reproducibility),
+#   - run on each case PROG/runs/NAME.args (the arguments, one per line), stdin NAME.in (none:
+#     empty), natively on amd64 and under QEMU's user mode (/usr/bin/qemu-aarch64, or
+#     $QEMU_AARCH64) on arm64: stdout must equal NAME.out, the exit code NAME.code (default 0),
+#     and stderr begin with NAME.err (none: stderr empty).
+#
+# Usage: bin/g2c-build-tests [--arch amd64|arm64]... [PROG...]
+# Environment: G2C_GOROOT (default /root/tamago-go), as bin/g2c. Work in .tmp/g2c-build-tests/.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+qemu=${QEMU_AARCH64:-/usr/bin/qemu-aarch64}
+out=$root/.tmp/g2c-build-tests
+archs=()
+progs=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) archs+=("$2"); shift 2 ;;
+    -*) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+    *) progs+=("$1"); shift ;;
+  esac
+done
+[ ${#archs[@]} -gt 0 ] || archs=(amd64 arm64)
+if [ ${#progs[@]} -eq 0 ]; then
+  for d in "$root"/test/g2c/build/*/; do progs+=("$(basename "$d")"); done
+fi
+
+rm -rf "$out"
+mkdir -p "$out/copy"
+pass=0
+fails=0
+fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+ok() { pass=$((pass + 1)); }
+
+for prog in "${progs[@]}"; do
+  src=$root/test/g2c/build/$prog
+  [ -d "$src/go" ] || { fail "$prog: no $src/go"; continue; }
+  # the same program at another path, for the reproducibility check
+  cp -r "$src" "$out/copy/$prog"
+  for arch in "${archs[@]}"; do
+    exe=$out/$arch/$prog
+    mkdir -p "$out/$arch"
+    t0=$(date +%s.%N)
+    if ! "$root/bin/g2c" build --arch "$arch" -o "$exe" "$src" > "$exe.log" 2>&1; then
+      cat "$exe.log"
+      fail "$prog $arch: build"
+      continue
+    fi
+    t1=$(date +%s.%N)
+    ok
+    # static: no interpreter, no dynamic section
+    info=$(file -b "$exe")
+    if [[ $info == *"statically linked"* ]] && ! readelf -lW "$exe" | grep -q INTERP &&
+       readelf -d "$exe" | grep -q 'no dynamic section'; then
+      ok
+    else
+      fail "$prog $arch: not static: $info"
+    fi
+    case $arch in
+      amd64) [[ $info == *x86-64* ]] && ok || fail "$prog $arch: $info" ;;
+      arm64) [[ $info == *aarch64* ]] && ok || fail "$prog $arch: $info" ;;
+    esac
+    # reproducible: from another path, byte for byte; --line-file too
+    "$root/bin/g2c" build --arch "$arch" -o "$exe.again" "$out/copy/$prog" > "$exe.again.log" 2>&1 \
+      && cmp -s "$exe" "$exe.again" && ok || fail "$prog $arch: a second build differs"
+    "$root/bin/g2c" build --arch "$arch" --line-file -o "$exe.lf" "$src" > "$exe.lf.log" 2>&1 \
+      && "$root/bin/g2c" build --arch "$arch" --line-file -o "$exe.lf.again" "$out/copy/$prog" > "$exe.lf.again.log" 2>&1 \
+      && cmp -s "$exe.lf" "$exe.lf.again" && ok || fail "$prog $arch: a second --line-file build differs"
+    run=()
+    [ "$arch" = arm64 ] && run=("$qemu")
+    ncases=0
+    for args_file in "$src"/runs/*.args; do
+      [ -e "$args_file" ] || continue
+      name=$(basename "$args_file" .args)
+      base=${args_file%.args}
+      mapfile -t args < "$args_file"
+      stdin=$base.in
+      [ -f "$stdin" ] || stdin=/dev/null
+      set +e
+      timeout 60 "${run[@]}" "$exe" "${args[@]}" < "$stdin" > "$out/$arch/$prog.$name.out" 2> "$out/$arch/$prog.$name.err"
+      code=$?
+      set -e
+      want=0
+      [ -f "$base.code" ] && want=$(cat "$base.code")
+      bad=""
+      [ "$code" = "$want" ] || bad="exit $code, expected $want"
+      cmp -s "$base.out" "$out/$arch/$prog.$name.out" || bad="$bad${bad:+; }stdout differs (diff $base.out $out/$arch/$prog.$name.out)"
+      if [ -f "$base.err" ]; then
+        n=$(stat -c %s "$base.err")
+        head -c "$n" "$out/$arch/$prog.$name.err" | cmp -s "$base.err" - ||
+          bad="$bad${bad:+; }stderr does not begin with $base.err ($out/$arch/$prog.$name.err)"
+      elif [ -s "$out/$arch/$prog.$name.err" ]; then
+        bad="$bad${bad:+; }stderr not empty ($out/$arch/$prog.$name.err)"
+      fi
+      if [ -n "$bad" ]; then fail "$prog $arch $name: $bad"; else ok; fi
+      ncases=$((ncases + 1))
+    done
+    printf '%s %s: %d bytes, %s, built in %.1f s, %d runs%s\n' "$prog" "$arch" "$(stat -c %s "$exe")" \
+      "$(sha256sum "$exe" | cut -c1-16)" "$(echo "$t1 - $t0" | bc)" "$ncases" \
+      "$([ "$arch" = arm64 ] && echo " (under $(basename "$qemu"))")"
+  done
+done
+echo "g2c build tests: $pass passed, $fails failed"
+[ "$fails" -eq 0 ]
