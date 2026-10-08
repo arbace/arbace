@@ -11,7 +11,7 @@
 // A is the original: a package directory, or a program of .go files of one
 // directory (F.go, or F.go,G.go,... with the other files' names relative to
 // F's directory) that the go command can build for the configuration in the
-// environment (GOOS, GOARCH, GOROOT, ...). B is the candidate: a directory
+// environment (GOOS, GOARCH, GOROOT, CGO_ENABLED: 0 unless set). B is the candidate: a directory
 // holding a file of the same name for each of A's files for the
 // configuration, or the files of a program, in the same spelling as A. A
 // program is compiled as Go's test driver compiles it, without -complete (a
@@ -48,8 +48,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -69,6 +71,12 @@ func defaultGo() string {
 }
 
 func main() {
+	// g2c's configurations have cgo off (tamago has none; linux is built static,
+	// CGO_ENABLED=0): unless the environment says otherwise, the go commands
+	// below and go/build (gocmp tests) take it off too
+	if _, ok := os.LookupEnv("CGO_ENABLED"); !ok {
+		os.Setenv("CGO_ENABLED", "0")
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "reprint":
@@ -286,6 +294,26 @@ var gcflags = []string{"-gcflags=all=-d=syncframes=0", "-gcflags=-S -d=syncframe
 // the file compiled in its place (the original itself for side A). With flat,
 // every file is compiled with flattened positions (flatten.go).
 func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
+	b := buildSideOnce(p, sources, flat, "")
+	if b.err != "" {
+		return b
+	}
+	for pkg := range b.export {
+		if strings.TrimSpace(b.asm[pkg]) == "" {
+			// The go command replays a cached compile's -S output from the build
+			// cache, and prints nothing when that entry is missing (seen
+			// 2026-10-08: two programs whose compiles were cached without their
+			// output). Compile again under a fresh cache key: the same files with
+			// a comment appended, which changes no position and no code.
+			return buildSideOnce(p, sources, flat, strconv.FormatInt(time.Now().UnixNano(), 36))
+		}
+	}
+	return b
+}
+
+// buildSideOnce is buildSide; a non-empty nonce is appended to every file as a
+// comment, so that the compile misses the build cache.
+func buildSideOnce(p *pkgFiles, sources map[string]string, flat bool, nonce string) built {
 	args := append([]string{"list", "-e", "-export", "-json=ImportPath,Export,GoFiles,Error,DepsErrors"}, gcflags...)
 	if withTests {
 		args = append(args[:1], append([]string{"-test"}, args[1:]...)...)
@@ -302,7 +330,7 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 	}
 	overlay := map[string]string{}
 	var tmp string
-	if flat {
+	if flat || nonce != "" {
 		var err error
 		tmp, err = os.MkdirTemp("", "gocmp-flat-")
 		if err != nil {
@@ -311,7 +339,7 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 		defer os.RemoveAll(tmp)
 	}
 	for orig, src := range sources {
-		if !flat {
+		if !flat && nonce == "" {
 			if src != orig {
 				overlay[orig] = src
 			}
@@ -321,8 +349,14 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 		if err != nil {
 			return built{err: err.Error()}
 		}
+		if flat {
+			b = flatten(orig, b)
+		}
+		if nonce != "" {
+			b = append(b, "\n// gocmp: compiled again, "+nonce+"\n"...)
+		}
 		f := filepath.Join(tmp, filepath.Base(orig))
-		if err := os.WriteFile(f, flatten(orig, b), 0o644); err != nil {
+		if err := os.WriteFile(f, b, 0o644); err != nil {
 			return built{err: err.Error()}
 		}
 		overlay[orig] = f
@@ -553,6 +587,16 @@ func compare(a, b string, want map[string]bool) *result {
 	if want["code"] {
 		fail("code", "pass", "")
 		for _, pkg := range pkgs {
+			// gc lists at least the compilation unit's symbols (go:cuinfo.*) for
+			// every package: an empty listing is the go command's, which replays
+			// a cached compile's output from the build cache and silently prints
+			// nothing when that entry is missing (cmd/go/internal/work,
+			// showStdout); comparing two empty listings would pass vacuously
+			if strings.TrimSpace(bA.asm[pkg]) == "" || strings.TrimSpace(bB.asm[pkg]) == "" {
+				fail("code", "error", prefix(pkg)+fmt.Sprintf("empty -S listing (A %d bytes, B %d bytes): the build cache gave no compiler output",
+					len(bA.asm[pkg]), len(bB.asm[pkg])))
+				break
+			}
 			if d := compareAsm(bA.asm[pkg], bB.asm[pkg], keepPositions); d != "" {
 				fail("code", "fail", prefix(pkg)+d)
 				break

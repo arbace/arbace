@@ -237,7 +237,9 @@ Closed (milestone G2, 2026-10-08): `bin/g2c roundtrip` converts std and `$GOROOT
 prints them in the lines layout and checks them with `bin/g2c-check` at the tree, export and
 code levels against a recorded reference; std (373 packages on amd64, 372 on arm64) and the
 `$GOROOT/test` programs (1,707 and 1,702) pass every level on both architectures, and so does
-std with its tests apart from nine known differences (embedded sources). The table, times and
+std with its tests apart from nine known differences (embedded sources). For `GOOS=linux`
+(B1a, 2026-10-08) std (376 and 374 packages) and the programs (1,713 and 1,707) pass every
+level too (`bin/g2c roundtrip linux/amd64`, `linux/arm64`), with no change to the printer. The table, times and
 what it took are in [CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
 
 What remains:

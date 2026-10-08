@@ -18,10 +18,14 @@ bin/g2c dump -tests fmt              # fmt.edn with fmt's _test.go files, and fm
 bin/g2c dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
 bin/g2c read .tmp/godump/out         # read on Arbace (needs bin/build-arbace), print a summary
 bin/g2c corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
+bin/g2c corpus linux-amd64 linux-test linux-arm64 linux-test-arm64   # the same for GOOS=linux
+bin/g2c dump -goos linux -goarch arm64 -o DIR std
 ```
 
 - **Toolchain.** `G2C_GOROOT` names TamaGo's Go tree (default `/root/tamago-go`). The system Go
-  (plain go1.27.1) lacks `GOOS=tamago`. `bin/g2c` builds the helper with `$G2C_GOROOT/bin/go`
+  (plain go1.27.1) lacks `GOOS=tamago`. TamaGo's go also builds `GOOS=linux`, and is used for it
+  too: one tree and one build cache for every configuration; its std differs from upstream's
+  only by `tamago` build constraints, its own files and the GOOS tables (ROUNDTRIP.md). `bin/g2c` builds the helper with `$G2C_GOROOT/bin/go`
   for the host (it runs at conversion time, like javac for j2c). It then runs the helper with
   `-go $G2C_GOROOT/bin/go`, which the helper uses for `go env` and `go list`.
 - **Pinned Go.** The helper checks that it was built with go1.27 (its `go/types` is the
@@ -31,7 +35,8 @@ bin/g2c corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, i
   needs a newer release (`//go:build go1.28`) are excluded by the configuration, as the go
   command does. Moving the pin is a recorded decision (journal, 2026-10-07).
 - **Configuration.** There is one per run, written into every dump: `-goos` (default
-  `tamago`), `-goarch` (`amd64` or `arm64`) and `-tags`. `CGO_ENABLED=0`, `GOFLAGS` is
+  `tamago`; g2c's configurations are `tamago` and `linux`), `-goarch` (`amd64` or `arm64`) and
+  `-tags`. `CGO_ENABLED=0`, `GOFLAGS` is
   emptied, and `GOTOOLCHAIN=local`. `GOAMD64`/`GOARM64` and `GOEXPERIMENT` come from `go env`
   and are recorded.
 - **Loading.** One `go list -e -json -export -deps` gives the files of each package for the
@@ -346,6 +351,10 @@ tests).
 | std, tamago/amd64 | 379 | 1,742 | 0 | 0 | 252.7 MB | runtime, 24.8 MB | 1.8 s | 5.9 s (2,308,308 nodes, 55,001 types) |
 | std, tamago/arm64 | 378 | 1,738 | 0 | 0 | 252.3 MB | runtime, 24.8 MB | 1.5 s | 5.4 s (2,304,970 nodes, 54,967 types) |
 | `$GOROOT/test`, tamago/amd64 | 1,705 of 1,745 | 1,706 | 0 | 0 | 52.2 MB | fixedbugs/bug257.go, 12.2 MB | 0.7 s | 2.4 s (396,469 nodes, 31,024 types) |
+| std, linux/amd64 | 382 | 1,834 | 0 | 0 | 257.7 MB | runtime, 26.2 MB | 1.3 s | 7.3 s (2,357,789 nodes, 56,256 types) |
+| std, linux/arm64 | 380 | 1,829 | 0 | 0 | 257.5 MB | runtime, 26.2 MB | 1.3 s | 6.4 s (2,355,930 nodes, 56,229 types) |
+| `$GOROOT/test`, linux/amd64 | 1,713 | 1,714 | 0 | 0 | 52.4 MB | fixedbugs/bug257.go, 12.2 MB | 1.5 s | 2.5 s (398,760 nodes, 31,239 types) |
+| `$GOROOT/test`, linux/arm64 | 1,707 | 1,708 | 0 | 0 | 52.3 MB | fixedbugs/bug257.go, 12.2 MB | 1.1 s | 2.5 s (397,654 nodes, 31,151 types) |
 | std with tests (`-tests`), tamago/amd64 | 554 (379 + 175 `_test` packages) | 2,935 | 0 | 0 | 451.0 MB | runtime, 25.8 MB | 1.1 s | 7.4 s (4,299,718 nodes, 99,678 types) |
 
 Format version 1 (same day, same machine) wrote 266.7 MB, 266.0 MB and 53.9 MB for the first
@@ -370,6 +379,17 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   constraints and file names: 1,707 programs for tamago/amd64 (1,708 files), 1,702 for
   tamago/arm64 (`bin/g2c corpus test-arm64`), all dumped, 0 excluded by the helper, 0 type
   errors.
+- **linux** (2026-10-08, B1a's configuration, `bin/g2c corpus linux-amd64 linux-test ...`):
+  std has 382 packages on amd64 (380 on arm64), three more than tamago's
+  (`internal/cgrouptest`, `internal/runtime/syscall/linux`, `runtime/race/internal/amd64v1` on
+  amd64), and 1,834 files (173 that tamago's configuration leaves out: system calls and their
+  generated tables, `os`, `net`, `internal/poll`, `internal/syscall/unix`, the runtime's linux
+  files; 81 the other way). `$GOROOT/test` has 1,713 programs on amd64 (`chanlinear.go`,
+  `maplinear.go`, `recover4.go`, `fixedbugs/issue15002.go`, `issue79874.go`, `issue8606b.go`
+  are linux or unix only) and 1,707 on arm64. Everything type-checks and reads; the helper
+  needed no change (cgo is off, `CGO_ENABLED=0`, so `CgoFiles` are empty: the packages' cgo
+  variants, `net`'s and `os/user`'s, are not this configuration). The linux std dumps in 1.3 s,
+  the first time 5 to 10 s (go list builds its export data).
 - **std with tests** (`bin/g2c corpus tests`, not run by default): every std package with its
   in-package test files, and the 175 external test packages. All type-check for tamago/amd64.
 - **Reading on Arbace:** every dump of the corpora reads with `arbace.core/read`
