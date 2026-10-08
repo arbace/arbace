@@ -3,7 +3,8 @@
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
 The vendored tree is the source of truth from now on and is maintained by hand; how it was
-derived is recorded below and can be replayed with `bin/vendor-arbace`. The bootstrap of SPEC
+derived is recorded below and can be replayed with `bin/vendor-arbace` on the branch
+`arbace-for-java-26` (main, without `clojure/` since the freeze, no longer has it). The bootstrap of SPEC
 §9.6 works: stage 0 compiles it into stage 1, stage 1 into stage 2, stage 2 into stage 3, and
 stage 1, 2 and 3 are byte-identical. Clojure's test suite gives the baseline's result on stage 1
 and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
@@ -19,9 +20,9 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/lang/Main.clj` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2c/` | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them |
 | `doc/ARBACE.md` (was `arbace/README.md`) | what `arbace/` holds and its origin (licenses: `LICENSE.md`) |
-| `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it |
+| `bin/vendor-arbace` | replays the derivation into `.tmp/vendor/` (never into `arbace/`) and checks it; on the branch `arbace-for-java-26` only |
 | `arbace/spec/**.clj`, `arbace/core/specs/alpha.clj` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
-| `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/` |
+| `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/`; on the branch `arbace-for-java-26` only |
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
 | `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-07) |
@@ -313,7 +314,8 @@ than the full JDK, which has its default CDS archive (`lib/server/classes.jsa`);
 
 - the fetched suite (`test/`, `src/script/`, and the checkout's top-level files, as
   `sequences.clj` reads `readme.txt`) is copied to `.tmp/clojure-tests/RUN/suite/` and renamed
-  with `arbace.j2c.rename` (`.clj`, `.cljc`, `.java`); the test namespaces
+  with `arbace.j2c.rename` (`.clj`, `.cljc`, `.java`; since the freeze it runs on Arbace,
+  `target/stage2`, through `bin/lib/tools.bash`, before on the frozen Clojure); the test namespaces
   (`clojure.test-clojure.*`, `clojure.test-helper`) keep their names, so the reference
   `test/baseline-results.edn` applies unchanged;
 - the six test libraries are extracted from their jars into `.tmp/clojure-tests/lib-arbace/` and
@@ -690,7 +692,8 @@ vendors spec and behaves as upstream Clojure with it: macro calls are checked ag
 core.specs at macroexpansion, `ex-triage` and the REPL print spec's explanations, `doc` shows
 specs. The frozen `clojure/` keeps the stub.
 
-**Vendored** (`bin/vendor-spec`, which replays it into `.tmp/vendor-spec/`): the versions
+**Vendored** (`bin/vendor-spec`, which replays it into `.tmp/vendor-spec/`; on the branch
+`arbace-for-java-26` only): the versions
 upstream Clojure `98d735fab02f` depends on in its `pom.xml`, from their repositories at those
 tags (the `.clj` sources equal those in the Maven jars, checked with `cmp`):
 

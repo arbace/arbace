@@ -1,9 +1,8 @@
 (ns arbace.j2c.rename
   "The clojure -> arbace renaming of agenda step 4 (doc/VENDOR-NOTES.md, \"What is renamed\"),
-  as a textual rewrite of source text. Used once to derive arbace/ from the frozen clojure/ (the
-  class names in converted Java are renamed by `convert --rename clojure=arbace`, this renames
-  what is left in its string literals, and the .clj sources), and by bin/clojure-tests to make a
-  renamed copy of Clojure's test suite and its test libraries.
+  as a textual rewrite of source text. Used by bin/clojure-tests to make a renamed copy of
+  Clojure's test suite and its test libraries. It also derived arbace/ from the frozen clojure/
+  once (bin/vendor-arbace and bin/vendor-spec, on the branch arbace-for-java-26).
 
   Renamed: names that belong to the vendored Clojure, written dotted or as paths:
   - the Java packages clojure.lang, clojure.asm (with commons, signature), clojure.java.api,
@@ -78,101 +77,10 @@
   [s]
   (reduce (fn [s p] (str/replace s p "arbace")) s patterns))
 
-;; ---------------------------------------------------------------------------------------------
-;; deriving arbace/ from clojure/ (bin/vendor-arbace)
-
-(def ^:private edits
-  "Hand edits after renaming: [file [old new]...], each old string must occur exactly once."
-  {"arbace/core.clj"
-   ;; clojure/version.properties is not vendored: its value is folded in (doc/VENDOR-NOTES.md)
-   [["(let [^java.util.Properties
-      properties (with-open [version-stream (.getResourceAsStream
-                                             (arbace.lang.RT/baseLoader)
-                                             \"clojure/version.properties\")]
-                   (doto (new java.util.Properties)
-                     (.load version-stream)))
-      version-string (.getProperty properties \"version\")"
-     "(let [version-string \"1.13.0-master-SNAPSHOT\""]]
-   "arbace/core/server.clj"
-   ;; the arbace.server.* system properties
-   [["(= k1 \"clojure\")" "(= k1 \"arbace\")"]]})
-
-(defn- edit [path s]
-  (reduce (fn [s [old new]]
-            (let [n (count (re-seq (re-pattern (java.util.regex.Pattern/quote old)) s))]
-              (when (not= 1 n)
-                (throw (ex-info (str "edit of " path ": " n " matches of " (pr-str old)) {})))
-              (str/replace s old new)))
-          s (get edits path)))
-
-(defn- java-header
-  "The comments before the package declaration of a Java file, as ;; lines."
-  [^java.io.File f]
-  (let [lines (take-while #(not (str/starts-with? % "package ")) (str/split-lines (slurp f)))
-        lines (reverse (drop-while str/blank? (reverse (drop-while str/blank? lines))))]
-    (apply str (for [l lines] (str (str/trimr (str ";; " (str/replace l "\t" "    "))) "\n")))))
-
-(defn- rel [root ^java.io.File f]
-  (str (.relativize (.toPath (.getCanonicalFile (io/file root))) (.toPath (.getCanonicalFile f)))))
-
-(defn vendor!
-  "Writes the vendored tree into out: the converter's output conv (converted with
-  --rename clojure=arbace from the Java files under src/clojure) with its string literals
-  renamed and each file headed by its Java file's notice, and the .clj files of src/clojure,
-  renamed, with the hand edits above."
-  [conv src out]
-  (let [files (fn [dir ext] (sort-by str (for [^java.io.File f (file-seq (io/file dir))
-                                               :when (and (.isFile f) (str/ends-with? (.getName f) ext))]
-                                           f)))
-        rev "98d735fab02f"]
-    (doseq [f (files conv ".clj")
-            :let [path (rel conv f)
-                  [first-line & more] (str/split-lines (slurp f))
-                  java (second (re-find #"^;; Converted from \S*?/(clojure/\S+\.java) by arbace\.j2c" first-line))
-                  pkg (second (re-find #"the namespace of Java package (\S+)\.$" first-line))
-                  head (cond
-                         java (str (java-header (io/file src java))
-                                   (when-not (str/blank? (java-header (io/file src java))) ";;\n")
-                                   ";; Converted from " java " of Clojure " rev " by arbace.j2c\n"
-                                   ";; (convert --rename clojure=arbace) and arbace.j2c.rename; see doc/VENDOR-NOTES.md.\n")
-                         pkg (str ";; The namespace of Java package " pkg ", written by arbace.j2c from Clojure " rev
-                                  ";\n;; see doc/VENDOR-NOTES.md.\n")
-                         :else (throw (ex-info (str "unexpected header: " first-line) {})))
-                  o (io/file out path)]]
-      (io/make-parents o)
-      (spit o (str head (rename (str/join "\n" more)) "\n")))
-    (doseq [f (files (io/file src "clojure") ".clj")
-            :let [path (rename (rel src f))
-                  o (io/file out path)]]
-      (io/make-parents o)
-      (spit o (edit path (rename (slurp f)))))))
-
-(defn vendor-lib!
-  "Writes the .clj files of a Clojure library's checkout src (under src/main/clojure) into out,
-  path and text renamed, each with a line naming its origin after its leading comment block
-  (the library's notice, if any). repo and rev name the checkout (bin/vendor-spec)."
-  [src out repo rev]
-  (let [dir (io/file src "src/main/clojure")]
-    (doseq [^java.io.File f (sort-by str (file-seq dir))
-            :when (and (.isFile f) (str/ends-with? (.getName f) ".clj"))
-            :let [path (rel dir f)
-                  s (slurp f)
-                  notice (re-find #"^(?:;[^\n]*\n)+" s)
-                  origin (str ";; Vendored from " repo ", src/main/clojure/" path "\n"
-                              ";; at " rev ", renamed by arbace.j2c.rename;\n"
-                              ";; see doc/VENDOR-NOTES.md.\n")
-                  o (io/file out (rename path))]]
-      (io/make-parents o)
-      (spit o (if notice
-                (str notice ";\n" origin (rename (subs s (count notice))))
-                (str origin "\n" (rename s)))))))
-
 (defn -main
   "files FILE...       renames in place, printing the files changed;
    stdin               renames standard input to standard output;
-   tree DIR EXT...     renames in place the files under DIR whose names end in one of EXT;
-   vendor CONV SRC OUT see vendor!;
-   vendor-lib SRC OUT REPO REV  see vendor-lib!."
+   tree DIR EXT...     renames in place the files under DIR whose names end in one of EXT."
   [cmd & args]
   (case cmd
     "files" (doseq [f args]
@@ -186,6 +94,4 @@
                      :when (and (.isFile f) (some #(str/ends-with? (.getName f) %) exts))
                      :let [s (slurp f) r (rename s)]
                      :when (not= s r)]
-               (spit f r)))
-    "vendor" (apply vendor! args)
-    "vendor-lib" (apply vendor-lib! args)))
+               (spit f r)))))
