@@ -25,10 +25,18 @@
 #                                 convert a corpus of `bin/g2c corpus` (dumped first if missing)
 #                                 into .tmp/g2c/forms/CORPUS[-full]; report in
 #                                 .tmp/g2c/forms/CORPUS[-full].report.edn
-#   bin/g2c roundtrip [amd64|arm64]
-#                                 the round trip: convert std (and, for amd64, $GOROOT/test),
-#                                 print the forms (arbace.g2c.print) into the candidate
-#                                 .tmp/g2c/cand-ARCH, and compare with bin/g2c-check
+#   bin/g2c roundtrip [amd64|arm64] [--record]
+#                                 the round trip: convert std and $GOROOT/test's programs for
+#                                 tamago/ARCH (default amd64), print the forms
+#                                 (arbace.g2c.print) into the candidate .tmp/g2c/cand-ARCH, and
+#                                 compare with bin/g2c-check against the reference
+#                                 test/g2c/roundtrip-ARCH.edn: exits non-zero on a regression
+#                                 (an entry and level passing there and not now). --record
+#                                 writes the results as the new reference. --tests: std for
+#                                 tamago/amd64 with its _test.go files (corpus tests) into
+#                                 .tmp/g2c/cand-tests, checked with g2c-check --with-tests,
+#                                 reference test/g2c/roundtrip-tests.edn, known differences
+#                                 (with reasons) test/g2c/roundtrip-tests-known.edn
 #   bin/g2c print ARGS...         the printer (bin/g2c-print, arbace.g2c.print)
 #   bin/g2c test                  the converter's tests (test/g2c/convert_test.clj and the spec's
 #                                 examples, test/g2c/convert/)
@@ -158,16 +166,47 @@ convert() {
 }
 
 roundtrip() {
-  local arch=${1:-amd64} cand
+  local arch=amd64 record="" tests=test cand ref t0 t1 t2 status with_tests="" check
+  while [ $# -gt 0 ]; do
+    case $1 in
+      amd64|arm64) arch=$1; shift ;;
+      --record) record=1; shift ;;
+      --tests) with_tests=1; shift ;;
+      *) echo "roundtrip: [amd64|arm64] [--tests] [--record], not $1" >&2; return 2 ;;
+    esac
+  done
+  [ "$arch" = arm64 ] && tests=test-arm64
   cand=$root/.tmp/g2c/cand-$arch
-  rm -rf "$cand"
-  convert --corpus "$arch" --print "$cand" || true
-  if [ "$arch" = amd64 ]; then
-    convert --corpus test --print "$cand" || true
-    "$root/bin/g2c-check" --arch "$arch" "$cand"
-  else
-    "$root/bin/g2c-check" --arch "$arch" --no-tests "$cand"
+  ref=$root/test/g2c/roundtrip-$arch.edn
+  check=("$root/bin/g2c-check" --arch "$arch")
+  if [ -n "$with_tests" ]; then
+    [ "$arch" = amd64 ] || { echo "roundtrip --tests: amd64 only (the corpus tests)" >&2; return 2; }
+    cand=$root/.tmp/g2c/cand-tests
+    ref=$root/test/g2c/roundtrip-tests.edn
+    check+=(--with-tests --no-tests --known "$root/test/g2c/roundtrip-tests-known.edn")
   fi
+  rm -rf "$cand"
+  t0=$(date +%s.%N)
+  if [ -n "$with_tests" ]; then
+    convert --corpus tests --print "$cand" || true
+  else
+    convert --corpus "$arch" --print "$cand" || true
+    convert --corpus "$tests" --print "$cand" || true
+  fi
+  t1=$(date +%s.%N)
+  status=0
+  if [ -n "$record" ]; then
+    "${check[@]}" --record "$ref" "$cand" || status=$?
+  elif [ -f "$ref" ]; then
+    "${check[@]}" --reference "$ref" "$cand" || status=$?
+  else
+    echo "no reference ${ref#$root/} (bin/g2c roundtrip ... --record): any failure fails" >&2
+    "${check[@]}" "$cand" || status=$?
+  fi
+  t2=$(date +%s.%N)
+  printf 'roundtrip %s: convert and print %.1f s, check %.1f s\n' "$arch" \
+    "$(echo "$t1 - $t0" | bc)" "$(echo "$t2 - $t1" | bc)"
+  return $status
 }
 
 cmd=${1:-}

@@ -55,6 +55,7 @@ import (
 var (
 	goCmd         string
 	keepPositions bool
+	withTests     bool
 )
 
 func defaultGo() string {
@@ -99,6 +100,7 @@ func mainCompare(args []string) int {
 	fs.StringVar(&goCmd, "go", defaultGo(), "the go command (default $GOCMP_GO, else $GOROOT/bin/go, else go)")
 	levels := fs.String("levels", "tree,export,code", "levels to compare: tree, export, code (comma-separated) or all")
 	fs.BoolVar(&keepPositions, "keep-positions", false, "compile with the sources' own positions (default: flattened; the code level then ignores DWARF)")
+	fs.BoolVar(&withTests, "tests", false, "a package directory with its _test.go files: the trees of all, and the export data and code of the package and its test variants (go list -test)")
 	fs.Usage = usage(fs, compareUsage)
 	fs.Parse(args)
 	if fs.NArg() != 2 {
@@ -201,15 +203,17 @@ func listPackage(a string) (*pkgFiles, error) {
 	if len(files) > 1 {
 		return nil, errors.New("a package directory or the files of a program, not both")
 	}
-	out, stderr, err := runGo(abs, "list", "-e", "-json=ImportPath,GoFiles,CgoFiles,Error", ".")
+	out, stderr, err := runGo(abs, "list", "-e", "-json=ImportPath,GoFiles,CgoFiles,TestGoFiles,XTestGoFiles,Error", ".")
 	if err != nil {
 		return nil, fmt.Errorf("go list: %v\n%s", err, stderr)
 	}
 	var p struct {
-		ImportPath string
-		GoFiles    []string
-		CgoFiles   []string
-		Error      *struct{ Err string }
+		ImportPath   string
+		GoFiles      []string
+		CgoFiles     []string
+		TestGoFiles  []string
+		XTestGoFiles []string
+		Error        *struct{ Err string }
 	}
 	if err := json.Unmarshal(out, &p); err != nil {
 		return nil, err
@@ -220,7 +224,11 @@ func listPackage(a string) (*pkgFiles, error) {
 	if len(p.CgoFiles) > 0 {
 		return nil, fmt.Errorf("%s: cgo files are not supported", p.ImportPath)
 	}
-	return &pkgFiles{dir: abs, pattern: []string{"."}, files: p.GoFiles}, nil
+	files = p.GoFiles
+	if withTests {
+		files = append(append(append([]string(nil), files...), p.TestGoFiles...), p.XTestGoFiles...)
+	}
+	return &pkgFiles{dir: abs, pattern: []string{"."}, files: files}, nil
 }
 
 func runGo(dir string, args ...string) (stdout []byte, stderr string, err error) {
@@ -232,11 +240,40 @@ func runGo(dir string, args ...string) (stdout []byte, stderr string, err error)
 	return o.Bytes(), e.String(), err
 }
 
-// built is one side compiled for the export and code levels.
+// built is one side compiled for the export and code levels: per package
+// compiled (one, or with -tests the package and its test variants, by import
+// path), its archive and its -S listing.
 type built struct {
-	export string // the package archive
-	asm    string // the -S listing
-	err    string // why it did not compile
+	export map[string]string // the package archives
+	asm    map[string]string // the -S listings
+	err    string            // why it did not compile
+}
+
+// splitListings splits the go command's compiler output by its "# pkg"
+// headers: with -test, several packages print their listings.
+func splitListings(stderr string, single string) map[string]string {
+	if single != "" {
+		return map[string]string{single: stderr}
+	}
+	out := map[string]string{}
+	cur := ""
+	var b strings.Builder
+	flush := func() {
+		if cur != "" {
+			out[cur] += b.String()
+		}
+		b.Reset()
+	}
+	for _, line := range strings.SplitAfter(stderr, "\n") {
+		if strings.HasPrefix(line, "# ") {
+			flush()
+			cur = strings.TrimSpace(line[2:])
+			continue
+		}
+		b.WriteString(line)
+	}
+	flush()
+	return out
 }
 
 // gcflags are the compiler flags of both sides: -S prints the code of the
@@ -249,7 +286,10 @@ var gcflags = []string{"-gcflags=all=-d=syncframes=0", "-gcflags=-S -d=syncframe
 // the file compiled in its place (the original itself for side A). With flat,
 // every file is compiled with flattened positions (flatten.go).
 func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
-	args := append([]string{"list", "-e", "-export", "-json=ImportPath,Export,Error,DepsErrors"}, gcflags...)
+	args := append([]string{"list", "-e", "-export", "-json=ImportPath,Export,GoFiles,Error,DepsErrors"}, gcflags...)
+	if withTests {
+		args = append(args[:1], append([]string{"-test"}, args[1:]...)...)
+	}
 	if p.pattern[0] != "." {
 		// a program of GOROOT/test: as Go's test driver compiles it (go tool
 		// compile without -complete); the flag only allows body-less functions
@@ -302,24 +342,44 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 	if err != nil {
 		return built{err: fmt.Sprintf("go list: %v\n%s", err, stderr)}
 	}
-	var r struct {
-		Export     string
-		Error      *struct{ Err string }
-		DepsErrors []*struct{ Err string }
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
-		return built{err: err.Error()}
-	}
-	if r.Export == "" {
-		msg := stderr
-		if r.Error != nil {
-			msg = r.Error.Err + "\n" + msg
+	res := built{export: map[string]string{}}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for dec.More() {
+		var r struct {
+			ImportPath string
+			Export     string
+			GoFiles    []string
+			Error      *struct{ Err string }
+			DepsErrors []*struct{ Err string }
 		}
-		for _, e := range r.DepsErrors {
-			msg += e.Err + "\n"
+		if err := dec.Decode(&r); err != nil {
+			return built{err: err.Error()}
 		}
-		return built{err: "does not compile:\n" + firstLines(msg, 12)}
+		if r.Export == "" && r.Error == nil && len(r.GoFiles) == 0 && withTests {
+			continue // a test-only package's own (empty) package
+		}
+		if r.Export == "" {
+			msg := stderr
+			if r.Error != nil {
+				msg = r.Error.Err + "\n" + msg
+			}
+			for _, e := range r.DepsErrors {
+				msg += e.Err + "\n"
+			}
+			return built{err: "does not compile:\n" + firstLines(msg, 12)}
+		}
+		res.export[r.ImportPath] = r.Export
 	}
+	if len(res.export) == 0 {
+		return built{err: "does not compile: no package listed"}
+	}
+	single := ""
+	if !withTests {
+		for k := range res.export {
+			single = k
+		}
+	}
+	res.asm = splitListings(stderr, single)
 	if dir := os.Getenv("GOCMP_KEEP"); dir != "" {
 		// a diagnostic knob: keep the listings
 		side := "a"
@@ -330,7 +390,7 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 		}
 		os.WriteFile(filepath.Join(dir, side+".s"), []byte(stderr), 0o644)
 	}
-	return built{export: r.Export, asm: stderr}
+	return res
 }
 
 func firstLines(s string, n int) string {
@@ -453,22 +513,50 @@ func compare(a, b string, want map[string]bool) *result {
 		}
 		return res
 	}
+	var pkgs []string
+	for k := range bA.export {
+		pkgs = append(pkgs, k)
+	}
+	sort.Strings(pkgs)
+	prefix := func(pkg string) string {
+		if withTests {
+			return pkg + ": "
+		}
+		return ""
+	}
+	if len(bA.export) != len(bB.export) {
+		for _, l := range []string{"export", "code"} {
+			if want[l] {
+				fail(l, "fail", fmt.Sprintf("packages compiled: %d vs %d", len(bA.export), len(bB.export)))
+			}
+		}
+		return res
+	}
 	if want["export"] {
-		d, err := compareExport(bA.export, bB.export)
-		switch {
-		case err != nil:
-			fail("export", "error", err.Error())
-		case d != "":
-			fail("export", "fail", d)
-		default:
-			fail("export", "pass", "")
+		fail("export", "pass", "")
+		for _, pkg := range pkgs {
+			if bB.export[pkg] == "" {
+				fail("export", "fail", prefix(pkg)+"the candidate does not compile the package")
+				break
+			}
+			d, err := compareExport(bA.export[pkg], bB.export[pkg])
+			if err != nil {
+				fail("export", "error", prefix(pkg)+err.Error())
+				break
+			}
+			if d != "" {
+				fail("export", "fail", prefix(pkg)+d)
+				break
+			}
 		}
 	}
 	if want["code"] {
-		if d := compareAsm(bA.asm, bB.asm, keepPositions); d != "" {
-			fail("code", "fail", d)
-		} else {
-			fail("code", "pass", "")
+		fail("code", "pass", "")
+		for _, pkg := range pkgs {
+			if d := compareAsm(bA.asm[pkg], bB.asm[pkg], keepPositions); d != "" {
+				fail("code", "fail", prefix(pkg)+d)
+				break
+			}
 		}
 	}
 	return res

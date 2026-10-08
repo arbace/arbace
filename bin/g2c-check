@@ -32,9 +32,16 @@
 #   -j N                 parallel comparisons (default the number of cores)
 #   --only REGEX         only the corpus entries (import paths, test paths) matching REGEX
 #   --no-tests           packages only; --no-packages: tests only
+#   --with-tests         packages with their _test.go files (gocmp -tests: the trees of all
+#                        files, the export data and code of the package and its test
+#                        variants), test-only packages included; work directory GOOS-GOARCH-tests
 #   --reference FILE     results to compare with: an entry passing a level there and not here
 #                        is a regression, and so is an entry missing here (default: none; any
 #                        failure fails the run)
+#   --record FILE        also write the results as a reference (without times or paths)
+#   --known FILE         the known differences, with their reasons (test/g2c/roundtrip-known.edn):
+#                        failing levels listed there are expected (reported, not failures);
+#                        failing levels not listed are reported as unexpected
 #   --list-tests         print the test programs of the corpus for the configuration, exit
 #   --ops OPS --seed N   for --mutations (default swap,const,drop and 1)
 # Environment: G2C_GOROOT (default /root/tamago-go), G2C_GOOS (default tamago), G2C_GOARCH;
@@ -55,6 +62,9 @@ only=
 packages=1
 tests=1
 reference=
+record=
+known=
+with_tests=
 mode=check
 make_kind=
 ops=swap,const,drop
@@ -100,7 +110,10 @@ while [ $# -gt 0 ]; do
     --only) only=$2; shift 2 ;;
     --no-tests) tests=0; shift ;;
     --no-packages) packages=0; shift ;;
+    --with-tests) with_tests=1; shift ;;
     --reference) reference=$2; shift 2 ;;
+    --record) record=$2; shift 2 ;;
+    --known) known=$2; shift 2 ;;
     --make) mode=make; make_kind=$2; shift 2 ;;
     --mutations) mode=mutations; shift ;;
     --list-tests) mode=list-tests; shift ;;
@@ -114,7 +127,10 @@ done
 
 go=$goroot/bin/go
 [ -x "$go" ] || { echo "no Go toolchain at $goroot (set G2C_GOROOT)" >&2; exit 2; }
-work=$root/.tmp/g2c-check/$goos-$goarch
+work=$root/.tmp/g2c-check/$goos-$goarch${with_tests:+-tests}
+if [ -n "$with_tests" ]; then
+  export G2C_GOCMP_FLAGS="${G2C_GOCMP_FLAGS:-} -tests"
+fi
 mkdir -p "$work"
 
 # gocmp, built for the host
@@ -161,7 +177,12 @@ fi
 corpus=$work/corpus.txt
 : > "$corpus"
 if [ $packages = 1 ]; then
-  "$go" list -e -f '{{if .GoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}' std |
+  if [ -n "$with_tests" ]; then
+    filter='{{if or .GoFiles .TestGoFiles .XTestGoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}'
+  else
+    filter='{{if .GoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}'
+  fi
+  "$go" list -e -f "$filter" std |
     while read -r ip dir; do printf 'package\t%s\t%s\n' "$ip" "${dir#$goroot/src/}"; done >> "$corpus"
 fi
 if [ $tests = 1 ]; then
@@ -270,21 +291,72 @@ results=$work/results.edn
 summary "$raw"
 echo "time: $elapsed s with $jobs jobs; results in ${results#$root/}, logs in ${work#$root/}/logs"
 
+# Known differences: lines "kind path level" of FILE's entries [KIND "PATH" [LEVEL ...] "reason"]
+known_levels() {
+  sed -n 's/^ *\[:\([a-z]*\) "\([^"]*\)" \[\([^]]*\)\].*/\1 \2 \3/p' "$1" |
+    awk '{ for (i = 3; i <= NF; i++) print $1, $2, substr($i, 2) }'
+}
+
 # Regressions against a reference, else failures
 key_status() { # FILE: lines "kind path level status"
-  sed -n 's/^  \[:\([a-z]*\) "\([^"]*\)" {\(.*\) :ms [0-9]*} .*/\1 \2 \3/p' "$1" |
+  sed -n 's/^  \[:\([a-z]*\) "\([^"]*\)" {\([^}]*\)}.*/\1 \2 \3/p' "$1" |
+    sed 's/ :ms [0-9]*//' |
     awk '{ for (i = 3; i < NF; i += 2) print $1, $2, substr($i, 2), substr($(i+1), 2) }'
 }
+if [ -n "$record" ]; then
+  # the reference: results.edn without times, dates or the candidate's path
+  {
+    echo ";; The round trip's reference results (bin/g2c roundtrip, doc/go/ROUNDTRIP.md):"
+    echo ";; an entry and level passing here and not in a later run is a regression."
+    echo ";; One entry per line: [KIND PATH {LEVEL STATUS ...} FIRST-LINE-OF-DIFFERENCE]."
+    printf '{:config {:goos "%s" :goarch "%s" :go "%s"}\n :levels [%s]\n :results\n [\n' \
+      "$goos" "$goarch" "$version" ":${levels//,/ :}"
+    grep '^  \[' "$results" | sed 's/ :ms [0-9]*}/}/'
+    echo " ]}"
+  } > "$record"
+  echo "recorded the reference ${record#$root/}"
+fi
+unexpected=0
+if [ -n "$known" ]; then
+  [ -f "$known" ] || { echo "no known differences file $known" >&2; exit 2; }
+  failing=$(key_status "$results" | awk '$4 == "fail" || $4 == "error" { print $1, $2, $3 }' | sort)
+  listed=$(known_levels "$known" | sort)
+  n_known=$(comm -12 <(echo "$failing") <(echo "$listed") | grep -c . || true)
+  unexp=$(comm -23 <(echo "$failing") <(echo "$listed") | grep . || true)
+  fixed=$(comm -13 <(echo "$failing") <(echo "$listed") |
+          while read -r k p l; do key_status "$results" | grep -q "^$k $p $l pass\$" && echo "  $k $p $l"; done)
+  echo "known differences (${known#$root/}): $n_known failing levels as expected"
+  [ -n "$fixed" ] && { echo "known differences that now pass (update ${known#$root/}):"; echo "$fixed"; }
+  if [ -n "$unexp" ]; then
+    unexpected=$(echo "$unexp" | wc -l)
+    echo "$unexpected unexpected failing entry levels; first ones:"
+    echo "$unexp" | head -10 | sed 's/^/  /'
+  fi
+fi
 if [ -n "$reference" ]; then
-  regressions=$(join -j1 <(key_status "$reference" | awk '{print $1"|"$2"|"$3, $4}' | sort) \
-                         <(key_status "$results" | awk '{print $1"|"$2"|"$3, $4}' | sort) |
-                awk '$2 == "pass" && $3 != "pass" { k = $1; gsub(/\|/, " ", k); print "  " k ": " $2 " -> " $3 }')
+  [ -f "$reference" ] || { echo "no reference $reference" >&2; exit 2; }
+  # an entry and level passing in the reference and not here, or missing here (when the
+  # run includes its kind and path), is a regression
+  regressions=$(join -j1 -a1 -e missing -o 0,1.2,2.2 \
+                  <(key_status "$reference" | awk '{print $1"|"$2"|"$3, $4}' | sort) \
+                  <(key_status "$results" | awk '{print $1"|"$2"|"$3, $4}' | sort) |
+                awk -v only="$only" -v packages=$packages -v tests=$tests -v levels=",$levels," '
+                  $2 == "pass" && $3 != "pass" {
+                    split($1, k, "|")
+                    if ($3 == "missing" && ((k[1] == "package" && !packages) || (k[1] == "test" && !tests) ||
+                                            (only != "" && k[2] !~ only) || index(levels, "," k[3] ",") == 0)) next
+                    print "  " k[1] " " k[2] " " k[3] ": " $2 " -> " $3
+                  }')
   if [ -n "$regressions" ]; then
-    echo "regressions against $reference:"
+    echo "regressions against ${reference#$root/}:"
     echo "$regressions"
     exit 1
   fi
-  echo "no regressions against $reference"
+  echo "no regressions against ${reference#$root/}"
+  exit 0
+fi
+if [ -n "$known" ]; then
+  [ "$unexpected" -eq 0 ] || exit 1
   exit 0
 fi
 failures=$(key_status "$results" | awk '$4 == "fail" || $4 == "error"' | wc -l)

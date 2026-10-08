@@ -659,11 +659,15 @@
           :unary-expr (do (count-node! n)
                           (if-let [neg (let [x (unparen (:x f))]
                                          (when (and (= "-" (:op f)) (= :basic-lit (nt x))
-                                                    (#{"INT" "FLOAT"} (:kind (nf x))))
+                                                    (#{"INT" "FLOAT"} (:kind (nf x)))
+                                                    ;; -0 would read as 0: only a double keeps
+                                                    ;; the sign of a zero
+                                                    (let [v (:value (binding [*stats* nil] (basic-lit x)))]
+                                                      (or (instance? Double v) (not (zero? v)))))
                                            (when (= :paren-expr (nt (:x f))) (count-node! (:x f)))
                                            (let [v (basic-lit x)]
                                              (note! :negative-literal)
-                                             (assoc v :text (str "-" (:text v)) :value (- (:value v))
+                                             (assoc v :text (str "-" (:text v)) :value (-' (:value v))
                                                     :line l :pos (parse-pos (:op-pos f))))))]
                             neg
                           (if-let [op (unary-ops (:op f))]
