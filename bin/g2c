@@ -15,6 +15,16 @@
 #                                 not by default) std for tamago/amd64 with its _test.go files
 #                                 (godump -tests), into .tmp/godump/corpus/, then read every
 #                                 dump on Arbace
+#   bin/g2c convert [--full] [--tests] [--out DIR] PKG...
+#                                 dump the packages (godump [-tests]) into .tmp/g2c/dumps, then
+#                                 convert them to Go forms (arbace.g2c.main) under DIR (default
+#                                 .tmp/g2c/forms/pkgs), each file read back and checked
+#   bin/g2c convert [--full] --corpus amd64|arm64|test|tests
+#                                 convert a corpus of `bin/g2c corpus` (dumped first if missing)
+#                                 into .tmp/g2c/forms/CORPUS[-full]; report in
+#                                 .tmp/g2c/forms/CORPUS[-full].report.edn
+#   bin/g2c test                  the converter's tests (test/g2c/convert_test.clj and the spec's
+#                                 examples, test/g2c/convert/)
 #
 # Environment: G2C_GOROOT, the TamaGo Go tree (go1.27.1, default /root/tamago-go);
 # G2C_JVM_OPTS, the JVM's heap options for read (default -Xmx16g).
@@ -112,6 +122,44 @@ corpus() {
   done
 }
 
+convert_main() {
+  . "$root/bin/lib/tools.bash"
+  arbace_runtime
+  # shellcheck disable=SC2086
+  java ${G2C_JVM_OPTS:--Xmx16g} -Xss64m -cp "$ARBACE_CP" arbace.lang.Main -m arbace.g2c.main convert "$@"
+}
+
+convert() {
+  local full="" tests="" out="" corpus="" jobs
+  jobs=${G2C_JOBS:-$(( $(nproc) / 2 ))}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --full) full=--full; shift ;;
+      --tests) tests=-tests; shift ;;
+      --out) out=$2; shift 2 ;;
+      --corpus) corpus=$2; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  if [ -n "$corpus" ]; then
+    local dumps=$work/corpus/$corpus
+    [ -d "$dumps" ] || corpus "$corpus"
+    out=${out:-$root/.tmp/g2c/forms/$corpus${full:+-full}}
+    rm -rf "$out"
+    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" --quiet $full \
+      --report "$out.report.edn" "$dumps"
+  else
+    [ $# -gt 0 ] || { echo "convert: packages or --corpus" >&2; return 2; }
+    build
+    local dumps=$root/.tmp/g2c/dumps
+    rm -rf "$dumps"
+    mkdir -p "$dumps"
+    godump $tests -o "$dumps" "$@" > "$dumps.tsv" || true
+    out=${out:-$root/.tmp/g2c/forms/pkgs}
+    convert_main --out "$out" --jobs "$jobs" --goroot "$goroot" $full "$dumps"
+  fi
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -121,5 +169,7 @@ case $cmd in
     if has_out_flag "$@"; then godump "$@"; else godump -o "$work/out" "$@"; fi ;;
   read) read_dumps "$@" ;;
   corpus) corpus "$@" ;;
+  convert) convert "$@" ;;
+  test) exec "$root/bin/g2c-convert-tests" "$@" ;;
   *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
