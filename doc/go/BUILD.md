@@ -116,16 +116,16 @@ its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the 
 `arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
 is C2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
 reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
-forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md); `bin/jrt overlay` prints them and
-writes the overlay file for `$G2C_GOROOT`, and `bin/jrt overlay --check` compares them with the
-toolchain's runtime.
+forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; C2G-SPEC §9.3, amendment T15);
+`bin/jrt overlay` prints them and writes the overlay file for `$G2C_GOROOT`, and `bin/jrt
+overlay --check` compares them with the toolchain's runtime.
 
 Checked (2026-10-08) with the experiment's overlay of `.tmp/c2g-exp/gls/` (C2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
 runs with it, for amd64 and for arm64 under `qemu-aarch64`.
 
-## Libraries and tests (amendment B6, proposed 2026-10-08)
+## Libraries and tests (amendment B6, accepted 2026-10-08)
 
 A library has no main package, so it is not built into an executable: `--print-only` prints
 the module into `--work DIR`'s `mod/` (as step 1 of the build does) and stops, so that other
@@ -134,7 +134,9 @@ gives the module path when `SRC` has no `program.edn`. `--tests` also prints eac
 `:test-files` (SPEC §4.2, §15 Q14), which the build leaves out otherwise (a test file is still
 collected by the package file's `load`, but not printed). `bin/jrt`
 ([JRT-NOTES.md](JRT-NOTES.md)) builds, vets and tests jrt this way, with the environment of
-"The build" above, and `go test -exec qemu-aarch64` for arm64.
+"The build" above, and `go test -exec qemu-aarch64` for arm64. (Amendment B6, proposed in
+JRT-NOTES.md and accepted 2026-10-08 with C2G-SPEC's amendments, §16; it adds options to
+`bin/g2c build` only and changes no form, so nothing of SPEC is amended.)
 
 ## Cross-compilation and arm64
 

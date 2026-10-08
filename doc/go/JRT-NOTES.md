@@ -490,38 +490,47 @@ when profiles show exceptions on hot paths.
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
+All accepted 2026-10-08; C2G-SPEC names them J1-J10 (§16).
+
 - **A1** (§5.11): `ClassInfo` gains `Go`, the Go type's qualified name, used by stack traces.
   Its function and table fields are set in an `init` function through `C_class.Info()`, not in
   the `Define` call: Go rejects the initialization cycles that Java's mutually referring classes
   make, and a function literal's body counts as a reference. `C_InstanceOf` must not refer to
-  `C_class` if it is given at `Define`.
+  `C_class` if it is given at `Define`. *(J1; accepted 2026-10-08, folded into C2G-SPEC §5.11.)*
 - **A2** (§5.2, §5.4): a non-leaf class's constructor bodies are `Ctor...(t *C, this C_I,
-  args...)`, as §15.3's super call implies. A leaf class's take no `this`.
+  args...)`, as §15.3's super call implies. A leaf class's take no `this`. *(J2; accepted
+  2026-10-08, folded into C2G-SPEC §5.2, §5.4.)*
 - **A3** (§5.9, §11): the array API as implemented:
   - `NewMultiArray(cls *Class, dims ...int32) *RefArray`, with `cls` the array class;
   - `Copy()` for a clone at the array's type;
   - `IndexOutOfBounds(i, n int)`;
   - `Arraycopy` (with `System_Arraycopy_O_I_O_I_I__V` calling it);
-  - `Array_NewInstance_Class_I__O`.
+  - `Array_NewInstance_Class_I__O`. *(J3; accepted 2026-10-08, folded into C2G-SPEC §5.9,
+    §11.)*
 - **A4** (§7.9.6): the frame table:
   - `FrameInfo{Go, Class, Method, Flags}` and `RegisterFrames`, c2g writing `c2g_frames.go`;
   - jrt's demangler as the fallback, so c2g registers what it cannot express by names:
     lambdas (`lambda$m$0`), methods whose Java name contains `_`, frames to elide;
-  - a function literal without an entry stands for its function.
-- **A5** (§11): the additions in bold in the API table above.
+  - a function literal without an entry stands for its function. *(J4; accepted 2026-10-08,
+    folded into C2G-SPEC §7.9.6.)*
+- **A5** (§11): the additions in bold in the API table above. *(J5; accepted 2026-10-08,
+  folded into C2G-SPEC §11.)*
 - **A6** (§7.9.5): implicit `NullPointerException`s have a null message (the JVM's helpful
   messages are not reproduced), and the oracle's cases that record them are accepted
-  mismatches. Reproducing them would need c2g to pass the expression's text to each check.
+  mismatches. Reproducing them would need c2g to pass the expression's text to each check. *(J6;
+  accepted 2026-10-08, folded into C2G-SPEC §7.9.5, §9.1 and §3.2 as V11.)*
 - **A7** (§8.1): the lock word's layout as implemented. A thread number that does not fit 22
-  bits inflates.
+  bits inflates. *(J7; accepted 2026-10-08, folded into C2G-SPEC §8.1.)*
 - **A8** (§5.8): `new Object()` is `jrt.Object_New() any`, of an unexported type; a clone's
-  header is reset with `ClearHeader`.
+  header is reset with `ClearHeader`. *(J8; accepted 2026-10-08, folded into C2G-SPEC §5.8.)*
 - **A9** (§4.3): stand-in files `standin_*` (generated, tracked) hold jrt's stand-ins for
-  translated classes until c2g's output joins, and are deleted then.
+  translated classes until c2g's output joins, and are deleted then. *(J9; accepted 2026-10-08,
+  folded into C2G-SPEC §4.3.)*
 - **A10** (§7.13, §9.1): `Enum`'s promotable methods are `name`, `ordinal`, `hashCode` and
   `equals`. `clone` is `Impl_Clone__O` (final, throwing `CloneNotSupportedException`), to which
-  enum classes forward.
+  enum classes forward. *(J10; accepted 2026-10-08, folded into C2G-SPEC §5.4, §7.13, §9.1.)*
 - **BUILD.md B6**: `--print-only`, `--tests`, `--module` (BUILD.md, "Libraries and tests").
+  *(Accepted 2026-10-08, marked in BUILD.md.)*
 
 ## Sources
 
@@ -883,33 +892,41 @@ Results (2026-10-08), the whole package: linux/amd64 2.0 s, linux/arm64 under `q
 
 ## Proposed amendments (phase 2b, for the user's review)
 
+All accepted 2026-10-08; C2G-SPEC names them R11-R19 (§16), apart from phase 2a's A11-A16.
+
 - **A11** (§5.11): the tables' value convention above: invokers take and return Go
   representations; jrt's `Method.invoke`, `Constructor.newInstance` and `Field.get`/`set` unbox
   and widen arguments and box results. §5.11's "boxing as Field.get/set do" in the invokers is
   replaced. `Invoke` is never nil; `Set` is nil for final fields; `New` nil for abstract classes.
+  *(R11; accepted 2026-10-08, folded into C2G-SPEC §5.11, §10.1.)*
 - **A12** (§5.11): the normative format of "The member tables": the modifiers as
   `getModifiers` reports them (bridge, varargs, synthetic, native kept), `Params` nil for no
   parameters, class expressions valid at `init`, one entry per member in its declaring class's
-  table.
+  table. *(R12; accepted 2026-10-08, folded into C2G-SPEC §5.11.)*
 - **A13** (§5.11, §10.1): `Proxy.newProxyInstance` throws `UnsupportedOperationException`; the
   `Reflector` variant's `boxArg` calls `jrt.AdaptFn(paramType, arg)` (the interface's
   `FromFn`) instead. c2g sets `FromFn` on every interface `Compiler.FISupport` may adapt (the
-  `@FunctionalInterface` ones), and `isAnnotationPresent(FunctionalInterface)` reads it.
+  `@FunctionalInterface` ones), and `isAnnotationPresent(FunctionalInterface)` reads it. *(R13;
+  accepted 2026-10-08, folded into C2G-SPEC §5.11, §7.11, §10.1, §12.)*
 - **A14** (§11, A5): jrt's new API names: `As`, `Box`, `Unbox`, `AdaptFn`, `Method.Info`,
   `Constructor.Info`, `Field.Info`, `Charset.Aliases`, `Date.InstantText`; the classes of the
-  structure table; `Math_PI`, `Math_E`, `Math_TAU` (and `StrictMath`'s) as constants.
+  structure table; `Math_PI`, `Math_E`, `Math_TAU` (and `StrictMath`'s) as constants. *(R14;
+  accepted 2026-10-08, folded into C2G-SPEC §11.)*
 - **A15** (§16 Q13): c2g's list of classes whose declared members the tables hold, so far:
   `java.util.Random` (`getDeclaredField("seed")`, with phase 2a's `Unsafe`). `Object`'s
-  protected `clone` is jrt's.
+  protected `clone` is jrt's. *(R15; accepted 2026-10-08, folded into C2G-SPEC §5.11, §16 Q13.)*
 - **A16** (§12): `getExceptionTypes` empty, `Method.toString` without throws clause, no
   annotations but `FunctionalInterface` through `FromFn`, generic reflection returning plain
-  `Class` objects.
+  `Class` objects. *(R16; accepted 2026-10-08, folded into C2G-SPEC §5.10, §12.)*
 - **A17** (JAVA-SURFACE.md decision 2): the default locale is `en_US` with the root locale's
-  data, and `String`'s `Locale` overloads use the root mapping for every locale.
+  data, and `String`'s `Locale` overloads use the root mapping for every locale. *(R17; accepted
+  2026-10-08, folded into C2G-SPEC §12.)*
 - **A18** (V9): jrt's charsets are UTF-8, ISO-8859-1 and US-ASCII; `Charset.forName` throws
-  `UnsupportedCharsetException` for the others.
+  `UnsupportedCharsetException` for the others. *(R18; accepted 2026-10-08, folded into C2G-SPEC
+  §12, with V9 widened.)*
 - **A19** (A9): `standin_reflect.clj` (the wrappers, `Type`, `InvocationTargetException`)
-  joins the stand-in files deleted when c2g's output joins the build.
+  joins the stand-in files deleted when c2g's output joins the build. *(R19; accepted 2026-10-08,
+  folded into C2G-SPEC §4.3.)*
 
 ## Sources (phase 2b)
 
@@ -1287,27 +1304,33 @@ if profiles ask.
 
 ## Proposed amendments (for the user's review)
 
+All accepted 2026-10-08; C2G-SPEC names them T11-T16 (§16), apart from phase 2b's A11-A16.
+
 - **A11** (§9.2, §5.11): c2g calls `jrt.RegisterGoType(C_class, reflect.TypeFor[C]())` in its
   init for every class whose fields reach `Unsafe.objectFieldOffset` (or every class, if
   simpler); field offsets are keys of jrt's field table, array offsets the JVM's numbers (base
   16, reference scale 4). A `Type` field of `ClassInfo` would serve as well, and reflection
-  (2b) may want it.
+  (2b) may want it. *(T11; accepted 2026-10-08, folded into C2G-SPEC §5.11, §9.2.)*
 - **A12** (§5.3): `AtomicInteger` and `AtomicLong` embed `Object`, with `Number`'s methods, until
   the translated `Number` joins; then they embed it (`Number` is non-leaf, so they become
-  `Number_I` values).
+  `Number_I` values). *(T12; accepted 2026-10-08, folded into C2G-SPEC §5.3.)*
 - **A13** (§8.4, §11): the threads API as implemented: `CurrentThread() *Thread` (the struct;
   `Thread_CurrentThread__Thread()` is Java's, returning `Thread_I`), `RunMain(func()) int` for
   §10.6's program entry, `Go(name, func()) *Thread`, `RunnableOf(func()) Runnable`,
-  `WaitNonDaemon()`; the interrupt token; `Thread_defaultHandler`.
+  `WaitNonDaemon()`; the interrupt token; `Thread_defaultHandler`. *(T13; accepted 2026-10-08,
+  folded into C2G-SPEC §7.9.6, §8.4, §10.6, §11.)*
 - **A14** (§9.4): the host interface as implemented (`Host`, `HostFile`, `HostFileInfo`,
   `OSHost`, `SetHost`, `CurrentHost`, `Stdin`/`Stdout`/`Stderr`); `System.in`/`out`/`err` are
-  defined with `PrintStream`/`InputStream` over these streams.
+  defined with `PrintStream`/`InputStream` over these streams. *(T14; accepted 2026-10-08, folded
+  into C2G-SPEC §9.4, §11.)*
 - **A15** (§9.3): the patched runtime files live in `overlay/go/runtime/` (a forms root of
   their own, outside `go/`, whose package files `bin/g2c build` would otherwise collect), are
   printed by `bin/jrt overlay`, and are checked against the toolchain by `bin/jrt overlay
-  --check`; BUILD.md's overlay section can name them.
+  --check`; BUILD.md's overlay section can name them. *(T15; accepted 2026-10-08, folded into
+  C2G-SPEC §9.3, §16 Q19.)*
 - **A16** (§8.1): `MonitorEnter`/`MonitorExit` require a Java object (the header at offset 0),
-  as c2g's output guarantees; the uncontended cost is about 14 ns, not 10.
+  as c2g's output guarantees; the uncontended cost is about 14 ns, not 10. *(T16; accepted
+  2026-10-08, folded into C2G-SPEC §8.1 and §3.2 as V13.)*
 
 ## Sources (phase 2a)
 
