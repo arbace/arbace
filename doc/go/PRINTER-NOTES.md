@@ -2,8 +2,9 @@
 
 The printer of milestone G2 ([SPEC.md](SPEC.md) §12): it reads Go forms with the Clojure reader
 (`*read-eval*` false, line numbers on) and writes Go source that gc compiles as the original
-(§3). It is the second half of the round trip *Go → converter → forms → printer → Go*; the
-converter does not exist yet, so the printer is proven on hand-written forms (below).
+(§3). It is the second half of the round trip *Go → converter → forms → printer → Go*. It is
+proven on hand-written forms (below) and on the converter's forms of all of std and
+`$GOROOT/test` ([CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip").
 
 ```sh
 bin/g2c-print [--layout lines|gofmt] [--no-line-directives] [--line-file] \
@@ -77,6 +78,15 @@ from text) and `gofmt` otherwise (forms built by a program):
     recorded line (`*next*`, the room rule), with a trailing comma where Go's semicolon rule
     needs one; otherwise they stay on the line (`f() }`, `x}`). Forms without a line follow
     the same rule, so a hand-written forms file gets a readable Go file with its own lines.
+    A closing brace followed by `else` goes to the line of the `else if` (its recorded line)
+    or, before a plain `else` block, to the line before the block's first statement, when
+    free. Inside a function body kept on one line nothing breaks the line.
+  - Strings with line breaks are interpreted strings (`"a\nb"`): the forms do not say whether
+    the source spelled them raw, and a raw string would push what follows to later lines.
+    (The gofmt layout writes them raw where Go allows it.)
+  - The label of a labeled declaration (`:go/label`), the keyword of a local `const ( ... )`
+    group, and a label before a label, go on the line before their statement when it is
+    free.
   - `--line-file` starts the file with `//line FORMS.clj:1`, so that gc's positions name the
     forms file with the forms' lines (§12.3's printer option for hand-written forms).
 
@@ -96,26 +106,27 @@ checks that every head of §13.5, the metadata the printer reads and the `go/pac
 |---|---|---|
 | §2 | the first example (sort.Search), lines layout | `s02_search` |
 | §4.1-4.2 | package file, `load` of one file per Go file, `:config`, `:files`, `:other-files`, `:embed-files`, `:init-order`, `:positions`, `:test-files` | `s04_multi`, `s09_directives`, `s04_testpkg` |
-| §4.3 | `go/file` `:build`, `:directives`, `:doc`, `:package`, `:imports` (`[name "path"]`, `^:alias`, `_`, `.`) | `s04_files`, `s04_testpkg` |
-| §4.4 | `pkg/Name`, dot-imported names, labels, `go/call` (`fn`, `len`), `go/id` (`true`), heads as plain symbols (`do`, `when`) | `s04_files` |
+| §4.3 | `go/file` `:build`, `:directives`, `:doc`, `:package`, `:imports` (`[name "path"]`, `^:alias`, `_`, `.`, a `go/directive` among them: C4) | `s04_files`, `s04_testpkg`, `s15_roundtrip` |
+| §4.4 | `pkg/Name`, dot-imported names, labels, `go/call` (`fn`, `len`), `go/id` (`true`; tagged as a parameter name: C5), heads as plain symbols (`do`, `when`) | `s04_files`, `s15_roundtrip` |
 | §5.1-5.2 | `* slice array map chan func struct interface \| tilde inst`, `(G T...)`, `(array ... T)`, `chan (<-chan T)`, `unsafe/Pointer` | `s05_types`, `s07_exprs` |
 | §5.3 | parameters, unnamed and variadic (`&`), single and named results, results vectors of function types | `s05_types`, `s06_decls` |
 | §5.4 | fields, embedded (also `*T`, generic), `:go/tag`, `:doc`, interface methods, embedded interfaces, type sets | `s05_types`, `s10_positions` |
 | §5.5 | `:type-params` (constraints, trailing comma `[P *int,]`), generic receivers, generic methods (Go 1.27), `inst`, `:inst` | `s05_types`, `s06_decls`, `s07_exprs`, `s12_printer` |
 | §6 | `go/type` (alias, generic alias, groups, a group of one), `go/const` (`values`, implicit repetition, `:val`), `go/var` (no init, `nil` init, `values`, groups), `go/func`, `go/method` (unnamed receiver, `^:extern`, `init`, implicit return, `panic`), doc comments | `s06_decls`, `s09_directives` |
-| §7.1-7.4 | `let` (`:=`, `values`, `^:assign`, `var` with `zero`, `^:var`, `^:const`), `let-type` (`^:alias`), `set!` (3 shapes, the 11 operators), `inc!`, `dec!`, `aset`, `do` | `s07_stmts` |
-| §7.5 | every operator, n-ary chains, precedence and parentheses, unary combinations | `s07_exprs`, `s12_printer` |
+| §7.1-7.4 | `let` (`:=`, `values`, `^:assign`, `var` with `zero`, `^:var`, `^:const`; a local `const` group, `^:go/grouped`, `^:go/implicit`: C2; `:go/label`: C9), `let-type` (`^:alias`; a local generic type's `:type-params`: C6), `set!` (3 shapes, the 11 operators), `inc!`, `dec!`, `aset`, `do` | `s07_stmts`, `s14_5_amended`, `s15_roundtrip` |
+| §7.5 | every operator, n-ary chains, precedence and parentheses, unary combinations, `^:go/paren` operands of `and` and `or` (C3) | `s07_exprs`, `s12_printer`, `s14_5_amended`, `s15_roundtrip` |
 | §7.6-7.7 | `.-f`, `.M`, field calls, method values and `method-expr`, `addr`, `@`, `lit` (positional, keyed, map, elided `_`, `&T{}`, `[...]T`, promoted keys), `aget`, `subslice` (all shapes), `conv`, `assert` (comma-ok), `spread`, every builtin, `new` of a value, `unsafe` | `s07_exprs`, `s12_printer` |
-| §7.8 | `if` `when` `cond` (`else if`, `else { if }`), init vectors of every kind, `switch` (init, tag, `default` anywhere, `fallthrough`, empty), `type-switch` (guard forms, init), `select` (every comm, empty), `for` (every clause shape, `for true`), `while`, `range` (all shapes, `^:assign`), labels, `break` `continue` `goto`, `(label :L)` | `s07_stmts` |
+| §7.8 | `if` `when` `cond` (`else if`, `else { if }`), init vectors of every kind, `switch` (init, tag, `default` anywhere, `fallthrough`, empty), `type-switch` (guard forms, init), `select` (every comm, empty), `for` (every clause shape, `for true`), `while`, `range` (all shapes, `^:assign`), labels (nested too), `break` `continue` `goto`, `(label :L)` | `s07_stmts`, `s15_roundtrip` |
 | §7.9 | `fn` (results, immediately called, deferred), `go`, `defer`, `>!`, `<!`, `panic`, `recover` | `s07_stmts`, `s07_exprs` |
-| §8 | integers (big), floats (double, `BigDecimal`, ratios as decimals and hex floats, `-0.0`), `imaginary`, runes (escapes, `(rune n)`), strings (escapes, raw when multi-line, `byte-string`), negative literals | `s08_literals` |
+| §8 | integers (big), floats (double, `BigDecimal`, ratios as decimals and hex floats, `-0.0`), `imaginary`, runes (escapes, `(rune n)`), strings (escapes, raw when multi-line in the gofmt layout, `byte-string`), negative literals | `s08_literals` |
 | §9 | attached directives (sorted, `//` after a doc), vectors of a directive, `go:embed` (also in a group), `go:linkname` pull and push, body-less functions with assembly, free-standing directives, `//line` in a body | `s09_directives` |
 | §10 | `:line` on lists, symbols, vectors; `:go/breaks` on literals and statements; `:go/end`; header overflow corrected by `//line` | `s10_positions`, `s02_search`, `s14_*` |
 | §12.4 | copies with hash check, overlay, `go build -overlay` | test `package-build` |
-| §14 | 14.1 (both as the spec writes it and on Go's lines), 14.2 utf8 excerpts, 14.3 sort excerpts, all in the lines layout | `s14_1_sample`, `s14_1_sample_lines`, `s14_2_utf8`, `s14_3_sort` |
+| §14 | 14.1 (both as the spec writes it and on Go's lines), 14.2 utf8 excerpts, 14.3 sort excerpts, all in the lines layout; 14.5 the amended forms | `s14_1_sample`, `s14_1_sample_lines`, `s14_2_utf8`, `s14_3_sort`, `s14_5_amended` |
 | errors | `values` in an expression, a statement in an expression, `let` without vector, bad `set!` operator, declarations before `go/file` | `e01`-`e05` |
 
-Not covered: mode `:full`; directives named other than `//go:` (A6).
+Not covered: mode `:full`. Directives not spelled `//go:` are free-standing `go/directive`
+forms (A6 as accepted), covered by `s09_directives`.
 
 ## Tests
 
@@ -135,8 +146,10 @@ Other tests: `package-build` (§12.4), `forms-in-memory` (the converter's path: 
 lines through `collect-forms`, printed in the gofmt layout, gocmp all levels), `line-file`
 (`--line-file`, golines), `spec-coverage`.
 
-Result (2026-10-08, tamago/amd64, go1.27.1): 5 tests, 241 assertions, all pass. The 17 cases
-with an original are equal to it at the tree, export and code levels in both layouts; the
+Result (2026-10-08, tamago/amd64, go1.27.1): 5 tests, 256 assertions, all pass (with the
+cases `s14_5_amended` and `s15_roundtrip` of the round trip's forms; `spec-coverage` also
+checks the metadata of the amendments: `:go/grouped`, `:go/implicit`, `:go/label`,
+`:go/paren`, `:type-params`). The 19 cases with an original are equal to it at the tree, export and code levels in both layouts; the
 gofmt layout of every case but `s12_printer` is gofmt's fixed point; the 5 `lines` cases (and
 the `line-file` test) have the original's lines. In the lines layout `s14_3_sort` is
 byte-identical to its original; `s02_search`, `s14_1_sample_lines` and `s14_2_utf8` differ
@@ -218,21 +231,21 @@ wins over the printer's over the helper's; the cases are noted below.
   `:go/end 15` where its own `Move` is on line 14); `s14_1_sample_lines` has the forms on
   Go's lines. *Accepted 2026-10-08 (with the converter's same note), folded into SPEC §14.*
 
-## What remains for the round trip
+## The round trip
 
-Once the converter writes forms (§11), the round trip over `$GOROOT/src` and `$GOROOT/test`:
+Closed (milestone G2, 2026-10-08): `bin/g2c roundtrip` converts std and `$GOROOT/test`,
+prints them in the lines layout and checks them with `bin/g2c-check` at the tree, export and
+code levels against a recorded reference; std (373 packages on amd64, 372 on arm64) and the
+`$GOROOT/test` programs (1,707 and 1,702) pass every level on both architectures, and so does
+std with its tests apart from nine known differences (embedded sources). The table, times and
+what it took are in [CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
 
-1. A driver: convert each corpus entry, print it into a candidate tree laid out like GOROOT
-   (`CANDIDATE/src/<dir>/`, `CANDIDATE/test/`), and run `bin/g2c-check CANDIDATE` (tree,
-   export, code). `print-package` and `collect-forms` are the entry points; the overlay and
-   `build` are §12.4's for single packages.
-2. The converter's layout must follow §10.1 and A2, A7, A8 so that the lines layout gives
-   gc the original's lines: then `golines`-style equality holds, and the code level can be
-   run with `gocmp -keep-positions` as well.
-3. Field groups of generic declarations: A1 (or accept the heuristic's misses, which the tree
-   level reports).
-4. Mode `:full` (columns, `:go/pos`, `:go/apos`) for byte-identical export data and line
-   tables, if the G2 gate keeps it.
-5. Comments other than doc comments and directives are not reproduced (§10.4, N8); go/printer
+What remains:
+
+1. Mode `:full` (columns, `:go/pos`, `:go/apos`): the converter writes it, the printer prints
+   such a package in the lines layout. With columns the positions would be the original's
+   (`gocmp -keep-positions` leaves 1 std package and 3 programs on amd64 that differ by
+   columns or by `/*line*/` directives inside expressions).
+2. Comments other than doc comments and directives are not reproduced (§10.4, N8); go/printer
    reformats doc comments (lists, code blocks), which only matters for the doc text, which no
    level compares.

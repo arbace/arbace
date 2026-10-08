@@ -89,20 +89,23 @@ fallbacks of `arbace/core_classes.clj` are gone.
 
 - g2c, milestones G0-G2 (the user's go, 2026-10-08):
   - Done: the Go helper (`tools/godump`, `bin/g2c`; all of std for tamago/amd64 and arm64 and
-    1,705 `$GOROOT/test` programs, 0 type errors, read on Arbace), and the round-trip oracle
+    the `$GOROOT/test` programs, 0 type errors, read on Arbace), and the round-trip oracle
     (`tools/gocmp`, `bin/g2c-check`; tree, export data, object code; proven on identity,
     reprinted and respelled candidates, mutations caught).
   - Done: the Go forms spec `doc/go/SPEC.md`; the user accepted all 20 recommendations of its
-    §15 (2026-10-08).
+    §15 and the 28 amendments of the helper, printer and converter (2026-10-08, folded in).
   - Done: the helper's format 2 (§11.3), the printer (`arbace.g2c.print`,
     [go/PRINTER-NOTES.md](go/PRINTER-NOTES.md)) and the converter (`arbace.g2c.convert`,
     `bin/g2c convert`, [go/CONVERTER-NOTES.md](go/CONVERTER-NOTES.md)): all of std (amd64,
     arm64, with tests) and `$GOROOT/test` convert, read back exactly, every node kind covered.
-    The round trip `bin/g2c roundtrip`: std amd64 336/373 packages equal at the tree level,
-    355 at the code level; `$GOROOT/test` 1,660/1,705.
-  - Then: the printer's support of the converter's markers (CONVERTER-NOTES C2-C6, C9) and the
-    forms it rejects, until `bin/g2c-check` passes over std and `$GOROOT/test`; the proposed
-    amendments (helper's 7, printer's A1-A10, converter's C1-C11) for the user.
+  - Done (G2): the round trip `bin/g2c roundtrip [amd64|arm64] [--tests]`: std (373 packages
+    on amd64, 372 on arm64) and `$GOROOT/test` (1,707 and 1,702 programs) pass the tree,
+    export and code levels; std with its tests too, but for 9 known differences (tests that
+    embed their own sources). It exits non-zero on a regression against the references
+    `test/g2c/roundtrip-*.edn`; about 40 s per architecture. One `$GOROOT/test` selection
+    for the helper and the oracle (`gocmp tests`). Not in `bin/gate` (to decide).
+  - Open: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s directory
+    tests.
 
 ## Later
 

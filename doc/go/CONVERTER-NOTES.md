@@ -13,11 +13,14 @@ printed back to Go by [the printer](PRINTER-NOTES.md); the round trip is judged 
 bin/g2c convert fmt sort              # dump (godump) and convert into .tmp/g2c/forms/pkgs
 bin/g2c convert --full --tests fmt    # mode :full; with the _test.go files and fmt_test
 bin/g2c convert --corpus amd64        # a corpus of `bin/g2c corpus` (amd64, arm64, test,
-                                      # tests) into .tmp/g2c/forms/CORPUS, report in
-                                      # .tmp/g2c/forms/CORPUS.report.edn
+                                      # test-arm64, tests) into .tmp/g2c/forms/CORPUS, report
+                                      # in .tmp/g2c/forms/CORPUS.report.edn
 bin/g2c convert --corpus test --print DIR   # and print each package into the candidate DIR
-bin/g2c roundtrip [amd64|arm64]       # convert + print std (and $GOROOT/test on amd64) into
-                                      # .tmp/g2c/cand-ARCH, then bin/g2c-check
+bin/g2c roundtrip [amd64|arm64]       # convert + print std and $GOROOT/test into
+                                      # .tmp/g2c/cand-ARCH, bin/g2c-check against the
+                                      # reference test/g2c/roundtrip-ARCH.edn
+bin/g2c roundtrip --tests             # std amd64 with its tests (.tmp/g2c/cand-tests)
+bin/g2c roundtrip ... --record        # the same, recording the results as the reference
 bin/g2c print ...                     # the printer (bin/g2c-print)
 bin/g2c test                          # the converter's tests (bin/g2c-convert-tests)
 ```
@@ -113,7 +116,8 @@ Beyond what the spec fixes:
   exponent. Non-integral values whose decimal expansion is long (over 80 characters) are
   ratios.
 - **Negative literals.** `-1`, `-1.5`, `-0x10` are Clojure literals (§7.5); `-'a'` and
-  `-2i` stay `(- ...)`.
+  `-2i` stay `(- ...)`, and so does `-0` of an integer or an exact float (`time.Unix(-0, 0)`
+  in `archive/tar`'s tests): `-0` would read as `0`; a double keeps its sign (`-0.0`).
 - **Strings.** A rune is a character in the BMP outside the surrogates, else `(rune 0x...)`;
   characters that do not print (controls, format characters, U+FFF0-U+FFFF) are `\uXXXX`.
   Byte strings split into maximal valid UTF-8 runs by Go's `utf8.DecodeRune`.
@@ -218,7 +222,8 @@ checked (times include reading the dumps and the check):
 |---|---:|---:|---:|---:|---:|---:|
 | std, tamago/amd64 | 379 | 1,742 | 30.7 MB | 8.7 s | 0 | 0 |
 | std, tamago/arm64 | 378 | 1,738 | 30.7 MB | 8.4 s | 0 | 0 |
-| `$GOROOT/test`, tamago/amd64 | 1,705 | 1,706 | 9.8 MB | 2.6 s | 0 | 0 |
+| `$GOROOT/test`, tamago/amd64 | 1,707 | 1,708 | 9.8 MB | 2.6 s | 0 | 0 |
+| `$GOROOT/test`, tamago/arm64 | 1,702 | 1,703 | 9.8 MB | 2.2 s | 0 | 0 |
 | std with tests (`-tests`), amd64 | 554 | 2,935 | 49.2 MB | 10.6 s | 0 | 0 |
 | std amd64, mode `:full` | 379 | 1,742 | 86.4 MB | 10.3 s | 0 | 0 |
 | `$GOROOT/test`, mode `:full` | 1,705 | 1,706 | 20.2 MB | 3.2 s | 0 | 0 |
@@ -232,39 +237,53 @@ Two runs give byte-identical forms trees (checked on std amd64).
 ## The round trip
 
 `bin/g2c roundtrip` converts, prints with `arbace.g2c.print/print-package` (lines layout)
-into a candidate tree and runs `bin/g2c-check` (tree, export, code):
+into a candidate tree and runs `bin/g2c-check` (tree, export, code; [ROUNDTRIP.md](ROUNDTRIP.md))
+against a recorded reference, `test/g2c/roundtrip-ARCH.edn` (Clojure-reader format, one entry
+per line): it exits non-zero on a regression, an entry and level passing in the reference and
+not now (or missing). `--record` rewrites the reference. The `$GOROOT/test` programs are the
+oracle's list (`bin/g2c-check --list-tests`, `gocmp tests`), dumped by the helper as they are:
+one rule for both. Result (2026-10-08, closing milestone G2):
 
 | corpus | entries | tree pass/fail/err | export pass/fail/err/skip | code pass/fail/err/skip |
 |---|---:|---|---|---|
-| std, tamago/amd64 | 373 | 336 / 37 / 0 | 359 / 13 / 0 / 1 | 355 / 17 / 0 / 1 |
-| `$GOROOT/test`, tamago/amd64 | 1,705 | 1,660 / 18 / 27 | 1,667 / 11 / 27 / 0 | 1,666 / 12 / 27 / 0 |
-| std, tamago/arm64 | 372 | 337 / 35 / 0 | 358 / 13 / 0 / 1 | 354 / 17 / 0 / 1 |
+| std, tamago/amd64 | 373 | 373 / 0 / 0 | 372 / 0 / 0 / 1 | 372 / 0 / 0 / 1 |
+| `$GOROOT/test`, tamago/amd64 | 1,707 | 1,707 / 0 / 0 | 1,707 / 0 / 0 / 0 | 1,707 / 0 / 0 / 0 |
+| std, tamago/arm64 | 372 | 372 / 0 / 0 | 371 / 0 / 0 / 1 | 371 / 0 / 0 / 1 |
+| `$GOROOT/test`, tamago/arm64 | 1,702 | 1,702 / 0 / 0 | 1,702 / 0 / 0 / 0 | 1,702 / 0 / 0 / 0 |
+| std with tests (`--tests`), amd64 | 379 | 379 / 0 / 0 | 378 / 0 / 0 / 1 | 369 / 9 / 0 / 1 |
 
-(2026-10-08; `unsafe` has no export data or code.)
+`unsafe` has no export data or code (skip). The nine code differences of std with its tests
+are known and explained in `test/g2c/roundtrip-tests-known.edn`: TamaGo's
+`testdata_tamago_test.go` files embed the packages' own Go sources (`//go:embed *.go` and the
+like), and the oracle compiles the candidate's sources in the original's place, so the test
+binaries embed other text. With `--tests` the oracle compares the `_test.go` files' trees and
+the export data and code of the package and its test variants (`gocmp -tests`).
 
-What fails is, as far as the first difference of each entry shows, on the printer's side:
-it does not yet print the converter's markers or some forms.
+Times (64 cores, warm build cache): `bin/g2c roundtrip` amd64 about 40 s (convert and print
+std and `$GOROOT/test` 29 s, of which std 21 s; the check 11 s); arm64 the same; `--tests`
+29 s and 17 s. The check from an empty build cache takes about a minute more (ROUNDTRIP.md).
 
-| first difference (amd64, std and tests) | entries | side |
-|---|---:|---|
-| a local `const ( ... )` group printed as separate declarations (C2) | 35 | printer: `:go/grouped`, `:go/implicit` on `let` bindings |
-| a labeled `:=`/`var` printed without its label (C9, A9) | 11 | printer: `:go/label` |
-| a local generic type without its type parameters (C6) | 4 | printer: `:type-params` on `let-type` names |
-| `&&`/`\|\|` operands without their parentheses: gc's code differs (C3) | 2 | printer: `:go/paren` |
-| `//go:generate` among the imports (C4) | 1 | printer: `go/directive` in `:imports` |
-| a parameter named `true` (C5) | 1 | printer: tagged `go/id` |
-| `switch {; case ...}` clauses on one line do not parse | 3 | printer |
-| not printed: nested labels `(label :A (label :B s))` (4), `-0x8000000000000000` and similar ("long overflow", 3), an empty `(go/const)` group (1) | 8 | printer |
-| not dumped: excluded by build constraints for the helper, compiled by the oracle | 19 | corpus lists (helper/oracle) |
+The lines are close to the original's: compiled from their own layouts (`gocmp
+-keep-positions`, so that positions are compared through the code: instruction order, inline
+marks, frame slots), the candidates' code equals the original's in 371 of 372 std packages and
+1,704 of 1,707 programs on amd64 (369 of 371 and 1,699 of 1,702 on arm64). The rest differ by
+columns (mode `:full`'s business) and by `/*line*/` directives inside expressions the forms
+cannot place (`issue29504.go`, §10.3).
+
+What it took (the first differences of the earlier run, 2026-10-08): the printer's support of
+the markers C2 (local `const` groups, 35 entries), C9 (labeled declarations, 11), C6 (local
+generic types, 4), C3 (`&&`/`||` parentheses, 2), C4 (a directive among the imports), C5 (a
+parameter named `true`); printer fixes for one-line clause lists (`switch {; case`), nested
+labels, `-0x8000000000000000` and an empty `(go/const)`; and one selection of `$GOROOT/test`
+programs for the helper and the oracle: 19 programs the oracle took but the helper's build
+constraints or configuration excluded; 18 `compile` programs with body-less functions and the
+two-file `cmplxdivide.go` that the helper took but the oracle could not build (it now compiles
+programs without `-complete`, as Go's test driver does, and takes programs of several files);
+2 programs whose action line is `//run` without a space, which the helper's old reading
+missed.
 
 ## What remains
 
-- The printer's support of C2-C6, C9 (and the nested labels, `-0x8000000000000000`, empty
-  groups and one-line clause lists it rejects), then the round trip to zero failures;
-  `gocmp -keep-positions` for the lines.
-- The 19 `$GOROOT/test` programs that `bin/g2c-check` compiles but the helper excludes by
-  their build constraints (`chanlinear.go`: `darwin || linux`; `go list F.go` does not apply
-  constraints to named files), and 6 more the helper leaves to other configurations: the two
-  corpus lists should agree.
-- Mode `:full` is written but not consumed by the printer yet.
-- The spec decisions above (C1-C11).
+- Mode `:full` is written but not consumed by the printer yet: columns would make the
+  positions (and `-keep-positions`' last differences) exact.
+- Directory tests of `$GOROOT/test` (several packages each) are in neither corpus.

@@ -17,7 +17,7 @@ bin/g2c dump -goarch arm64 -o DIR std
 bin/g2c dump -tests fmt              # fmt.edn with fmt's _test.go files, and fmt_test.edn
 bin/g2c dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
 bin/g2c read .tmp/godump/out         # read on Arbace (needs bin/build-arbace), print a summary
-bin/g2c corpus [amd64|arm64|test|tests]  # the coverage runs below, into .tmp/godump/corpus/
+bin/g2c corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
 ```
 
 - **Toolchain.** `G2C_GOROOT` names TamaGo's Go tree (default `/root/tamago-go`). The system Go
@@ -362,6 +362,14 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   `GOEXPERIMENT` (`arenas`, `fieldtrack`, ...) and are left out as another configuration. Not
   taken: the 290 directory tests (`*dir` actions, several packages each) and the 678 error
   tests (`errorcheck*`, which must not compile).
+
+  Since 2026-10-08 (closing the round trip) the list is the oracle's, `bin/g2c-check
+  --list-tests` (`gocmp tests`, [ROUNDTRIP.md](ROUNDTRIP.md)): one rule, in one place, for
+  both corpora. It is the rule above with the test driver's reading of the action line
+  (`//run` without a space counts: 2 more programs) and go/build's matching of build
+  constraints and file names: 1,707 programs for tamago/amd64 (1,708 files), 1,702 for
+  tamago/arm64 (`bin/g2c corpus test-arm64`), all dumped, 0 excluded by the helper, 0 type
+  errors.
 - **std with tests** (`bin/g2c corpus tests`, not run by default): every std package with its
   in-package test files, and the 175 external test packages. All type-check for tamago/amd64.
 - **Reading on Arbace:** every dump of the corpora reads with `arbace.core/read`

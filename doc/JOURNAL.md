@@ -255,3 +255,51 @@ decision (2026-10-08).
   clarifications, folded in without separate questions. Two agents: one folds them into
   `doc/go/SPEC.md`, one closes the round trip (printer support, the helper's and the oracle's
   `$GOROOT/test` selections made to agree, a recorded reference).
+
+## 2026-10-08: g2c's round trip closed (milestone G2)
+
+- Agent, branch `g2c-close`. The printer prints the converter's markers as the accepted
+  amendments say: local `const ( ... )` groups (`^:go/grouped`, `^:go/implicit`, C2),
+  `^:go/paren` operands of `&&`/`||` (C3), `go/directive` among the imports (C4), tagged
+  `(go/id "x")` names (C5), local generic types (C6), `:go/label` (C9); `new`'s operand by A5
+  (a list with a plain head is a call); and it no longer rejects nested labels, the most
+  negative integer literals (`-0x8000000000000000`), an empty `(go/const)` or a first clause
+  on the `switch` line. A6 is the spec's: non-`//go:` directives stay free-standing forms. The
+  converter writes `-0` (integer or exact float) as `(- 0)`: the literal `-0` reads as `0`.
+- The lines layout follows the source more closely: the `}` before `else` on the else's
+  line, interpreted strings only (a raw string's newlines would push what follows: the forms
+  do not say how the source spelled it), labels and `const (` on the line before their
+  statement when free, nothing broken inside a one-line body. Measured by compiling both
+  sides from their own layouts (`gocmp -keep-positions`): the code equals the original's in
+  371/372 std packages and 1,704/1,707 programs (amd64), from 364 and 1,701.
+- One `$GOROOT/test` selection, in one place: `gocmp tests` (the test driver's directories and
+  reading of the action line, `-goexperiment` left to other configurations, go/build's
+  matching), used by `bin/g2c-check` and by the helper's corpus (`bin/g2c corpus test`,
+  `test-arm64`). Before, the oracle took the programs `go list -export F.go` compiles (no
+  build constraints on named files: 19 programs the helper excluded, such as `chanlinear.go`)
+  and the helper missed `//run` without a space and could not be checked on the 18 `compile`
+  programs with body-less functions and the two-file `cmplxdivide.go`. gocmp now compiles a
+  program as the test driver does, without `-complete` (`-gcflags=-complete=false` after the
+  go command's `-complete`; gc's flag only allows body-less functions, `noder/writer.go`),
+  and takes programs of several files (`F.go,G.go`). Considered: excluding those programs
+  from both corpora (losing body-less functions from the check), or running `go tool compile`
+  directly (another build path than the go command's).
+- `bin/g2c roundtrip [amd64|arm64] [--tests] [--record]` is a check: it exits non-zero on a
+  regression (an entry and level passing in the reference and not now, or missing) against
+  `test/g2c/roundtrip-amd64.edn`, `-arm64.edn`, `-tests.edn` (Clojure-reader format;
+  `bin/g2c-check --record`, `--reference`, `--known`). arm64 now includes `$GOROOT/test`.
+  Result: std 373/373 (amd64) and 372/372 (arm64) at the tree level, all but `unsafe` (no
+  export data or code) at export and code; `$GOROOT/test` 1,707/1,707 and 1,702/1,702 at all
+  three levels. About 40 s per architecture with a warm build cache (convert and print 29 s,
+  check 11 s). Not added to `bin/gate`.
+- The oracle supports packages with their tests (`gocmp -tests`, `bin/g2c-check
+  --with-tests`): the `_test.go` files' trees, and the export data and code of every package
+  `go list -test -export` compiles, paired by import path. std with tests (379 packages,
+  test-only ones included): tree 379/379, export 378 (+ `unsafe`), code 369; the 9 others are
+  known differences with their reason (`test/g2c/roundtrip-tests-known.edn`): TamaGo's
+  `testdata_tamago_test.go` embeds the package's own Go sources, so the test binary holds the
+  candidate's text. 46 s.
+- The oracle's own candidates (identity, reprint, canon) pass the new corpus on amd64 (373 +
+  1,707 trees). Tests: `bin/g2c-print-tests` 5 tests, 256 assertions (new cases
+  `s14_5_amended`, SPEC §14.5, and `s15_roundtrip`); `bin/g2c-convert-tests` 6 tests, 150
+  assertions; `go test` in `tools/gocmp`.

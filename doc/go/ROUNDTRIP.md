@@ -25,6 +25,10 @@ bin/g2c-check CANDIDATE                     # all of the corpus, three levels, t
 bin/g2c-check --arch arm64 CANDIDATE        # tamago/arm64
 bin/g2c-check --levels tree --only '^fmt$' CANDIDATE
 bin/g2c-check --reference OLD.edn CANDIDATE # fail only on regressions against OLD.edn
+bin/g2c-check --record REF.edn CANDIDATE    # also write the results as a reference
+bin/g2c-check --known KNOWN.edn CANDIDATE   # failures listed there (with reasons) expected
+bin/g2c-check --with-tests --no-tests CANDIDATE   # std with its _test.go files
+bin/g2c-check --list-tests                  # the test programs of the corpus
 bin/g2c-check --make identity|reprint|canon DIR   # candidates made without forms
 bin/g2c-check --mutations [--seed N]        # the oracle's self-test (below)
 ```
@@ -40,8 +44,13 @@ one comparison per corpus entry in parallel (`-j`, default all cores), and write
 - `logs/`, gocmp's full output per entry;
 - a summary table on stdout (pass/fail/error/skip per level and kind).
 
-With `--reference`, an entry and level passing in the reference and not now is a regression
-and fails the run; without, any failure does. The environment overrides the defaults:
+With `--reference`, an entry and level passing in the reference and not now (or missing from
+a run that includes it) is a regression and fails the run; without, any failure does, or,
+with `--known`, any failure not listed in the known-differences file (`[KIND "PATH" [LEVEL
+...] "reason"]` per line; the run also reports listed levels that now pass). `--record FILE`
+writes the results as a reference: `results.edn` without times, date or candidate path. g2c's
+round trip keeps its references under `test/g2c/` (`bin/g2c roundtrip`,
+[CONVERTER-NOTES.md](CONVERTER-NOTES.md)). The environment overrides the defaults:
 `G2C_GOROOT` (`/root/tamago-go`), `G2C_GOOS` (`tamago`), `G2C_GOARCH` (`amd64`), and
 `G2C_GOCMP_FLAGS` passes flags to gocmp. The driver runs every go command with
 `GOTOOLCHAIN=local`, `GOFLAGS=` and `GOWORK=off`.
@@ -50,13 +59,16 @@ and fails the run; without, any failure does. The environment overrides the defa
 
 ```sh
 GOROOT=/root/tamago-go GOOS=tamago GOARCH=amd64 \
-  gocmp [-levels tree,export,code] [-keep-positions] A B
+  gocmp [-levels tree,export,code] [-keep-positions] [-tests] A B
+GOOS=tamago GOARCH=amd64 gocmp tests [-v] $GOROOT/test
 ```
 
-A is the original, a package directory or a single `.go` file that the go command can build for
-the configuration in the environment; B is the candidate, a directory with a file of the same
-name for each of A's files for the configuration (other files in B are ignored), or a single
-file. The go command is `$GOCMP_GO`, else `$GOROOT/bin/go`, else `go`. The output gives, per
+A is the original, a package directory or a program (a `.go` file, or `F.go,G.go,...`: files of
+one directory, the others named relative to F's) that the go command can build for the
+configuration in the environment; B is the candidate, a directory with a file of the same
+name for each of A's files for the configuration (other files in B are ignored), or the files
+of a program, spelled as A. With `-tests`, A is a package directory with its `_test.go` files
+(see "Test files" below). `gocmp tests` prints the corpus's test programs (below). The go command is `$GOCMP_GO`, else `$GOROOT/bin/go`, else `go`. The output gives, per
 level, `pass`, `fail` with the first difference (path to the node, the symbol or the export data
 element, with both sides' source or listing), `error` or `skip`, then a line
 `RESULT tree=... export=... code=...`. Exit status: 0 equal, 1 different, 2 error, 3 the
@@ -73,11 +85,20 @@ The configuration is `GOOS=tamago`, `GOARCH=amd64` or `arm64`, go1.27.1, TamaGo'
   `internal/coverage/test`, `internal/runtime/wasitest`, `net/internal/cgotest`). The files
   compared are the package's `GoFiles` for the configuration (not its `_test.go` files).
   `unsafe` has no export data or code: those two levels report `skip` for it.
-- **Test programs:** the `.go` files of `GOROOT/test` outside `*.dir` directories whose action
-  (the first comment line after build constraints) is `run`, `runoutput`, `build`, `buildrun`,
-  `compile` or `asmcheck` (1,747 of 2,731), and that compile for the configuration as a
-  single-file package (`go list -export F.go`): 1,705 on amd64 and on arm64. The list is
-  computed once per toolchain and configuration (`corpus-tests.txt`).
+- **Test programs** (`gocmp tests`, the one rule for the oracle's corpus and the helper's,
+  `bin/g2c corpus test`): the `.go` files of the directories of Go's test driver
+  (`cmd/internal/testdir`, `dirs`) whose action (the first line after build constraints, read
+  as the driver reads it, `//run` too) is `run`, `runoutput`, `build`, `buildrun`, `compile`
+  or `asmcheck`, that need no other `GOEXPERIMENT` (`-goexperiment` on the action line), and
+  that go/build matches for the configuration (build constraints and file name, cgo off):
+  1,707 on amd64, 1,702 on arm64. The extra files an action line names join the program
+  (`cmplxdivide.go,cmplxdivide1.go`). Programs are compiled as the test driver compiles them,
+  without `-complete` (`-gcflags=-complete=false` after the go command's own `-complete`), so
+  that the 18 `compile` programs declaring functions without bodies build; the flag only
+  allows body-less functions (`noder/writer.go`) and changes no code. (Until 2026-10-08 the
+  oracle took every directory and the programs that `go list -export F.go` compiles, which
+  applies no build constraints to named files: 19 programs differed from the helper's list
+  either way.) The list is written to `corpus-tests.txt`.
 
 ## Level 1: the trees
 
@@ -246,7 +267,9 @@ Candidates made without forms, on tamago/amd64 and tamago/arm64 (2026-10-08, 64 
 | canon (`--make canon`) | 373 + 1,705 | 372 + 1,705 | 372 + 1,705 |
 
 (packages + test programs passing, amd64; arm64 the same with 372 and 371 packages; the one
-package fewer at export and code is `unsafe`, skipped.)
+package fewer at export and code is `unsafe`, skipped. With the corpus of `gocmp tests`, the
+same three candidates on amd64 pass 373 + 1,707, 372 + 1,707, 372 + 1,707, re-run
+2026-10-08.)
 
 - **reprint** is `gocmp reprint`: each file parsed, its comments dropped except the directives,
   every position reset, printed again by `go/printer`, the directives put back before what they
@@ -309,8 +332,15 @@ a new configuration takes about a minute (it also finds the test programs that c
   groups, measured above). The first is reported only by the export and code levels.
 - **Elision** is normalized only where the element type is written in the literal's type, and
   identifies invalid spellings through named pointer types (caught by the compile).
-- **Test files** (`_test.go`) of the packages are not compared, and packages are compared per
-  configuration: files of other GOOS/GOARCH or build tags are not.
+- **Test files** (`_test.go`) of the packages are compared only with `--with-tests` (`gocmp
+  -tests`): the trees of the package's `GoFiles`, `TestGoFiles` and `XTestGoFiles`, and the
+  export data and code of every package `go list -test -export` compiles (the package, its
+  test variant, the external test package, the generated test main), paired by import path,
+  the code split by the go command's `# pkg` headers; test-only packages are included (379
+  packages for tamago/amd64). Packages are compared per configuration: files of other
+  GOOS/GOARCH or build tags are not. A test that embeds the package's own Go sources (TamaGo's
+  `testdata_tamago_test.go`, `//go:embed *.go`) embeds the candidate's text, so its code
+  differs whatever the candidate (9 std packages).
 - **Export data** must be Unified IR version 4 with sync markers (go1.27); dictionaries are
   read only for their derived types. Other dictionary lists (runtime types, itabs,
   subdictionaries) are compared by index, which would report a renumbering as a difference.
