@@ -150,15 +150,20 @@
                 t (e/target f)
                 directive? (= (code/op f) "go/directive")
                 [doc dirs] (if directive? [nil []] (code/decl-doc-and-directives f))
-                pre (+ (if (and doc (not= doc "")) (count (str/split (str/replace doc #"\n$" "") #"\n" -1)) 0)
-                       (count dirs))]
-            (binding [e/*next* (some e/target (subvec decls (inc i)))]
+                pre (code/pre-lines doc dirs)]
+            (binding [e/*next* (some (fn [d] (when-let [t (e/target d)]
+                                               (let [[doc dirs] (if (= (code/op d) "go/directive")
+                                                                  [nil []]
+                                                                  (code/decl-doc-and-directives d))]
+                                                 (- (long t) (code/pre-lines doc dirs)))))
+                                     (subvec decls (inc i)))]
+              ;; form feeds: a top-level line never aligns with the lines before it
               (cond
-                (not lines?) (do (when-not (e/bol?) (e/nl 0)) (e/nl 0))
-                (nil? t) (do (when-not (e/bol?) (e/nl 0)) (e/nl 0))
+                (not lines?) (do (when-not (e/bol?) (e/nl 0 true)) (e/nl 0 true))
+                (nil? t) (do (when-not (e/bol?) (e/nl 0 true)) (e/nl 0 true))
                 :else (let [want (- (long t) pre)]
-                        (when-not (e/bol?) (e/nl 0))
-                        (while (< (e/line) want) (e/nl 0))))
+                        (when-not (e/bol?) (e/nl 0 true))
+                        (while (< (e/line) want) (e/nl 0 true))))
               (if directive?
                 (e/comment-line (str (second f)) 0)
                 (do
@@ -168,8 +173,7 @@
                     (cond
                       (> (long t) (e/line)) (while (< (e/line) (long t)) (e/nl 0))
                       :else (e/line-directive-own t)))
-                  (binding [e/*next* nil]
-                    (code/top-decl f))))))))
+                  (code/top-decl f)))))))
       (when-not (e/bol?) (e/nl 0))
       (e/result))))
 

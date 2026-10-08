@@ -129,7 +129,10 @@
 (defn vtab
   "An alignment separator before the next token (gofmt's vtab)."
   []
-  (when-not (bol?) (vreset! (:ws *p*) (char 11))))
+  (when-not (bol?)
+    ;; a second separator in a row is an empty cell
+    (when (= @(:ws *p*) (char 11)) (.append ^StringBuilder (:sb *p*) (char 11)))
+    (vreset! (:ws *p*) (char 11))))
 
 (defn nl
   "Ends the line; the next line is indented by indent. form-feed? ends the alignment

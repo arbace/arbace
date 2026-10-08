@@ -125,6 +125,8 @@
   (or (line-of child)
       (when (and (e/lines?) (contains? (breaks-of parent) i)) :break)))
 
+(defn- room? [n] (e/room? n))
+
 (defn- next-line
   "The first recorded line among forms, else *next*."
   [forms]
@@ -302,7 +304,7 @@
         v (if (vector? v) v [v])]
     (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v))))
 
-(defn- pre-lines
+(defn pre-lines
   "The number of comment lines before a declaration: doc and directives."
   [doc dirs]
   (+ (if (and doc (not= doc "")) (count (doc-lines doc)) 0) (count dirs)))
@@ -844,10 +846,11 @@
         (when (some? cond) (expr0 cond 1) (sp))
         (do (when init (simple-stmt init))
             (tok ";") (sp)
-            (when (some? cond) (expr0 cond 1) (sp))
-            (when for?
-              (tok ";") (sp)
-              (when post (simple-stmt post) (sp))))))))
+            (when (some? cond) (expr0 cond 1))
+            (if for?
+              (do (tok ";") (sp)
+                  (when post (simple-stmt post) (sp)))
+              (when (some? cond) (sp))))))))
 
 (defn- branch-forms
   "The statement list of a branch: (do ...) is its forms, anything else one statement."
@@ -969,7 +972,9 @@
 
 (defn- select-stmt [f]
   (tok "select")
-  (clause-list (rest f) comm))
+  (if (and (empty? (rest f)) (not (e/lines?)))
+    (do (sp) (tok "{") (tok "}"))
+    (clause-list (rest f) comm)))
 
 (defn- for-stmt [f]
   (let [[_ init c post & body] f]
@@ -1112,7 +1117,8 @@
         one-line? (if (e/lines?)
                     (if (integer? end)
                       (= (long end) start)
-                      (and func? (every? #(let [t (line-of %)] (and t (= t start))) forms)))
+                      (and func? (every? #(let [t (line-of %)] (or (nil? t) (= t start))) forms)
+                           (or (seq forms) (nil? next) (room? 0))))
                     (and func? (empty? forms)))]
     (if one-line? ((or sep sp)) (sp))
     (tok "{")
@@ -1127,7 +1133,7 @@
       (e/pop-open!)
       (if one-line?
         (do (when (seq forms) (sp)) (tok "}"))
-        (do (e/close-break! end (> (e/line) start) true indent)
+        (do (when-not (e/close-break! end (> (e/line) start) true indent) (sp))
             (tok "}"))))))
 
 (defn- stmt-list-one-line
@@ -1250,8 +1256,8 @@
                 (and (e/lines?) (integer? t))
                 (do (if (pos? pre)
                       (e/stmt-break! (max (- (long t) pre) (inc (e/line))) false ";" 1)
-                      (e/stmt-break! t false ";" 1)))
-                (e/lines?) (e/stmt-break! (if (pos? pre) :break nil) false ";" 1)
+                      (e/stmt-break! t (zero? i) ";" 1)))
+                (e/lines?) (e/stmt-break! (if (pos? pre) :break nil) (zero? i) ";" 1)
                 :else (e/nl 1 (or (zero? i) (> (e/line) @last-start)))))
             (when (pos? pre)
               (when-not (e/bol?) (e/nl 1))

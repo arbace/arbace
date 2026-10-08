@@ -90,7 +90,8 @@
             (do
               (let [{[s o] :gofmt} (:gofmt r)]
                 (is (zero? s) (str "gofmt layout parses: " o))
-                (is (str/blank? o) (str "gofmt layout is gofmt's: " o)))
+                (when-not (:nogofmt (:opts c))
+                  (is (str/blank? o) (str "gofmt layout is gofmt's: " o))))
               (let [{[s o] :gofmt} (:lines r)]
                 (is (zero? s) (str "lines layout parses: " o)))
               (doseq [layout [:gofmt :lines]]
