@@ -10,8 +10,9 @@ reproducible from the record we keep.
 
 Direction:
 - Short term: Arbace is excellent on the modern JVM (Java 26), binary compatible with it.
-- Before breaking away from the JVM and the `.class` format, the JVM state of the art is frozen
-  on a well-known branch, `arbace-for-java-26`, advertised in the docs.
+- Before breaking away from the JVM and the `.class` format, the JVM state of the art was frozen
+  on the branch `arbace-for-java-26` (tag `arbace-for-java-26-v1`, 2026-10-08), advertised in
+  the README.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2c. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -30,24 +31,24 @@ Prior art:
 
 ## Layout
 
-- `clojure/` is the frozen reference baseline: upstream Clojure and ASM sources as seeded by
-  `SEED.bash` (now only in git history, commit `d21dc91`). Its compiled classes are tracked too,
-  built in place with `javac -g $(find clojure -name '*.java')`; rebuild them after a fix.
-  Don't modify it, except for bug fixes the user approves, each recorded in the journal. The
-  rewrite is derived from it but lives elsewhere. After the freeze, main replaces it with a
-  binary seed (`doc/AGENDA.md`, "Later").
+- `seed/arbace-seed.jar` is the binary seed of the bootstrap: Arbace's jar as built at the tag
+  `arbace-for-java-26-v1`, pinned by `seed/arbace-seed.jar.sha256`. `bin/seed --check` checks
+  the hash; `bin/seed --verify` rebuilds it from the tag. It replaced the frozen reference tree
+  `clojure/` (upstream Clojure and ASM), which remains on the branch `arbace-for-java-26`. The
+  tools take what they need of that tree as data (j2c's corpus, the baseline of Clojure's suite)
+  from the tag, extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
-  baseline, and checks the result against `test/baseline-results.edn`.
+  frozen baseline, and checks the result against `test/baseline-results.edn` (Arbace's:
+  `test/arbace-results.edn`).
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
 - `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.clj`:
   - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang`, `arbace.asm`
-    and the rest; the Java parts are class forms). It is now hand-maintained source; its
-    derivation is recorded in `doc/VENDOR-NOTES.md` and replayable with `bin/vendor-arbace`.
-    `bin/build-arbace [--suite]` bootstraps it: stage 0 (the frozen `clojure/` plus
-    `arbace.classes`) builds `target/stage1`, which builds `target/stage2`, which must rebuild
-    itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
+    and the rest; the Java parts are class forms). It is hand-maintained source; its
+    derivation is recorded in `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`).
+    `bin/build-arbace [--suite]` bootstraps it: stage 0 (the seed) builds `target/stage1`,
+    which builds `target/stage2`, which must rebuild itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
     its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
     (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
     reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
@@ -76,7 +77,7 @@ Prior art:
 
 - Data and source formats target the Clojure reader (`read`), not strict EDN; the two differ
   slightly, and where in doubt the Clojure reader wins.
-- In a fresh git worktree, run `find clojure -name '*.class' -exec touch {} +` first: checkout
-  leaves the `.java` files newer than their tracked classes, and the checks then recompile them.
+- The tools (j2c, the class forms checks, the suite runner, the bench driver) run on Arbace's
+  `target/stage2` plus the checkout (`bin/lib/tools.bash`), so build first.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.

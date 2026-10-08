@@ -59,24 +59,35 @@ Other documents refer to these step numbers.
   4. Benchmarks against Clojure 1.12.6 ([BENCHMARKS.md](BENCHMARKS.md)): startup 0.2 s against
      0.56 s, un-hinted interop about 580x and multi-argument `str` about 10x faster, the rest
      mostly even; open: `into` through a transducer 1.31x (javac 26's baseline too) and
-     `apply str` 1.16x. The GitHub Actions gate (`.github/workflows/gate.yml`, only on pushes
-     to `arbace-for-java-26` and by hand; main is gated by running the checks locally). The
-     freeze kit ([FREEZE.md](FREEZE.md), `bin/freeze`).
+     `apply str` 1.16x. The GitHub Actions gate (on the branch `arbace-for-java-26` only;
+     main is gated by running the checks locally). The freeze kit (`doc/FREEZE.md`,
+     `bin/freeze`; on the branch only since the freeze).
 
 ## Done: the `arbace-for-java-26` freeze (2026-10-08)
 
 The branch `arbace-for-java-26` and the tag `arbace-for-java-26-v1` hold Arbace on the JVM, at
-main `38a652d`, after the gate passed on it ([FREEZE.md](FREEZE.md)). The repository is public.
+main `38a652d`, after the gate passed on it ([FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/FREEZE.md) there). The repository is public.
 The journal up to the freeze is on that branch; main's [JOURNAL.md](JOURNAL.md) starts over.
+
+## Done: the binary seed (2026-10-08)
+
+`clojure/` is gone from main (it remains on `arbace-for-java-26`). Stage 0 of the bootstrap is
+`seed/arbace-seed.jar`, the freeze tag's jar, pinned by SHA-256 and reproducible from the tag
+(`bin/seed --check`, `--verify`). The tools run on Arbace's `target/stage2`
+(`bin/lib/tools.bash`), and take the frozen Clojure sources they compare against from the tag.
+Removed from main with it: `bin/vendor-arbace`, `bin/vendor-spec`, `bin/freeze`, the CI
+workflow, `doc/FREEZE.md` and `doc/MODERN-COMPILER.md` (all on the branch).
+
+## Next
+
+- A faster gate (the user's request, 2026-10-08): `bin/gate`, the essential checks (the
+  bootstrap, then Clojure's suite on stage 2 and the class forms tests, concurrently), and
+  `bin/gate --full` (adding the suite on stage 1 and `bin/j2c-check --suite`, concurrently).
+- `arbace/core_classes.clj` keeps fallbacks for running without native class forms, unused
+  since stage 0 is the seed; removing them changes the runtime.
 
 ## Later
 
-- Next: `clojure/` remains on `arbace-for-java-26` for good, so that branch builds and
-  verifies from its own checkout. On main it is replaced by a
-  Go-style binary seed (the user's decision, 2026-10-08): stage 0 becomes the jar built from the
-  freeze tag, pinned by hash. Its other roles (j2c's regression corpus, the suite's reference
-  results, the replay of the derivation) move to the frozen branch or are re-anchored on the
-  seed.
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style

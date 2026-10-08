@@ -610,7 +610,7 @@ and `bytes` use it in one file (§10, table).
   never names. Options:
   1. `invokedynamic` per call site, bootstrapped to look up the receiver's method by Go name
      and signature, with an inline cache keyed by class. This is the JVM's own answer to
-     dynamic dispatch (MODERN-COMPILER.md ranks indy for keyword and reflective call sites,
+     dynamic dispatch (MODERN-COMPILER.md, on the branch `arbace-for-java-26`, ranks indy for keyword and reflective call sites,
      and both have since been adopted). It works incrementally at the REPL.
   2. Whole-program: generate a Java interface per Go interface and make each class implement
      every interface its method set satisfies. This is fastest (`invokeinterface`), but it
@@ -1147,7 +1147,7 @@ Local:
 - go-whim `/root/go-whim`, commit `80c49bf`: `CLAUDE.md`, `doc/{GO-LISP,CLOJURE,JAVA,GUEST,LISP-SANDBOX}.md`,
   `crefactor/togo/`.
 - golang.org/x/tools `v0.44.1-0.20260420230617-19499e7caabc` (module cache): `go/ssa`.
-- Arbace: `doc/classes/SPEC.md`, `doc/classes/CONVERTER-NOTES.md`, `doc/MODERN-COMPILER.md`,
+- Arbace: `doc/classes/SPEC.md`, `doc/classes/CONVERTER-NOTES.md`, `doc/MODERN-COMPILER.md` (on the branch `arbace-for-java-26` since the freeze),
   `doc/JOURNAL.md` (2026-10-07 entries), `arbace/j2c/`.
 
 Web (checked 2026-10-07):

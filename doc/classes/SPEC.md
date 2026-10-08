@@ -14,8 +14,8 @@ Words used throughout:
 - **class form**: `defclass` and the other forms that define classes (`anon`, `letclass`,
   `defmodule`, `defpackage`).
 - **class body**: the member forms inside a class form.
-- **the compiler**: Arbace's compiler. At stage 0 it is a bootstrap library running on the
-  frozen `clojure/` and emitting bytecode with `clojure.asm`. From stage 1 on, the same
+- **the compiler**: Arbace's compiler. On the frozen `clojure/` (stage 0 until 2026-10-08) it
+  was a bootstrap library emitting bytecode with `clojure.asm`. From stage 1 on, the same
   implementation is part of Arbace's self-hosted compiler, which hands it the class forms
   (§9.5, §9.6).
 - **the converter**: the Java → Clojure converter (agenda step 3), working on javac's
@@ -1439,7 +1439,10 @@ forms); its value is `nil`. `import*` imports into the current namespace at run 
 
 ### 9.6 Bootstrap
 
-- **Stage 0**: the frozen `clojure/` with a bootstrap library implementing the class forms. Its
+- **Stage 0**: since 2026-10-08 (the user's decision), the binary seed `seed/arbace-seed.jar`:
+  Arbace as built at the tag `arbace-for-java-26-v1`, pinned by hash, whose own class forms
+  compiler compiles stage 1. Until then stage 0 was, as on that branch, the frozen `clojure/`
+  with a bootstrap library implementing the class forms. Its
   `defclass` macro runs the library's own compiler on the form (the frozen `Compiler.java` knows
   nothing of `class*`), which compiles the bodies (the Java subset only) with `clojure.asm` and
   defines or writes the classes. The stage-0 driver interns the library's macros into the running

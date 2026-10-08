@@ -11,25 +11,25 @@ full in this file. Source files keep the copyright and license notices they came
 §3 and the BSD 3-Clause License require it); this file is the one place that states which license
 covers what.
 
-- `clojure/` other than `clojure/asm/` and `clojure/lang/Murmur3.java`: Clojure,
-  https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`, under the
-  Eclipse Public License 1.0. One file, `clojure/repl.clj` (Copyright (c) Chris Houser), still
-  carries an older header naming the Common Public License 1.0, the EPL's predecessor; upstream
-  Clojure distributes it as part of Clojure under the EPL and ships no CPL text.
-- `clojure/asm/`: ASM, https://gitlab.ow2.org/asm/asm at
-  `0460f74ba64230e5b846967c81a52628b5dd0596`, under the BSD 3-Clause License. The package is
-  renamed from `org.objectweb.asm` to `clojure.asm`.
-- `clojure/lang/Murmur3.java`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
-  Clojure, under the Apache License 2.0. The MurmurHash3 algorithm it implements was written by
-  Austin Appleby and placed in the public domain.
 - `arbace/`: the vendored Clojure in it (everything outside `arbace/classes/` and `arbace/j2c/`)
-  is derived from `clojure/` above, renamed to `arbace.*`, with its Java converted to Clojure
-  class forms (doc/VENDOR-NOTES.md). Each file stays under its source's license: `arbace/asm/`
-  and `arbace/asm.clj` under ASM's BSD 3-Clause License (package `arbace.asm`),
-  `arbace/lang/Murmur3.clj` under the Apache License 2.0, `arbace/repl.clj` as
-  `clojure/repl.clj`, and the rest under the Eclipse Public License 1.0. Files there that are
-  Arbace's own, not derived from `clojure/` (they say so in their header, such as
-  `arbace/lang/KeywordInvokeSite.clj`), are under the Eclipse Public License 1.0 as Arbace.
+  is derived from Clojure, https://github.com/clojure/clojure at
+  `98d735fab02f337cee654cb0629bddc09883a75a`, with ASM, https://gitlab.ow2.org/asm/asm at
+  `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
+  held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
+  with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its
+  source's license:
+  - `arbace/asm/` and `arbace/asm.clj`: ASM, under the BSD 3-Clause License (the package
+    renamed from `org.objectweb.asm`, by way of `clojure.asm`, to `arbace.asm`);
+  - `arbace/lang/Murmur3.clj`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
+    Clojure, under the Apache License 2.0; the MurmurHash3 algorithm it implements was written
+    by Austin Appleby and placed in the public domain;
+  - `arbace/repl.clj` (Copyright (c) Chris Houser): it still carries an older header naming the
+    Common Public License 1.0, the EPL's predecessor; upstream Clojure distributes it as part of
+    Clojure under the EPL and ships no CPL text;
+  - the rest: Clojure, under the Eclipse Public License 1.0.
+
+  Files there that are Arbace's own, not derived from Clojure (they say so in their header, such
+  as `arbace/lang/KeywordInvokeSite.clj`), are under the Eclipse Public License 1.0 as Arbace.
 - `arbace/spec/` (`arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
   (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse

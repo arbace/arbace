@@ -1,7 +1,9 @@
 # Class forms compiler: implementation notes
 
 The implementation of [SPEC.md](SPEC.md) (agenda step 2): one plain-Clojure compiler of the class
-forms (§12 question 17) that runs on the frozen baseline (stage 0) and emits bytecode with ASM.
+forms (§12 question 17) that emits bytecode with ASM. It first ran on the frozen baseline
+`clojure/` (stage 0 until 2026-10-08); since then stage 0 is the binary seed, Arbace itself
+(doc/VENDOR-NOTES.md, "The binary seed"), and it runs on Arbace at every stage.
 These notes say how it is built, how to use and test it, what it covers (the §8 tables), and
 where implementing the spec suggested changes to it (amendments, accepted and folded into
 SPEC.md, last section).

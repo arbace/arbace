@@ -1,5 +1,9 @@
 # Vendoring `clojure/` as `arbace/`, and self-hosting (agenda step 4)
 
+> Since the freeze (2026-10-08) main no longer holds `clojure/`, `bin/vendor-arbace`,
+> `bin/vendor-spec`, `doc/MODERN-COMPILER.md` or `doc/FREEZE.md`; where this file names them,
+> they are on the branch [`arbace-for-java-26`](https://github.com/arbace/arbace/tree/arbace-for-java-26).
+
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
 The vendored tree is the source of truth from now on and is maintained by hand; how it was

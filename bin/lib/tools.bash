@@ -14,7 +14,7 @@
 #                   only to the jar alone anyway.
 #   frozen_clojure  prints the directory holding the frozen reference tree clojure/ (upstream
 #                   Clojure and ASM sources with their javac classes), extracted once from the
-#                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/ (doc/FREEZE.md): j2c's
+#                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: j2c's
 #                   regression corpus, the class forms tests' javac classes, the reference runs
 #                   of Clojure's suite and the benchmarks' baseline. Re-extracted when the tag
 #                   moves. Its classes are dated after its sources, so javac does not recompile
