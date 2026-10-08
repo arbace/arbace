@@ -6,7 +6,10 @@ executable for `linux/amd64` or `linux/arm64`. This is B1a's step 0 ([B1-PLAN.md
 the path by which Arbace itself will be built from forms.
 
 ```sh
-bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] DIR
+bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR]
+              [--overlay FILE] DIR
+bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
+              [--line-file] SRC
 bin/g2c-build-tests [--arch amd64|arm64]... [PROG...]
 ```
 
@@ -101,6 +104,34 @@ info records (`go version -m`: the module path, `-trimpath=true`, `CGO_ENABLED=0
 `GOARCH`, `GOAMD64`). No `-buildid=` is needed. `--line-file` keeps this: its `//line` names
 are relative to the package's directory, which `-trimpath` rewrites (a path outside it, such
 as `../go/...`, would keep the host's directory).
+
+## Overlays (amendment B5, accepted 2026-10-08)
+
+`--overlay FILE` passes `-overlay FILE` (made absolute) to `go build`: a JSON file in Go's
+overlay format, `{"Replace": {"/path/of/a/file/the/build/reads.go": "/path/of/its/replacement.go",
+...}}`, which replaces or adds files of the build without changing the tree they belong to.
+This is how the patched Go runtime of C2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
+its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the overlay maps
+`$G2C_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
+`arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
+is C2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
+reproducible: the overlay's files are inputs of gc's build IDs like any source.
+
+Checked (2026-10-08) with the experiment's overlay of `.tmp/c2g-exp/gls/` (C2G-SPEC §13.3): a
+program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
+without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
+runs with it, for amd64 and for arm64 under `qemu-aarch64`.
+
+## Libraries and tests (amendment B6, proposed 2026-10-08)
+
+A library has no main package, so it is not built into an executable: `--print-only` prints
+the module into `--work DIR`'s `mod/` (as step 1 of the build does) and stops, so that other
+tools run `go build`, `go vet` or `go test` there. It requires no main package; `--module PATH`
+gives the module path when `SRC` has no `program.edn`. `--tests` also prints each package's
+`:test-files` (SPEC §4.2, §15 Q14), which the build leaves out otherwise (a test file is still
+collected by the package file's `load`, but not printed). `bin/jrt`
+([JRT-NOTES.md](JRT-NOTES.md)) builds, vets and tests jrt this way, with the environment of
+"The build" above, and `go test -exec qemu-aarch64` for arm64.
 
 ## Cross-compilation and arm64
 

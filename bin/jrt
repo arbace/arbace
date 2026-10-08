@@ -1,0 +1,142 @@
+#!/bin/bash
+# jrt, the Java runtime of Arbace on Go (B1a step 3, doc/go/JRT-NOTES.md): its hand-written
+# Go forms under go/arbace/jrt (the package arbace/jrt of the module arbace, C2G-SPEC §4.2,
+# §4.3), printed by the printer (arbace.g2c.print, through bin/g2c build --print-only) into a
+# module and built, vetted and tested by gc.
+#
+# Usage: bin/jrt build [--arch amd64|arm64|all]
+#            print the module into .tmp/jrt-go/mod (with the test files), then go build and
+#            go vet the package for linux/ARCH (default all: amd64 and arm64)
+#        bin/jrt test [--arch amd64|arm64|all] [--race] [GO-TEST-FLAGS...]
+#            print the module with its test files (the forms' _test files, SPEC §15 Q14),
+#            add the test data (made first if missing or older than test/jrt), and go test the
+#            package: amd64 natively, arm64
+#            under qemu-aarch64 (go test -exec); --race adds -race (amd64 only); other flags
+#            go to go test (-run RE, -v, -bench RE, -count N ...)
+#        bin/jrt testdata [--check]
+#            regenerate the differential tests' expected values from the JVM into
+#            $JRT_WORK/testdata (bin/arbace runs test/jrt/testdata.clj; regenerated, not
+#            tracked, about 12 MB in 4 s); --check makes them twice and compares (determinism)
+#        bin/jrt standins
+#            regenerate go/arbace/jrt/standin_lang.clj and standin_character.clj, the stand-ins
+#            for JDK classes c2g will translate (test/jrt/standins.clj; $JDK, default
+#            /root/jdk26u, for SpecialCasing.txt)
+#        bin/jrt manifest
+#            regenerate go/arbace/jrt/manifest.edn (C2G-SPEC §9.1: jrt's hand-written classes
+#            as c2g declares them, derived from the forms and the JDK) and manifest_test.clj
+#            (refers to each member by its Go name), and print the coverage of the edge
+#            (.tmp/jrt/edge.edn, from bin/jrt-convert, when present) (test/jrt/manifest.clj)
+#        bin/jrt print OUTDIR
+#            print the module (with tests) into OUTDIR/mod only
+# Environment: G2C_GOROOT (default /root/tamago-go, go1.27.1), JRT_WORK (default .tmp/jrt-go).
+# Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+goroot=${G2C_GOROOT:-/root/tamago-go}
+work=${JRT_WORK:-$root/.tmp/jrt-go}
+case "$work" in /*) ;; *) work=$root/$work ;; esac
+go=$goroot/bin/go
+qemu=${QEMU_AARCH64:-/usr/bin/qemu-aarch64}
+
+usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
+
+# make_testdata DIR: the expected values of the differential tests, from the JVM
+make_testdata() {
+  rm -rf "$1"; mkdir -p "$1"
+  ARBACE_CLASSPATH="$root/test" bin/arbace -m jrt.testdata "$1"
+}
+
+# print_module DIR: the module of go/ (package arbace/jrt) with its tests into DIR/mod, and
+# the test data (made when missing or older than its generator)
+print_module() {
+  local out=$1
+  mkdir -p "$out"
+  bin/g2c build --print-only --tests --module arbace --work "$out" "$root" >&2
+  if [ ! -f "$work/testdata/.done" ] || [ -n "$(find test/jrt -name 'testdata*.clj' -newer "$work/testdata/.done")" ]; then
+    echo "== test data from the JVM (test/jrt/testdata.clj)" >&2
+    make_testdata "$work/testdata" && touch "$work/testdata/.done"
+  fi
+  rm -rf "$out/mod/jrt/testdata"
+  cp -r "$work/testdata" "$out/mod/jrt/testdata"
+}
+
+goenv() {
+  local arch=$1
+  local level
+  case $arch in amd64) level=GOAMD64=v1 ;; arm64) level=GOARM64=v8.0 ;; esac
+  echo GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
+    CGO_ENABLED=0 GOEXPERIMENT= GOOS=linux GOARCH="$arch" "$level"
+}
+
+arches() {
+  case $1 in
+    all) echo amd64 arm64 ;;
+    amd64|arm64) echo "$1" ;;
+    *) echo "bin/jrt: --arch amd64|arm64|all" >&2; exit 2 ;;
+  esac
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  build)
+    arch=all
+    while [ $# -gt 0 ]; do
+      case $1 in --arch) arch=$2; shift 2 ;; *) usage ;; esac
+    done
+    print_module "$work"
+    status=0
+    for a in $(arches "$arch"); do
+      echo "== linux/$a: go build, go vet" >&2
+      # shellcheck disable=SC2046
+      (cd "$work/mod" && env $(goenv "$a") "$go" build -trimpath ./... &&
+         env $(goenv "$a") "$go" vet ./...) || status=1
+    done
+    exit $status ;;
+  test)
+    arch=all race=
+    flags=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --arch) arch=$2; shift 2 ;;
+        --race) race=1; shift ;;
+        *) flags+=("$1"); shift ;;
+      esac
+    done
+    print_module "$work"
+    status=0
+    for a in $(arches "$arch"); do
+      extra=()
+      if [ "$a" = arm64 ]; then
+        extra=(-exec "$qemu")
+      elif [ -n "$race" ]; then
+        extra=(-race)
+      fi
+      echo "== linux/$a: go test ${extra[*]} ${flags[*]}" >&2
+      if [ -n "$race" ] && [ "$a" = amd64 ]; then
+        # the race detector needs cgo on linux/amd64
+        # shellcheck disable=SC2046
+        (cd "$work/mod" && env $(goenv "$a") CGO_ENABLED=1 "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
+      else
+        # shellcheck disable=SC2046
+        (cd "$work/mod" && env $(goenv "$a") "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
+      fi
+    done
+    exit $status ;;
+  testdata)
+    make_testdata "$work/testdata" && touch "$work/testdata/.done"
+    if [ "${1:-}" = --check ]; then
+      make_testdata "$work/testdata-again"
+      diff -r -x .done "$work/testdata" "$work/testdata-again" && echo "testdata: two runs identical" >&2
+    fi ;;
+  manifest)
+    ARBACE_CLASSPATH="$root/test" bin/arbace -m jrt.manifest "$root/.tmp/jrt/edge.edn" ;;
+  standins)
+    ARBACE_CLASSPATH="$root/test" bin/arbace -m jrt.standins go/arbace/jrt/standin_lang.clj \
+      go/arbace/jrt/standin_character.clj ;;
+  print)
+    [ $# -eq 1 ] || usage
+    print_module "$1" ;;
+  *) usage ;;
+esac

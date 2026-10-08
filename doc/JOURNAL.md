@@ -521,3 +521,25 @@ decision (2026-10-08).
   stubs the rest of each file (throwing `UnsupportedOperationException` if called), so the
   closure stays at 184 files; c2g needs a reachability pass. Not taken: a whole-file closure
   grown to a fixed point.
+
+## 2026-10-08: B1a step 3, phase 1: jrt's core
+
+- Agent, branch `jrt-core` (ten commits), squash-merged because its early commits carried 12 MB
+  of JVM test data it later untracked. jrt's hand-written Go forms under `go/arbace/jrt/`
+  (package `arbace/jrt`, module `arbace`; about 4,700 lines of forms, 13,600 of Go): the object
+  header and monitors (thin lock and identity hash in one word, inflation on contention,
+  recursion and `wait`), classes, arrays, class-init guards, the UTF-16 `String`,
+  `StringBuilder`, `StringBuffer`, codecs, number formatting, `Math` and `StrictMath` (FdLibm
+  ports, equal to StrictMath bit for bit), `Throwable` and the try/catch machinery with Java
+  stack traces from a frame table c2g will register, `Enum`, `Record`, `Volatile`; stand-ins for
+  32 exception classes, 5 interfaces and the parts of `Character` that `String` needs, until
+  c2g translates them; a manifest derived from the forms. `bin/jrt` (`build`, `test`,
+  `testdata`, `standins`, `manifest`, `print`); `bin/g2c build --overlay` (BUILD.md B5,
+  accepted with C2G-SPEC q19). Notes: `doc/go/JRT-NOTES.md`.
+- Tests: 28, on linux/amd64, on arm64 under qemu-aarch64, and with `-race`; about 295,000 cases
+  compared with values the JVM computed (strings, number formatting, math, exception messages)
+  plus the case mappings of every code point; regenerated test data (12 MB, not tracked). The
+  main session reran `bin/jrt test` (both architectures pass).
+- Thread identity uses the `runtime.Stack` stopgap until phase 2 (monitor enter+exit 8.9 µs
+  for now). Helpful NPE messages are not reproduced. Proposed amendments for the user:
+  C2G-SPEC A1-A10, BUILD.md B6 (in JRT-NOTES).
