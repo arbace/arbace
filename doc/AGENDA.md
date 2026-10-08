@@ -116,8 +116,10 @@ fallbacks of `arbace/core_classes.clj` are gone.
   under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
   static executables for both). Step 1 done: the Java surface measured
   ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Step 2 done: the c2g spec
-  ([go/C2G-SPEC.md](go/C2G-SPEC.md)), accepted with its 23 recommendations. In progress
-  alongside: jrt's JDK sources through j2c, and the JVM oracle for differential tests.
+  ([go/C2G-SPEC.md](go/C2G-SPEC.md)), accepted with its 23 recommendations. Done alongside:
+  jrt's JDK sources through j2c (`bin/jrt-convert`, 184 files shape-identical; unreached
+  methods to be stubbed by c2g) and the JVM oracle (`bin/oracle`, 15,854 cases). Next: step 3,
+  jrt.
 
 ## Later
 

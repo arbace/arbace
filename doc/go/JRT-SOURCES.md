@@ -213,3 +213,11 @@ classes and from javac's: identical.
   overrides), `Unsafe`'s 39 members first among the VM's interfaces.
 - Decide for the 80 outside classes: more files or stubs; and whether the cut and reworked
   references (179 + 30 members) are stubbed per call site or per class.
+
+## Decided (2026-10-08)
+
+The user chose to keep the closure at the 184 files: c2g translates the methods reached from
+Arbace (step 1's closure) and stubs the rest of each file, throwing
+`UnsupportedOperationException` if ever called. c2g needs a reachability pass for this. The
+alternative, adding the files of the 80 classes outside the closure until it is closed, was not
+taken.

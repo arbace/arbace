@@ -517,3 +517,7 @@ decision (2026-10-08).
   largest `String` 49 members, `Unsafe` 39, `Math` 34, `StringBuilder` 31; rework 9, cut 47);
   5 natives; 70 intrinsic candidates, all with Java bodies. Translating whole files pulls in
   80 plain-Java classes outside the 184 files: a decision for the user.
+- The user's decision: c2g translates the methods reached from Arbace (step 1's closure) and
+  stubs the rest of each file (throwing `UnsupportedOperationException` if called), so the
+  closure stays at 184 files; c2g needs a reachability pass. Not taken: a whole-file closure
+  grown to a fixed point.
