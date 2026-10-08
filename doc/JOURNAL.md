@@ -411,3 +411,20 @@ decision (2026-10-08).
 - B1a step 1 started (agent): the Java surface of `arbace/lang` and the namespaces, measured
   from the compiled bytecode, with a treatment per JDK class (translate from the JDK's source
   with j2c, shim, cut, or rework) and the decisions for the user.
+
+## 2026-10-08: B1a step 1: the Java surface measured
+
+- Agent, `67e56cd`, merged: `bin/java-surface` (`test/g2c/java_surface.clj`, 15 s,
+  deterministic) reads the bytecode of all 5,740 classes of `target/stage2` with
+  `java.lang.classfile`, resolving members to their declaring JDK class; a `javap` cross-check
+  on the runtime agrees exactly (573 member references). Results in
+  `doc/go/JAVA-SURFACE.md`, raw data in `doc/go/java-surface.edn`.
+- The runtime and the REPL's namespaces use 278 JDK classes, 970 members (the runtime alone
+  224 and 682). Proposed treatments: translate 150 classes (j2c from jdk26u's source), shim 57,
+  compile directly in c2g 2 (string `+`, lambdas), rework 7 (`java.lang.invoke`,
+  `ClassLoader`), cut 62. The translation closure is 422 classes from 184 source files, of
+  which j2c converts all 176 it covers to javac's shapes; 8 are generated in the JDK build.
+  `java.util.regex` (9,592 lines) converts exactly. Reflection cannot be cut: the analyzer
+  resolves every interop form with it. The `invokedynamic` sites become plain evaluation, ASM
+  is not needed, class loading becomes source loading plus a name registry. Estimate 13-19
+  agent-days in all (jrt 10-15 against the plan's 6-10). Seven decisions for the user.
