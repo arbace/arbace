@@ -443,3 +443,6 @@ decision (2026-10-08).
 - The user proposed `arbace-for-go1.27.1` for the branch that will freeze B1a, after the
   pinned Go toolchain, as `arbace-for-java-26` names the JDK. Recorded in B1-PLAN and the
   agenda.
+- Revised by the user the same day: the branch `arbace-for-golang`, the tag
+  `arbace-for-go1.27.1`. The branch names the platform and can take later fixes; the tag names
+  the exact toolchain.
