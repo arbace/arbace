@@ -75,9 +75,9 @@ The current state of the work. This file is rewritten as things change. For the 
      Actions gate (only on `arbace-for-java-26` and by hand), and the freeze kit
      ([FREEZE.md](FREEZE.md), `bin/freeze`). Open lead: `reduce`/transducer/transient
      benchmarks run 15-60% slower than Clojure; cause not found.
-- The freeze itself, waiting for the user's confirmation: cherry-pick the README section
-  (`c57969f`, branch `freeze-readme`) onto main, have the gate pass on that commit, then
-  `bin/freeze --yes` creates and pushes `arbace-for-java-26` and the tag `arbace-for-java-26-v1`.
+- The freeze itself, waiting for the user's confirmation: have the gate pass on the main commit,
+  then `bin/freeze --yes` creates and pushes `arbace-for-java-26` and the tag
+  `arbace-for-java-26-v1` (the README's section advertising it is on main).
 
 ## Later
 

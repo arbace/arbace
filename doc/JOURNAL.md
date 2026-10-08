@@ -1063,3 +1063,22 @@ recommended:
   classes, the verifier clean, native tests 47/2,780, the suite 20,750/20,750 on stages 1 and
   2, `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without regressions.
 - Not created: the branch and the tag wait for the user's confirmation.
+
+## 2026-10-08: "A Clojure derivative", and a compact README
+
+- The user corrected the project's definition: Arbace is not "a from-scratch reimplementation of
+  Clojure in Clojure" (the first entry's words), since much of it is vendored; it is "a Clojure
+  derivative written entirely in Clojure". CLAUDE.md and the README now say so. Past entries
+  keep their words.
+- The README was rewritten as a compact abstract, at the user's request, around the arc:
+  Clojure extended to represent its own implementation (the class forms, j2c, the vendored
+  Clojure as all `.clj`), modernized for Java 26, and evolving to represent its runtime too,
+  down to the bare metal. It keeps the "Arbace for Java 26" section that `bin/freeze` requires,
+  worded to hold before and after the freeze, two commands to build and run, and the
+  documentation list.
+- Moved out: the running details (the cache, the image's modules, the virtual-thread option) to
+  `doc/FREEZE.md`'s "Build, run, verify"; their full accounts were already in
+  `doc/VENDOR-NOTES.md`. Prior art is down to one line of links (CLAUDE.md keeps the
+  annotated list).
+- The README section prepared by the freeze agent (`c57969f`, local branch `freeze-readme`) is
+  superseded by the new README's section, and the branch was deleted.

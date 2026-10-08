@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-Arbace is a from-scratch reimplementation of Clojure in Clojure. Studying prior art and vendoring
+Arbace is a Clojure derivative written entirely in Clojure. Studying prior art and vendoring
 parts of it is always allowed. The work is a derivation done once by hand, so it must stay
 reproducible from the record we keep.
 

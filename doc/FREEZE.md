@@ -2,7 +2,7 @@
 
 Arbace runs on the JVM today: a Clojure, written in Clojure, that compiles itself to `.class`
 files for Java 26. Its long-term direction leaves the JVM and the `.class` format behind (see
-the README's "Direction"). Before that break, the JVM state of the art is frozen on a
+the README). Before that break, the JVM state of the art is frozen on a
 well-known branch:
 
 - **branch `arbace-for-java-26`**, with the annotated tag **`arbace-for-java-26-v1`** on the
@@ -48,6 +48,16 @@ bin/build-arbace                 # stages 1-3, verifier, native tests, target/ar
 bin/arbace                       # a REPL; also bin/arbace -e '(+ 1 2)', bin/arbace script.clj
 bin/arbace-image                 # target/arbace-image: a self-contained runtime (131 MB)
 ```
+
+`bin/arbace` runs `target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache
+applies (it is tied to the JDK build and the jar), and from the jar alone otherwise.
+`target/arbace-image` (also `bin/build-arbace --image`) needs no installed JDK: copy the
+directory anywhere and run `arbace-image/bin/arbace`; further JDK modules go in
+`ARBACE_IMAGE_MODULES` (e.g. `java.net.http`). `send-off`, `future` and `pmap` run on virtual
+threads with `ARBACE_JAVA_OPTS=-Darbace.virtual-threads=true`, or after
+`(set-agent-send-off-executor! (arbace.lang.Agent/newVirtualThreadExecutor))`; virtual threads
+are daemon threads, so the JVM does not wait for them at exit (`doc/VENDOR-NOTES.md`, hand
+change 9; the image: "The runtime image").
 
 **The gate**, the checks every change had to pass, run one after the other:
 
