@@ -67,7 +67,13 @@
     (when cls
       (case (:op s)
         :static [:static (find-method cls (:name s) ps true)]
-        :invoke [:invoke (find-method cls (:name s) ps false)]
+        :invoke [:invoke (let [mm (find-method cls (:name s) ps false)]
+                           ;; a method jrt has on the step's class rather than on the declaring
+                           ;; class (StringBuilder's, declared by AbstractStringBuilder)
+                           (if (and mm (not= cls (:owner mm)) (m/hand-written? cls) (m/hand-written? (:owner mm))
+                                    (not (m/hw-method-exists? (:owner mm) mm)) (m/hw-method-exists? cls mm))
+                             (assoc mm :owner cls)
+                             mm))]
         :new [:new (find-ctor cls ps)]
         (:get :get-static) [(:op s) (when-let [f (env/find-field cls (:name s))] (assoc f :owner (or (:owner f) cls)))]
         nil))))
@@ -333,6 +339,11 @@
         (case ["java.lang.Double"] (return jrt/Prim_double))
         (default (return jrt/Prim_float))))
     (go/func runStep [^int i ^string bind ^{:tag (func [])} f]
+      ;; a Go panic that is no Java exception (c2g's own) ends the step, not the program
+      (defer ((fn []
+                (let [r (recover)]
+                  (when (!= r nil)
+                    (fmt/Printf "@@c2g %d X go.panic %s\n" i (units (jrt/Str (fmt/Sprint r)))))))))
       (let [exc ((fn [] :results [^jrt/Throwable_I exc] (defer (jrt/Catch (addr exc))) (f) (return)))]
         (when (!= exc nil)
           (when (!= bind "") (aset B bind nil))
@@ -517,6 +528,56 @@
     (for [s cases] (assoc (compare-case s (get got (:i s))) :i (:i s) :src (:src s)))))
 
 ;; ---------------------------------------------------------------------------------------
+;; fixtures (test/c2g/fixtures): recorded on this JVM, in-process
+
+(def fixtures-dir "test/c2g/fixtures")
+
+(defn- fixture-observe [v]
+  (cond (nil? v) {:type "nil"}
+        (or (string? v) (instance? Boolean v) (instance? Integer v) (instance? Long v) (instance? Double v))
+        {:type (.getName (class v)) :value v}
+        :else {:type (.getName (class v))}))
+
+(defn- fixture-chain [^Throwable e]
+  (loop [e e acc [] n 0]
+    (if (or (nil? e) (= n 8)) acc (recur (.getCause e) (conj acc [(.getName (class e)) (.getMessage e)]) (inc n)))))
+
+(defn fixture-expected
+  "{class-simple-name {:cases [...]}} of the fixtures: each public static method without
+  parameters whose name starts with t, in name order, run on this JVM (the fixtures loaded
+  here by load-file) and recorded as the oracle's class scripts are."
+  []
+  (let [files (sort (filter #(str/ends-with? % ".clj") (map #(.getPath ^java.io.File %) (.listFiles (io/file fixtures-dir)))))
+        nsname 'c2g.fixtures]
+    (binding [*ns* (create-ns nsname)]
+      (refer 'arbace.core)
+      (doseq [f files] (load-file f)))
+    (let [tops (for [f files
+                     cf (w/read-forms f)
+                     :when (and (seq? cf) (= 'do (first cf)))
+                     dc (rest cf)
+                     :when (and (seq? dc) (= 'defclass (first dc)))]
+                 (name (second dc)))]
+      (into (array-map)
+            (for [cn tops
+                  :let [^Class c (ns-resolve (the-ns nsname) (symbol cn))
+                        ms (->> (.getDeclaredMethods c)
+                                (filter (fn [^java.lang.reflect.Method m]
+                                          (and (re-matches #"t[A-Z].*" (.getName m)) (zero? (.getParameterCount m))
+                                               (java.lang.reflect.Modifier/isStatic (.getModifiers m))
+                                               (java.lang.reflect.Modifier/isPublic (.getModifiers m)))))
+                                (sort-by #(.getName ^java.lang.reflect.Method %)))]
+                  :when (seq ms)]
+              [cn {:cases (vec (map-indexed
+                                 (fn [i ^java.lang.reflect.Method m]
+                                   (let [base {:i (inc i) :op :static :class (str nsname "." cn) :name (.getName m) :sig []
+                                               :src (str "(" cn "/" (.getName m) ")")}]
+                                     (try (assoc base :result (fixture-observe (.invoke m nil (object-array 0))))
+                                          (catch java.lang.reflect.InvocationTargetException e
+                                            (assoc base :throws (fixture-chain (.getCause e)))))))
+                                 ms))}])))))
+
+;; ---------------------------------------------------------------------------------------
 
 (defn sh [& args]
   (let [pb (ProcessBuilder. ^java.util.List (map str args))
@@ -530,9 +591,15 @@
         c2g-args (rest c2g-args)
         arches (or (some-> (System/getenv "C2G_ARCH") (str/split #",")) ["amd64" "arm64"])
         out-dir (or (System/getenv "C2G_OUT") ".tmp/c2g/check")
-        files (if (seq files) files (map #(str/replace (.getName ^java.io.File %) ".edn" "")
-                                         (sort (.listFiles (io/file "test/oracle/expected/classes")))))
-        expected (into (array-map) (for [f files] [f (read-expected (str "test/oracle/expected/classes/" f ".edn"))]))
+        files (if (seq files) files (map #(str/replace % ".edn" "")
+                                         (concat (sort (map #(.getName ^java.io.File %) (.listFiles (io/file "test/oracle/expected/classes")))) ["fixtures.edn"])))
+        fixtures? (some #{"fixtures"} files)
+        files (remove #{"fixtures"} files)
+        expected (into (array-map) (concat (for [f files] [f (read-expected (str "test/oracle/expected/classes/" f ".edn"))])
+                                           (when fixtures? (fixture-expected))))
+        c2g-args (if fixtures?
+                   (concat c2g-args ["--input" fixtures-dir] (when (some #{"--slice"} c2g-args) ["--slice" "^c2g/"]))
+                   c2g-args)
         ;; each file runs alone (bindings are per script): one program per file, built once
         all-cases (vec (mapcat (fn [[f x]] (map #(assoc % ::file f) (:cases x))) expected))
         opts (c2g/parse-args (concat ["--out" out-dir] c2g-args))

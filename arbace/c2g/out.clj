@@ -243,6 +243,20 @@ translated java.util.Formatter).\n"
           "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
           ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
           (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
+     ;; records' derived equals and hashCode (java.lang.runtime.ObjectMethods)
+     '(go/func C2g_ObjHash "C2g_ObjHash is Objects.hashCode.\n" ^int32 [^any x]
+        (when (== x nil) (return 0))
+        (HashCode x))
+     '(go/func C2g_ObjEquals "C2g_ObjEquals is Objects.equals.\n" ^bool [^any a ^any b]
+        (when (== a b) (return true))
+        (when (or (== a nil) (== b nil)) (return false))
+        (Equals a b))
+     '(go/func C2g_DoubleBits "C2g_DoubleBits is Double.doubleToLongBits (one NaN).\n" ^int64 [^float64 d]
+        (when (math/IsNaN d) (return 0x7ff8000000000000))
+        (conv int64 (math/Float64bits d)))
+     '(go/func C2g_FloatBits "C2g_FloatBits is Float.floatToIntBits (one NaN).\n" ^int32 [^float32 f]
+        (when (!= f f) (return 0x7fc00000))
+        (conv int32 (math/Float32bits f)))
      (list 'go/type 'C2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
      (list 'go/func 'C2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
            (list '.CloneShallow (list 'assert 'C2gCloner 'x)))])))

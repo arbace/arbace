@@ -315,6 +315,63 @@
 ;; ---------------------------------------------------------------------------------------
 ;; methods (§5.4)
 
+(defn- record-object-body
+  "A record's derived toString, hashCode or equals, as java.lang.runtime.ObjectMethods makes
+  them: Name[c=v, ...]; 31 * h + the component's hash, in order; the same class and equal
+  components (wrapper compare for primitives, Objects.equals for references)."
+  [pkg n mm ps]
+  (let [d (a/decl n)
+        comps (:components d)
+        js (fn [s] (m/jrt-sym pkg s))
+        fld (fn [o cm] (list (symbol (str ".-" (nm/field-name (:name cm)))) o))
+        hash (fn [cm x]
+               (case (:desc cm)
+                 ("I" "S" "B" "C") (list 'conv 'int32 x)
+                 "Z" (list 'if x 1231 1237)
+                 "J" (list 'conv 'int32 (list 'bit-xor x (list 'conv 'int64 (list '>> (list 'conv 'uint64 x) 32))))
+                 "F" (list (js "C2g_FloatBits") x)
+                 "D" (let [b (list (js "C2g_DoubleBits") x)]
+                       (list 'conv 'int32 (list 'bit-xor b (list 'conv 'int64 (list '>> (list 'conv 'uint64 b) 32)))))
+                 (list (js "C2g_ObjHash") (c/coerce x (:desc cm) "Ljava/lang/Object;" false))))
+        strof (fn [cm x]
+                (case (:desc cm)
+                  ("I" "S" "B") (list (js "StrOfInt") (list 'conv 'int32 x))
+                  "J" (list (js "StrOfLong") x)
+                  "C" (list (js "StrOfChar") x)
+                  "Z" (list (js "StrOfBool") x)
+                  "F" (list (js "StrOfFloat") x)
+                  "D" (list (js "StrOfDouble") x)
+                  (list (js "StrOfObj") (c/coerce x (:desc cm) "Ljava/lang/Object;" false))))]
+    (case (:name mm)
+      "toString"
+      (let [simple (let [s (str/replace (subs n (inc (.lastIndexOf ^String n "/"))) #".*\$" "")] s)
+            parts (concat [(c/string-lit (str simple "["))]
+                          (apply concat
+                                 (map-indexed (fn [i cm]
+                                                [(c/string-lit (str (when (pos? i) ", ") (:name cm) "="))
+                                                 (strof cm (fld 't cm))])
+                                              comps))
+                          [(c/string-lit "]")])]
+        [(list 'return (apply list (js "Concat") parts))])
+      "hashCode"
+      [(list 'return (reduce (fn [acc cm] (list '+ (list '* acc 31) (hash cm (fld 't cm)))) (list 'conv 'int32 0) comps))]
+      "equals"
+      (let [o (first ps)
+            g (m/go-name n)]
+        [(list 'when (list '== (list 'conv 'any 't) o) (list 'return true))
+         (list 'when (list 'or (list '== o nil) (list '!= (list (js "GetClass") o) (symbol (str g "_class")))) (list 'return false))
+         (list 'let ['other (list 'assert (list '* (symbol g)) o)]
+               (list 'return (reduce (fn [acc cm]
+                                       (let [a (fld 't cm) b (fld 'other cm)
+                                             e (case (:desc cm)
+                                                 "F" (list '== (list (js "C2g_FloatBits") a) (list (js "C2g_FloatBits") b))
+                                                 "D" (list '== (list (js "C2g_DoubleBits") a) (list (js "C2g_DoubleBits") b))
+                                                 ("I" "S" "B" "C" "Z" "J") (list '== a b)
+                                                 (list (js "C2g_ObjEquals") (c/coerce a (:desc cm) "Ljava/lang/Object;" false)
+                                                       (c/coerce b (:desc cm) "Ljava/lang/Object;" false)))]
+                                         (if (true? acc) e (list 'and acc e))))
+                                     true comps)))]))))
+
 (defn derived-body
   "Go statements of a derived method (enum values/valueOf/$values, bridges, record members)."
   [pkg n mm ps]
@@ -350,6 +407,7 @@
           [(list 'return (c/coerce call tr br false))]))
       :record-accessor (let [cm (:component mm)]
                          [(list 'return (list (symbol (str ".-" (nm/field-name (:name cm)))) 't))])
+      :record-object-method (record-object-body pkg n mm ps)
       [(list 'panic (list (m/jrt-sym pkg "C2g_NotTranslated") (str "derived " (name (:derived mm)))))])))
 
 (defn method-forms
@@ -493,7 +551,7 @@
         (and (some? cv) (#{"F" "D"} (:desc f)))
         (list 'go/var (tag s (gt pkg (:desc f))) (binding [c/*f* (new-fn-state pkg n)] (c/float-lit (:desc f) cv)))
         (and (some? cv) (string? cv))
-        (list 'go/var (tag s (gt pkg (:desc f))) (binding [c/*f* (new-fn-state pkg n)] (c/use-sym! (c/string-lit cv))))
+        (list 'go/var (tag s (gt pkg (:desc f))) (binding [c/*f* (new-fn-state pkg n)] (c/string-lit cv)))
         :else
         (list 'go/var (tag s (field-go-type pkg f)))))))
 

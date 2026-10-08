@@ -262,7 +262,7 @@
                     (when (System/getenv "C2G_TRACE") (.printStackTrace ex)))))))
           ;; adapters of the functional interfaces lambdas target (in the interface's package)
           (loop [done #{}]
-            (let [todo (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))]
+            (let [todo (doall (distinct (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))))]
               (when (seq todo)
                 (doseq [fi todo]
                   (let [pkg (m/pkg fi)]
@@ -363,6 +363,9 @@
                       :let [rel (str (.relativize (.toPath (.getCanonicalFile (io/file mdir))) (.toPath (.getCanonicalFile f))))]]
                 (copy-file! f (str prog-dir "/" rel))))
             (let [report {:classes (count T) :reached (count (:reached res))
+                          ;; the classes in the inputs, by Go package
+                          :world (frequencies (map #(name (m/pkg %)) @(:order (:unit world))))
+                          :methods-with-missing-parts (count (:unavailable res))
                           :translated (vec (sort T))
                           :replaced-standins (vec (sort replaced))
                           :unavailable (into (sorted-map) (for [[k v] (:unavailable res)] [(str/join " " k) (vec (sort v))]))
