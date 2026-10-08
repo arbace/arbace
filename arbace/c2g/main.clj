@@ -148,11 +148,21 @@
                        (let [h (name (first f))]
                          (cond
                            (= h "method") (some? (some->> (method-recv-type f) (re-matches own-re)))
-                           (#{"type" "var" "func"} h)
+                           (#{"type" "var" "func" "const"} h)
                            (let [nm (first (form-names f))]
                              (and nm (not= nm "init") (re-matches own-re nm)))
-                           :else false))))]
-      (vec (for [f forms :when (not (drop? f))]
+                           :else false))))
+          ;; groups (go/var [a e] [b e]): the specs of translated classes go
+          group (fn [f]
+                  (if (and (seq? f) (symbol? (first f)) (#{"var" "const" "type"} (name (first f)))
+                           (some vector? (rest f)))
+                    (let [[h & more] f
+                          [doc specs] (if (string? (first more)) [[(first more)] (rest more)] [[] more])
+                          keep (remove (fn [sp] (let [x (first sp)] (and (symbol? x) (re-matches own-re (name x))))) specs)]
+                      (when (seq keep) (apply list h (concat doc keep))))
+                    f))]
+      (vec (for [f forms :when (not (drop? f))
+                 :let [f (group f)] :when f]
              (if (and (seq? f) (symbol? (first f)) (= "func" (name (first f))) (= 'init (second f)))
                (filter-init-body f own-re)
                f))))))
@@ -177,7 +187,14 @@
                       (when (or (:lang opts) (not (:jdk opts))) [{:root "arbace" :dirs ["lang"]}])
                       (when (or (:jdk opts) (not (:lang opts))) (when (.isDirectory (io/file jdk)) [{:root jdk :tree true}]))
                       (for [i (:inputs opts)] {:root i :tree true})))
-        world (w/load-world inputs)
+        variant-files (or (:variant-files opts)
+                          (when (some #(= "arbace" (:root %)) inputs)
+                            (let [d (io/file "arbace/lang/go")]
+                              (when (.isDirectory d)
+                                (sort (filter #(str/ends-with? (str %) ".clj") (.listFiles d)))))))
+        world (w/load-world inputs :variant-files variant-files)
+        _ (doseq [[n c] (sort (:variants world))]
+            (println (str "c2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
         t-load (secs t0)
         _ (println (str "c2g: " (count (:files world)) " files, " (count @(:compile-set world)) " classes analyzed in " t-load " s"
                         (when (seq (:failed world)) (str ", " (count (:failed world)) " failures"))))
@@ -188,20 +205,17 @@
         slice (:slice opts)
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
         cs (:compile-set world)]
-    ;; the slice: classes outside it are not translatable in this run; their declarations
-    ;; come from the running JDK again (where it has them)
-    (when (seq slice)
-      (doseq [n (keys @cs) :when (not (in-slice? (top-of n)))]
-        (swap! cs dissoc n)))
-    (w/with-world (assoc world :from-source (fn [n] (contains? @cs (top-of n))))
+    (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})}
             t1 (now)
-            roots (vec (mapcat root-keys (:roots opts)))
-            reach1 (binding [m/*w* wst] (r/run {:roots roots}))
-            ;; the stand-ins the translated classes replace: their members are roots too
-            sroots (binding [m/*w* (assoc wst :T (:T reach1))] (vec (standin-roots scan (:T reach1))))
-            ;; jrt's own needs: the exceptions it throws are constructed through these
-            res (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots))}))
+            roots (vec (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f)))))
+            slice? (fn [n] (boolean (in-slice? (top-of n))))
+            ;; the stand-ins the translated classes replace: the members they define are roots
+            ;; too (jrt's own code uses them), to a fixpoint
+            res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice?})) n 0]
+                  (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
+                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice?}))]
+                    (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
             wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
             wst (assoc wst :subclass-index (m/make-subclass-index wst))
@@ -211,8 +225,9 @@
             t2 (now)
             gen-dir (str (:out opts) "/gen")
             prog-dir (str (:out opts) "/prog")
-            pkgstates {:jrt {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{})}
-                       :lang {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{})}}
+            cuts (atom #{})
+            pkgstates {:jrt {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}
+                       :lang {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}}
             files (atom {})   ; [pkg go-file] -> forms
             errors (atom [])]
         (binding [m/*w* wst
@@ -247,6 +262,7 @@
               (swap! files assoc [pkg "c2g_classes.go"] (vec (mapcat #(out/class-registration pkg %) classes)))
               (when-let [fr (out/frames-forms pkg classes)] (swap! files assoc [pkg "c2g_frames.go"] (vec fr)))
               (when (= pkg :jrt) (swap! files assoc [pkg "c2g_support.go"] (out/support-forms))))
+            (swap! files assoc [pkg "c2g_cut.go"] (vec (out/cut-forms pkg (filter #(= pkg (m/pkg %)) @cuts))))
             (swap! files assoc [pkg "c2g_strings.go"] (vec (out/strings-forms pkg @(:lits ps))))
             (swap! files assoc [pkg "c2g_up.go"] (vec (out/ups-forms pkg @(:ups ps)))))
           (let [t-trans (secs t2)
@@ -304,6 +320,8 @@
                            (str/join "\n" (for [s gen-lang] (out/form-text (list 'load (str "lang/" s)))))
                            "\n")))
             (write! (str prog-dir "/program.edn") "{:module \"arbace\" :go \"1.27\"}\n")
+            (when-let [after (:after opts)]
+              (after {:prog-dir prog-dir :T T :res res :world world}))
             (doseq [mdir (:mains opts)]
               (doseq [^java.io.File f (file-seq (io/file mdir))
                       :when (.isFile f)
@@ -315,6 +333,7 @@
                           :unavailable (into (sorted-map) (for [[k v] (:unavailable res)] [(str/join " " k) (vec (sort v))]))
                           :missing (into (sorted-map) (for [[k v] (:missing res)] [k (count v)]))
                           :analysis-failures (:failed world)
+                          :variants (:variants world)
                           :errors @errors
                           :times {:load t-load :reach t-reach :translate t-trans :write (secs t3)}}]
               (write! (str (:out opts) "/report.edn") (with-out-str (arbace.pprint/pprint report)))

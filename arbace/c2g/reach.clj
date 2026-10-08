@@ -67,6 +67,10 @@
 ;; the analysis
 
 (def ^:dynamic *st* nil)
+(def ^:dynamic *slice?*
+  "Whether a class's code may be translated in this run (classes outside the slice exist as
+  declarations with stub bodies)."
+  (constantly true))
 (def ^:dynamic *current* nil)
 
 (defn- note-unavailable! [why]
@@ -99,6 +103,8 @@
     (m/translated? n) true
     (contains? @(:failed-classes *st*) n) (do (note-unavailable! (str "class " n ": " (get @(:failed-classes *st*) n))) false)
     (and (m/jrt-class n) (not (:standin (m/jrt-class n)))) true
+    ;; a stand-in is replaced only by a translation of the slice (jrt's code needs its members)
+    (and (m/jrt-class n) (not (*slice?* n))) true
     (m/translatable? n)
     (let [d (a/decl n)]
       (if-let [why (:analysis-failed @(:state d))]
@@ -131,7 +137,7 @@
 (defn reach!
   "Marks method [c name desc] reached (its body will be translated)."
   [[c name desc :as k]]
-  (when (and c (m/translated? c) (not (contains? @(:reached *st*) k)))
+  (when (and c (m/translated? c) (*slice?* c) (not (contains? @(:reached *st*) k)))
     (swap! (:reached *st*) conj k)
     (swap! (:queue *st*) conj k)))
 
@@ -340,10 +346,11 @@
 (defn run
   "Reachability from roots (method keys [class name desc]; classes to instantiate
   :instantiate). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
-  [{:keys [roots instantiate classes]}]
+  [{:keys [roots instantiate classes slice?]}]
   (let [st {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
             :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})}]
     (binding [*st* st
+              *slice?* (or slice? (constantly true))
               m/*w* (assoc m/*w* :T (:T st))]
       (doseq [c classes] (use! c))
       (doseq [[c :as k] roots] (when (use! c) (reach! k) (when (not= "<init>" (second k)) nil)))

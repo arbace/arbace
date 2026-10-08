@@ -96,7 +96,10 @@
                                [ls more]))
               lets (reverse lets)
               bindings (vec (mapcat (fn [[_ s i]] [s i]) lets))
-              unused (for [[_ s _] lets :when (not (contains? used (str s)))] (list 'set! '_ (symbol (str s))))]
+              unused (for [[_ s _] lets
+                           v (if (seq? s) (rest s) [s])
+                           :when (and (symbol? v) (not= '_ v) (not (contains? used (str v))))]
+                       (list 'set! '_ (symbol (str v))))]
           (recur more2 (list (apply list 'let bindings (concat unused acc)))))
         (recur more (cons it acc)))
       acc)))
@@ -135,7 +138,8 @@
       "I" (long (unchecked-int v)) "J" v "S" (long (unchecked-short v)) "B" (long (unchecked-byte v))
       "C" (long (int (unchecked-char v))) nil)))
 
-(declare expr expr-as stmt! assign! ret! cond-expr translate-ctx missing-reason missing-expr go-call?)
+(declare expr expr-op expr-as stmt! assign! ret! cond-expr translate-ctx missing-reason missing-expr go-call?
+         prim-convert)
 
 (defn up-sym
   "The nil-preserving conversion of pointer type `from` (desc) to interface `to` (desc):
@@ -156,7 +160,8 @@
     (= from :null) (if (t/prim? to) (zero-of to) nil)
     (= from :none) x
     (= from to) x
-    (and (t/prim? from) (t/prim? to)) x
+    ;; branches of a conditional keep their own primitive type (the JVM's int slot): widened
+    (and (t/prim? from) (t/prim? to)) (prim-convert x from to)
     (or (t/prim? from) (t/prim? to)) (fail (str "unexpected primitive coercion " from " -> " to))
     (and (m/pointer-desc? from) (m/iface-desc? to)) (if nn x (up-sym x from to))
     (and (m/pointer-desc? from) (m/pointer-desc? to))
@@ -291,7 +296,10 @@
            (let [node (nth nodes i)
                  want (nth wants i nil)
                  val (expr node)
-                 val (if want (assoc val :x (coerce (:x val) (:t val) want (:nn val)) :t want) val)
+                 val (cond
+                       (and want (:missing val)) (assoc val :x (missing-expr (:missing val) want) :t want)
+                       want (assoc val :x (coerce (:x val) (:t val) want (:nn val)) :t want)
+                       :else val)
                  need (and (not (stable? node))
                            (or (nth stmt-after i)
                                (and (nth eff-after i) (reads-state? node))))]
@@ -385,8 +393,9 @@
                     scan (:jrt m/*w*)]
                 (when-not (or (contains? (:vars scan) s) (contains? (:consts scan) s))
                   (str "jrt lacks " (str/replace o "/" ".") "." (:name f)))))))
-      (:cast :instance?) (desc-missing (:class node))
-      :class-lit (desc-missing (:class node))
+      :cast (desc-missing (:class node))
+      :instance? nil
+      :class-lit nil
       (:new-array :array-init) (desc-missing (:type node))
       :lambda (class-missing (:fi node))
       :method-ref (or (class-missing (:fi node)) (class-missing (:owner node)) (mdesc-missing (:desc node)))
@@ -497,7 +506,15 @@
     (= d "V") (jsym "Prim_void")
     (t/array? d) (list '.ArrayClass (class-val (t/elem-type d)))
     :else (let [n (t/desc->internal d)]
-            (if (= n "java/lang/Object") (jsym "Object_class") (csym n "_class")))))
+            (cond
+              (= n "java/lang/Object") (jsym "Object_class")
+              ;; a class outside the closed world, or one jrt declares without a Class object:
+              ;; a Class object of its name only (a \"cut\" class, C2G-SPEC §4.1)
+              (or (not (m/in-world? n))
+                  (and (m/hand-written? n) (not (contains? (:vars (:jrt m/*w*)) (str (m/go-name n) "_class")))))
+              (do (when-let [cuts (:cuts *pkgstate*)] (swap! cuts conj n))
+                  (csym n "_class"))
+              :else (csym n "_class")))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; expressions
@@ -523,12 +540,20 @@
   (let [node (acc/unaccess node)]
     (if-let [why (missing-reason node)]
       (let [d (vt node) d (if (keyword? d) "Ljava/lang/Object;" d)]
-        (v (missing-expr why d) d))
+        (v (missing-expr why d) d :missing why))
       (cond
         (= ::go (:op node)) (v (:x node) (:t node) :nn (:nn node))
         (not (expressible? node)) (hoist node)
-        (= "V" (:type node)) (do (stmt! node) (v nil :null))
-        :else
+        (= "V" (:type node)) (do (emit! (:x (expr-op node))) (v nil :null))
+        :else (expr-op node)))))
+
+(defn expr-op
+  "The Go expression of an expressible node's own operation (operands translated as needed)."
+  [node]
+  (let [node (acc/unaccess node)]
+    (if-let [why (missing-reason node)]
+      (let [d (vt node) d (if (keyword? d) "Ljava/lang/Object;" d)]
+        (v (missing-expr why d) d))
         (case (:op node)
           :const (const-value node)
           :none (v (missing-expr "unreachable" "Ljava/lang/Object;") "Ljava/lang/Object;")
@@ -597,12 +622,13 @@
                                   (list (csym ifn "_Cast") (list '.Deref__O (static-place f)))
                                   (map :x args))
                            "Ljava/lang/Object;"))
-          (fail (str "no expression translation for " (:op node))))))))
+          (fail (str "no expression translation for " (:op node)))))))
 
 (defn expr-as
   "node's Go expression converted to Java type `to`."
   [node to]
-  (let [x (expr node)] (coerce (:x x) (:t x) to (:nn x))))
+  (let [x (expr node)]
+    (if (and (:missing x) to (not= to "V")) (missing-expr (:missing x) to) (coerce (:x x) (:t x) to (:nn x)))))
 
 (defn cond-expr
   "A Go boolean expression of node as a condition (Clojure's truth on non-booleans)."
@@ -622,6 +648,15 @@
 ;; arithmetic (§7.4)
 
 (defn- go-lit? [x] (and (number? x) (not (float? x))))
+
+(defn- unsigned-lit
+  "A Go literal of the unsigned value of Java integer v of the given width (Go rejects the
+  conversion of a negative constant to an unsigned type)."
+  [v bits]
+  (let [v (long v)]
+    (if (neg? v)
+      (if (= bits 64) (+ (bigint v) 18446744073709551616N) (+ v 4294967296))
+      v)))
 
 (defn arith-val [node]
   (let [{:keys [family o args type]} node
@@ -662,10 +697,14 @@
           :andnot (list 'bit-and-not a b)
           :shl (list '<< a (cnt))
           :shr (list '>> a (cnt))
-          :ushr (let [ut (if (= ty "J") 'uint64 'int32)]
+          :ushr (if (and (go-lit? a) (go-lit? b))
+                  ;; both constant: folded here (Go would reject the overflowing constant)
                   (if (= ty "J")
-                    (list 'conv 'int64 (list '>> (if (go-lit? a) (bit-and (long a) -1) (list 'conv 'uint64 a)) (cnt)))
-                    (list 'conv 'int32 (list '>> (if (go-lit? a) (bit-and (long a) 0xffffffff) (list 'conv 'uint32 a)) (cnt)))))))
+                    (unsigned-bit-shift-right (long a) (bit-and (long b) 63))
+                    (long (unchecked-int (unsigned-bit-shift-right (bit-and (long a) 0xffffffff) (bit-and (long b) 31)))))
+                  (if (= ty "J")
+                    (list 'conv 'int64 (list '>> (list 'conv 'uint64 (if (go-lit? a) (unsigned-lit a 64) a)) (cnt)))
+                    (list 'conv 'int32 (list '>> (list 'conv 'uint32 (if (go-lit? a) (unsigned-lit a 32) a)) (cnt)))))))
       ty)))
 
 ;; ---------------------------------------------------------------------------------------
@@ -728,9 +767,14 @@
 (defn instance-val [node]
   (let [d (:class node)
         x (expr (:expr node))
-        o (coerce (:x x) (:t x) "Ljava/lang/Object;" (:nn x))]
-    (v (if (t/array? d)
+        o (coerce (:x x) (:t x) "Ljava/lang/Object;" (:nn x))
+        cut (some #(not (m/in-world? %)) (m/desc-classes d))]
+    (v (cond
+         ;; nothing is an instance of a class outside the closed world
+         cut (list (jsym "C2g_Discard") o)
+         (t/array? d)
          (list '.IsInstance_O__Z (class-val d) o)
+         :else
          (let [n (t/desc->internal d)]
            (if (and (m/hand-written? n) (not (contains? (:funcs (:jrt m/*w*)) (str (m/go-name n) "_InstanceOf"))))
              (list '.IsInstance_O__Z (class-val d) o)
@@ -921,19 +965,42 @@
 
 (defn- outside? [target-fn] (not= target-fn (:fn-id *f*)))
 
-(defn- method-return! [val-form]
+(defn- method-return!
+  "A return from the method (::void for a void method's), a control code inside a try body."
+  [val-form]
   (if (outside? (:method-fn *f*))
-    (code-jump! {:kind :return :rv val-form})
-    (emit! (if (nil? val-form) (list 'return) (list 'return val-form)))))
+    (code-jump! {:kind :return :rv (if (= ::void val-form) nil val-form)})
+    (emit! (if (= ::void val-form) (list 'return) (list 'return val-form)))))
+
+(defn- set-static! [node]
+  (let [f (:field node)
+                          o (or (:declarer f) (:owner f))
+                          guard (guarded-static? node)
+
+                          x (let [xv (v (expr-as (:val node) (:desc f)) (:desc f))]
+                              (:x (if (and guard (not (stable? (:val node)))) (hoist-value xv) xv)))
+                          _ (when guard (emit! (class-init-call o)))
+                          place (static-place f)]
+                      (emit! (if (volatile-field? f) (volatile-write place (:desc f) x) (list 'set! place x)))))
+
+(defn- dropped-store?
+  "A static initializer's store into a field of its class that the closed world drops (its
+  type is outside it: serialization's serialPersistentFields): nothing can read the field,
+  so the store goes."
+  [node]
+  (and (:clinit *f*) (= :set-static (:op node))
+       (let [f (:field node) o (or (:declarer f) (:owner f))]
+         (and (= o (:class *f*)) (not (m/desc-in-world? (:desc f)))))))
 
 (defn stmt!
   "Translates node in statement context."
   [node]
   (let [node (acc/unaccess node)]
-    (if-let [why (missing-reason node)]
+    (if-let [why (and (not (dropped-store? node)) (missing-reason node))]
       (emit! (missing-expr why "V"))
       (case (:op node)
         (:const :local :this-path :class-lit :none) nil
+        :set-static (if (dropped-store? node) nil (set-static! node))
         :do (do (run! stmt! (:statements node)) (stmt! (:ret node)))
         :let (do (doseq [[b init] (:bindings node)]
                    (let [s (binding-sym b)]
@@ -952,14 +1019,6 @@
                          [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
                          place (field-place tv f)]
                      (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv)))))
-        :set-static (let [f (:field node)
-                          o (or (:declarer f) (:owner f))
-                          guard (guarded-static? node)
-                          x (let [xv (v (expr-as (:val node) (:desc f)) (:desc f))]
-                              (:x (if (and guard (not (stable? (:val node)))) (hoist-value xv) xv)))
-                          _ (when guard (emit! (class-init-call o)))
-                          place (static-place f)]
-                      (emit! (if (volatile-field? f) (volatile-write place (:desc f) x) (list 'set! place x))))
         :get-static (do (when (guarded-static? node) (emit! (class-init-call (or (:declarer (:field node)) (:owner (:field node))))))
                         nil)
         :aset (let [[a i val] (operands [(:array node) (:index node) (:val node)]
@@ -968,15 +1027,15 @@
                 (emit! (if (t/prim? et)
                          (list 'aset (list '.-A (:x a)) (:x i) (:x val))
                          (list '.Store (:x a) (:x i) (:x val)))))
-        (:invoke :new :var-invoke) (let [x (expr node)] (emit! (:x x)))
+        (:invoke :new :var-invoke) (let [x (expr-op node)] (emit! (:x x)))
         :throw (let [x (expr-as (:expr node) "Ljava/lang/Throwable;")]
                  (emit! (list 'panic (list (jsym "Thrown") x))))
         :return (if (:val node)
                   (if (= "V" (:method-ret *f*))
-                    (do (stmt! (:val node)) (method-return! nil))
+                    (do (stmt! (:val node)) (method-return! ::void))
                     (let [x (expr-as (:val node) (:method-ret *f*))]
                       (method-return! x)))
-                  (method-return! nil))
+                  (method-return! ::void))
         (:loop :label :try :monitor :switch :if-instance :for-each :break :recur :assert)
         (translate-ctx node {:k :stmt})
         :ctor-call ((:ctor-call-fn *f*) node)
@@ -1032,7 +1091,8 @@
       (missing-reason node)
       (if (= k :stmt)
         (stmt! node)
-        (let [x (:x (expr node))] (assign-value! x ctx)))
+        (let [to (ctx-desc ctx)]
+          (assign-value! (missing-expr (missing-reason node) (if (= to "V") "Ljava/lang/Object;" to)) ctx)))
 
       (= k :stmt)
       (case (:op node)
@@ -1124,15 +1184,15 @@
                           x (if (volatile-field? f) (volatile-read place (:desc f)) place)]
                       (assign-value! (coerce x (:desc f) (ctx-desc ctx) false) ctx))
         :aset (let [et (t/elem-type (vt (:array node)))
-                    [a i val] (operands [(:array node) (:index node) (:val node)] [nil "I" (if (t/prim? et) et "Ljava/lang/Object;")])
+                    [a i val] (operands [(:array node) (:index node) (:val node)] [nil "I" et])
                     val (hoist-value val)]
                 (emit! (if (t/prim? et)
                          (list 'aset (list '.-A (:x a)) (:x i) (:x val))
-                         (list '.Store (:x a) (:x i) (:x val))))
-                (assign-value! (:x val) ctx))
+                         (list '.Store (:x a) (:x i) (coerce (:x val) et "Ljava/lang/Object;" false))))
+                (assign-value! (coerce (:x val) et (ctx-desc ctx) false) ctx))
         :assert (do (translate-ctx node {:k :stmt}) (assign-value! nil ctx))
         :ctor-call (stmt! node)
-        (let [x (expr node)
+        (let [x (expr-op node)
               to (ctx-desc ctx)]
           (if (= "V" (:type node))
             (do (emit! (:x x)) (assign-value! (when-not (= :return k) nil) ctx))
@@ -1370,13 +1430,14 @@
   function."
   [ctl rv codes]
   (when (seq codes)
+    (use-sym! ctl)
     (let [clause (fn [c]
                    (list 'case [(:code c)]
                          (cons 'do
                                (with-block
                                  (fn []
                                    (case (:kind c)
-                                     :return (method-return! (when (:rv c) rv))
+                                     :return (method-return! (if (= "V" (:method-ret *f*)) ::void (use-sym! rv)))
                                      :break (translate-ctx {:op :break :target (:target c) :val nil :type :none} {:k :jump})
                                      :recur (let [ti (target-info (:target c))]
                                               (if (outside? (:fn-id ti))
@@ -1426,8 +1487,7 @@
                       call (literal-form lit true rv-desc)
                       ctl (when (:ctl? lit) (tmp)) rv (when (:ctl? lit) (tmp)) exc (tmp)]
                   (if (:ctl? lit)
-                    (do (swap! *block* conj [:let (list 'values ctl rv exc) call])
-                        (use-sym! ctl) (use-sym! rv))
+                    (swap! *block* conj [:let (list 'values ctl rv exc) call])
                     (swap! *block* conj [:let exc call]))
                   (use-sym! exc)
                   (when nfin
@@ -1465,7 +1525,7 @@
             call (literal-form lit true rv-desc)
             ctl (when (:ctl? lit) (tmp)) rv (when (:ctl? lit) (tmp)) exc (tmp)]
         (if (:ctl? lit)
-          (do (swap! *block* conj [:let (list 'values ctl rv exc) call]) (use-sym! ctl) (use-sym! rv))
+          (swap! *block* conj [:let (list 'values ctl rv exc) call])
           (swap! *block* conj [:let exc call]))
         (use-sym! exc)
         (stmt! fin)
@@ -1490,7 +1550,6 @@
     (if (:ctl? lit)
       (let [ctl (tmp) rv (tmp)]
         (swap! *block* conj [:let (list 'values ctl rv) call])
-        (use-sym! ctl) (use-sym! rv)
         (dispatch-codes! ctl rv (:codes lit)))
       (emit! call))
     (when after (method-return! after))))

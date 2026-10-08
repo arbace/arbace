@@ -179,14 +179,11 @@
   (filter in-world? (supertypes n)))
 
 (defn all-supertypes
-  "n and its supertypes in the world, superclass chain first then interfaces."
+  "n and its supertypes that exist in the world, superclass chain first then interfaces
+  (Java's supertypes: an interface in the world counts also when it is reached only through
+  one that is not)."
   [n]
-  (loop [out [] seen #{} queue [n]]
-    (if-let [[q & more] (seq queue)]
-      (if (seen q)
-        (recur out seen (vec more))
-        (recur (conj out q) (conj seen q) (into (vec more) (world-supertypes q))))
-      out)))
+  (vec (filter in-world? (env/all-supertypes n))))
 
 (defn hw-method-exists?
   "Does jrt's hand-written class or interface n have method m (name desc) in Go?"

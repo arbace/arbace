@@ -62,15 +62,22 @@
 ;; ---------------------------------------------------------------------------------------
 ;; classes (§4.4)
 
+(def renames
+  "The rename table (§4.4, Collisions): classes whose Go name would collide with another of the
+  closed world's or with jrt's own names."
+  {;; jrt's byte[] is ByteArray (§5.9)
+   "jdk/internal/util/ByteArray" "Jdk_ByteArray"})
+
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it
   does not start with an upper-case letter."
   [internal]
+  (or (get renames internal)
   (let [s (subs internal (inc (.lastIndexOf ^String internal "/")))
         s (munge-name s)]
     (if (and (seq s) (Character/isUpperCase (.charAt ^String s 0)))
       s
-      (str "X" s))))
+      (str "X" s)))))
 
 (defn capitalize [^String s]
   (if (empty? s) s (str (Character/toUpperCase (.charAt s 0)) (subs s 1))))

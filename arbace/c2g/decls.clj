@@ -374,7 +374,9 @@
                     f (m/jrt-sym pkg (str g "_" base "_native"))
                     call (apply list f (concat (when-not static ['t]) pn))]
                 [pn [(if (= "V" r) call (list 'return call))]])
-              (:derived mm)
+              (and (:derived mm)
+                   (or (not= :bridge (:derived mm))
+                       (and reached (m/mdesc-in-world? (:desc (:bridge-of mm))))))
               (let [pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]
                 [pn (derived-body pkg n mm pn)])
               (and reached ab (not (:analysis-failed @(:state (a/decl n)))))
@@ -501,7 +503,7 @@
           st @(:state d)
           sup (:super d)
           reached (contains? *reached* [n "<clinit>" "()V"])
-          body (binding [c/*f* (new-fn-state pkg n :static true :method-ret "V")]
+          body (binding [c/*f* (new-fn-state pkg n :static true :method-ret "V" :clinit true)]
                  (binding [c/*f* (assoc c/*f* :method-fn (:fn-id c/*f*))]
                    (c/with-block
                      (fn []
@@ -565,7 +567,7 @@
           [(list 'go/type (symbol g)
                  (apply list 'interface (m/jrt-sym pkg "Object_I")
                         (concat
-                          (for [s (:interfaces d) :when (m/in-world? s)] (m/class-sym pkg s))
+                          (for [s (interface-closure n)] (m/class-sym pkg s))
                           [(list (symbol (str "Is_" g)) [])]
                           (for [mm (:methods d)
                                 :when (and (not (m/static? mm)) (not (m/private? mm)) (m/mdesc-in-world? (:desc mm)))
@@ -581,7 +583,7 @@
               [(list 'go/type (symbol (str g "_I"))
                      (apply list 'interface (super-iface-type pkg n)
                             (concat
-                              (for [s (:interfaces d) :when (m/in-world? s)] (m/class-sym pkg s))
+                              (for [s (interface-closure n)] (m/class-sym pkg s))
                               [(list (symbol (str "Self_" g)) (with-meta [] {:tag (list '* (symbol g))}))]
                               (for [mm methods
                                     :when (m/virtual-member? mm)

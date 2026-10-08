@@ -226,6 +226,7 @@
            (list 'when (list '== 'x nil) (list 'let [(tag 'z 'T) (list 'zero 'T)] (list 'return 'z)))
            (list 'let ['y (list '.Cast_O__O 'cls 'x)]
                  (list 'assert 'T 'y)))
+     (list 'go/func 'C2g_Discard (with-meta [(tag 'x 'any)] {:tag 'bool}) false)
      (list 'go/type 'C2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
      (list 'go/func 'C2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
            (list '.CloneShallow (list 'assert 'C2gCloner 'x)))]))
@@ -344,9 +345,9 @@
                         [(list 'set! (list '.-Init 'i) (symbol (str g "_Init")))])
                       (when (= :enum (:kind dd))
                         [(list 'set! (list '.-Enum 'i)
-                               (list 'fn (with-meta [] {:tag (list '* (m/jrt-sym pkg "RefArray"))})
-                                     (concat (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
-                                             [(symbol (str g "__VALUES"))])))])
+                               (list* 'fn (with-meta [] {:tag (list '* (m/jrt-sym pkg "RefArray"))})
+                                      (concat (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
+                                              [(symbol (str g "__VALUES"))])))])
                       (when (seq (:methods tables))
                         [(list 'set! (list '.-Methods 'i) (apply list 'lit (list 'slice (m/jrt-sym pkg "MethodInfo")) (:methods tables)))])
                       (when (seq (:ctors tables))
@@ -355,6 +356,20 @@
                         [(list 'set! (list '.-Fields 'i) (apply list 'lit (list 'slice (m/jrt-sym pkg "FieldInfo")) (:fields tables)))])
                       (when-not iface
                         [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))])))
+
+(defn cut-forms
+  "Class objects of classes outside the closed world that code names (class literals):
+  registered by name only, so that Class.forName finds them and nothing is their instance
+  (\"cut\" classes, C2G-SPEC §4.1)."
+  [pkg classes]
+  (for [n (sort classes)]
+    (list 'go/var (symbol (str (m/go-name n) "_class"))
+          (list (m/jrt-sym pkg "Define")
+                (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
+                                  :Name (str/replace n "/" ".")
+                                  :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
+                                  :Super (when-not (env/interface? n) (m/jrt-sym pkg "Object_class"))
+                                  :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))
 
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
