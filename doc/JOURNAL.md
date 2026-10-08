@@ -446,3 +446,24 @@ decision (2026-10-08).
 - Revised by the user the same day: the branch `arbace-for-golang`, the tag
   `arbace-for-go1.27.1`. The branch names the platform and can take later fixes; the tag names
   the exact toolchain.
+
+## 2026-10-08: B1a step 2: the c2g spec, draft for review
+
+- Agent, `3022054`, merged as a draft: `doc/go/C2G-SPEC.md` (about 2,300 lines), class forms →
+  Go forms. c2g reuses the class forms analyzer unchanged and translates its typed nodes;
+  Go-build differences go in variant files. Two Go packages (`arbace/jrt`, `arbace/lang`;
+  Java's packages import each other in cycles), module `arbace`. Classes as structs embedding
+  their superclass with an 8-byte header (identity hash, thin lock); interfaces and classes
+  with subclasses as Go interfaces with marker methods; leaf classes as plain pointers (326 of
+  352 in `arbace.lang`); `Object` as `any`; names mangled with the erased descriptor; lazy
+  per-class initialization; exceptions as panics with `try` bodies as function literals;
+  monitors in the header; volatile fields as `sync/atomic` types; reflection over generated
+  member tables; evaluator-made objects as one `Dyn` type; thread identity by a goroutine-
+  local slot patched into the Go runtime. Arithmetic rules found by a prototype: Go rejects
+  constant conversions that overflow, Go's evaluation order differs, and gc fuses
+  multiply-add on arm64 (an explicit conversion prevents it).
+- Checked with a prototype (`.tmp/c2g-proto/`, scratch): translated `Murmur3`, `Reduced`,
+  `Util`'s class init and a class hierarchy build for linux/amd64 and arm64 and give the JVM's
+  hashes. Measured (ns): interface call 3.5 (megamorphic 10.2), direct call 1.9, entering a
+  `try` 9.0, throw and catch 305-795, the runtime slot 3.7 (the `runtime.Stack` stopgap about
+  3,000), a thin lock 5.0. 23 open questions with recommendations, for the user's review.
