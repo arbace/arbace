@@ -279,8 +279,26 @@
       (and aligned (not (too-wide? aligned col))) aligned
       :else (str m "(" (pp hd (inc col0)) "\n" (indent (+ col0 2)) (pp-seq-lines args (+ col0 2) "\n") ")"))))
 
+(def ^:dynamic ^java.util.IdentityHashMap *pp-cache*
+  "Within form-text: form (by identity) -> {col text}. pp-call lays out its arguments twice
+  (aligned, then indented when too wide), so without it a chain of nested calls (the JDK's
+  generated tables, a string concatenation of hundreds of lines) takes time exponential in its
+  depth."
+  nil)
+
+(declare pp*)
+
 (defn pp
   "`x` laid out starting at column `col`."
+  [x col]
+  (if (and *pp-cache* (coll? x))
+    (let [^java.util.HashMap m (or (.get *pp-cache* x)
+                                   (let [m (java.util.HashMap.)] (.put *pp-cache* x m) m))]
+      (or (.get m col)
+          (let [s (pp* x col)] (.put m col s) s)))
+    (pp* x col)))
+
+(defn- pp*
   [x col]
   (let [s (flat x)]
     (if (and (fits? s col)
@@ -334,5 +352,6 @@
         :else s))))
 
 (defn form-text [x]
-  (binding [*flat-cache* (java.util.IdentityHashMap.)]
+  (binding [*flat-cache* (java.util.IdentityHashMap.)
+            *pp-cache* (java.util.IdentityHashMap.)]
     (pp x 0)))

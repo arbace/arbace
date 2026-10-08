@@ -36,6 +36,14 @@
   (into {} (for [[k v] m]
              [k (if (set? v) (set (map (fn [[d vis s]] [d vis (realize s)]) v)) v)])))
 
+(defn- float-value
+  "A float or double constant compared by its bits (NaN is not = to itself, and NaNs differ in
+  their bits); other constants as they are."
+  [v]
+  (cond (instance? Double v) [:double (str v) (Long/toHexString (Double/doubleToRawLongBits v))]
+        (instance? Float v) [:float (str v) (Integer/toHexString (Float/floatToRawIntBits v))]
+        :else v))
+
 (defn- code-symbols
   "The symbolic content of code (SPEC §3.5): member references, class references, call sites,
   constants, as a set (order and instruction choice may differ)."
@@ -47,9 +55,7 @@
     (visitTypeInsn [op t] (swap! store conj [:type op t]))
     (visitMultiANewArrayInsn [d n] (swap! store conj [:type :multianewarray d]))
     (visitLdcInsn [v] (swap! store conj [:const (cond (instance? Type v) (str "class " v)
-                                                      (instance? Double v) [:double (str v)]
-                                                      (instance? Float v) [:float (str v)]
-                                                      :else v)]))
+                                                      :else (float-value v))]))
     (visitInvokeDynamicInsn [name desc ^Handle bsm bargs]
       (swap! store conj [:indy (if (re-matches #"lambda\$.*" name) name name) desc (str bsm)
                          (mapv str bargs)]))))
@@ -88,7 +94,7 @@
                nil)
              (visitAttribute [a] (swap! c update :attributes (fnil conj #{}) (.-type a)))
              (visitField [access name desc sig value]
-               (let [f (atom {:flags access :signature sig :value value})]
+               (let [f (atom {:flags access :signature sig :value (float-value value)})]
                  (swap! fields assoc [name desc] f)
                  (proxy [FieldVisitor] [Opcodes/ASM9]
                    (visitAnnotation [d vis] (add-ann f :annotations d vis))

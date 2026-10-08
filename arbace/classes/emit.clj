@@ -48,6 +48,17 @@
   (when-not (or (= t :none) (= t "V"))
     (insn gen (if (= 2 (t/size t)) Opcodes/POP2 Opcodes/POP))))
 
+(defn- pool-float
+  "A float constant as javac writes it to the constant pool (Float.floatToIntBits): every NaN
+  is the canonical one (a folded 0.0f/0.0f is 0xffc00000 on x86 hardware, javac's 0x7fc00000)."
+  [v]
+  (let [f (float v)] (if (Float/isNaN f) Float/NaN f)))
+
+(defn- pool-double
+  "A double constant as javac writes it (Double.doubleToLongBits): the canonical NaN."
+  [v]
+  (let [d (double v)] (if (Double/isNaN d) Double/NaN d)))
+
 (defn emit-const [gen t v]
   (let [m (mv gen)]
     (case (if (keyword? t) t t)
@@ -60,12 +71,12 @@
               :else (.visitLdcInsn m (Integer/valueOf (int i)))))
       "J" (let [l (long v)]
             (if (<= 0 l 1) (.visitInsn m (+ Opcodes/LCONST_0 l)) (.visitLdcInsn m (Long/valueOf l))))
-      "F" (let [f (float v)
+      "F" (let [f (pool-float v)
                 bits (Float/floatToIntBits f)]
             (if (#{(Float/floatToIntBits 0.0) (Float/floatToIntBits 1.0) (Float/floatToIntBits 2.0)} bits)
               (.visitInsn m (+ Opcodes/FCONST_0 (int f)))
               (.visitLdcInsn m (Float/valueOf f))))
-      "D" (let [d (double v)
+      "D" (let [d (pool-double v)
                 bits (Double/doubleToLongBits d)]
             (if (#{(Double/doubleToLongBits 0.0) (Double/doubleToLongBits 1.0)} bits)
               (.visitInsn m (+ Opcodes/DCONST_0 (int d)))
@@ -974,7 +985,7 @@
     ("I" "S" "B") (Integer/valueOf (int v))
     "C" (Integer/valueOf (int (char v)))
     "Z" (Integer/valueOf (if v 1 0))
-    "J" (Long/valueOf (long v)) "F" (Float/valueOf (float v)) "D" (Double/valueOf (double v))
+    "J" (Long/valueOf (long v)) "F" (Float/valueOf (pool-float v)) "D" (Double/valueOf (pool-double v))
     v))
 
 (defn- bind-param-slots! [gen bs]
