@@ -314,7 +314,9 @@
   (or (empty? sel)
       (some (fn [^String s] (if (some #{s} parts) (= s part) (.contains ^String (rel f) s))) sel)))
 
-(def default-impl "bin/arbace -")
+;; With -XX:-OmitStackTraceInFastThrow: once C2 compiles a hot path, the JVM otherwise throws
+;; preallocated exceptions without their messages (seen under load: NPE messages turned nil)
+(def default-impl "env ARBACE_JAVA_OPTS=-XX:-OmitStackTraceInFastThrow bin/arbace -")
 
 (defn record
   "Regenerates the expected files of the selected parts (or files) from the JVM Arbace."

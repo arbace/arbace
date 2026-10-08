@@ -476,3 +476,20 @@ decision (2026-10-08).
   interface; jrt's forms under `go/arbace/jrt` with an overlay option in `bin/g2c build`,
   module `arbace`; Java stack traces, receiver null checks, conservative temporaries. The
   spec's status is accepted.
+
+## 2026-10-08: The JVM oracle for differential tests
+
+- Agent, `521bd0a`, merged: `test/oracle/` and `bin/oracle` (`record`, `check IMPL`,
+  `harvest`); docs in `doc/go/ORACLE.md`. 15,854 cases, about 4 MB, Clojure-reader format:
+  6,473 hand-written forms and 3,179 harvested from Clojure's test suite (printed value and
+  class, output, or the exception chain), 4,969 steps of operation scripts over the runtime's
+  core classes (as data), and 1,233 regex patterns with 11,682 inputs (Java's exact results
+  for matches, finds with all groups, split, replace, named groups, syntax errors). An
+  implementation plugs in as a command reading forms on stdin; the driver prints results in
+  ASCII so UTF-16 strings, lone surrogates included, survive. Exclusions (time, locale,
+  randomness, concurrency, identity hashes, file loading) in ORACLE.md. LICENSE.md: the
+  harvested forms and their results come from Clojure's test suite (EPL-1.0).
+- The main session's recheck found 2 mismatches the agent had not: NPE messages turned nil
+  under load, the JVM's fast throw of preallocated exceptions once C2 compiles a hot path (the
+  native tests met it before). The runner now starts the JVM with
+  `-XX:-OmitStackTraceInFastThrow`; two checks then matched 15,854 of 15,854 (about 10 s each).
