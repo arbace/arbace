@@ -121,3 +121,37 @@ decision (2026-10-08).
   constraints, 5 need another GOEXPERIMENT). Dumps are byte-identical across runs. All 2,462
   read on Arbace; runtime, the largest (27 MB, 233,403 nodes), in 2.0-2.7 s.
 - LICENSE.md and doc/ARBACE.md now name `arbace/g2c/` among Arbace's own tools.
+
+## 2026-10-08: g2c G0 draft and G2's round-trip oracle
+
+- The Go forms spec (agent, `724edaa`, merged as a draft for the user's review):
+  `doc/go/SPEC.md`, about 1,950 lines, modelled on the class forms spec. Round trip first (the
+  forms keep everything gc's output depends on), readable Clojure (Go names verbatim, the
+  agreed heads, nested `let`, Go's operators in Go context), go/types' decisions as metadata
+  (`:val`, `:inst`, `:go/via`, `:init-order`, `:tag` on untyped-constant shifts). Reader
+  findings changed the survey's sketch: `~` is unquote (so `(tilde T)`), `.5` reads as a
+  symbol, `1e400` as `##Inf`. 20 open questions with recommendations, published for review as
+  an artifact (https://claude.ai/artifact/DuQmxZxEHAXV8S5R3GAYME).
+- The round-trip oracle (agent, `c529817`, `7ad506e`, merged): `tools/gocmp` (Go, standard
+  library only) compares an original package or test program with a candidate at three
+  levels: tree (go/ast by reflection, go-lisp's method from `lisp_roundtrip_test.go` @
+  `2483a496`, with documented normalisations: parentheses, literal spelling, import order,
+  declaration and field grouping, empty statements, elided literal types), export data (the
+  candidate compiled in the original's place through `go list -export -overlay`, the export
+  data decoded generically and compared as graphs), and object code (every symbol's `-S`
+  listing, positions removed, both sides compiled from a canonical token layout since gc's
+  scheduling, inline marks and stack slots depend on positions). `bin/g2c-check` runs it over
+  std (373 packages for tamago/amd64, 372 for arm64) and 1,705 `$GOROOT/test` programs, with
+  results for the Clojure reader in `.tmp/g2c-check/`. Details: `doc/go/ROUNDTRIP.md`.
+- Proof without forms: identity, a go/printer reprint and a "canon" respelling of every
+  normalisation pass all three levels on both architectures; seeded mutations (operand swaps,
+  changed constants, dropped statements; about 4,750 per seed) are all caught by the tree
+  level. A full run takes about 10 s with a warm build cache, 56 s from an empty one.
+- Known gaps for the printer: line numbers are never compared (they would match only with
+  `//line` directives); parentheses around `&&`/`||` operands change gc's dead-branch removal
+  (11 packages), and expanding field groups in generic declarations changes dictionaries, so
+  the printer must avoid both.
+- Incident: the agent's bisection script ran `go tool compile -o /dev/null`; on a compile
+  error gc removed `/dev/null` and another process recreated it as a regular file. The agent
+  restored the character device (`mknod c 1 3`, mode 666) within minutes, about 10:19 UTC;
+  checked afterwards. Lesson: never give a compiler `/dev/null` as an output path.
