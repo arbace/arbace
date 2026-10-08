@@ -299,7 +299,7 @@
     {:package pkg :files (keys files)}))
 
 (defn- gofmt-file [goroot ^File f]
-  (let [[status out] (run [(str goroot "/bin/gofmt") "-w" (.getPath f)] (.getParentFile (.getAbsoluteFile f)) {})]
+  (let [[status out] (run [(str goroot "/bin/gofmt") "-w" (.getPath (.getAbsoluteFile f))] (.getParentFile (.getAbsoluteFile f)) {})]
     (when-not (zero? status)
       (throw (ex-info (str "gofmt " f ": " out) {:file f})))))
 
