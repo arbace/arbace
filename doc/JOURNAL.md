@@ -342,3 +342,14 @@ decision (2026-10-08).
   `java.util.regex` (against the recommendation of Go's RE2 first: exact Java semantics); D6 a
   first REPL without `defclass`/the class forms, `gen-class`, `proxy`, JVM interop beyond
   jrt's classes. D3 (go-whim) moves to B1b.
+
+## 2026-10-08: B1a ends with a freeze, and includes linux/arm64
+
+- The user: the static Linux executable may be the next milestone frozen on a branch, as the
+  Java 26 state was this morning; and since it is a Go program, cross-compiling to arm64 is
+  trivial and belongs in the milestone. The plan now says so: step 0 covers `linux/amd64` and
+  `linux/arm64`, step 6 builds both, and a step 8 makes the freeze (branch and tag, name to
+  choose, on the user's confirmation). The arm64 executables are tested here under QEMU's
+  user-mode emulation (`/usr/bin/qemu-aarch64`, installed).
+- Step 0 started with two agents: the round trip for linux, and building Go forms into static
+  executables.

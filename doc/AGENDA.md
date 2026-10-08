@@ -111,7 +111,8 @@ fallbacks of `arbace/core_classes.clj` are gone.
   Go executable of Arbace tested as a user process (the user's proposal, 2026-10-08); the box
   (TamaGo, arm64) later as B1b. Decided: c2g + jrt, an evaluator first, Java's UTF-16 strings,
   a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
-  Next: step 0, g2c for `linux/amd64`.
+  B1a ends with a freeze (a branch and tag, as for Java 26) and includes `linux/arm64`, tested
+  under `qemu-aarch64`. In progress: step 0, g2c for linux.
 
 ## Later
 
