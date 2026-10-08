@@ -38,6 +38,11 @@ covers what.
   at `v0.6.133-alpha10` (`75875946b7e827a1cec91ce645d5e1dcfc475e49`), under the Eclipse Public
   License 1.0 (the repository's `LICENSE`; the file itself carries no notice). Renamed from
   `clojure.core.specs.alpha` to `arbace.core.specs.alpha`.
+- `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
+  `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
+  that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
+  file it is or is compiled from, as above (`arbace/asm/...` classes under ASM's BSD 3-Clause
+  License, `arbace/lang/Murmur3*` under the Apache License 2.0, and so on).
 
 ## Arbace, Clojure, spec.alpha and core.specs.alpha: Eclipse Public License 1.0
 

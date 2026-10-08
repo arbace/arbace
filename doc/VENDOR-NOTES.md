@@ -24,6 +24,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `arbace/spec/**.clj`, `arbace/core/specs/alpha.clj` | spec.alpha and core.specs.alpha, vendored later and renamed alike (below, "Spec") |
 | `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/`; on the branch `arbace-for-java-26` only |
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
+| `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed") |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
 | `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-07) |
 
@@ -142,6 +143,9 @@ Left alone (with the reason):
 ## The bootstrap
 
 `bin/build-arbace` (about 1.5 minutes):
+
+(As built until the freeze. Since 2026-10-08 stage 0 is the binary seed, not the frozen
+`clojure/`: below, "The binary seed".)
 
 - **Stage 0 → stage 1.** The frozen `clojure/` loads `arbace.classes` through
   `arbace.classes.boot` and runs `arbace.classes.build` over the packages (`arbace` until the
@@ -762,6 +766,73 @@ upstream's control run. `test/baseline-results.edn` stays the frozen baseline's 
 default run of `bin/clojure-tests`), with its 32 spec failures. Result on stages 1 and 2:
 20,750 / 20,750, no regressions. spec.alpha's own tests (its `src/test/clojure`, renamed, with
 the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
+
+## The binary seed (2026-10-08)
+
+After the freeze (doc/FREEZE.md), main's stage 0 is no longer the frozen `clojure/` but a binary
+seed, as Go bootstraps from a previous Go toolchain: `seed/arbace-seed.jar`, the
+`target/arbace.jar` that `bin/build-arbace` makes at the tag `arbace-for-java-26-v1` (commit
+`38a652d`), committed in the repository and pinned by its SHA-256 in
+`seed/arbace-seed.jar.sha256` (sha256sum format):
+
+    561b4cc5f5a340b9da5ee07f7d2c193017890e1a5799396dbb901131b1239f4d  arbace-seed.jar
+
+**What it is.** A Clojure runtime under `arbace.*` (7.5 MB, 6,023 entries): stage 2's classes at
+the freeze (the class forms of `arbace.lang`, `arbace.asm`, `arbace.java.api`, and the
+namespaces AOT-compiled with direct linking, the class forms compiler `arbace.classes` and spec
+included) and the tag's `arbace/*.clj` sources; its main class is `arbace.lang.Main`. It holds
+code under the licenses of the `arbace/` files it comes from (`LICENSE.md`).
+
+**How it is made.** In a fresh worktree of the tag: `find clojure -name '*.class' -exec touch
+{} +`, then `bin/build-arbace`; its `target/arbace.jar` is the seed. The jar is reproducible
+(fixed entry order, times and manifest; "Compiled namespaces, the jar and the AOT cache" above):
+built so on 2026-10-08 it had the hash above, the same as the jar the freeze commit had built in
+the main checkout before. The JDK it was built with: OpenJDK 26.0.2.1 (a jdk26u build).
+
+**How it is checked.** `bin/seed --check` compares the committed jar with the pinned hash (and
+`bin/build-arbace` does the same before using it, failing on a mismatch). `bin/seed --verify`
+rebuilds the jar from the tag, in a temporary worktree `.tmp/seed-verify` (removed afterwards),
+and checks that the rebuilt jar has the pinned hash: the seed is exactly the tag's jar, so it is
+derived from the recorded sources, not trusted as a binary. (The tag still holds `clojure/`,
+which its own build needs as its stage 0; the chain thus goes back to the frozen baseline.)
+
+**How stage 0 works now.** `bin/build-arbace` runs the seed from the jar alone:
+
+    java -cp seed/arbace-seed.jar arbace.lang.Main -e "(require 'arbace.classes.boot)
+      (arbace.classes.build/-main ROOT target/stage1 arbace/lang arbace/asm ...)"
+
+The seed's own `arbace.classes` (the compiler as it was at the freeze, AOT-compiled into the jar)
+compiles the checkout's class forms into `target/stage1`, reading them as files under ROOT;
+then, as at every stage, stage 1's runtime AOT-compiles the checkout's namespaces into
+`target/stage1`. Stage 1 builds stage 2 and stage 2 builds stage 3 as before.
+
+Nothing of the checkout is on the seed's class path. That matters because of `RT.load`: it takes
+a namespace's `__init` class only when the class is strictly newer than the source found on the
+class path. In the jar the sources are dated 2000-01-01T00:00:00Z and the classes ten seconds
+later, so with the jar alone (or first) on the class path each namespace finds the jar's own
+source and its own newer class, and loads the class. With the checkout ahead of the jar, the
+checkout's sources (newer) would win, and the seed would compile today's `arbace/*.clj` with its
+compiler instead of running its own namespaces (checked with `-verbose:class`: `arbace.core__init`
+then is not loaded, and the start takes 4.4 s instead of 0.8 s). Extracting the jar into a
+directory with fresh file times was the alternative; it would work too, but adds a copy whose
+times must be managed, while running the jar alone uses exactly the bytes the hash covers.
+
+`arbace.classes.boot`'s stage-0 path (reading `arbace.X` as `clojure.X` on the frozen runtime) no
+longer runs in the bootstrap: the seed is an Arbace runtime, so boot takes its stage-1 path.
+
+**Stage 1 and stage 2.** Stage 1 is the current sources compiled by the seed's compiler; stage 2
+and stage 3 by the current compiler. Stage 2 = stage 3 stays the hard check (the fixpoint).
+Stage 1 = stage 2 is reported but no longer required: it holds as long as the compiler's output
+for these sources has not changed since the freeze, and breaks legitimately when it does (as
+Go's toolchain1 differs from toolchain2). On 2026-10-08 `arbace/` is unchanged since the tag, so
+stages 1, 2 and 3 are byte-identical, all 5,756 classes, and the built `target/arbace.jar` equals
+the seed byte for byte. Compiling stage 1's class forms takes about 14 s with the seed, against
+about 22 s on the frozen `clojure/` (whose stage 0 loaded the compiler from source).
+
+**When the seed must move.** The seed must be able to compile the current class forms: as with
+Go's minimum bootstrap toolchain, if the class forms come to use a construct the seed's compiler
+does not know, either the change waits or the seed is replaced by a newer reproducible jar (a
+new tag), recorded in the journal with its hash.
 
 ## Open decisions for the user
 
