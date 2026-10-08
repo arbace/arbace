@@ -353,3 +353,23 @@ decision (2026-10-08).
   user-mode emulation (`/usr/bin/qemu-aarch64`, installed).
 - Step 0 started with two agents: the round trip for linux, and building Go forms into static
   executables.
+
+## 2026-10-08: B1a step 0: Go forms → static executables
+
+- Agent, `493567c`, merged: `bin/g2c build [--arch amd64|arm64] [-o OUT] DIR` (logic in
+  `arbace.g2c.build`, on Arbace): a program held as Go forms (`DIR/go/` in SPEC §4.1's
+  layout, optional `DIR/program.edn` with `:module` and `:go`) printed into a temporary
+  module and built with `CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false`, the
+  environment pinned (`GOTOOLCHAIN=local`, `GOFLAGS=`, `GOWORK=off`, `GOPROXY=off`,
+  `GOAMD64=v1`/`GOARM64=v8.0`). Without arguments `bin/g2c build` still builds the helper.
+  Details: `doc/go/BUILD.md`.
+- Tests (`bin/g2c-build-tests`, 30 checks): a hello program and a three-package program
+  (embedding, goroutines, channels, `select`, stdin, a panic) written by hand as Go forms,
+  built for linux/amd64 and linux/arm64: statically linked (no interpreter, no dynamic
+  section), byte-identical across directories and fresh caches, every run's stdout, stderr
+  and exit code as expected; arm64 run under `qemu-aarch64`. Hello is about 2.35 MB. The main
+  session reran the tests (30 passed) and `bin/gate` (passed).
+- Toolchain: TamaGo's go1.27.1 by default (`G2C_GOROOT`); Alpine's go1.27.1 passes too, with
+  different but equally reproducible executables.
+- Four proposed spec amendments (programs and modules; files of hand-written packages; the
+  `//line` file name; `:config` overridden by the build target), collected for the user.
