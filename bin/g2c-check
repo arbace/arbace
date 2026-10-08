@@ -1,0 +1,293 @@
+#!/bin/bash
+# The round-trip oracle of g2c over a corpus (doc/go/ROUNDTRIP.md): compares a candidate's Go
+# sources with the originals by tools/gocmp, at the levels tree, export and code.
+#
+# Usage: bin/g2c-check [OPTIONS] CANDIDATE
+#        bin/g2c-check --make identity|reprint|canon DIR
+#        bin/g2c-check --mutations [OPTIONS]
+#
+# CANDIDATE is laid out like GOROOT: CANDIDATE/src/<package dir>/*.go and CANDIDATE/test/....
+# The corpus, for the configuration:
+#   - every package of `go list std` (cmd is not in std) with Go files: GOROOT/src/P against
+#     CANDIDATE/src/P;
+#   - every single-file program of GOROOT/test (outside *.dir directories) whose action is
+#     run, runoutput, build, buildrun, compile or asmcheck and that compiles for the
+#     configuration: GOROOT/test/F against CANDIDATE/test/F. The list is computed once per
+#     toolchain and configuration and kept in the work directory (corpus-tests.txt).
+# --make writes a candidate made without forms: identity (a copy of the .go files of
+# GOROOT/src and GOROOT/test), reprint (gocmp reprint: go/printer over the trees without
+# comments or positions, the directives kept) or canon (gocmp reprint -canon: reprint after
+# respelling the trees in every way the tree level normalizes).
+# --mutations checks the oracle itself: for each package, and each operation (swap, const,
+# drop), one seeded mutation (gocmp mutate) compared with the original at all levels; reports
+# which levels catch it.
+#
+# Options:
+#   --arch amd64|arm64   GOARCH (default $G2C_GOARCH, else amd64)
+#   --levels L,...       tree, export, code (default all three)
+#   -j N                 parallel comparisons (default the number of cores)
+#   --only REGEX         only the corpus entries (import paths, test paths) matching REGEX
+#   --no-tests           packages only; --no-packages: tests only
+#   --reference FILE     results to compare with: an entry passing a level there and not here
+#                        is a regression (default: none; any failure fails the run)
+#   --ops OPS --seed N   for --mutations (default swap,const,drop and 1)
+# Environment: G2C_GOROOT (default /root/tamago-go), G2C_GOOS (default tamago), G2C_GOARCH;
+# G2C_GOCMP_FLAGS, more flags for gocmp (e.g. -keep-positions).
+# Output under .tmp/g2c-check/GOOS-GOARCH/: results.edn (read by the Clojure reader: one
+# entry per line, [:package|:test PATH {:tree :pass ...} "first line of the difference"]),
+# logs/ (gocmp's full output per entry), and a summary table on stdout.
+# Exit status: 0 when no entry fails (or, with --reference, nothing regressed).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+
+goroot=${G2C_GOROOT:-/root/tamago-go}
+goos=${G2C_GOOS:-tamago}
+goarch=${G2C_GOARCH:-amd64}
+levels=tree,export,code
+jobs=$(nproc)
+only=
+packages=1
+tests=1
+reference=
+mode=check
+make_kind=
+ops=swap,const,drop
+seed=1
+
+if [ "${1:-}" = "--worker" ]; then
+  # --worker "KIND<tab>PATH<tab>A<tab>B<tab>LOG<tab>MUTDIR": one comparison (through xargs)
+  IFS=$'\t' read -r kind path a b log mutdir <<< "$2"
+  site=
+  if [ -n "$mutdir" ]; then
+    rm -rf "$mutdir"
+    out=$mutdir
+    [ -f "$a" ] && { mkdir -p "$mutdir"; out=$mutdir/$(basename "$a"); }
+    site=$("$GOCMP" mutate -op "$G2C_OP" -seed "$G2C_SEED" "$a" "$out" 2>&1 | tr '\t\n' '  ')
+    case $? in
+      0) b=$out ;;
+      4) printf '%s\t%s\tnosite\t\n' "$kind" "$path"; exit 0 ;;
+      *) printf '%s\t%s\terror\t%s\n' "$kind" "$path" "$(echo "$site" | head -1)"; exit 0 ;;
+    esac
+  fi
+  start=$(date +%s%N)
+  "$GOCMP" ${G2C_GOCMP_FLAGS:-} -levels "$G2C_LEVELS" "$a" "$b" > "$log" 2>&1
+  status=$?
+  ms=$(( ($(date +%s%N) - start) / 1000000 ))
+  result=$(grep '^RESULT ' "$log" | tail -1 | cut -c8-)
+  [ -n "$result" ] || result="tree=error export=error code=error"
+  # the first line of the first difference, for the results file
+  first=$(grep -v -e '^RESULT ' -e '^[a-z]*: pass$' -e '^[a-z]*: skip$' "$log" | sed -n '2p' | sed 's/^ *//' | tr '\t' ' ' | cut -c1-200)
+  [ -n "$site" ] && first="$site | $first"
+  [ -n "$mutdir" ] && rm -rf "$mutdir"
+  nocompile=0
+  grep -q '^  candidate does not compile' "$log" && nocompile=1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$path" "$result" "$status" "$ms" "$first" "$nocompile"
+  exit 0
+fi
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) goarch=$2; shift 2 ;;
+    --levels) levels=$2; shift 2 ;;
+    -j) jobs=$2; shift 2 ;;
+    --only) only=$2; shift 2 ;;
+    --no-tests) tests=0; shift ;;
+    --no-packages) packages=0; shift ;;
+    --reference) reference=$2; shift 2 ;;
+    --make) mode=make; make_kind=$2; shift 2 ;;
+    --mutations) mode=mutations; shift ;;
+    --ops) ops=$2; shift 2 ;;
+    --seed) seed=$2; shift 2 ;;
+    -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "unknown option $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+go=$goroot/bin/go
+[ -x "$go" ] || { echo "no Go toolchain at $goroot (set G2C_GOROOT)" >&2; exit 2; }
+work=$root/.tmp/g2c-check/$goos-$goarch
+mkdir -p "$work"
+
+# gocmp, built for the host
+export GOCMP=$root/.tmp/g2c-check/bin/gocmp
+(cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= \
+   "$go" build -o "$GOCMP" .) || { echo "cannot build tools/gocmp" >&2; exit 2; }
+
+if [ "$mode" = make ]; then
+  dir=${1:?--make $make_kind needs a directory}
+  mkdir -p "$dir"
+  case $make_kind in
+    identity)
+      (cd "$goroot" && find src test -name '*.go' -print0 | tar --null -T - -cf -) | tar -xf - -C "$dir" ;;
+    reprint|canon)
+      flag=; [ "$make_kind" = canon ] && flag=-canon
+      "$GOCMP" reprint $flag "$goroot/src" "$dir/src" 2> "$dir.copied.txt" &&
+        "$GOCMP" reprint $flag "$goroot/test" "$dir/test" 2>> "$dir.copied.txt"
+      st=$?
+      echo "files copied as they are: $dir.copied.txt"
+      exit $st ;;
+    *) echo "--make identity|reprint|canon" >&2; exit 2 ;;
+  esac
+  exit
+fi
+
+if [ "$mode" = check ]; then
+  cand=$(cd "${1:?usage: bin/g2c-check [OPTIONS] CANDIDATE}" && pwd) || exit 2
+fi
+
+# The configuration of every go command below
+export GOROOT=$goroot GOOS=$goos GOARCH=$goarch GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOCMP_GO=$go
+version=$("$go" env GOVERSION)
+
+# The corpus
+corpus=$work/corpus.txt
+: > "$corpus"
+if [ $packages = 1 ]; then
+  "$go" list -e -f '{{if .GoFiles}}{{if not .Error}}{{.ImportPath}} {{.Dir}}{{end}}{{end}}' std |
+    while read -r ip dir; do printf 'package\t%s\t%s\n' "$ip" "${dir#$goroot/src/}"; done >> "$corpus"
+fi
+if [ $tests = 1 ]; then
+  tlist=$work/corpus-tests.txt
+  stamp="$goroot $version $goos $goarch"
+  if [ ! -f "$tlist" ] || [ "$(head -1 "$tlist")" != "# $stamp" ]; then
+    echo "computing the test programs that compile for $goos/$goarch (once) ..."
+    (cd "$goroot/test" && find . -name '*.go' ! -path '*.dir/*' | sed 's|^\./||' | sort) |
+      while read -r f; do
+        action=$(grep -m1 -v -e '^//go:build' -e '^// +build' -e '^$' "$goroot/test/$f" |
+                 sed -n 's|^// *\([a-z]*\).*|\1|p')
+        case $action in run|runoutput|build|buildrun|compile|asmcheck) echo "$f" ;; esac
+      done > "$work/candidates.txt"
+    xargs -P "$jobs" -I{} sh -c 'cd "$GOROOT/test/$(dirname {})" &&
+        e=$("$GOCMP_GO" list -e -export -f "{{.Export}}" "$(basename {})" 2>/dev/null) &&
+        [ -n "$e" ] && echo {}' < "$work/candidates.txt" | sort > "$tlist.new"
+    { echo "# $stamp"; cat "$tlist.new"; } > "$tlist"
+    rm -f "$tlist.new"
+  fi
+  grep -v '^#' "$tlist" | while read -r f; do printf 'test\t%s\t%s\n' "$f" "$f"; done >> "$corpus"
+fi
+if [ -n "$only" ]; then
+  awk -F'\t' -v re="$only" '$2 ~ re' "$corpus" > "$corpus.only" && mv "$corpus.only" "$corpus"
+fi
+total=$(wc -l < "$corpus")
+[ "$total" -gt 0 ] || { echo "empty corpus" >&2; exit 2; }
+
+export G2C_LEVELS=$levels G2C_OP= G2C_SEED=$seed
+rm -rf "$work/logs"
+mkdir -p "$work/logs"
+
+# run_corpus TAG: compares every corpus entry, one line per entry into $work/raw-TAG.tsv
+run_corpus() {
+  local tag=$1 mutate=$2
+  awk -F'\t' -v goroot="$goroot" -v cand="${cand:-}" -v logs="$work/logs" -v tag="$tag" \
+      -v mut="$mutate" -v mutroot="$work/mut" '
+    {
+      id = tag "-" $1 "-" $2; gsub(/[\/ ]/, "_", id)
+      if ($1 == "package") { a = goroot "/src/" $3; b = cand "/src/" $3 }
+      else { a = goroot "/test/" $3; b = cand "/test/" $3 }
+      m = (mut == "1") ? mutroot "/" id : ""
+      print $1 "\t" $2 "\t" a "\t" b "\t" logs "/" id ".log\t" m
+    }' "$corpus" |
+    xargs -d '\n' -n 1 -P "$jobs" "$0" --worker > "$work/raw-$tag.tsv"
+}
+
+# summary TSV: prints the table of a raw file
+summary() {
+  awk -F'\t' -v levels="$levels" '
+    BEGIN { n = split(levels, L, ",") }
+    {
+      k = $1; total[k]++; kinds[k] = 1
+      split($3, parts, " ")
+      for (i in parts) { split(parts[i], kv, "="); c[k, kv[1], kv[2]]++ }
+    }
+    END {
+      printf "%-9s %6s", "", "total"
+      for (i = 1; i <= n; i++) printf "  %-26s", L[i] " pass/fail/err/skip"
+      printf "\n"
+      for (k in kinds) {
+        printf "%-9s %6d", k, total[k]
+        for (i = 1; i <= n; i++)
+          printf "  %-26s", sprintf("%d/%d/%d/%d", c[k, L[i], "pass"], c[k, L[i], "fail"], c[k, L[i], "error"], c[k, L[i], "skip"])
+        printf "\n"
+      }
+    }' "$1"
+}
+
+started=$(date +%s)
+if [ "$mode" = mutations ]; then
+  status=0
+  for op in ${ops//,/ }; do
+    export G2C_OP=$op
+    run_corpus "mut-$op" 1
+    raw=$work/raw-mut-$op.tsv
+    echo "== mutation $op (seed $seed)"
+    awk -F'\t' -v levels="$levels" '
+      BEGIN { n = split(levels, L, ",") }
+      $3 == "nosite" { nosite++; next }
+      $3 == "error" { err++; next }
+      {
+        mutated++
+        delete r; split($3, parts, " ")
+        for (i in parts) { split(parts[i], kv, "="); r[kv[1]] = kv[2] }
+        for (i = 1; i <= n; i++) if (r[L[i]] == "fail") caught[L[i]]++
+        if ($7 == 1) nocompile++
+        if (r["tree"] != "fail") { missed++; print "  NOT CAUGHT BY TREE: " $1 " " $2 ": " $6 > "/dev/stderr" }
+      }
+      END {
+        printf "  mutated %d (no site %d, errors %d); candidate does not compile: %d\n", mutated, nosite, err, nocompile
+        for (i = 1; i <= n; i++) printf "  caught by %-6s %d\n", L[i], caught[L[i]]
+        exit missed > 0
+      }' "$raw" || status=1
+  done
+  echo "time: $(( $(date +%s) - started )) s, logs in $work/logs"
+  exit $status
+fi
+
+run_corpus check 0
+raw=$work/raw-check.tsv
+elapsed=$(( $(date +%s) - started ))
+
+# results.edn: one entry per line, sorted
+results=$work/results.edn
+{
+  echo ";; bin/g2c-check results (doc/go/ROUNDTRIP.md). One entry per line:"
+  echo ";; [KIND PATH {LEVEL STATUS ...} FIRST-LINE-OF-DIFFERENCE]"
+  printf '{:config {:goroot "%s" :goos "%s" :goarch "%s" :go "%s"}\n' "$goroot" "$goos" "$goarch" "$version"
+  printf ' :candidate "%s"\n :levels [%s]\n :date "%s"\n :seconds %d\n :results\n [\n' \
+    "$cand" ":${levels//,/ :}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$elapsed"
+  sort -t$'\t' -k1,1 -k2,2 "$raw" | awk -F'\t' '{
+      n = split($3, parts, " "); m = ""
+      for (i = 1; i <= n; i++) { split(parts[i], kv, "="); m = m (i > 1 ? " " : "") ":" kv[1] " :" kv[2] }
+      first = $6; gsub(/\\/, "\\\\\\\\", first); gsub(/"/, "\\\"", first)
+      printf "  [:%s \"%s\" {%s :ms %s} \"%s\"]\n", $1, $2, m, $5, first
+    }'
+  echo " ]}"
+} > "$results"
+
+summary "$raw"
+echo "time: $elapsed s with $jobs jobs; results in ${results#$root/}, logs in ${work#$root/}/logs"
+
+# Regressions against a reference, else failures
+key_status() { # FILE: lines "kind path level status"
+  sed -n 's/^  \[:\([a-z]*\) "\([^"]*\)" {\(.*\) :ms [0-9]*} .*/\1 \2 \3/p' "$1" |
+    awk '{ for (i = 3; i < NF; i += 2) print $1, $2, substr($i, 2), substr($(i+1), 2) }'
+}
+if [ -n "$reference" ]; then
+  regressions=$(join -j1 <(key_status "$reference" | awk '{print $1"|"$2"|"$3, $4}' | sort) \
+                         <(key_status "$results" | awk '{print $1"|"$2"|"$3, $4}' | sort) |
+                awk '$2 == "pass" && $3 != "pass" { k = $1; gsub(/\|/, " ", k); print "  " k ": " $2 " -> " $3 }')
+  if [ -n "$regressions" ]; then
+    echo "regressions against $reference:"
+    echo "$regressions"
+    exit 1
+  fi
+  echo "no regressions against $reference"
+  exit 0
+fi
+failures=$(key_status "$results" | awk '$4 == "fail" || $4 == "error"' | wc -l)
+if [ "$failures" -gt 0 ]; then
+  echo "$failures failing entry levels; first ones:"
+  key_status "$results" | awk '$4 == "fail" || $4 == "error" { print "  " $1, $2, $3 }' | head -10
+  exit 1
+fi
+exit 0
