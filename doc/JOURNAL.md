@@ -493,3 +493,27 @@ decision (2026-10-08).
   under load, the JVM's fast throw of preallocated exceptions once C2 compiles a hot path (the
   native tests met it before). The runner now starts the JVM with
   `-XX:-OmitStackTraceInFastThrow`; two checks then matched 15,854 of 15,854 (about 10 s each).
+
+## 2026-10-08: jrt's JDK sources through j2c
+
+- Agent, `070c969`, merged: `bin/jrt-convert [--twice]` (`test/g2c/jrt_sources.clj`) converts
+  the 184 source files of the measured closure (176 from jdk26u's `share/classes`, 8
+  generated) with j2c into `.tmp/jrt/` (regenerated, not tracked), compiles them with javac
+  under java.base's options, and checks every file with the class forms compiler: 184 of 184
+  files, 591 of 591 classes shape-identical to javac's; deterministic; about 85 s with
+  `--twice`. Notes in `doc/go/JRT-SOURCES.md`.
+- The 8 generated sources (`CharacterData*`, `CaseFolding`, `IndicConjunctBreak`) are made by
+  the JDK build's own generators, built and run as its makefiles do; byte-identical to the
+  build's `support/gensrc`. They must run on the boot JDK 25: `GenerateCaseFolding` filters
+  by the running JDK's `Character`, and on JDK 26 (Unicode 17) it drops 28 entries the build
+  (Unicode 16) kept.
+- Three bugs fixed on the way, reviewed by the main session: j2c's printer laid out deeply
+  nested forms in exponential time (memoized; output unchanged); the class forms compiler
+  wrote a folded NaN with the hardware's bits instead of javac's canonical NaN; and the shape
+  comparison compared float constants with `=`, so NaN never equalled itself and javac's own
+  `Float`/`Double` were silently skipped, which had hidden the second bug.
+  `bin/gate --full` passed (7m21s).
+- The edge jrt hand-writes, over whole files: 188 classes, 678 members (shims 51 classes: the
+  largest `String` 49 members, `Unsafe` 39, `Math` 34, `StringBuilder` 31; rework 9, cut 47);
+  5 natives; 70 intrinsic candidates, all with Java bodies. Translating whole files pulls in
+  80 plain-Java classes outside the 184 files: a decision for the user.
