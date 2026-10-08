@@ -372,15 +372,25 @@
     (param-list params)
     (print-results (results-entries params results))))
 
+(declare type-expr)
+
 (defn- one-line-fields?
-  "go/printer's isOneLineFieldList: one field (group), small, without tag or doc."
+  "go/printer's isOneLineFieldList: one field (group) without tag or doc, whose type prints
+  in at most 30 characters, 29 with names (a method's type is func(...)...)."
   [groups struct?]
   (and (= 1 (count groups))
-       (let [g (first groups)]
-         (and (not (:go/tag (:meta g))) (not (:doc (:meta g)))
-              (if struct?
-                (<= (+ (reduce + (map #(count (name %)) (:names g))) 10) 30)
-                true)))))
+       (let [g (first groups)
+             m (:meta g)]
+         (and (not (:go/tag m)) (not (:doc m))
+              (let [x (:src g)
+                    method? (and (not struct?) (interface-method? x))
+                    names? (if struct? (seq (:names g)) method?)
+                    text (e/render
+                           (fn [] (if method?
+                                    (do (tok "func") (iface-method-sig (second x) (nnext x)))
+                                    (type-expr (:type g x)))))]
+                (and (not (str/includes? text "\n"))
+                     (<= (+ (if names? 1 0) (count text)) 30)))))))
 
 (defn- struct-fields [fs]
   (group-entries (for [f fs]

@@ -1,3 +1,4 @@
+;; SPEC §14.1: the survey's sample, as the spec writes it (lines of the spec's text, not Go's).
 (ns go.sample
   (:require [arbace.go :as go]))
 

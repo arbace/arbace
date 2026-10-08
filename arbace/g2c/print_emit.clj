@@ -203,6 +203,15 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Layout
 
+(defn render
+  "The text f (a function of no arguments that prints) writes on a fresh line, without
+  positions: go/printer's nodeSize."
+  [f]
+  (binding [*p* (new-state {:lines? false :line-directives? false})
+            *next* nil]
+    (f)
+    (.toString ^StringBuilder (:sb *p*))))
+
 (defn break-to!
   "Inside an expression, before a form recorded at line t (or :break, a new line): line
   breaks where Go allows them, else a /*line*/ directive."

@@ -70,3 +70,11 @@
 (go/type Ptr :type-params [^{:tag (* int)} P] (struct ^P p))
 
 (go/type Ord :type-params [^{:tag (interface (| (tilde int) (tilde string)))} T] (struct ^T v))
+
+(go/type Small (struct ^{:tag (map string int)} x))
+
+(go/type Large (struct ^{:tag (map string (map string int64))} x))
+
+(go/type OneMethod (interface (String ^string [])))
+
+(go/type LongMethod (interface (Method [^int a ^int b ^int c] :results [string error])))

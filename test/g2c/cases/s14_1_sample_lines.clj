@@ -1,4 +1,4 @@
-;; g2c-test: original=sample.go lines
+;; g2c-test: original=s14_1_sample.go lines
 (ns go.sample (:require [arbace.go :as go]))
 (go/package sample :path "sample" :files ["sample.go"] :init-order [ErrEmpty] :positions :lines)
 (go/file "sample.go" :imports [[errors "errors"] [fmt "fmt"]])

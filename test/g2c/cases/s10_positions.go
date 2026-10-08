@@ -68,5 +68,5 @@ L:
 	}
 }
 
-func Short() int { return 1 }
+func Short() int  { return 1 }
 func Short2() int { return 2 }

@@ -37,7 +37,7 @@ type Fields struct {
 	a, b int
 	f    func()
 	Pair[string, int]
-	t    string "plain"
+	t string "plain"
 }
 
 type Pair[K comparable, V any] struct {
@@ -80,3 +80,15 @@ type List[T any] struct {
 type Ptr[P *int,] struct{ p P }
 
 type Ord[T interface{ ~int | ~string }] struct{ v T }
+
+type Small struct{ x map[string]int }
+
+type Large struct {
+	x map[string]map[string]int64
+}
+
+type OneMethod interface{ String() string }
+
+type LongMethod interface {
+	Method(a, b, c int) (string, error)
+}
