@@ -151,7 +151,7 @@
           (close c)
           (let [p (new int)
                 q (new 42)
-                r (new (Pair string int))
+                r (new (inst Pair string int))
                 z (complex 1 2)]
             (set! _ (+ (real z) (imag z)))
             (set! _ (min 1 2 n))

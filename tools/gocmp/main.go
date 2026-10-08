@@ -6,11 +6,16 @@
 //	gocmp [-go CMD] [-levels tree,export,code] [-keep-positions] A B
 //	gocmp reprint [-canon] SRCROOT DSTROOT
 //	gocmp mutate -op swap|const|drop [-seed N] A OUTDIR
+//	gocmp tests [-v] TESTDIR
 //
-// A is the original: a package directory or a single .go file that the go
-// command can build for the configuration in the environment (GOOS, GOARCH,
-// GOROOT, ...). B is the candidate: a directory holding a file of the same
-// name for each of A's files for the configuration, or a single file.
+// A is the original: a package directory, or a program of .go files of one
+// directory (F.go, or F.go,G.go,... with the other files' names relative to
+// F's directory) that the go command can build for the configuration in the
+// environment (GOOS, GOARCH, GOROOT, ...). B is the candidate: a directory
+// holding a file of the same name for each of A's files for the
+// configuration, or the files of a program, in the same spelling as A. A
+// program is compiled as Go's test driver compiles it, without -complete (a
+// function may lack a body).
 //
 // The levels, each stronger than the one before:
 //
@@ -69,6 +74,8 @@ func main() {
 			os.Exit(mainReprint(os.Args[2:]))
 		case "mutate":
 			os.Exit(mainMutate(os.Args[2:]))
+		case "tests":
+			os.Exit(mainTests(os.Args[2:]))
 		}
 	}
 	os.Exit(mainCompare(os.Args[1:]))
@@ -155,22 +162,44 @@ type result struct {
 // pkgFiles is the original's list of files for the configuration.
 type pkgFiles struct {
 	dir     string   // the directory the go command runs in
-	pattern string   // "." or the file's name
+	pattern []string // "." or the files' names
 	files   []string // base names
+}
+
+// programFiles splits a program F.go,G.go,... into its files: F's path, and
+// the others in F's directory.
+func programFiles(a string) []string {
+	parts := strings.Split(a, ",")
+	for i := 1; i < len(parts); i++ {
+		parts[i] = filepath.Join(filepath.Dir(parts[0]), parts[i])
+	}
+	return parts
 }
 
 // listPackage asks the go command which files make up the original.
 func listPackage(a string) (*pkgFiles, error) {
-	st, err := os.Stat(a)
+	files := programFiles(a)
+	st, err := os.Stat(files[0])
 	if err != nil {
 		return nil, err
 	}
-	abs, err := filepath.Abs(a)
+	abs, err := filepath.Abs(files[0])
 	if err != nil {
 		return nil, err
 	}
 	if !st.IsDir() {
-		return &pkgFiles{dir: filepath.Dir(abs), pattern: filepath.Base(abs), files: []string{filepath.Base(abs)}}, nil
+		p := &pkgFiles{dir: filepath.Dir(abs)}
+		for _, f := range files {
+			if _, err := os.Stat(f); err != nil {
+				return nil, err
+			}
+			p.files = append(p.files, filepath.Base(f))
+		}
+		p.pattern = append([]string(nil), p.files...)
+		return p, nil
+	}
+	if len(files) > 1 {
+		return nil, errors.New("a package directory or the files of a program, not both")
 	}
 	out, stderr, err := runGo(abs, "list", "-e", "-json=ImportPath,GoFiles,CgoFiles,Error", ".")
 	if err != nil {
@@ -191,7 +220,7 @@ func listPackage(a string) (*pkgFiles, error) {
 	if len(p.CgoFiles) > 0 {
 		return nil, fmt.Errorf("%s: cgo files are not supported", p.ImportPath)
 	}
-	return &pkgFiles{dir: abs, pattern: ".", files: p.GoFiles}, nil
+	return &pkgFiles{dir: abs, pattern: []string{"."}, files: p.GoFiles}, nil
 }
 
 func runGo(dir string, args ...string) (stdout []byte, stderr string, err error) {
@@ -221,6 +250,12 @@ var gcflags = []string{"-gcflags=all=-d=syncframes=0", "-gcflags=-S -d=syncframe
 // every file is compiled with flattened positions (flatten.go).
 func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 	args := append([]string{"list", "-e", "-export", "-json=ImportPath,Export,Error,DepsErrors"}, gcflags...)
+	if p.pattern[0] != "." {
+		// a program of GOROOT/test: as Go's test driver compiles it (go tool
+		// compile without -complete); the flag only allows body-less functions
+		// (noder/writer.go), it changes no code
+		args[len(args)-1] += " -complete=false"
+	}
 	if extra := os.Getenv("GOCMP_GCFLAGS"); extra != "" {
 		// a diagnostic knob: more flags for the package compared, both sides
 		args[len(args)-1] += " " + extra
@@ -262,7 +297,7 @@ func buildSide(p *pkgFiles, sources map[string]string, flat bool) built {
 		f.Close()
 		args = append(args, "-overlay="+f.Name())
 	}
-	args = append(args, p.pattern)
+	args = append(args, p.pattern...)
 	out, stderr, err := runGo(p.dir, args...)
 	if err != nil {
 		return built{err: fmt.Sprintf("go list: %v\n%s", err, stderr)}
@@ -306,10 +341,14 @@ func firstLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// candidateFile returns B's file for the original file name.
-func candidateFile(b string, bIsDir bool, name string) string {
+// candidateFile returns B's file for the original file name (the i-th of a
+// program's files).
+func candidateFile(b string, bIsDir bool, name string, i int) string {
 	if bIsDir {
 		return filepath.Join(b, name)
+	}
+	if fs := programFiles(b); i < len(fs) {
+		return fs[i]
 	}
 	return b
 }
@@ -330,18 +369,20 @@ func compare(a, b string, want map[string]bool) *result {
 	if err != nil {
 		return errAll(err.Error())
 	}
-	stB, err := os.Stat(b)
+	stB, err := os.Stat(programFiles(b)[0])
 	if err != nil {
 		return errAll(err.Error())
 	}
 	bIsDir := stB.IsDir()
-	if bIsDir != (p.pattern == ".") {
+	if bIsDir != (p.pattern[0] == ".") {
 		return errAll("A and B must both be directories or both be files")
 	}
-	sort.Strings(p.files)
+	if !bIsDir && len(programFiles(b)) != len(p.files) {
+		return errAll("A and B must name as many files")
+	}
 	overlay := map[string]string{}
-	for _, name := range p.files {
-		fb, err := filepath.Abs(candidateFile(b, bIsDir, name))
+	for i, name := range p.files {
+		fb, err := filepath.Abs(candidateFile(b, bIsDir, name, i))
 		if err != nil {
 			return errAll(err.Error())
 		}
@@ -350,6 +391,7 @@ func compare(a, b string, want map[string]bool) *result {
 		}
 		overlay[filepath.Join(p.dir, name)] = fb
 	}
+	sort.Strings(p.files)
 
 	var wg sync.WaitGroup
 	var bA, bB built

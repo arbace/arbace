@@ -9,10 +9,12 @@
 #   bin/g2c read [--jobs N] [--quiet] FILE|DIR...
 #                                 read dumps with Arbace's reader (arbace.g2c.read), print a
 #                                 summary; needs a prior bin/build-arbace
-#   bin/g2c corpus [amd64|arm64|test|tests]...
+#   bin/g2c corpus [amd64|arm64|test|test-arm64|tests]...
 #                                 dump $GOROOT/src outside cmd (std) for tamago/amd64 and
-#                                 tamago/arm64, $GOROOT/test's single-file programs, and (tests,
-#                                 not by default) std for tamago/amd64 with its _test.go files
+#                                 tamago/arm64, $GOROOT/test's single-file programs (the
+#                                 oracle's list, bin/g2c-check --list-tests) for amd64 (test)
+#                                 and arm64 (test-arm64, not by default), and (tests, not by
+#                                 default) std for tamago/amd64 with its _test.go files
 #                                 (godump -tests), into .tmp/godump/corpus/, then read every
 #                                 dump on Arbace
 #   bin/g2c convert [--full] [--tests] [--out DIR] PKG...
@@ -71,26 +73,13 @@ read_dumps() {
   java ${G2C_JVM_OPTS:--Xmx16g} -Xss16m -cp "$ARBACE_CP" arbace.lang.Main -m arbace.g2c.read "$@"
 }
 
-# The single-file programs of $GOROOT/test, as Go's test driver (cmd/internal/testdir) finds
-# them: the .go files of its directories whose action compiles one program (run, compile,
-# build, runoutput, buildrun, asmcheck). Extra .go files named on the action line join the
-# program (FILE,FILE). Programs needing another GOEXPERIMENT are left out (another
-# configuration). Prints one argument per line.
+# The single-file programs of $GOROOT/test for tamago/ARCH: the oracle's list (bin/g2c-check
+# --list-tests, `gocmp tests`), so that the helper's corpus and the oracle's agree: Go's test
+# driver's directories and actions that compile one program, no other GOEXPERIMENT, build
+# constraints and file names matched by go/build. Extra .go files named on the action line
+# join the program (FILE,FILE). Prints one argument per line.
 test_programs() {
-  local d f line action extra
-  cd "$goroot/test"
-  for d in . ken chan interface internal/runtime/sys syntax dwarf fixedbugs codegen abi \
-           typeparam typeparam/mdempsky arenas simd; do
-    for f in "$d"/*.go; do
-      [ -f "$f" ] || continue
-      line=$(awk 'NF && !/^\/\/go:build/ && !/^\/\/ \+build/ {print; exit}' "$f")
-      action=$(echo "$line" | awk '{print $2}')
-      case $action in run|compile|build|runoutput|buildrun|asmcheck) ;; *) continue ;; esac
-      case $line in *-goexperiment*) echo "skip-config ${f#./}" >&2; continue ;; esac
-      extra=$(echo "$line" | tr ' ' '\n' | grep '\.go$' | grep -v '^\./' | paste -sd, - || true)
-      echo "${f#./}${extra:+,$extra}"
-    done
-  done
+  "$root/bin/g2c-check" --arch "$1" --list-tests
 }
 
 corpus() {
@@ -107,12 +96,14 @@ corpus() {
         godump -goarch "$what" -o "$out" std > "$out.tsv" || true ;;
       tests)
         godump -tests -goarch amd64 -o "$out" std > "$out.tsv" || true ;;
-      test)
-        test_programs > "$work/corpus/test-programs.txt" 2> "$work/corpus/test-skipped.txt"
-        (cd "$goroot/test" && xargs -a "$work/corpus/test-programs.txt" \
-           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -files -o "$out") \
+      test|test-arm64)
+        local tarch=amd64
+        [ "$what" = test-arm64 ] && tarch=arm64
+        test_programs "$tarch" > "$work/corpus/$what-programs.txt"
+        (cd "$goroot/test" && xargs -a "$work/corpus/$what-programs.txt" \
+           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goarch "$tarch" -files -o "$out") \
           > "$out.tsv" || true ;;
-      *) echo "corpus: amd64, arm64, test or tests, not $what" >&2; return 2 ;;
+      *) echo "corpus: amd64, arm64, test, test-arm64 or tests, not $what" >&2; return 2 ;;
     esac
     t1=$(date +%s.%N)
     awk -F'\t' -v what="$what" -v secs="$(echo "$t1 - $t0" | bc)" '

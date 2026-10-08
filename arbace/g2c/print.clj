@@ -125,23 +125,37 @@
     (when explicit? (e/tok (str nm)) (e/sp))
     (e/tok (arbace.g2c.print-text/go-string path))))
 
-(defn- write-imports [imports]
+(defn- write-import-decl [specs]
+  (if (= 1 (count specs))
+    (do (e/tok "import") (e/sp) (import-spec (first specs)) (e/nl 0))
+    (do (e/tok "import") (e/sp) (e/tok "(")
+        (e/nl 1)
+        (loop [[v & more] specs prev nil]
+          (when v
+            ;; a path sorting before the previous one starts a block of its own, which
+            ;; gofmt's import sorting then leaves in place
+            (when (and prev (neg? (compare (str (second v)) (str (second prev)))))
+              (e/nl 1))
+            (import-spec v)
+            (e/nl (if more 1 0))
+            (recur more v)))
+        (e/tok ")") (e/nl 0))))
+
+(defn- write-imports
+  "The imports: [name path] specs, and (go/directive \"...\") forms among them (C4), in
+  order; the specs between two directives are one import declaration."
+  [imports]
   (when (seq imports)
     (e/nl 0)
-    (if (= 1 (count imports))
-      (do (e/tok "import") (e/sp) (import-spec (first imports)) (e/nl 0))
-      (do (e/tok "import") (e/sp) (e/tok "(")
-          (e/nl 1)
-          (loop [[v & more] imports prev nil]
-            (when v
-              ;; a path sorting before the previous one starts a block of its own, which
-              ;; gofmt's import sorting then leaves in place
-              (when (and prev (neg? (compare (str (second v)) (str (second prev)))))
-                (e/nl 1))
-              (import-spec v)
-              (e/nl (if more 1 0))
-              (recur more v)))
-          (e/tok ")") (e/nl 0)))))
+    (let [directive? #(and (seq? %) (= (code/op %) "go/directive"))]
+      (loop [xs (seq imports)]
+        (when xs
+          (if (directive? (first xs))
+            (do (e/comment-line (str (second (first xs))) 0)
+                (recur (next xs)))
+            (let [[specs more] (split-with (complement directive?) xs)]
+              (write-import-decl (vec specs))
+              (recur (seq more)))))))))
 
 (defn- one-line-func?
   "Whether a declaration is a function printed on one line: its closing brace on its first

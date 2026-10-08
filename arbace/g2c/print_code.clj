@@ -99,7 +99,7 @@
 
 (defn- unary-operand [f]
   (if (negative-literal? f)
-    (if (instance? Double f) (Math/abs (double f)) (- f))
+    (if (instance? Double f) (Math/abs (double f)) (-' f))
     (second f)))
 
 (defn- bin-op [f] (first (binary-ops (op f))))
@@ -108,7 +108,7 @@
 (defn- bin-x
   "The left operand: (+ a b c) is (+ (+ a b) c)."
   [f]
-  (if (> (count f) 3) (with-meta (apply list (butlast f)) (meta f)) (second f)))
+  (if (> (count f) 3) (with-meta (apply list (butlast f)) (dissoc (meta f) :go/paren)) (second f)))
 
 (defn- bin-y [f] (last f))
 
@@ -231,7 +231,10 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Types (§5)
 
-(defn- tagged? [x] (and (symbol? x) (contains? (meta x) :tag)))
+(defn- tagged?
+  "A name with a type: a symbol or (go/id \"x\") carrying :tag (C5)."
+  [x]
+  (and (or (symbol? x) (go-sym? x)) (contains? (meta x) :tag)))
 
 (defn- param-entries
   "The entries of a parameter, result or field vector: {:name sym-or-nil :type T
@@ -336,17 +339,21 @@
                       indent))))
 
 (def ^:private non-directive-keys
-  #{:go/tag :go/via :go/breaks :go/end :go/pos :go/apos :go/inst})
+  #{:go/tag :go/via :go/breaks :go/end :go/pos :go/apos :go/inst :go/grouped :go/implicit
+    :go/paren :go/label :go/directives})
 
 (defn directives-of
   "The directive lines of a declared name's metadata (§9.1): :go/<name> true or text (a
-  vector for several), sorted by name."
+  vector for several), sorted by name, then the verbatim lines of :go/directives (A6:
+  directives not spelled //go:, such as //export f)."
   [m]
-  (for [[k v] (sort-by (comp name key) (filter (fn [[k _]] (and (keyword? k) (= (namespace k) "go")
-                                                                (not (non-directive-keys k))))
-                                               m))
-        v (if (vector? v) v [v])]
-    (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v))))
+  (concat
+    (for [[k v] (sort-by (comp name key) (filter (fn [[k _]] (and (keyword? k) (= (namespace k) "go")
+                                                                  (not (non-directive-keys k))))
+                                                 m))
+          v (if (vector? v) v [v])]
+      (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v)))
+    (map str (:go/directives m))))
 
 (defn pre-lines
   "The number of comment lines before a declaration: doc, a // line between doc and
@@ -588,6 +595,15 @@
 
 (defn- reduce-depth [d] (max 1 (dec d)))
 
+(defn- paren-operand
+  "An operand of && or || the source parenthesized (:go/paren, C3): gc removes dead branches
+  by syntax and does not look through parentheses."
+  [x]
+  (e/break-to! (line-of x))
+  (tok "(")
+  (binding [*header* false] (expr0 x 1))
+  (tok ")"))
+
 (defn- binary-expr [f prec1 cut depth]
   (let [prec (bin-prec f)]
     (if (< prec prec1)
@@ -596,14 +612,18 @@
           (tok ")"))
       (let [blank? (< prec cut)
             x (bin-x f) y (bin-y f)]
-        (expr1 x prec (+ depth (diff-prec x prec)))
+        (if (:go/paren (meta x))
+          (paren-operand x)
+          (expr1 x prec (+ depth (diff-prec x prec))))
         (when blank? (sp))
         (tok (bin-op f))
         (let [yt (child-target f (dec (count f)) y)]
           (if (and yt (or (= yt :break) (> (long yt) (e/line))))
             (e/break-to! yt)
             (when blank? (sp))))
-        (expr1 y (inc prec) (inc depth))))))
+        (if (:go/paren (meta y))
+          (paren-operand y)
+          (expr1 y (inc prec) (inc depth)))))))
 
 (defn- call-args
   "(args) of a call; a final (spread xs) is xs...."
@@ -718,13 +738,9 @@
 
 (defn- new-arg [x]
   ;; new(T) or Go 1.26's new(value): a type unless the operand is clearly an expression
-  (if (or (symbol? x) (type-form? x)
-          (and (seq? x) (nil? (op x)) (symbol? (first x)))
-          (and (seq? x) (op x) (not (contains? stmt-heads (op x)))
-               (not (contains? binary-ops (op x))) (not (contains? unary-ops (op x)))
-               (not (#{"lit" "conv" "assert" "aget" "subslice" "fn" "inst" "method-expr" "rune"
-                       "imaginary" "byte-string" "go/call" "len" "cap" "append" "make" "new"
-                       "complex" "real" "imag" "min" "max" "recover"} (op x)))))
+  ;; A5: a generic type's instance is (inst G T), which prints G[T] as a type or an
+  ;; expression; any other list with a plain head is a call (Go 1.26's new(f(x)))
+  (if (or (symbol? x) (go-sym? x) (type-form? x))
     (type-expr x)
     (expr0 x 1)))
 
@@ -855,9 +871,13 @@
               (sp) (tok ":=") (sp) (expr-list init depth)))))
 
 (defn- type-binding-stmt [nm t]
-  (tok "type") (sp) (tok (ident-string nm)) (sp)
-  (when (:alias (meta nm)) (tok "=") (sp))
-  (type-expr t))
+  (let [tps (:type-params (meta nm))]
+    (binding [*generic* (boolean tps)]
+      (tok "type") (sp) (tok (ident-string nm))
+      (when tps (type-params tps))
+      (sp)
+      (when (:alias (meta nm)) (tok "=") (sp))
+      (type-expr t))))
 
 (defn- assign-stmt [f]
   (let [[_ place a b] f]
@@ -978,7 +998,7 @@
         (let [c (nth clauses i)]
           (when-not (clause? c) (fail "not a case or default clause" c))
           (binding [e/*next* (next-line (subvec clauses (inc i)))]
-            (e/stmt-break! (line-of c) false ";" indent)
+            (e/stmt-break! (line-of c) (zero? i) ";" indent)
             (if (= (op c) "default")
               (do (tok "default") (tok ":")
                   (stmt-list (vec (rest c)) {:indent (inc indent) :parent c :offset 1}))
@@ -1069,6 +1089,8 @@
         (tok "range") (sp) (expr0 x 1)))
     (block-body (vec body) {:parent f :offset 2})))
 
+(declare label-stmt)
+
 (defn print-stmt
   "Prints one statement form (not a let: stmt-list flattens those)."
   [f]
@@ -1096,6 +1118,7 @@
       "while" (while-stmt f)
       "range" (range-stmt f)
       ("let" "let-type") (block-body [f] {})
+      "label" (label-stmt f (e/cur-indent) false)
       (simple-stmt f))))
 
 ;; Statement lists: a let scopes over the rest of its list, so the list is flattened.
@@ -1133,12 +1156,95 @@
 
 (defn- item-t [it] (:t it))
 
+(defn- label-stmt
+  "(label :L s?): L: s. A label without a statement is followed by ; when more statements
+  follow (more?). Nested labels print in a row (L1: L2: s)."
+  [f indent more?]
+  (let [[_ l s] f]
+    (tok (label-name l)) (tok ":")
+    (cond
+      (some? s) (do (e/stmt-break! (line-of s) false nil indent)
+                    (e/push-open! indent)
+                    (cond
+                      (and (seq? s) (#{"let" "let-type"} (op s))) (block-body [s] {})
+                      (and (seq? s) (= (op s) "label")) (label-stmt s indent more?)
+                      :else (print-stmt s))
+                    (e/pop-open!))
+      more? (if (e/lines?) (tok ";") (do (e/nl indent) (tok ";"))))))
+
+(defn- bind-target [it] (first (:bind it)))
+
+(defn- const-bind? [it]
+  (when-let [t (bind-target it)]
+    (let [ts (targets t)]
+      (or (:const (meta t)) (some #(:const (meta %)) ts)))))
+
+(defn- group-consts
+  "Joins the bindings of a local const ( ... ) group (C2): a const binding whose target
+  carries :go/grouped continues the group of the binding before it."
+  [items]
+  (reduce (fn [acc it]
+            (let [prev (peek acc)]
+              (if (and prev (const-bind? it) (:go/grouped (meta (bind-target it)))
+                       (or (:const-group prev) (const-bind? prev)))
+                (conj (pop acc) (if (:const-group prev)
+                                  (update prev :const-group conj it)
+                                  {:const-group [prev it] :t (:t prev)}))
+                (conj acc it))))
+          [] items))
+
+(defn- label-of
+  "The label of a labeled declaration (:go/label on its first target, A9)."
+  [it]
+  (when-let [t (or (bind-target it) (first (:type-bind it))
+                   (bind-target (first (:const-group it))))]
+    (:go/label (meta t))))
+
+(defn- const-spec
+  "One spec of a local const group: names, type and values, or the names alone (:go/implicit)."
+  [[target init] keep-type]
+  (let [ts (targets target)
+        implicit? (:go/implicit (meta target))
+        typ (some #(when (contains? (meta %) :tag) (:tag (meta %))) ts)]
+    (doseq [[i t] (map-indexed vector ts)]
+      (when (pos? i) (tok ",") (sp))
+      (tok (ident-string t)))
+    (when-not implicit?
+      (when (or typ keep-type) (vtab))
+      (when typ (type-expr typ))
+      (vtab) (tok "=") (sp) (expr-list init 1))))
+
+(declare keep-type-column)
+
+(defn- const-group
+  "const ( specs ) in a function body, at indent: its specs on their recorded lines."
+  [its indent]
+  (let [specs (mapv :bind its)
+        keep (keep-type-column (mapv (fn [[t x]] [t (if (:go/implicit (meta t)) ::none x)]) specs))
+        nxts (next-targets (map :t its))]
+    (tok "const") (sp) (tok "(")
+    (e/push-open! indent)
+    (dotimes [j (count its)]
+      (binding [e/*next* (or (nth nxts j) e/*next*)]
+        (e/stmt-break! (or (:t (nth its j)) (when-not (e/lines?) :break)) (zero? j) ";" (inc indent))
+        (const-spec (nth specs j) (nth keep j))))
+    (e/pop-open!)
+    (if (e/lines?)
+      (e/close-break! nil true true indent)
+      (e/nl indent true))
+    (tok ")")))
+
+(defn- group-target
+  "The line of a const group's keyword: the line before its first spec when free."
+  [t]
+  (if (and (integer? t) (> (dec (long t)) (e/line))) (dec (long t)) t))
+
 (defn stmt-list
   "Prints a statement list at indent (opts :indent), each statement on its recorded line.
   :results? makes a final expression the function's return (§6.4). :parent and :offset
   locate the forms in their list (for :go/breaks)."
   [forms {:keys [indent results? parent offset] :as opts}]
-  (let [items (flatten-stmts forms parent (or offset 0))
+  (let [items (group-consts (flatten-stmts forms parent (or offset 0)))
         n (count items)
         nxts (next-targets (map item-t items))]
     (dotimes [i n]
@@ -1147,28 +1253,24 @@
         (binding [e/*next* nxt]
           (let [f (:form it)
                 label? (and (seq? f) (= (op f) "label"))
-                directive? (and (seq? f) (= (op f) "go/directive"))]
+                directive? (and (seq? f) (= (op f) "go/directive"))
+                decl-label (label-of it)]
             (cond
               directive?
               (do (e/stmt-break! (:t it) false ";" indent)
                   (e/comment-line (second f) indent))
               :else
               (do
-                (e/stmt-break! (:t it) (zero? i) ";" (if label? (max 0 (dec indent)) indent))
+                (e/stmt-break! (if (:const-group it) (group-target (:t it)) (:t it))
+                               (zero? i) ";" (if (or label? decl-label) (max 0 (dec indent)) indent))
                 (e/push-open! indent)
+                (when decl-label
+                  (tok (label-name decl-label)) (tok ":") (sp))
                 (cond
+                  (:const-group it) (const-group (:const-group it) indent)
                   (:bind it) (apply binding-stmt (:bind it))
                   (:type-bind it) (apply type-binding-stmt (:type-bind it))
-                  label? (let [[_ l s] f]
-                           (tok (label-name l)) (tok ":")
-                           (cond
-                             (some? s) (do (e/stmt-break! (line-of s) false nil indent)
-                                           (e/push-open! indent)
-                                           (if (and (seq? s) (#{"let" "let-type"} (op s)))
-                                             (block-body [s] {})
-                                             (print-stmt s))
-                                           (e/pop-open!))
-                             (< i (dec n)) (if (e/lines?) (tok ";") (do (e/nl indent) (tok ";")))))
+                  label? (label-stmt f indent (< i (dec n)))
                   (and results? (= i (dec n)) (expression-form? f))
                   (do (tok "return") (sp) (expr0 f 1))
                   :else (print-stmt f))
@@ -1209,13 +1311,15 @@
 (defn- stmt-list-one-line
   "A function body on one line: statements separated by semicolons (go/printer's funcBody)."
   [forms results? indent]
-  (let [items (flatten-stmts forms nil 0)
+  (let [items (group-consts (flatten-stmts forms nil 0))
         n (count items)]
     (dotimes [i n]
       (let [it (nth items i) f (:form it)]
         (when (pos? i) (tok ";") (sp))
         (e/push-open! (dec indent))
+        (when-let [l (label-of it)] (tok (label-name l)) (tok ":") (sp))
         (cond
+          (:const-group it) (const-group (:const-group it) (dec indent))
           (:bind it) (apply binding-stmt (:bind it))
           (:type-bind it) (apply type-binding-stmt (:type-bind it))
           (and results? (= i (dec n)) (expression-form? f)) (do (tok "return") (sp) (expr0 f 1))
@@ -1345,7 +1449,7 @@
 (defn- const-var-decl [f kw]
   (let [[_ & xs] f
         [doc xs] (if (string? (first xs)) [(first xs) (rest xs)] [nil xs])]
-    (if (and (seq xs) (every? vector? xs) (not (and (= 1 (count xs)) false)))
+    (if (every? vector? xs)
       ;; a group
       (let [specs (mapv (fn [v] [(first v) (if (> (count v) 1) (second v) ::none)]) xs)
             keep (keep-type-column specs)
@@ -1354,7 +1458,6 @@
                     (fn [v i] (let [[t init] (nth specs i)] (value-spec t init group? (nth keep i))))
                     (fn [v] (meta (spec-name (first v))))))
       (let [[t init] xs]
-        (when (and (empty? xs)) (fail "an empty declaration" f))
         (tok kw) (sp)
         (value-spec t (if (> (count xs) 1) init ::none) false false)))))
 

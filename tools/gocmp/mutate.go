@@ -65,7 +65,7 @@ func mainMutate(args []string) int {
 	fmt.Fprintf(h, "%d %s %v", *seed, *op, p.files)
 	s := sites[h.Sum64()%uint64(len(sites))]
 	out := fs.Arg(1)
-	if p.pattern == "." {
+	if p.pattern[0] == "." {
 		if err := os.MkdirAll(out, 0o755); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 2
@@ -77,8 +77,12 @@ func mainMutate(args []string) int {
 			b = append(append(append([]byte{}, b[:s.start]...), s.repl...), b[s.end:]...)
 		}
 		path := out
-		if p.pattern == "." {
+		if p.pattern[0] == "." {
 			path = filepath.Join(out, name)
+		} else if len(p.files) > 1 {
+			// a program of several files: OUTPUT is the first file's path, the
+			// others go next to it
+			path = filepath.Join(filepath.Dir(out), name)
 		}
 		if err := os.WriteFile(path, b, 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)

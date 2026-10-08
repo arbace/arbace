@@ -10,10 +10,14 @@
 # The corpus, for the configuration:
 #   - every package of `go list std` (cmd is not in std) with Go files: GOROOT/src/P against
 #     CANDIDATE/src/P;
-#   - every single-file program of GOROOT/test (outside *.dir directories) whose action is
-#     run, runoutput, build, buildrun, compile or asmcheck and that compiles for the
-#     configuration: GOROOT/test/F against CANDIDATE/test/F. The list is computed once per
-#     toolchain and configuration and kept in the work directory (corpus-tests.txt).
+#   - every single-file program of GOROOT/test for the configuration, as `gocmp tests`
+#     selects them (the rule the helper's corpus uses too, bin/g2c corpus test): in a
+#     directory of Go's test driver, action run, runoutput, build, buildrun, compile or
+#     asmcheck, no other GOEXPERIMENT, matched by go/build (build constraints, file name).
+#     GOROOT/test/F against CANDIDATE/test/F; a program of several files (F,G.go: the
+#     extra files its action line names) against the same files. The list is written to
+#     the work directory (corpus-tests.txt).
+# --list-tests prints that list and exits.
 # --make writes a candidate made without forms: identity (a copy of the .go files of
 # GOROOT/src and GOROOT/test), reprint (gocmp reprint: go/printer over the trees without
 # comments or positions, the directives kept) or canon (gocmp reprint -canon: reprint after
@@ -29,7 +33,9 @@
 #   --only REGEX         only the corpus entries (import paths, test paths) matching REGEX
 #   --no-tests           packages only; --no-packages: tests only
 #   --reference FILE     results to compare with: an entry passing a level there and not here
-#                        is a regression (default: none; any failure fails the run)
+#                        is a regression, and so is an entry missing here (default: none; any
+#                        failure fails the run)
+#   --list-tests         print the test programs of the corpus for the configuration, exit
 #   --ops OPS --seed N   for --mutations (default swap,const,drop and 1)
 # Environment: G2C_GOROOT (default /root/tamago-go), G2C_GOOS (default tamago), G2C_GOARCH;
 # G2C_GOCMP_FLAGS, more flags for gocmp (e.g. -keep-positions).
@@ -61,10 +67,11 @@ if [ "${1:-}" = "--worker" ]; then
   if [ -n "$mutdir" ]; then
     rm -rf "$mutdir"
     out=$mutdir
-    [ -f "$a" ] && { mkdir -p "$mutdir"; out=$mutdir/$(basename "$a"); }
+    first=${a%%,*}
+    [ -f "$first" ] && { mkdir -p "$mutdir"; out=$mutdir/$(basename "$first"); }
     site=$("$GOCMP" mutate -op "$G2C_OP" -seed "$G2C_SEED" "$a" "$out" 2>&1 | tr '\t\n' '  ')
     case $? in
-      0) b=$out ;;
+      0) b=$out; [ "$first" != "$a" ] && b=$out,${a#*,} ;;
       4) printf '%s\t%s\tnosite\t\n' "$kind" "$path"; exit 0 ;;
       *) printf '%s\t%s\terror\t%s\n' "$kind" "$path" "$(echo "$site" | head -1)"; exit 0 ;;
     esac
@@ -96,6 +103,7 @@ while [ $# -gt 0 ]; do
     --reference) reference=$2; shift 2 ;;
     --make) mode=make; make_kind=$2; shift 2 ;;
     --mutations) mode=mutations; shift ;;
+    --list-tests) mode=list-tests; shift ;;
     --ops) ops=$2; shift 2 ;;
     --seed) seed=$2; shift 2 ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -113,6 +121,19 @@ mkdir -p "$work"
 export GOCMP=$root/.tmp/g2c-check/bin/gocmp
 (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= \
    "$go" build -o "$GOCMP" .) || { echo "cannot build tools/gocmp" >&2; exit 2; }
+
+# The configuration of every go command below
+export GOROOT=$goroot GOOS=$goos GOARCH=$goarch GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOCMP_GO=$go
+version=$("$go" env GOVERSION)
+
+# The test programs (one rule for the helper's corpus and the oracle's)
+list_tests() {
+  "$GOCMP" tests "$goroot/test"
+}
+if [ "$mode" = list-tests ]; then
+  list_tests
+  exit
+fi
 
 if [ "$mode" = make ]; then
   dir=${1:?--make $make_kind needs a directory}
@@ -136,10 +157,6 @@ if [ "$mode" = check ]; then
   cand=$(cd "${1:?usage: bin/g2c-check [OPTIONS] CANDIDATE}" && pwd) || exit 2
 fi
 
-# The configuration of every go command below
-export GOROOT=$goroot GOOS=$goos GOARCH=$goarch GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOCMP_GO=$go
-version=$("$go" env GOVERSION)
-
 # The corpus
 corpus=$work/corpus.txt
 : > "$corpus"
@@ -149,22 +166,8 @@ if [ $packages = 1 ]; then
 fi
 if [ $tests = 1 ]; then
   tlist=$work/corpus-tests.txt
-  stamp="$goroot $version $goos $goarch"
-  if [ ! -f "$tlist" ] || [ "$(head -1 "$tlist")" != "# $stamp" ]; then
-    echo "computing the test programs that compile for $goos/$goarch (once) ..."
-    (cd "$goroot/test" && find . -name '*.go' ! -path '*.dir/*' | sed 's|^\./||' | sort) |
-      while read -r f; do
-        action=$(grep -m1 -v -e '^//go:build' -e '^// +build' -e '^$' "$goroot/test/$f" |
-                 sed -n 's|^// *\([a-z]*\).*|\1|p')
-        case $action in run|runoutput|build|buildrun|compile|asmcheck) echo "$f" ;; esac
-      done > "$work/candidates.txt"
-    xargs -P "$jobs" -I{} sh -c 'cd "$GOROOT/test/$(dirname {})" &&
-        e=$("$GOCMP_GO" list -e -export -f "{{.Export}}" "$(basename {})" 2>/dev/null) &&
-        [ -n "$e" ] && echo {}' < "$work/candidates.txt" | sort > "$tlist.new"
-    { echo "# $stamp"; cat "$tlist.new"; } > "$tlist"
-    rm -f "$tlist.new"
-  fi
-  grep -v '^#' "$tlist" | while read -r f; do printf 'test\t%s\t%s\n' "$f" "$f"; done >> "$corpus"
+  list_tests > "$tlist" || { echo "cannot list the test programs" >&2; exit 2; }
+  while read -r f; do printf 'test\t%s\t%s\n' "${f%%,*}" "$f"; done < "$tlist" >> "$corpus"
 fi
 if [ -n "$only" ]; then
   awk -F'\t' -v re="$only" '$2 ~ re' "$corpus" > "$corpus.only" && mv "$corpus.only" "$corpus"
