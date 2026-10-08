@@ -580,3 +580,12 @@ decision (2026-10-08).
   build`, `bin/jrt test` (amd64, arm64 under qemu) and `--race` pass.
 - Step 3 (jrt's hand-written part) is done. The translated JDK classes join with c2g (step 4),
   which then deletes the stand-ins. Proposed amendments from the three phases, for the user.
+- The user accepted all of jrt's proposals: the deviations (implicit NPEs with a null message,
+  helpful messages possible later from c2g; `SoftReference` held strongly; about 14 ns per
+  uncontended monitor); the implemented APIs and formats as amendments to C2G-SPEC (phase 1
+  A1-A10, phase 2b A11-A19, phase 2a A11-A16: class info and tables in `init`, constructors,
+  arrays, the frame table, the lock word, the member-table format and invoker values, threads
+  with `RunMain`, the host interface, `RegisterGoType`, the runtime patch under
+  `overlay/go/runtime/`); the reduced scope (no `Proxy.newProxyInstance`, `jrt.AdaptFn`
+  instead; plain generic reflection, no annotations; en_US with root data; three charsets);
+  and BUILD.md B6 (`--print-only`, `--tests`, `--module`). An agent folds them into the specs.
