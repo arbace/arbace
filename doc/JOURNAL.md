@@ -170,3 +170,23 @@ decision (2026-10-08).
   the renamings of §15 question 16; only shifts of untyped constants get a `:tag`, more by
   amendment; the helper extended now (§11.3) before the converter; embedded files by path and
   hash; separate trees per architecture. The spec's status is now accepted.
+
+## 2026-10-08: The helper's format 2 (spec §11.3)
+
+- As the user decided (spec q18), the helper was extended before the converter (agent,
+  `037c8ad`, merged): `:godump 2`. Types are data: one `:type-table` per dump in dependency
+  order (named types, aliases and type parameters are leaves), and every annotation refers to
+  it by id; local types are told apart by their `:decl` position. New: `:dot` positions of
+  selectors and type assertions; comment groups with doc text; every `go/ast` directive;
+  `:warnings` (a `/*line*/` inside an expression); constant values with go/constant's kind
+  (`(:float R)`, `(:float M E)`, `(:complex ...)`); `:via` names of embedded fields on
+  selections and on struct literal keys; all of `go list`'s file lists and embedded files
+  with SHA-256; a `-tests` option dumping in-package tests and external `p_test` packages.
+  Details: `doc/go/HELPER-NOTES.md`.
+- Corpus: std tamago/amd64 252.7 MB (was 266.7), dump 1.8 s, read on Arbace 5.9 s, 55,001
+  types; arm64 alike; `$GOROOT/test` 52.2 MB; std with tests 554 dumps, 451 MB, read 7.4 s.
+  0 type errors, identical across job counts.
+- The agent proposes seven spec amendments (dots on type assertions; whether gc attaches
+  `//go:` lines across blank lines, to verify; the type table as §11.3's shape; values
+  narrower than their type; `:go/via` from the helper; separate file lists; the `p_test`
+  path). Collected for the user with the printer's.
