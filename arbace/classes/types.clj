@@ -24,8 +24,8 @@
 (def string-desc "Ljava/lang/String;")
 
 (def lang
-  "The internal name of the running Clojure's package arbace.lang: clojure/lang at stage 0,
-  where arbace.classes.boot reads arbace.* as clojure.*, arbace/lang from stage 1 on."
+  "The internal name of the running runtime's package arbace.lang (until the freeze, clojure/lang
+  at stage 0, the frozen Clojure)."
   (str/replace (.getName (.getPackage arbace.lang.RT)) "." "/"))
 
 (defn lang-class "The internal name of class `simple` of arbace.lang." [simple] (str lang "/" simple))

@@ -2,11 +2,13 @@
 ;; forms class*, label*, break*, continue*, return*, switch*, lambda*, method-ref*, java-str*,
 ;; java-assert*, for-each*, with-resources* and if-instance*, and the operators of §5.4.
 ;;
-;; Loaded by arbace/core.clj (stage 1 on). The special forms are known to arbace.lang.Compiler,
-;; which hands them to the class forms compiler (arbace.classes, loaded on first use; see
-;; arbace.classes.native). At stage 0 the frozen compiler knows none of them: there
-;; arbace.classes.boot loads this file into clojure.core (reading arbace.X as clojure.X), and
-;; `defclass` and `defclasses` run the class forms compiler at macroexpansion time instead.
+;; Loaded by arbace/core.clj. The special forms are known to arbace.lang.Compiler, which hands
+;; them to the class forms compiler (arbace.classes, loaded on first use; see
+;; arbace.classes.native). Until the freeze, stage 0 was the frozen Clojure, whose compiler knows
+;; none of them: there arbace.classes.boot loaded this file into clojure.core (reading arbace.X
+;; as clojure.X), and `defclass` and `defclasses` ran the class forms compiler at
+;; macroexpansion time instead; the non-native branches below (class-forms-native? false) are
+;; what is left of that, unused since.
 
 (in-ns 'arbace.core)
 

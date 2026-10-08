@@ -5,7 +5,7 @@
 
   The classes of the packages being built are compiled from their sources only (env/*from-source*):
   when a stage recompiles itself, its own loaded classes of the same names are ignored, so every
-  stage sees the same class environment, the one stage 0 sees.
+  stage sees the same class environment, the one the stage before it sees.
 
   (build! root out pkg-dirs) or, from a command line after loading arbace.classes.boot,
   (arbace.classes.build/-main ROOT OUT PKG-DIR...): compiles the files of the package directories
