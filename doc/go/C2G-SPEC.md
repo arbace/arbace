@@ -566,9 +566,11 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
 - **Identity** (`identical?`, `==` on references) is Go's `==` on the two values converted to a
   common Go type (`any` when they differ), nil-preservingly (§5.6). Every Java object is a
   pointer, so the comparison never panics.
-- **The identity hash** is assigned on first use from a per-thread xorshift sequence, as
-  HotSpot does, and stored in the header; it is never the address (gc may keep an object that
-  does not escape on the stack, and stacks move).
+- **The identity hash** is assigned on first use and stored in the header; it is never the
+  address (gc may keep an object that does not escape on the stack, and stacks move).
+  (Correction, 2026-10-08, to follow jrt: the hash comes from one global atomic sequence
+  mixed by a 32-bit finalizer, 31 bits and never 0, not from a per-thread xorshift sequence
+  as HotSpot's; V3 permits it, the values differing from the JVM's anyway.)
 - `wait`, `notify`, `notifyAll` are jrt functions on the header (§8.1); `finalize` is not used
   (V8).
 - **`new Object()`** (lock objects, sentinels) is `(jrt/Object_New)`, of Go type `any`: a
@@ -1140,9 +1142,10 @@ completion) is translated in the same position as `finally`, without the rethrow
 | array store | `RefArray.Store` checks | `ArrayStoreException` |
 | `String` index | jrt's `String` checks | `StringIndexOutOfBoundsException` |
 
-`jrt.Catch` recognizes Go's `runtime.Error` values and builds the Java exception (parsing the
-index and length from the message, which is the only place they are given); its stack trace is
-taken at that point, which lies inside the frame that failed. Go's fatal errors (stack
+`jrt.Catch` recognizes Go's `runtime.Error` values and builds the Java exception; its stack
+trace is taken at that point, which lies inside the frame that failed. (Correction,
+2026-10-08, to follow jrt: the index and length of an out-of-range index are read from the
+fields `x` and `y` of the runtime's `boundsError` by reflection, not parsed from the message.) Go's fatal errors (stack
 overflow, out of memory, concurrent map writes in jrt) cannot be recovered (V1, V2).
 
 **The message of an implicit `NullPointerException` is null** (amendment J6, accepted

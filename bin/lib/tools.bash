@@ -28,7 +28,7 @@ arbace_runtime() {
     return 1
   fi
   # The class forms of the runtime itself never load from source: say when they are stale
-  newer=$(cd "$root" && find arbace -name '*.clj' ! -path 'arbace/classes/*' ! -path 'arbace/j2c/*' ! -path 'arbace/g2c/*' \
+  newer=$(cd "$root" && find arbace -name '*.clj' ! -path 'arbace/classes/*' ! -path 'arbace/j2c/*' ! -path 'arbace/g2c/*' ! -path 'arbace/c2g/*' ! -path 'arbace/lang/go/*' \
             -newer "$dir/arbace/core__init.class" -print -quit)
   if [ -n "$newer" ]; then
     echo "warning: $newer is newer than target/stage$stage; run bin/build-arbace" >&2
