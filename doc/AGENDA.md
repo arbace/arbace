@@ -115,8 +115,9 @@ fallbacks of `arbace/core_classes.clj` are gone.
   `arbace-for-golang`, tag `arbace-for-go1.27.1`) and includes `linux/arm64`, tested
   under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
   static executables for both). Step 1 done: the Java surface measured
-  ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Next: step 2, the
-  c2g spec.
+  ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Step 2 done: the c2g spec
+  ([go/C2G-SPEC.md](go/C2G-SPEC.md)), accepted with its 23 recommendations. In progress
+  alongside: jrt's JDK sources through j2c, and the JVM oracle for differential tests.
 
 ## Later
 

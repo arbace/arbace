@@ -467,3 +467,12 @@ decision (2026-10-08).
   hashes. Measured (ns): interface call 3.5 (megamorphic 10.2), direct call 1.9, entering a
   `try` 9.0, throw and catch 305-795, the runtime slot 3.7 (the `runtime.Stack` stopgap about
   3,000), a thin lock 5.0. 23 open questions with recommendations, for the user's review.
+- The user accepted all 23 recommendations of the c2g spec's §16, asked in groups: interface
+  values for references, `Object` as `any`, leaf classes as pointers; two Go packages, names
+  mangled with descriptors, `F_` fields; lazy class init, header monitors, exceptions as
+  panics; torn two-word fields accepted under races with `-race` testing, reference CAS by
+  striped locks; one `Dyn` type, partial member tables, variant files; the evaluator counts
+  stack depth, fused multiply-add prevented; `jrt.Concat`, one adapter per functional
+  interface; jrt's forms under `go/arbace/jrt` with an overlay option in `bin/g2c build`,
+  module `arbace`; Java stack traces, receiver null checks, conservative temporaries. The
+  spec's status is accepted.

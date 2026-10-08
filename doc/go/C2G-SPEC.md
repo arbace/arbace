@@ -1,6 +1,7 @@
 # c2g: class forms compiled to Go forms
 
-Status: draft for the user's review (2026-10-08), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)). The
+Status: accepted (2026-10-08; the user took the recommendation of each of the 23 questions of
+§16), B1a step 2 ([B1-PLAN.md](B1-PLAN.md)). The
 decisions it builds on: D1 (c2g + jrt), D2 (an evaluator first), D4 (Java's UTF-16 strings), D5
 (a port of `java.util.regex`), D6 (the first REPL without class forms, `gen-class`, `proxy`,
 interop beyond jrt's classes), and the seven decisions of 2026-10-08 in
@@ -2151,6 +2152,8 @@ and, generated once in jrt for `java.util.function.Predicate`:
   world (`STATIC` is 2), and a `nil` `kind` is a `NullPointerException` from the field read.
 
 ## 16. Open questions
+
+**Settled (2026-10-08):** the user accepted all 23 recommendations; they are part of the spec.
 
 Each with a recommendation, which the text above follows, for the user's review.
 
