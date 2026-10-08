@@ -1,8 +1,10 @@
 # Go forms: Go programs written in Clojure
 
-Status: accepted (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7).
-Nothing here is implemented yet. The decisions of 2026-10-07 (survey §9) bind it; the user
-accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
+Status: accepted (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7),
+with the 28 amendments found while implementing the helper, the printer and the converter folded
+in (2026-10-08, §15). Implemented by `tools/godump` (the helper), `arbace.g2c.convert` (the
+converter) and `arbace.g2c.print` (the printer). The decisions of 2026-10-07 (survey §9) bind
+it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
 `go/types` see it, is written as Clojure data in ordinary `.clj` sources. It says what the forms
@@ -62,7 +64,9 @@ what is derived · 12 The printer · 13 Coverage · 14 Worked examples · 15 Ope
    declaration order, every directive, initialisation semantics, and positions (§10). The
    printer can therefore give gc a program it compiles to the same export data and object code
    (§3). Differences that gc cannot see (parentheses, field grouping, literal spelling, ordinary
-   comments) are normalised away and listed (§3.2).
+   comments) are normalised away and listed (§3.2); where gc does see them (parentheses around
+   `&&` and `||` operands, field groups of generic declarations, local `const` groups), they
+   are kept (amendment, accepted 2026-10-08).
 7. **One configuration per conversion.** Build constraints are resolved by the helper. The forms
    of a package are for one GOOS, GOARCH and tag set, recorded in the forms (§4.2). The pinned
    configurations are `GOOS=tamago` with `GOARCH=amd64` and `arm64`, toolchain go1.27.1
@@ -153,12 +157,12 @@ comparison of level 1 applies them to both trees before comparing:
 
 | N | difference | how it is normalised |
 |---|---|---|
-| N1 | parentheses | `ParenExpr` removed; the printer adds the parentheses Go's grammar needs (§12.2) |
+| N1 | parentheses | `ParenExpr` removed; the printer adds the parentheses Go's grammar needs (§12.2); except around operands of `&&` and `\|\|`, kept as `^:go/paren` (§7.5) |
 | N2 | empty statements | `EmptyStmt` removed from statement lists, except as the target of a label |
-| N3 | grouped names in fields, parameters, results, type parameters (`a, b int`) | one field per name; the printer may regroup |
+| N3 | grouped names in fields, parameters, results, type parameters (`a, b int`) | one field per name; the printer may regroup; except in generic declarations, where the groups are kept as `^:go/grouped` (§5.3) |
 | N4 | literal spelling | `BasicLit` compared by kind and exact value: radix, `_` separators, exponent form, raw against interpreted strings, escapes |
 | N5 | import grouping | imports compared as one ordered list of specs per file |
-| N6 | local declaration groups | `var (...)`, `const (...)`, `type (...)` inside a function become one declaration per spec, implicit repetition in local `const` groups written out |
+| N6 | local declaration groups | `var (...)` and `type (...)` inside a function become one declaration per spec; a local `const (...)` group keeps its grouping as `^:go/grouped`, with its implicit repetition written out and marked `^:go/implicit` (§7.3) |
 | N7 | `for ; c ; {}` | the same tree as `for c {}` (Go's parser already makes it one) |
 | N8 | comments | only directives (§9.1), line directives (§10.3) and, when kept, doc comments are compared |
 | N9 | positions | per mode (§10): all of them in `:full`; in `:lines`, the lines of statements and of the forms that start a Go line |
@@ -170,6 +174,14 @@ elided composite literal types, `any` against `interface{}`, `byte` against `uin
 single-spec groups at package level, the position of `default` in a `switch`, `else { if ... }`
 against `else if`. Some of these are invisible to gc too, but keeping them costs nothing and
 makes inlining costs, which count gc's IR nodes, follow without argument.
+
+N1, N3 and N6 have exceptions because gc's output depends on what they would drop
+(amendment, accepted 2026-10-08): gc removes dead branches of `&&` and `||` by syntax and does
+not look through parentheses (`bytes.IndexRune` compiles differently without them); field
+groups in generic declarations change gc's dictionaries; and iota and implicit repetition in a
+local `const` group depend on the group. The oracle's tree level keeps the last two
+([ROUNDTRIP.md](ROUNDTRIP.md), normalizations 4 and 5); the parentheses show at the export and
+code levels.
 
 ### 3.3 What equivalence does not cover
 
@@ -192,11 +204,20 @@ replaced by `.` and, inside a path element, `.` and `-` replaced by `_`:
 | `math/rand/v2` | `go.math.rand.v2` | `go/math/rand/v2.clj`, `go/math/rand/v2/*.clj` |
 | `vendor/golang.org/x/net/dns/dnsmessage` | `go.vendor.golang_org.x.net.dns.dnsmessage` | |
 | `main` packages (`cmd/gofmt`) | `go.cmd.gofmt` | |
+| the external test package of `fmt` (`fmt_test`, §15 Q14) | `go.fmt_test` | `go/fmt_test.clj`, `go/fmt_test/*.clj` |
+| a single-file program `$GOROOT/test/fixedbugs/bug257.go` | `go.test.fixedbugs.bug257` | |
 
-The path is kept exactly in `go/package` (§4.2). Two paths of one conversion that map to one
-namespace are a converter error (none exists in the standard library). Layout follows class
-forms §9.1: the package file holds the `ns` form, the `go/package` form and one `load` per Go
-file in the package's file order; each Go file `x.go` becomes `<pkg-dir>/x.clj`:
+The path is kept exactly in `go/package` (§4.2). An external test package `p_test` has the
+path `p_test` and the namespace `go.<path>_test`, `<path>` mapped as above (amendment, accepted
+2026-10-08). A single-file program (`$GOROOT/test`) keeps the import path the go command gives
+it, `command-line-arguments`, in `:path`; its namespace is `go.test.` followed by the file's
+path relative to `$GOROOT/test` without `.go`, mapped as above (amendment, accepted
+2026-10-08). Two paths of one conversion that map to one namespace are a converter error (none
+exists in the standard library). Layout follows class forms §9.1: the package file holds the
+`ns` form, the `go/package` form and one `load` per Go file in the package's file order; each
+Go file `x.go` becomes `<pkg-dir>/x.clj`, or `<pkg-dir>/x.go.clj` when the package's source
+directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x.clj`
+(amendment, accepted 2026-10-08; 9 files in std, such as `runtime/debug.go`):
 
 ```clojure
 ;; go/unicode/utf8.clj
@@ -237,8 +258,8 @@ The forms of each configuration are a separate tree (for example under
 | `:path` | the import path, a string |
 | `:config` | the build configuration (below) |
 | `:files` | the Go files of the package in gc's order (sorted by name, as `go list` gives `GoFiles`), a vector of strings |
-| `:other-files` | the non-Go files the build uses, copied by the printer: `.s`, `.h`, `.syso` (§9.5) |
-| `:embed-files` | the files matched by `//go:embed` patterns, with their SHA-256 (§9.6) |
+| `:other-files` | the non-Go files the build uses, copied by the printer: `.s`, `.h`, `.syso` (§9.5); one sorted vector, the union of the helper's separate lists |
+| `:embed-files` | the files matched by `//go:embed` patterns, with their SHA-256 (§9.6), the test files' included |
 | `:test-files` | when tests are converted, the package's `_test.go` files, loaded after `:files` (§15 Q14) |
 | `:init-order` | go/types' `InitOrder` (§6.3) |
 | `:positions` | `:lines` (the default) or `:full` (§10) |
@@ -256,6 +277,13 @@ The forms of each configuration are a separate tree (for example under
 | `:cgo` | `false` | `CGO_ENABLED` |
 | `:compiler` | `"gc"` | always gc |
 
+The helper gives go list's file lists apart (`:s-files`, `:h-files`, `:syso-files`, and the
+cgo-only lists, empty for tamago); the converter merges them, sorted, into `:other-files`, since
+the printer only copies them (amendment, accepted 2026-10-08). `:other-files`, `:embed-files`
+and `:test-files` are omitted when empty. The package's name is the package clause's; a
+package with test files only (no Go files for the configuration) is named by the last element
+of its path, with `.` and `-` replaced by `_` (amendment, accepted 2026-10-08).
+
 ### 4.3 `go/file`
 
 Each Go file starts with one `go/file` form, after `in-ns`. It holds the file's package clause
@@ -272,7 +300,7 @@ and everything gc reads from the file header:
 | `:directives` | other directives before the package clause, verbatim (`//go:debug ...`) |
 | `:lang` | the file's language version when it differs from the package's (`types.Info.FileVersions`, from a `//go:build go1.N` line) |
 | `:doc` | the package doc comment on this file's package clause (§10.4) |
-| `:imports` | the import specs, in order |
+| `:imports` | the import specs, in order, and the directives among them (below) |
 
 An import spec is a vector `[name "path"]`:
 
@@ -282,6 +310,13 @@ An import spec is a vector `[name "path"]`:
 | `import r "math/rand"` | `^:alias [r "math/rand"]`: an explicit name |
 | `import _ "embed"` | `[_ "embed"]` |
 | `import . "math"` | `[. "math"]` |
+
+A directive after the package clause and before the end of the last import declaration is a
+`(go/directive "...")` element of `:imports`, in source order with the specs (amendment,
+accepted 2026-10-08). `crypto/internal/fips140/mlkem`'s `mlkem768.go` has a `//go:generate`
+line between its package clause and its imports, so its `go/file` has
+`:imports [(go/directive "//go:generate go run generate1024.go ...") [bytes "bytes"] ...]`
+(the text shortened). The printer writes the directive where it stands.
 
 Imports are file-scoped, as in Go: `utf8/RuneLen` resolves through the imports of the file it is
 in, so two files may import different packages under one name. The forms do not use Clojure's
@@ -297,7 +332,10 @@ Go identifiers are symbols, verbatim: `RuneLen`, `rune1Max`, `_`, `ñ`. Other na
 | a name brought in by a dot import | the bare symbol |
 | a label `L` | the keyword `:L` (labels are never confused with locals) |
 | the predeclared `true`, `false`, `nil` | the literals `true`, `false`, `nil` |
-| an identifier spelled `true`, `false` or `nil` that names something else (a shadowing declaration, $GOROOT/test only) | `(go/id "true")`, in any symbol position |
+| an identifier spelled `true`, `false` or `nil` that names something else (a shadowing declaration) | `(go/id "true")`, in any symbol position; as a declared name (parameter, field, binding target) it is tagged like a symbol: `^bool (go/id "true")` |
+
+A tagged `(go/id "x")` in a parameter, field or binding position is a name like a tagged
+symbol (amendment, accepted 2026-10-08): `text/template/parse` has a parameter named `true`.
 
 **Resolution.** An unqualified symbol in Go context means what Go's scopes make of it: locals and
 parameters innermost first, then the package's declarations (from all its files), then the
@@ -379,7 +417,17 @@ results  = ^T params                         ; one unnamed result: tag on the pa
 
 - The rule for vectors of parameters, results and struct fields: **a symbol with a `:tag` is a
   name with its type; any other element is a type** (an unnamed parameter, an embedded field).
-  A blank name is `^T _`.
+  A blank name is `^T _`. A tagged `(go/id "x")` counts as a symbol (§4.4).
+- **Field groups in generic declarations** (amendment, accepted 2026-10-08). Inside a generic
+  declaration (a `go/type`, `go/func` or `go/method` with `:type-params`, a method with a
+  generic receiver, a local generic type) gc's output depends on how names were grouped
+  (`a, b T` against `a T, b T`: each written type is its own object in the generic
+  dictionary), so N3 does not apply there. A name declared in one field with the name before it
+  carries `^:go/grouped`; a name declared apart although its type equals the previous name's
+  carries `^{:go/grouped false}`. This holds for type parameters, parameters, results and
+  struct fields: `(go/func Max :type-params [^cmp/Ordered T] ^T [^T a ^:go/grouped ^T b] ...)`
+  is `func Max[T cmp.Ordered](a, b T) T`. The printer prints exactly the groups the markers
+  say; elsewhere it groups consecutive names of equal type or not, as it likes (N3).
 - `func f()` has `[]` and no result tag. A Go function's results cannot be inferred: no tag
   and no `:results` means no results.
 - In a **function type** the results are a second vector: `(func [params] [results])`, and
@@ -424,7 +472,14 @@ in source order.
   method (Go 1.27) has its own `:type-params` as well.
 - **Explicit instantiation** in source is written: `(inst slices/Sort (slice int))` for the
   function value `slices.Sort[[]int]`, `(Stack int)` for the type `Stack[int]`. A partial
-  instantiation `F[A]` is `(inst F A)`.
+  instantiation `F[A]` is `(inst F A)`. When the operand of `new` or of `method-expr` is itself
+  a generic type's instance, it is written `(inst G T...)`, which means `G[T...]` in any
+  position: there `(G T)` would be ambiguous for a consumer without declarations, since `new`'s
+  operand may be a value (Go 1.26: `new(f(x))` is a call), and a list with a plain head there
+  is a call (amendment, accepted 2026-10-08). `(new (inst atomic/Pointer T))` is
+  `new(atomic.Pointer[T])`, `(new (f x))` is `new(f(x))`, `(method-expr (inst List int) Len)`
+  is `List[int].Len`; inside a type form (`(method-expr (* (List T)) Push)`) the position is a
+  type position and `(G T)` stays.
 - **Inferred type arguments** (go/types `Instances` without explicit arguments in source) are
   `:inst` metadata on the symbol that names the generic function or method, with *all* type
   arguments: `(^{:inst [(slice int) int]} slices/Sort x)` for `slices.Sort(x)`, and
@@ -509,7 +564,8 @@ target = ^{:tag T? :doc s?} Name | (values A B ...)
 Package-level variables stay in **source order**. Their initialisation order is go/types'
 `InitOrder`, recorded in `go/package`'s `:init-order` as a vector with one entry per
 initializer: the variable's symbol, `(values a b)` for an initializer of several variables, and
-for a blank variable `["file.go" line col]` (the position of its `_`). A consumer runs the
+for a blank variable `["file.go" line col]` (the position of its `_`), also as an element of
+`(values ...)` (amendment, accepted 2026-10-08). A consumer runs the
 initializers in that order, then each file's `init` functions in file order and, within a file,
 in source order (Go's rules); it does not compute the order itself.
 
@@ -558,7 +614,11 @@ Doc comments are kept as data, as Clojure keeps docstrings (§10.4): a doc strin
 of `go/func`, `go/method` and a single `go/type`; `:doc` metadata on the name of a constant,
 variable, field, interface method or spec in a group; a group's doc string right after the head;
 `:doc` in `go/file` for the package doc. The text is the comment's text as `go/ast`'s
-`CommentGroup.Text` gives it, without the directives.
+`CommentGroup.Text` gives it, without the directives: exactly that, its final newline included
+(`"Numbers fundamental to the encoding.\n"`) (amendment, accepted 2026-10-08). Only a node's
+`Doc` group is a doc comment; a line comment after a field or spec (go/ast's `Comment`, as in
+`lo uint8 // lowest value for second byte.`) is an ordinary comment (§10.4) (amendment,
+accepted 2026-10-08).
 
 ## 7. Code
 
@@ -568,7 +628,7 @@ variable, field, interface method or spec in a group; a group's doc string right
 |---|---|
 | `x := e`, `a, b := f()` | `(let [x e] ...)`, `(let [(values a b) (f)] ...)` |
 | `x, err := g()` with `err` already declared in the block | `(let [(values x ^:assign err) (g)] ...)` |
-| `var x T`, `var x T = e`, `var x = e` | `(let [^T x (zero T)] ...)`, `(let [^T x e] ...)`, `(let [^:var x e] ...)` |
+| `var x T`, `var x T = e`, `var x = e`, `var a, b = f()` | `(let [^T x (zero T)] ...)`, `(let [^T x e] ...)`, `(let [^:var x e] ...)`, `(let [^:var (values a b) (f)] ...)` |
 | `const N = 10`, `type T struct{}` in a function | `(let [^:const ^{:val 10} N 10] ...)`, `(let-type [T (struct)] ...)` |
 | `x = e`, `a, b = b, a`, `_ = x` | `(set! x e)`, `(set! (values a b) (values b a))`, `(set! _ x)` |
 | `x += e`, `x &^= m` | `(set! x + e)`, `(set! x bit-and-not m)` |
@@ -582,6 +642,7 @@ variable, field, interface method or spec in a group; a group's doc string right
 | `for i := 0; i < n; i++ {}` | `(for [i 0] (< i n) (inc! i) ...)` |
 | `for k, v := range x {}` | `(range [k v x] ...)` |
 | `L:`, `break L`, `continue L`, `goto L`, `fallthrough` | `(label :L stmt)`, `(break :L)`, `(continue :L)`, `(goto :L)`, `(fallthrough)` |
+| `L: x := e` (a labeled declaration) | `(let [^{:go/label :L} x e] ...)` |
 | `return`, `return a, b` | `(return)`, `(return a b)`; a final `return e` is `e` (§6.4) |
 | `go f(x)`, `defer f(x)` | `(go (f x))`, `(defer (f x))` |
 | `ch <- v`, `<-ch` | `(>! ch v)`, `(<! ch)` |
@@ -640,14 +701,33 @@ statement list, and consecutive declarations share one `let`:
   assigned, not declared (go/types records it in `Uses`, not `Defs`). Such a target is marked
   `^:assign`. At least one target of a `:=` is new, as Go requires.
 - **`var` statements.** `^T x e` is `var x T = e`; `^T x (zero T)` is `var x T`, and
-  `(values ^T a ^T b) (zero T)` is `var a, b T`; `^:var x e` is `var x = e`. `(zero T)` occurs
-  only there.
+  `(values ^T a ^T b) (zero T)` is `var a, b T`; `^:var x e` is `var x = e`, and
+  `^:var (values a b) (f)`, the marker on the `values` form, is `var a, b = f()` (amendment,
+  accepted 2026-10-08). `(zero T)` occurs only there.
 - **Local constants** are bindings marked `^:const`, with `:val` as in §6.2:
   `(let [^:const ^{:tag int :val 10} N 10] ...)`. The implicit repetition and `iota` of a local
-  `const` group are written out per constant (N6): `(let [^:const ^{:val 0} a iota
-  ^:const ^{:val 1} b iota] ...)`, each `iota` meaning its spec's index as in the source group.
+  `const` group are written out per constant (N6), each `iota` meaning its spec's index as in
+  the source group. The group itself is kept (amendment, accepted 2026-10-08): in a group of
+  several specs, the target of every spec after the first carries `^:go/grouped`, and the
+  target of a spec without init in the source (its type and init written out) also
+  `^:go/implicit`, so that the printer prints the group as written:
+
+  ```clojure
+  (let [^:const ^{:val 0} a iota                          ; const (a = iota
+        ^:const ^:go/grouped ^:go/implicit ^{:val 1} b iota]  ;        b)
+    ...)
+  ```
+
 - **Local types**: `(let-type [Name type-form ...] body...)`, with `^:alias` on aliases. A
-  local type's name is in scope in its own type form (recursive types), as in Go.
+  local type's name is in scope in its own type form (recursive types), as in Go. A local
+  generic type (in `$GOROOT/test` and std's tests) carries its type parameters as
+  `:type-params [P ...]` metadata on its name, the vector as in §5.5, so the binding vector
+  keeps its name and type pairs (amendment, accepted 2026-10-08):
+  `(let-type [^{:type-params [^any T]} Box (struct ^T v)] ...)`.
+- **Labeled declarations.** `L: x := 1` (legal Go, 20 in std, such as
+  `internal/runtime/maps`) is `^{:go/label :L}` on the first target of the `let` binding that
+  holds the declaration: `(let [^{:go/label :L} x 1] ...)` (amendment, accepted 2026-10-08).
+  `(label :L (let ...))` would make the `let`'s body the label's statement.
 - **Explicit blocks** `{ ... }` are `(do ...)`. In a body, `(do ...)` always means a Go block.
 
 ### 7.4 Assignment
@@ -697,10 +777,20 @@ concatenates, on `float32` rounds to `float32`; `/` truncates on integers and pa
   converter flattens a left-nested chain of the same operator into one form and keeps any other
   nesting: `a + (b + c)` is `(+ a (+ b c))`. A string chain `a + b + c` therefore stays one
   concatenation for gc, as in the source.
+- **Parenthesized operands of `and` and `or`** (amendment, accepted 2026-10-08). gc removes
+  dead branches of `&&` and `||` by syntax and does not look through parentheses, so they
+  change its output (`bytes.IndexRune`, `strings.IndexRune`). An operand of `and` or `or` that
+  the source parenthesized carries `^:go/paren`, and the printer parenthesizes it; a
+  parenthesized operand of the same operator is not merged into the chain:
+  `a && (b && c)` is `(and a ^:go/paren (and b c))`, `(a || b) && c` is
+  `(and ^:go/paren (or a b) c)`. A literal operand cannot carry metadata, so the parentheses
+  of `(true) && x` are lost. Other parentheses are dropped (N1).
 - Comparisons are strictly binary: Clojure's `(< a b c)` means something else.
 - A negative numeric literal is the unary minus of the literal, as Go parses it: `-1` is Go's
   `-1`, and `(- 1)` is never written. `-0.0` is the constant 0 (Go constants have no negative
-  zero).
+  zero). This holds for Go's integer and float literals (`-1`, `-1.5`, `-0x10`, `-1E+400M`,
+  `-1/4` for `-0x1p-2`); the minus of a rune or imaginary literal stays `(- x)`: `-'a'` is
+  `(- \a)`, `-2i` is `(- (imaginary 2))` (amendment, accepted 2026-10-08).
 
 ### 7.6 Selectors, calls, methods
 
@@ -720,8 +810,11 @@ concatenates, on `float32` rounds to `float32`; `/` truncates on integers and pa
   ```
 
   The metadata goes on the `(.-f x)` or `(.M x ...)` list. Whether a step dereferences a
-  pointer follows from the embedded fields' types. A composite literal key naming a promoted
-  field (Go 1.27) gets the same path in the literal's `:go/via` map (§7.7).
+  pointer follows from the embedded fields' types. The names are the helper's `:via` (the
+  embedded fields of `Selection.Index()` but its last index, by name, outermost first; for
+  literal keys, of the key's field path), copied as symbols (amendment, accepted 2026-10-08).
+  A composite literal key naming a promoted field (Go 1.27) gets the same path in the
+  literal's `:go/via` map (§7.7).
 - **Receivers.** Implicit `&x` and `*p` on a method's receiver (`n.Move()` on an addressable
   `Named`, `p.String()` on a `*Point`) are not written; they follow from the method's receiver
   type and the operand's addressability.
@@ -737,9 +830,10 @@ concatenates, on `float32` rounds to `float32`; `/` truncates on integers and pa
 - **Builtins** are heads of their own name, with Go's argument rules: `(len x)`, `(cap x)`,
   `(append s a b)`, `(copy dst src)`, `(delete m k)`, `(clear x)`, `(close ch)`,
   `(make (slice int) n c)`, `(make (map K V))`, `(make (chan T) n)`, `(new T)`,
-  `(new 42)` (Go 1.26: `new` of a value; the declarations decide whether the operand is a type
-  or a value, as in Go), `(complex re im)`, `(real z)`, `(imag z)`, `(min a b)`, `(max a b)`,
-  `(panic v)`, `(recover)`, `(print ...)`, `(println ...)`. `unsafe`'s are package members:
+  `(new 42)` (Go 1.26: `new` of a value; the declarations decide whether a symbol operand is a
+  type or a value, as in Go; a generic type's instance there is `(inst G T)`, §5.5),
+  `(complex re im)`, `(real z)`, `(imag z)`, `(min a b)`, `(max a b)`, `(panic v)`,
+  `(recover)`, `(print ...)`, `(println ...)`. `unsafe`'s are package members:
   `(unsafe/Sizeof x)`, `(unsafe/Add p n)`, `(unsafe/Slice p n)`, `(unsafe/String p n)`,
   `(unsafe/SliceData s)`, `(unsafe/StringData s)`, `(unsafe/Offsetof (.-f x))`,
   `(unsafe/Alignof x)`.
@@ -798,7 +892,10 @@ declarations scope over the whole statement (all branches and clauses), as in Go
 `(if c then)` is the same as `(when c then)`. An else branch that is an `if`, `when` or `cond`
 form prints as `else if`; `else { if ... }` is `(do (if ...))`. The converter writes an
 `else if` chain of two or more tests without init statements as `cond`, with `:else` for a final
-`else`.
+`else`; it does so only when no `if` of the chain has an init statement, so that the chain
+ends in a plain `else` block or in nothing. A chain with an init statement in one of its
+`else if`s stays nested `if` and `when` forms, each printing as `else if` (amendment, accepted
+2026-10-08).
 
 **switch.**
 
@@ -912,9 +1009,16 @@ the source's radix; after reading, only the value remains (N4).
   decimal expansion of reasonable length, a ratio. Hex floats are always exact as a ratio or
   `BigDecimal`. Integer-valued float literals keep a decimal point or exponent (`1.0`), so their
   kind stays float. Go's `.5` must be written `0.5`: the reader reads `.5` as a symbol.
+  Precisely (amendment, accepted 2026-10-08): a decimal literal is a double when
+  `Double/toString` of its nearest double denotes exactly its value, else a `BigDecimal`. A
+  hexadecimal float is a ratio (`0x1p-2` is `1/4`), or a `BigDecimal` when integral (`0x1p4`
+  is `16.0M`, since a ratio that is an integer reads as an integer). A non-integral value
+  whose decimal expansion would be longer than 80 characters is a ratio.
 - **Runes** in the Basic Multilingual Plane outside the surrogates are Clojure characters;
   others are `(rune n)`. `(rune n)` takes an integer literal and is a literal itself, not a
-  conversion (`rune(x)` is `(conv rune x)`).
+  conversion (`rune(x)` is `(conv rune x)`). The converter spells characters that do not
+  print (controls, format characters, U+FFF0-U+FFFF) as `\uXXXX`, and uses the reader's names
+  (`\newline`, `\space`, ...) where it has them.
 - **Strings** are bytes in Go. A Clojure string denotes the UTF-8 encoding of its characters and
   must not contain unpaired surrogates. A string that is not valid UTF-8 is
   `(byte-string part ...)`: each part is a Clojure string (its UTF-8 bytes) or an integer 0-255
@@ -932,8 +1036,23 @@ the source's radix; after reading, only the value remains (N4).
 | string | a string, or `(byte-string ...)` |
 | integer (typed integers, untyped int) | `long` or `BigInt` |
 | rune (untyped rune) | a character or `(rune n)` |
-| float (typed floats, untyped float) | as float literals in §8.1: a double when exact by that rule, else `BigDecimal` or ratio; a typed `float32` or `float64` value is the rounded value, so always a double; an integral untyped float is written with a decimal point (`1.0E100` is not exact, so `1E+100M`) |
+| float (typed floats, untyped float) | as float literals in §8.1: a double when exact by that rule, else `BigDecimal` or ratio; a typed `float32` or `float64` value is the rounded value, so always a double; an integral untyped float is written with a decimal point or exponent: `1.0E100` denotes exactly 10^100 by §8.1's rule, so it is a double (amendment, accepted 2026-10-08: this text called it inexact); an untyped float beyond a rational's range is `(binary-float M E)` (below) |
 | complex | `(complex re im)`, each part a float as above |
+
+**Huge floats** (amendment, accepted 2026-10-08). go/types holds an untyped float whose
+binary exponent is beyond ±2^14 (`1e1000000`; only in `$GOROOT/test`) as a `big.Float`, not a
+rational, and its decimal or ratio would have up to hundreds of millions of digits. Its `:val`
+is `(binary-float M E)`, meaning M·2^E with M an odd integer and E an integer, each a literal
+(`(binary-float 3 4000000)` is 3·2^4000000). Like `(rune n)`, it is data, not a call.
+
+**The kind comes from the type** (amendment, accepted 2026-10-08). The representation follows
+the constant's type (the helper's `:t`), not the kind of go/constant's value, which can be
+narrower. go/constant keeps a value in its smallest kind: `const C = 1 + 0i` is an
+`untyped complex` constant with the integer value 1, so its `:val` is `(complex 1.0 0.0)`;
+`const F float64 = 2` has the integer value 2 and the `:val` `2.0`; untyped runes have integer
+values and get characters. A named type's kind is its underlying type's (the dump's `:types`);
+for a named type of another package, whose underlying type is in that package's dump, the
+value's kind decides.
 
 The representation alone tells an untyped constant's kind; a typed constant's type is its
 `:tag` or its init's type. go/types folds untyped floats exactly while they fit a rational and
@@ -972,14 +1091,14 @@ added as the compiler is built (§15 Q17).
 Every `//go:` directive (and every other `//name:` directive go/ast recognises, such as
 `//export` and `//line`, §10.3) is kept. gc reads two kinds:
 
-1. **Attached** to the declaration that follows (no blank line or other code between):
-   `nosplit`, `noinline`, `noescape`, `norace`, `nocheckptr`, `systemstack`,
-   `nowritebarrier`, `nowritebarrierrec`, `yeswritebarrierrec`, `registerparams`,
-   `uintptrkeepalive`, `uintptrescapes`, `cgo_unsafe_args`, `wasmimport`, `wasmexport`, `fix`,
-   `embed` (before a `var` spec), `linkname` when written there, and any other. They are
-   metadata on the declared name, keyed `:go/<name>`, valued `true` when the directive has no
-   arguments and otherwise the argument text verbatim (a vector of such strings when one
-   directive occurs several times):
+1. **Attached** to the declaration that follows: `nosplit`, `noinline`, `noescape`, `norace`,
+   `nocheckptr`, `systemstack`, `nowritebarrier`, `nowritebarrierrec`, `yeswritebarrierrec`,
+   `registerparams`, `uintptrkeepalive`, `uintptrescapes`, `cgo_unsafe_args`, `wasmimport`,
+   `wasmexport`, `fix`, `embed` (before a `var` spec), `linkname` naming the declaration that
+   follows, and any other `//go:` directive not listed under 2. They are metadata on the
+   declared name, keyed `:go/<name>`, valued `true` when the directive has no arguments and
+   otherwise the argument text verbatim (a vector of such strings when one directive occurs
+   several times):
 
    ```clojure
    (go/func ^:go/nosplit ^:go/noinline f [] ...)
@@ -987,21 +1106,40 @@ Every `//go:` directive (and every other `//name:` directive go/ast recognises, 
    (go/var ^{:go/embed ["a.txt" "b.txt"] :tag embed/FS} files)
    ```
 
-   The printer writes them, one per line, between the doc comment and the declaration, sorted
-   by name (gc does not depend on their order).
-2. **Free-standing**: directives anywhere else at top level, which gc applies by name or to
-   the file (`linkname` naming another declaration, `cgo_import_dynamic`, `cgo_import_static`,
-   `cgo_export_*`, `cgo_ldflag`, `linknamestd`, `generate`). They are top-level forms in
-   source order: `(go/directive "//go:cgo_import_dynamic libc_read read \"libc.so\"")`, the
-   text verbatim.
+   **Which declaration** (amendment, accepted 2026-10-08): the next one, as gc decides it, *also
+   across blank lines and other comments*. gc's parser accumulates pragmas until the next
+   top-level declaration takes them, and drops what is left after each declaration
+   (`cmd/compile/internal/syntax/parser.go`, `takePragma` and `clearPragma`;
+   `noder/noder.go`), so a blank line does not detach a directive; the text of 2026-10-08
+   required "no blank line or other code between". Inside a `var`, `const` or `type` group a
+   directive attaches to the next spec of the group. A directive after the last declaration
+   of a file is free-standing.
 
-Directives before the package clause (`//go:build`, `//go:debug`) are in `go/file` (§4.3).
-Directives inside function bodies other than `//line` are not attached to anything gc reads;
-they are kept as statement-level `(go/directive "...")` forms when they occur.
+   The printer writes them, one per line, between the doc comment and the declaration, sorted
+   by name (gc does not depend on their order). After a doc comment it first writes a `//`
+   line, as gofmt separates a doc comment's text from its directives (amendment, accepted
+   2026-10-08); the converter's line accounting counts that line.
+2. **Free-standing**: directives that gc applies by name or to the file (`linkname` naming
+   another declaration, `cgo_import_dynamic`, `cgo_import_static`, `cgo_export_*`,
+   `cgo_ldflag` and every other `cgo_*`, `linknamestd`, `generate`, `build` out of the header),
+   and every directive that is not a `//go:` line (`//export f`, `//extern`, `//line`,
+   `//tool:name args` such as `//gcassert:inline`). They are top-level forms in source order,
+   where they stand: `(go/directive "//go:cgo_import_dynamic libc_read read \"libc.so\"")`,
+   the text verbatim. A non-`//go:` directive is never `:go/<name>` metadata, which would print
+   as a `//go:` line (amendment, accepted 2026-10-08).
+
+Directives before the package clause are in `go/file` (§4.3): `//go:build` and `// +build` in
+`:build`, the others (`//go:debug`) in `:directives`. Directives between the package clause and
+the end of the imports are elements of `:imports` (§4.3). Directives inside function bodies
+are not attached to anything gc reads; they are kept as statement-level `(go/directive "...")`
+forms in the statement list where they stand, `//line` included (§10.3). A `//line` comment
+that does not start at column 1 is not a directive for gc (`cmd/compile/doc.go`) and is an
+ordinary comment (amendment, accepted 2026-10-08).
 
 ### 9.2 `go:linkname`
 
-`linkname` is a directive like the others: attached or free-standing as written. A
+`linkname` is a directive like the others: attached when its first argument names the
+declaration that follows it, free-standing otherwise (§9.1). A
 `go/func ^:extern` with a `:go/linkname` (pull) has no body; one with a body and a one-argument
 `linkname` (push) is an ordinary function. Resolving names is the linker's business.
 
@@ -1044,14 +1182,30 @@ Positions are lines, and they are carried by the layout of the forms text:
 - **The forms file has the Go file's lines.** The converter writes each form that begins a Go
   line on that line number of the `.clj` file. Go's lines are never fewer than the forms need:
   Go puts one statement per line, and a closing `}` line becomes a blank line or a comment line.
-  The `in-ns` and `go/file` forms take the place of the package clause and the imports.
+  The `in-ns` and `go/file` forms take the place of the package clause and the imports: both
+  start on the package clause's line, and comments before it (a copyright) are `;;` lines
+  above (amendment, accepted 2026-10-08).
 - The reader attaches `:line` (and the `.clj` column, `:column`) to every list it reads. In this
   mode `:line` is the Go line; `:column` is meaningless and ignored.
 - **Symbols and vectors** that begin a Go line, and so carry no `:line` from the reader, get it
-  written: `^{:line 87} rune2Max`. A **literal** that begins a Go line (it cannot carry
-  metadata) is recorded in its parent's `:go/breaks`, a vector of the child indexes that begin a
-  new line: the rows of `utf8`'s `first` table begin with the symbol `as` and need nothing; a
-  table of numbers gets `^{:go/breaks [17 33 49]} (lit ...)`.
+  written: `^{:line 87} rune2Max`; so do `@` forms. A **literal** or keyword that begins a Go
+  line (it cannot carry metadata) is recorded in its parent's `:go/breaks`, a vector of the
+  child indexes that begin a new line. An index is the child's index as `nth` gives it, the
+  head being 0, and `:go/breaks` applies to every list, statement lists included: a final
+  `nil`, `-1` or `"?"` that begins its Go line as `return nil` is a break of its function or
+  `let` form (amendment, accepted 2026-10-08). The rows of `utf8`'s `first` table begin with
+  the symbol `as` and need nothing; a table of numbers with 16 to a row, each row on a line of
+  its own, gets `^{:go/breaks [2 18 34 50]} (lit (array 64 uint8) ...)` (`lit` is 0, the type
+  1, the first element 2).
+- **Lists placed after their line.** When the forms must put a list after its Go line (in
+  `(assert T x)` the type precedes `x`, and a `T` that spans lines pushes `x` down), the list
+  carries an explicit `:line`, which the reader keeps over its own (amendment, accepted
+  2026-10-08; 8 lists in std, all type assertions to multi-line interface types).
+- **Lists inside metadata** carry the reader's `:line` too, type forms in tags included
+  (`^{:tag (func [int] [bool])} f`), and a consumer takes them as recorded lines. So the
+  converter writes a declaration's doc string, name and signature on the declaration's line;
+  a doc string on a forms line of its own before a signature would push the signature's types
+  to later Go lines (amendment, accepted 2026-10-08).
 - **End lines.** gc uses the line of a function's closing brace (the implicit return, deferred
   calls at exit). Every `go/func`, `go/method` and `fn` form carries `:go/end`, that line:
   `^{:go/end 73} (go/func Search ...)`.
@@ -1075,12 +1229,24 @@ Every position of the syntax tree is kept, for byte-identical export data and li
   field names, kebab-cased as the helper writes them) to `[line column]`:
   `^{:go/pos {:op-pos [24 9]}} (+ a b)`, `^{:go/pos {:name-pos [12 2]}} x`,
   `^{:go/pos {:lparen [31 7] :rparen [31 19]}} (f x)`. A selector also has `:dot`, the position
-  of its `.` (go/ast has none; the helper computes it from the source).
+  of its `.` (go/ast has none; the helper computes it from the source); so does a type
+  assertion `(assert T x)`, which gc also positions at its dot (amendment, accepted
+  2026-10-08).
 - Literals and keywords get theirs in the parent's `:go/apos`, a map from child index to
   `[line column]` (`:value-pos` positions).
 - End positions (`:rbrace`, `:rparen`, `:rbrack`, `:colon` of case clauses, the file's end)
   are among the fields.
 - Columns count bytes from 1, as Go's do; tabs count one.
+- **Spliced nodes** (amendment, accepted 2026-10-08). Where a form stands for several go/ast
+  nodes, it carries the positions of the nodes it absorbs: a `go/func`, `go/method` or `fn`
+  form its `func` keyword and its body's braces (`:func`, `:lbrace`, `:rbrace`); a parameter
+  or result vector its field list's `:opening` and `:closing`; `when`, the loops, `switch`,
+  `type-switch` and `select` their body's `:lbrace` and `:rbrace`; `if` its then block's and
+  the else block's (`:else-lbrace`, `:else-rbrace`); a selector also its name's `:name-pos`,
+  and a qualified symbol `pkg/Name` the package name's `:x-pos`; a binding target its
+  statement's `:tok-pos`. Not kept: the positions of parentheses (N1), of the `return` keyword
+  of an implicit return (§6.4), of the inner operators of a merged chain (§7.5), and of a
+  literal's parts beyond its own position (`:go/apos` holds one position per child).
 
 This mode is for the G2 gate and for tools; it is not meant to be read.
 
@@ -1090,7 +1256,8 @@ This mode is for the G2 gate and for tools; it is not meant to be read.
 statement or declaration where they occur. Positions in the forms are the file's raw positions
 (`token.FileSet.PositionFor(p, false)`); the printed directive adjusts them again in gc, as in
 the original. A `/*line*/` directive inside an expression is not representable; the helper
-reports it (none occurs in `$GOROOT/src` outside `cmd` and testdata).
+warns, and the converter reports it and does not write it (none occurs in std; two programs of
+`$GOROOT/test`, `issue29504.go` and `issue38698.go`, have some).
 
 ### 10.4 Comments
 
@@ -1099,7 +1266,9 @@ reports it (none occurs in `$GOROOT/src` outside `cmd` and testdata).
 - **Directives** are data (§9).
 - **Other comments** are written by the converter as `;` comments in the forms text, at their
   Go line where the layout allows, and are lost when the forms are read: the printer does not
-  reproduce them. They do not count for equivalence (N8).
+  reproduce them. They do not count for equivalence (N8). A comment is written at the end of
+  its Go line (`; text`) or on a line of its own (`;; text`), each line of a block comment on
+  its line. Line comments after fields and specs are among them (§6.5).
 
 ## 11. What the converter writes, what is derived
 
@@ -1111,8 +1280,8 @@ reports it (none occurs in `$GOROOT/src` outside `cmd` and testdata).
 | constant values | `Types[e].Value`, `Const.Val()` | `:val` on constant names (§6.2, §7.3) |
 | expression types the local rules do not give | `Types[e].Type` | `:tag` on the expression (§8.3) |
 | inferred type arguments | `Instances` | `:inst` on the generic function's or method's symbol (§5.5) |
-| embedded-field paths of selections | `Selections[e].Index()` | `:go/via` names (§7.6) |
-| promoted keys of struct literals | the key's field object (helper: `LookupFieldOrMethod`) | `:go/via` map on `lit` |
+| embedded-field paths of selections | `Selections[e].Index()` (helper: `:sel`'s `:via`) | `:go/via` names (§7.6) |
+| promoted keys of struct literals | the key's field object (helper: `:field`'s `:via`) | `:go/via` map on `lit` |
 | field selection, method value, method expression | `Selections[e].Kind()` | `(.-f x)`, `(.M x ...)`, `((.-f x) ...)`, `method-expr` |
 | new against reused names in `:=` | `Defs` / `Uses` | `^:assign` |
 | package members, dot-imported names, universe names | `Uses` | `pkg/Name`, bare symbols, `go/call`, `go/id` |
@@ -1120,6 +1289,12 @@ reports it (none occurs in `$GOROOT/src` outside `cmd` and testdata).
 | package initialisation order | `InitOrder` | `:init-order` |
 | per-file language versions | `FileVersions` | `:lang` in `go/file` |
 | comma-ok forms | `Types[e]` mode `commaok` | two-target bindings (the shape suffices) |
+| constant kinds of `:val` | `Types[e].Type` of the constant (helper: `:t`), not the value's kind | `:val`'s representation (§8.2) |
+
+The converter also writes, from the syntax tree rather than go/types, what gc's output depends
+on beyond the normalisations (amendment, accepted 2026-10-08): `^:go/paren` on parenthesized
+operands of `and` and `or` (§7.5), `^:go/grouped` in generic declarations (§5.3) and local
+`const` groups with `^:go/implicit` (§7.3), and `:go/label` on labeled declarations (§7.3).
 
 ### 11.2 Derived by a consumer (from declarations)
 
@@ -1141,7 +1316,7 @@ The helper (developed in parallel under `tools/`) emits the typed tree generical
 spec the converter needs from it:
 
 1. Every node with all its position fields, raw (not adjusted by line directives), and the
-   position of each selector's `.` (§10.2).
+   position of the `.` of each selector and each type assertion (`:dot`, §10.2).
 2. All comment groups with positions, so the converter can attach doc comments, directives and
    `;` comments.
 3. `Types` (mode, type, value), `Defs`, `Uses`, `Implicits`, `Selections` (kind, index path,
@@ -1149,14 +1324,27 @@ spec the converter needs from it:
 4. **Types as structured data**, not `types.TypeString` strings: the converter writes type
    forms in `:inst` and `:tag`, and must qualify named types by package *path* (to map them to
    import names or namespaces, §4.4) and keep aliases (`types.Alias`) and instances
-   (`Named.TypeArgs`) apart. Each named or alias type as `{:path "pkg/path" :name "T" :args
-   [...]}` or a type table with ids would do.
-5. Constant values exactly: `constant.Value` kind plus exact string (`ExactString`), and for
-   floats that are not rationals, the decimal expansion go/constant can give.
+   (`Named.TypeArgs`) apart. The helper gives a **type table** (amendment, accepted
+   2026-10-08): one `:type-table` vector per dump, in dependency order, every annotation
+   referring to a type by its id (its index). Named types, aliases and type parameters are
+   leaves `{:kind :named :name N :pkg P}` (`:alias` with its `:actual`, `:type-param` with its
+   `:index`), qualified by package path; an instance names its `:origin` and `:args`; other
+   entries are interned by structure. A **local type** (declared in a function) and a **type
+   parameter** are identified by `:decl`, their declaring position `"file.go:L:C"`, so two
+   local types `T` of one package are two entries; the converter writes them by name, which
+   Go's scopes resolve (§4.4). The table's full shape is in
+   [HELPER-NOTES.md](HELPER-NOTES.md), "Types".
+5. Constant values exactly, with go/constant's kind: the helper writes integers, strings,
+   `(:float R)` with R an exact rational, `(:float M E)` for M·2^E beyond a rational's range,
+   and `(:complex ...)`. That kind can be narrower than the constant's type, so the converter
+   builds §8.2's representation from the type (`:t`), not from the kind (amendment, accepted
+   2026-10-08).
 6. For every key of a struct composite literal, the field's index path (go/types records only
-   the field object).
+   the field object), and for keys and selections the names of the embedded fields traversed
+   (`:via`), which become `:go/via` (§7.6).
 7. The configuration (§4.2), the file lists (`GoFiles` order, `SFiles`, `HFiles`, `SysoFiles`,
-   `EmbedFiles`) and the embed patterns.
+   `EmbedFiles`) and the embed patterns. The helper gives each of go list's lists apart; the
+   converter merges the non-Go ones into `:other-files` (§4.2).
 
 ## 12. The printer
 
@@ -1179,8 +1367,17 @@ expressions) is for consumers.
   binary levels: `* / % << >> & &^`, then `+ - | ^`, then comparisons, then `&&`, then `||`;
   unary operators bind tighter), around a right operand of the same precedence
   (`a - (b - c)`), around composite literals whose type is a bare name in `if`, `for` and
-  `switch` headers (`if x == (T{}) {`), around conversions to types that begin with `*`,
-  `<-`, `func` or `[` (`(*T)(x)`, `(<-chan int)(c)`, `(func())(f)`), and for `chan (<-chan T)`.
+  `switch` headers (`if x == (T{}) {`, also for instantiated generic types:
+  `switch (P[int]{}) {`), around conversions to types that begin with `*`, `<-`, `func` or
+  `chan` (`(*T)(x)`, `(<-chan int)(c)`, `(func())(f)`, `(chan int)(c)`), and for
+  `chan (<-chan T)`. A type that begins with `[` needs none (`[]byte(s)`) (amendment, accepted
+  2026-10-08). Beyond the grammar, an operand of `and` or `or` marked `^:go/paren` is
+  parenthesized (§7.5).
+- **Groups.** In a file whose forms carry `:go/grouped`, names are grouped exactly as marked
+  (§5.3); local `const` bindings marked `^:go/grouped` print as one `const ( ... )` group,
+  those marked `^:go/implicit` without their type and init (§7.3). A binding with `:go/label`
+  prints with its label (`L: x := 1`). A `go/directive` element of `:imports` prints between
+  the import declarations where it stands (§4.3).
 - `(- -1)` prints `- -1` (or `-(-1)`): two `-` never touch. A type parameter list with one
   parameter whose constraint begins with `*` or `(` gets a trailing comma (`[P *T,]`).
 - A n-ary form prints as a left-associative chain without parentheses.
@@ -1199,8 +1396,16 @@ expressions) is for consumers.
   ends the line (and adds a trailing comma where Go's semicolon rule needs one, before a `)` or
   `}` that follows on a later line). `:go/breaks` and `:go/end` likewise. It never puts a form
   on a later line than recorded. When a line break is not allowed at that point, it writes a
-  `/*line :N*/` directive instead. Indentation is tabs, as gofmt's; the output may be run
-  through `gofmt` afterwards, which keeps lines.
+  `/*line :N:1*/` directive instead, and when a form would land after its line (the header
+  took more lines than the original's), a `//line :N:1` line before it. The column is needed:
+  a line directive without a column keeps the previous file name only when it has one
+  (`cmd/compile/doc.go`; `syntax/parser.go`, `updateBase`), so `/*line :N*/` would record an
+  empty file name (amendment, accepted 2026-10-08). Indentation is tabs, as gofmt's.
+- **gofmt** is not run over the output (amendment, accepted 2026-10-08). gofmt keeps lines
+  only where the layout is already its own, and gofmt 1.27.1 breaks `switch (P[int]{}) {`: its
+  `stripParens` does not count an instantiated type as a type name and drops parentheses the
+  parser needs. The printer does gofmt's spacing and alignment itself (go/printer's rules and
+  `text/tabwriter`); with no positions, its output is gofmt's fixed point.
 - **Mode `:full`**: every token at its recorded line and column, with newlines, spaces, and
   `/*line :L:C*/` directives where a position cannot be reached by layout (a token whose
   column is left of the cursor). The output is not gofmt-formatted.
@@ -1235,33 +1440,33 @@ kinds, and the universe's builtins.
 | `File` | the file's `go/file` form and its top-level forms (§4.3) |
 | `Package` (deprecated) | not used: a package is `go/package` (§4.2) |
 | `Comment`, `CommentGroup` | doc strings and `:doc`, directives (§9), `;` comments (§10.4) |
-| `GenDecl` `import` | `go/file :imports` |
-| `GenDecl` `const`, `var`, `type` | `go/const`, `go/var`, `go/type` (groups as vectors); in functions `let`, `let-type` (§7.3) |
+| `GenDecl` `import` | `go/file :imports`, with `go/directive` elements among the specs (§4.3) |
+| `GenDecl` `const`, `var`, `type` | `go/const`, `go/var`, `go/type` (groups as vectors); in functions `let`, `let-type` (§7.3), a local `const` group as `^:go/grouped` and `^:go/implicit` bindings |
 | `ImportSpec` | `[name "path"]`, `^:alias`, `_`, `.` |
 | `ValueSpec` | a target and init (§6.2, §6.3) |
-| `TypeSpec` | a `go/type` or a spec vector; `^:alias` for `Assign` set |
+| `TypeSpec` | a `go/type` or a spec vector; `^:alias` for `Assign` set; in a function a `let-type` pair, `:type-params` metadata on a generic one's name |
 | `FuncDecl` | `go/func`, `go/method` |
-| `Field`, `FieldList` | tagged symbols and types in parameter, result and field lists (§5.3, §5.4); interface elements |
+| `Field`, `FieldList` | tagged symbols and types in parameter, result and field lists (§5.3, §5.4); interface elements; `^:go/grouped` for the field groups of generic declarations (§5.3) |
 | `BadDecl`, `BadStmt`, `BadExpr` | none: the converter rejects invalid packages |
-| `Ident` | a symbol; `pkg/Name`; `true`, `false`, `nil`; `(go/id "...")` |
-| `BasicLit` | Clojure literals, `(rune n)`, `(imaginary x)`, `(byte-string ...)` (§8.1) |
+| `Ident` | a symbol; `pkg/Name`; `true`, `false`, `nil`; `(go/id "...")`, tagged as a declared name (§4.4) |
+| `BasicLit` | Clojure literals, `(rune n)`, `(imaginary x)`, `(byte-string ...)` (§8.1); with a unary `-`, a negative Clojure number (§7.5) |
 | `CompositeLit` | `(lit T element*)` |
 | `KeyValueExpr` | `[key value]`, `:field value` |
 | `FuncLit` | `(fn ...)` |
-| `ParenExpr` | none (N1) |
+| `ParenExpr` | none (N1); `^:go/paren` on an operand of `and` or `or` (§7.5) |
 | `SelectorExpr` | `(.-f x)`, `(.M x ...)`, `pkg/Name`, `(method-expr T M)` |
 | `IndexExpr`, `IndexListExpr` | `(aget x i)`; `(inst F T...)`, `(G T...)` |
 | `SliceExpr` | `(subslice x lo hi max)` |
-| `TypeAssertExpr` | `(assert T x)`; in a type switch, the guard |
+| `TypeAssertExpr` | `(assert T x)`; in a type switch, the guard; its `:dot` in mode `:full` (§10.2) |
 | `CallExpr` | a call, `(conv T x)`, a builtin, `(go/call f ...)`; `Ellipsis` set: `(spread xs)` |
 | `StarExpr` | `@p`; `(* T)` in type positions |
 | `UnaryExpr` | `(- x)`, `(+ x)`, `(bit-not x)`, `(not x)`, `(addr x)`, `(<! ch)`; `(tilde T)` in constraints |
 | `BinaryExpr` | §7.5; `(\| A B)` in constraints |
 | `Ellipsis` | `&` in parameters, `(array ... T)` |
 | `ArrayType`, `StructType`, `FuncType`, `InterfaceType`, `MapType`, `ChanType` | type forms (§5.1) |
-| `DeclStmt` | `let`, `let-type`, `^:const` bindings |
+| `DeclStmt` | `let`, `let-type`, `^:const` bindings, `^:var` on a binding or a `values` target |
 | `EmptyStmt` | none (N2); `(label :L)` |
-| `LabeledStmt` | `(label :L stmt)` |
+| `LabeledStmt` | `(label :L stmt)`; on a declaration, `:go/label` on the first target of its `let` (§7.3) |
 | `ExprStmt` | the expression form |
 | `SendStmt` | `(>! ch v)` |
 | `IncDecStmt` | `(inc! x)`, `(dec! x)` |
@@ -1296,12 +1501,12 @@ kinds, and the universe's builtins.
 
 | map | use |
 |---|---|
-| `Types` | conversions and builtins by mode; constant values (`:val`); `:tag` on shifts (§8.3); comma-ok by mode; types for `:inst` |
+| `Types` | conversions and builtins by mode; constant values (`:val`), represented by the constant's type (§8.2); `:tag` on shifts (§8.3); comma-ok by mode; types for `:inst` |
 | `Instances` | `:inst`, and `inst` for explicit instantiation |
 | `Defs` | declared objects; new names of `:=` (others get `^:assign`) |
 | `Uses` | package members, dot imports, universe, `go/call`; reused names of `:=` |
 | `Implicits` | import names (`ImportSpec`); type-switch clause variables (derived, not written); unnamed parameters (nothing) |
-| `Selections` | `.-` against `.M` against field calls, `method-expr`; `:go/via` |
+| `Selections` | `.-` against `.M` against field calls, `method-expr`; `:go/via` (the helper's `:via`) |
 | `Scopes` | not written: the forms' nesting is Go's block structure |
 | `InitOrder` | `:init-order` |
 | `FileVersions` | `:lang` |
@@ -1311,7 +1516,7 @@ kinds, and the universe's builtins.
 | `types.Type` | form |
 |---|---|
 | `Basic` (typed) | `int` ... `uintptr`, `string`, `bool`, `unsafe/Pointer` |
-| `Basic` (untyped kinds) | never a type form: the kind is in `:val`'s representation (§8.2) |
+| `Basic` (untyped kinds) | never a type form: the kind is in `:val`'s representation (§8.2), `(binary-float M E)` included |
 | `Pointer`, `Slice`, `Array`, `Map`, `Chan` | `(* T)`, `(slice T)`, `(array n T)`, `(map K V)`, `(chan ...)` |
 | `Signature` | `(func [...] [...])`; signatures in declarations (§5.3) |
 | `Struct`, `Interface`, `Union` (and terms) | `(struct ...)`, `(interface ...)`, `(\| ...)`, `(tilde T)` |
@@ -1343,6 +1548,8 @@ kinds, and the universe's builtins.
 - Types (in type positions): `* slice array map chan func struct interface | tilde inst`.
 - Qualified, at top level or anywhere: `go/package go/file go/type go/const go/var go/func
   go/method go/directive go/call go/id`.
+- Data in `:val` only (§8.2), never code: `binary-float`, besides the literal heads `rune`,
+  `byte-string` and `complex`.
 
 A Go identifier equal to an unqualified reserved head is written as itself everywhere except
 as a callee, where it is `(go/call name ...)` (§4.4). In the standard library outside tests
@@ -1351,7 +1558,11 @@ this concerns mostly locals named `fn` (about 170 calls).
 ## 14. Worked examples
 
 The examples show mode `:lines` without the metadata the layout carries; `:go/end` is shown
-once.
+once. Their layout is illustrative: the converter puts each form on its Go line (§10.1), with
+`in-ns` and `go/file` on the package clause's line, which these excerpts do not all do
+(amendment, accepted 2026-10-08: the text said §14.1's forms were on Go's lines, but they are
+one line off, and `:go/end 15` is `Move`'s Go line, not its forms line). Doc strings ending in
+`...` are shortened.
 
 ### 14.1 The survey's sample (`.tmp/g2c/sample/sample.go`)
 
@@ -1472,8 +1683,7 @@ func Use() int32 {
 (load "sample/sample")
 ```
 
-`go/sample/sample.clj` (the converter puts each form on its Go line; the blank lines stand for
-Go's closing braces):
+`go/sample/sample.clj` (laid out for reading; the blank lines stand for Go's closing braces):
 
 ```clojure
 (in-ns 'go.sample)
@@ -1585,7 +1795,7 @@ Notes:
 
 ```clojure
 (go/const
-  "Numbers fundamental to the encoding."
+  "Numbers fundamental to the encoding.\n"
   [^{:val \uFFFD} RuneError \uFFFD]   ; the "error" Rune or "Unicode replacement character"
   [^{:val 128} RuneSelf 0x80]                ; characters below RuneSelf are represented as ...
   [^{:val (rune 0x10FFFF)} MaxRune (rune 0x10FFFF)]   ; Maximum valid Unicode code point.
@@ -1599,11 +1809,11 @@ Notes:
   ...)
 
 (go/const
-  [^{:val 239} runeErrorByte0 (bit-or t3 (>> RuneError 12))]
-  [^{:val 191} runeErrorByte1 (bit-or tx (bit-and (>> RuneError 6) maskx))]
-  [^{:val 189} runeErrorByte2 (bit-or tx (bit-and RuneError maskx))])
+  [^{:val \ï} runeErrorByte0 (bit-or t3 (>> RuneError 12))]
+  [^{:val \¿} runeErrorByte1 (bit-or tx (bit-and (>> RuneError 6) maskx))]
+  [^{:val \½} runeErrorByte2 (bit-or tx (bit-and RuneError maskx))])
 
-(go/var ^{:doc "first is information about the first byte in a UTF-8 sequence."} first
+(go/var ^{:doc "first is information about the first byte in a UTF-8 sequence.\n"} first
   (lit (array 256 uint8)
     ;;   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
     as as as as as as as as as as as as as as as as   ; 0x00-0x0F
@@ -1611,9 +1821,9 @@ Notes:
     s5 s6 s6 s6 s7 xx xx xx xx xx xx xx xx xx xx xx)) ; 0xF0-0xFF
 
 (go/type acceptRange
-  "acceptRange gives the range of valid values for the second byte in a UTF-8\nsequence."
-  (struct ^{:tag uint8 :doc "lowest value for second byte."} lo
-          ^{:tag uint8 :doc "highest value for second byte."} hi))
+  "acceptRange gives the range of valid values for the second byte in a UTF-8\nsequence.\n"
+  (struct ^uint8 lo     ; lowest value for second byte.
+          ^uint8 hi))   ; highest value for second byte.
 
 (go/var acceptRanges
   (lit (array 16 acceptRange)
@@ -1625,7 +1835,13 @@ Notes:
 ```
 
 `RuneError` and `MaxRune` are rune constants, and `:val` keeps the kind: a character, or
-`(rune n)` (data here, spelled as the literal) above the Basic Multilingual Plane. The row
+`(rune n)` (data here, spelled as the literal) above the Basic Multilingual Plane. So are
+`runeErrorByte0`-`2`: `t3 | RuneError>>12` combines an untyped int and an untyped rune, which
+gives an untyped rune, so their `:val`s are the characters U+00EF, U+00BF and U+00BD, not the
+integers 239, 191 and 189 (amendment, accepted 2026-10-08: the text showed integers). The
+comments after `acceptRange`'s fields are line comments, not doc comments, so they are `;`
+comments, not `:doc` (§6.5; amendment, accepted 2026-10-08). Doc strings end in a newline, as
+`CommentGroup.Text` gives them (§6.5). The row
 symbols of `first` begin their lines and get `^{:line ...}` in the text (§10.1), not shown.
 
 ```go
@@ -1836,12 +2052,141 @@ The printer's output for `encodeRuneNonASCII`'s first clause, from the forms abo
 
 `(bit-or tx (bit-and (conv byte r) maskx))` needs no parentheses (`&` binds tighter than `|`);
 `(bit-and (bit-or a b) c)` would print `(a | b) & c`. gofmt's spacing (`r>>6`, `byte(r)&maskx`)
-is cosmetic and comes from running gofmt on the output, which keeps the lines.
+is cosmetic; the printer computes it itself, by go/printer's rules, and does not run gofmt on
+its output (§12.3; amendment, accepted 2026-10-08: the text said the spacing came from running
+gofmt).
+
+### 14.5 The amended forms
+
+The amendments of 2026-10-08 in one file (`p.go`, checked with go1.27.1 and gofmt):
+
+```go
+package p
+
+import "cmp"
+
+//go:noinline
+
+func Clamp[T cmp.Ordered](x, lo, hi T) T {
+	return min(max(x, lo), hi)
+}
+
+func Count(s []byte, c byte) int {
+	const (
+		none = iota - 1
+		one
+	)
+	n := none + one
+retry:
+	i := 0
+	for i < len(s) && (s[i] == c || c == 0) {
+		n++
+		i++
+	}
+	if n < 0 {
+		n = 0
+		goto retry
+	}
+	return n
+}
+```
+
+```clojure
+(go/func ^:go/noinline Clamp :type-params [^cmp/Ordered T]
+  ^T [^T x ^:go/grouped ^T lo ^:go/grouped ^T hi]
+  (min (max x lo) hi))
+
+(go/func Count ^int [^{:tag (slice byte)} s ^byte c]
+  (let [^:const ^{:val -1} none (- iota 1)
+        ^:const ^:go/grouped ^:go/implicit ^{:val 0} one (- iota 1)
+        n (+ none one)]
+    (let [^{:go/label :retry} i 0]
+      (while (and (< i (len s)) ^:go/paren (or (== (aget s i) c) (== c 0)))
+        (inc! n)
+        (inc! i))
+      (when (< n 0)
+        (set! n 0)
+        (goto :retry))
+      n)))
+```
+
+- `//go:noinline` attaches to `Clamp` across the blank line, as gc attaches it (§9.1).
+- `Clamp` is generic, so its parameter group `x, lo, hi T` is kept: `lo` and `hi` are declared
+  with the name before them (§5.3). `Count`'s parameters are not in a generic declaration and
+  carry no marker.
+- The local `const` group keeps its grouping; `one` repeats `iota - 1` implicitly, written out
+  and marked (§7.3). The group and `n := ...` share one `let`.
+- `retry: i := 0` is a labeled declaration: it starts a `let` of its own, the label on its
+  first target (§7.3).
+- The parentheses around `s[i] == c || c == 0` are needed by precedence anyway; `^:go/paren`
+  records that the source had them, which matters where they are not needed:
+  `a && (b && c)` (§7.5).
 
 ## 15. Open questions
 
 Each with the recommendation the spec follows. **Settled (2026-10-08):** the user accepted all
 20 recommendations; they are part of the spec.
+
+**Amendments (2026-10-08).** Implementing the helper, the printer and the converter raised 28
+proposed amendments: seven by the helper's author (H1-H7, [HELPER-NOTES.md](HELPER-NOTES.md)),
+ten by the printer (A1-A10, [PRINTER-NOTES.md](PRINTER-NOTES.md)) and eleven by the converter
+(C1-C11, [CONVERTER-NOTES.md](CONVERTER-NOTES.md)), with the converter's corrections of the
+spec's text and the documented choices of its notes that fix the spec. The user accepted all of
+them on 2026-10-08. They are folded into the text above, marked "(amendment, accepted
+2026-10-08)" where they apply:
+
+- H1 `:dot` on type assertions too: §10.2, §11.3 (1), §13.1. H2 whether a `//go:` line
+  attaches across blank lines: settled by C1, §9.1. H3 the type table with ids, local types
+  and type parameters identified by `:decl`: §11.3 (4). H4 values narrower than their type,
+  `:val` built from `:t`: §8.2, §11.1, §11.3 (5), §13.3. H5 `:go/via` from the helper's `:via`:
+  §7.6, §11.1, §11.3 (6), §13.3. H6 the helper's file lists merged into `:other-files`: §4.2,
+  §11.3 (7). H7 `p_test` as `go.<path>_test`: §4.1.
+- A1 `^:go/grouped` for the field groups of generic declarations: §3.2 (N3), §5.3, §12.2,
+  §13.1, §14.5. A2 `:go/breaks` indexes by `nth`, on every list: §10.1. A3 `/*line :N:1*/`
+  and `//line :N:1`: §12.3. A4 conversion parentheses for `chan`, not `[`: §12.2. A5
+  `(inst G T)` in `new`'s operand: §5.5, §7.7. A6 directives other than `//go:` kept
+  verbatim: §9.1. A7 a `//` line between a doc comment and its directives: §9.1. A8 lines of
+  lists inside metadata: §10.1. A9 labeled declarations: §7.1, §7.3 (as C9). A10 no gofmt over
+  the printer's output: §12.3, §14.4.
+- C1 directives attach across blank lines: §9.1. C2 local `const` groups kept
+  (`^:go/grouped`, `^:go/implicit`): §3.2 (N6), §7.3, §12.2, §13.1, §14.5. C3 `^:go/paren` on
+  operands of `and` and `or`: §3.2 (N1), §7.5, §11.1, §12.2, §13.1, §14.5. C4 directives among
+  the imports: §4.3, §9.1, §12.2, §13.1. C5 a tagged `(go/id "x")` as a name: §4.4, §5.3,
+  §13.1. C6 local generic types: §7.3, §13.1. C7 `x.go.clj` on file-name collisions: §4.1. C8
+  `(binary-float M E)`: §8.2, §13.4, §13.5. C9 `:go/label` on the first target: §7.1, §7.3,
+  §12.2, §13.1, §14.5. C10 `^:var (values a b)`: §7.1, §7.3, §13.1. C11 `:full` positions of
+  spliced nodes: §10.2.
+- The spec's own text, corrected: `1.0E100` is exact by §8.1's rule (§8.2); `runeErrorByte0`
+  is an untyped rune, so its `:val` is a character (§14.2); `acceptRange`'s field comments are
+  line comments, not `:doc` (§6.5, §14.2); §14.1's lines are illustrative (§14); the spacing of
+  §14.4 is the printer's, not gofmt's.
+- The converter's documented choices that fix the spec: single-file programs'
+  namespaces (§4.1); the name of a package with test files only (§4.2); blank variables inside
+  `(values ...)` in `:init-order` (§6.3); doc text with its final newline (§6.5); negative
+  literals (§7.5); `cond` only for chains without init statements (§7.8); the float literal
+  rule and character spellings (§8.1); `linkname` attached only when it names the next
+  declaration, directives in groups, header and bodies, `//line` off column 1 (§9.1, §9.2);
+  `in-ns` and `go/file` on the package clause's line, explicit `:line` on lists placed after
+  their line, `:line` on `@` forms (§10.1); `/*line*/` inside expressions reported, not
+  written (§10.3); where ordinary comments go (§10.4).
+
+Where two amendments disagreed, the later and more specific won (the converter's over the
+printer's over the helper's):
+
+- H2 left open whether gc attaches a `//go:` line across a blank line; C1 verified that it does
+  (`syntax/parser.go`, `clearPragma`/`takePragma`) and is the rule.
+- A6 proposed attached metadata such as `:go/directives ["//export f"]`; the converter writes
+  every directive other than a `//go:` line as a free-standing `(go/directive "...")` form
+  where it stands, and that is the rule. Both keep the text verbatim.
+- A9 proposed `^{:go/label :L}` on the binding; C9 fixes it on the first target of the `let`
+  binding that holds the declaration, `var` declarations included, starting a `let` of its own.
+- A1 proposed `^:go/grouped` "at least inside generic declarations"; the converter writes it
+  only there, adds `^{:go/grouped false}` for names of equal type declared apart, and C2 reuses
+  the marker for local `const` groups.
+- H4 said to build `:val` from `:t`; the converter refines it for named types of other
+  packages, whose underlying type is not in the dump: there the value's kind decides (§8.2).
+- A5 asked for `(inst G T)` in `new`'s operand; the converter writes it in `method-expr`'s
+  operand as well (§5.5).
 
 1. **Positions.** Mode `:lines` carries Go lines in the layout of the forms text (no metadata
    on most forms; `:line` on line-starting symbols, `:go/breaks`, `:go/end`), and `:full`
@@ -1932,7 +2277,10 @@ Each with the recommendation the spec follows. **Settled (2026-10-08):** the use
     (predeclared types and builtins, `new` of a value), `assignments.go` (redeclaration in
     short variable declarations is recorded in `Uses`);
   - `src/cmd/compile/internal/syntax/parser.go` (gc positions: a selector at its `.`, a call at
-    its `(`, an operation at its operator);
+    its `(`, an operation at its operator; pragmas kept across blank lines, `takePragma` and
+    `clearPragma`; line directives' file names, `updateBase`),
+    `src/cmd/compile/internal/noder/noder.go` (pragma names);
+  - `src/go/printer/nodes.go` (spacing and parentheses), `src/cmd/gofmt` (`stripParens`);
   - `src/cmd/compile/doc.go` (line directives, function directives);
   - `doc/go_spec.html` ("Language version go1.27": generic methods, function type inference in
     assignment contexts, selector keys in struct literals; Go 1.24 generic aliases).
@@ -1949,6 +2297,8 @@ Each with the recommendation the spec follows. **Settled (2026-10-08):** the use
   (checked with `bin/arbace`).
 - go-lisp `/root/go-lisp` (`2483a496`): `golisp/SPEC.md` (invariants I1-I4, the node tables,
   directives, round-trip normalisations, end positions F10), `golisp/DESIGN.md` §4.1.
+- The amendments of 2026-10-08: `doc/go/HELPER-NOTES.md`, `doc/go/PRINTER-NOTES.md`,
+  `doc/go/CONVERTER-NOTES.md`, and the oracle's normalizations in `doc/go/ROUNDTRIP.md`.
 - Arbace: `doc/classes/SPEC.md` (structure, principles, tags, labels, `switch`),
   `doc/G2C-SURVEY.md`, the journal entry "Decisions on g2c's open questions" (2026-10-07, on
   the branch `arbace-for-java-26`).
