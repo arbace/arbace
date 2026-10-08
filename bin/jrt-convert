@@ -1,0 +1,231 @@
+#!/bin/bash
+# jrt's translated input (B1a step 3, doc/go/JRT-SOURCES.md): the Java source files of the
+# translation closure that bin/java-surface measured (doc/go/java-surface.edn, :closure :repl
+# :sources; 184 files of java.base), converted by j2c into class forms, compiled back with the
+# class forms compiler and compared with javac's classes, and the edge the translated classes
+# call into (what jrt hand-writes). Writes only under $JRT_WORK (default .tmp/jrt), regenerated
+# on every run (not tracked: the user's decision for j2c's output).
+#
+# Usage: bin/jrt-convert [--twice]
+#   --twice   afterwards run the generators and j2c a second time into $JRT_WORK/again and
+#             require the same files (determinism)
+# Steps ($JRT_STEPS, default all, comma-separated: sources,generate,convert,javac,check,edge,report):
+#   sources   the closure's files (g2c.jrt-sources/print-sources) copied from $JDK into
+#             $JRT_WORK/src/java.base (the tree j2c and javac read); sources.txt lists them
+#   generate  the 8 files the JDK build generates (CharacterData*, CaseFolding,
+#             IndicConjunctBreak) made as make/modules/java.base/gensrc/GensrcCharacterData.gmk
+#             and GensrcRegex.gmk make them: the build tools of make/jdk/src/classes/build/tools/
+#             {generatecharacter,generateextraproperties} compiled with $GEN_JDK's javac and run
+#             on $GEN_JDK's java (the build runs them on its boot JDK; CaseFolding's output
+#             depends on the running JDK's Unicode version) over src/java.base/share/data/
+#             unicodedata, into src/java.base; compared byte for byte with the JDK build's
+#             support/gensrc when $JDK/build has one (generated.edn)
+#   convert   bin/j2c ... jdk --check: the tree into class forms, $JRT_WORK/conv (java.base,
+#             attributed with --patch-module against the running JDK, built from the same sources)
+#   javac     the tree compiled twice by javac (ref1, ref2) with java.base's build options
+#   check     bin/class-forms-check on chunks of the converted files ($JRT_JOBS parallel JVMs):
+#             every class compiled from the forms (written to forms-classes) compared with
+#             javac's (REF=ref1:ref2), results in res/
+#   edge      g2c.jrt-sources/write-edge on forms-classes (edge.edn) and on ref1
+#             (edge-javac.edn, which must be the same)
+#   report    report.md and report.edn; manifest.sha256 (every file of src, conv, forms-classes)
+# Environment:
+#   JDK        jdk26u's checkout (default /root/jdk26u)
+#   SURFACE    the java-surface data (default doc/go/java-surface.edn; `bin/java-surface F`
+#              recomputes it)
+#   GEN_JDK    the JDK that compiles and runs the generators (default: the JDK build's boot JDK,
+#              JAVA_CMD of $JDK/build/*/spec.gmk, else /usr/lib/jvm/java-25-openjdk)
+#   JRT_WORK   work directory (default .tmp/jrt);  JRT_JOBS check JVMs (default 4, -Xmx3g each)
+#   J2C_JVM_OPTS  j2c's heap (default here -Xmx8g)
+# Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace). Exit status 0 when
+# every file converts and compiles to javac's class shapes (and, with --twice, is deterministic).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+. bin/lib/tools.bash
+arbace_runtime || exit 1
+jdk=${JDK:-/root/jdk26u}
+surface=${SURFACE:-$root/doc/go/java-surface.edn}
+work=${JRT_WORK:-$root/.tmp/jrt}
+case "$work" in /*) ;; *) work=$root/$work ;; esac
+jobs=${JRT_JOBS:-4}
+steps=${JRT_STEPS:-sources,generate,convert,javac,check,edge,report}
+twice=0
+[ "${1:-}" = "--twice" ] && twice=1
+has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
+clj() { java -Xss64m -Xmx4g -cp "$ARBACE_CP:$root/test" arbace.lang.Main -e "(require 'g2c.jrt-sources) $1"; }
+status=0
+mkdir -p "$work/log"
+t00=$(date +%s)
+
+conf=$(ls -d "$jdk"/build/*/spec.gmk 2>/dev/null | head -1)
+if [ -z "${GEN_JDK:-}" ]; then
+  GEN_JDK=$(sed -n 's|^JAVA_CMD := \(.*\)/bin/java$|\1|p' "$conf" 2>/dev/null)
+  [ -n "$GEN_JDK" ] || GEN_JDK=/usr/lib/jvm/java-25-openjdk
+fi
+gensrc_ref=${conf:+$(dirname "$conf")/support/gensrc/java.base}
+
+# the closure's sources, then the generated ones, into tree $1
+make_sources() {
+  local tree=$1 m kind rel
+  rm -rf "$tree"
+  mkdir -p "$tree/java.base"
+  clj "(g2c.jrt-sources/print-sources \"$surface\")" > "$work/sources.txt" || return 1
+  while read -r m kind rel; do
+    [ "$m" = java.base ] || { echo "not java.base: $m $rel" >&2; return 1; }
+    if [ "$kind" = share ]; then
+      mkdir -p "$tree/java.base/$(dirname "$rel")"
+      cp "$jdk/src/java.base/share/classes/$rel" "$tree/java.base/$rel"
+    fi
+  done < "$work/sources.txt"
+}
+
+generate() {
+  local tree=$1 out tools=$2 u c t f
+  u=$jdk/src/java.base/share/data/unicodedata
+  c=$jdk/src/java.base/share/classes
+  t=$jdk/make/jdk/src/classes
+  out=$tree/java.base
+  rm -rf "$tools"
+  "$GEN_JDK/bin/javac" -nowarn -d "$tools" \
+    "$t"/build/tools/generatecharacter/*.java "$t"/build/tools/generateextraproperties/*.java || return 1
+  # the build's JAVA_SMALL flags (spec.gmk: JAVA_FLAGS, JAVA_FLAGS_SMALL)
+  local java=("$GEN_JDK/bin/java" -Duser.language=en -Duser.country=US -XX:+UseSerialGC -Xms32M -Xmx512M
+              -XX:TieredStopAtLevel=1 -cp "$tools")
+  mkdir -p "$out/java/lang" "$out/jdk/internal/lang" "$out/jdk/internal/util/regex"
+  # GensrcCharacterData.gmk: SetupCharacterData NAME, OPTIONS, -usecharforbyte ARGS (release build:
+  # no -d)
+  chardata() {
+    "${java[@]}" build.tools.generatecharacter.GenerateCharacter $2 \
+      -template "$c/java/lang/$1.java.template" -spec "$u/UnicodeData.txt" \
+      -specialcasing "$u/SpecialCasing.txt" -proplist "$u/PropList.txt" \
+      -derivedprops "$u/DerivedCoreProperties.txt" -emojidata "$u/emoji/emoji-data.txt" \
+      -o "$out/java/lang/$1.java" -usecharforbyte $3
+  }
+  chardata CharacterDataLatin1 "" "-latin1 8" &&
+  chardata CharacterData00 "-string -plane 0" "11 4 1" &&
+  chardata CharacterData01 "-string -plane 1" "11 4 1" &&
+  chardata CharacterData02 "-string -plane 2" "11 4 1" &&
+  chardata CharacterData03 "-string -plane 3" "11 4 1" &&
+  chardata CharacterData0E "-string -plane 14" "11 4 1" &&
+  "${java[@]}" build.tools.generatecharacter.GenerateCaseFolding \
+    "$c/jdk/internal/lang/CaseFolding.java.template" "$u/CaseFolding.txt" \
+    "$out/jdk/internal/lang/CaseFolding.java" &&
+  "${java[@]}" build.tools.generateextraproperties.GenerateExtraProperties \
+    "$c/jdk/internal/util/regex/IndicConjunctBreak.java.template" "$u/DerivedCoreProperties.txt" \
+    "$out/jdk/internal/util/regex/IndicConjunctBreak.java" InCB=Linker InCB=Extend InCB=Consonant ||
+    return 1
+  # every gensrc file of the closure is made
+  while read -r _ kind rel; do
+    [ "$kind" = gensrc ] && [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; }
+  done < "$work/sources.txt"
+  return 0
+}
+
+convert() {
+  local tree=$1 conv=$2 log=$3
+  rm -rf "$conv"
+  # from $work: j2c's jdk command copies the files into .tmp/j2c-patch below the current directory
+  (cd "$work" && J2C_THREADS=4 J2C_JVM_OPTS=${J2C_JVM_OPTS:--Xmx8g} \
+     "$root/bin/j2c" -m arbace.j2c.main jdk --check "$conv" java.base "$tree/java.base") > "$log" 2>&1
+  tail -1 "$log"
+  grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$log"
+}
+
+if has sources; then
+  echo "== sources ($surface)"
+  make_sources "$work/src" || exit 1
+  echo "$(wc -l < "$work/sources.txt") files: $(grep -c ' share ' "$work/sources.txt") from $jdk/src/java.base/share/classes, $(grep -c ' gensrc ' "$work/sources.txt") generated"
+fi
+
+if has generate; then
+  echo "== generate (on $GEN_JDK: $("$GEN_JDK/bin/java" -version 2>&1 | head -1))"
+  t0=$(date +%s)
+  generate "$work/src" "$work/gen-tools" > "$work/log/generate.log" 2>&1 || { cat "$work/log/generate.log"; exit 1; }
+  {
+    if [ -n "$gensrc_ref" ]; then ref="\"$gensrc_ref\""; else ref=nil; fi
+    echo "{:gen-jdk \"$GEN_JDK\" :jdk-gensrc $ref"
+    echo " :files {"
+    while read -r _ kind rel; do
+      [ "$kind" = gensrc ] || continue
+      if [ -z "$gensrc_ref" ] || [ ! -f "$gensrc_ref/$rel" ]; then v=:no-reference
+      elif cmp -s "$work/src/java.base/$rel" "$gensrc_ref/$rel"; then v=:same
+      else v=:different; status=1; fi
+      echo "  \"$rel\" $v"
+    done < "$work/sources.txt"
+    echo "}}"
+  } > "$work/generated.edn"
+  echo "$(grep -c ':same' "$work/generated.edn") of 8 equal to $gensrc_ref ($(( $(date +%s) - t0 )) s)"
+fi
+
+if has convert; then
+  echo "== convert"
+  t0=$(date +%s)
+  convert "$work/src" "$work/conv" "$work/log/convert.log" || status=1
+  echo "($(( $(date +%s) - t0 )) s)"
+fi
+
+if has javac; then
+  echo "== javac (twice)"
+  t0=$(date +%s)
+  (cd "$work/src/java.base" && find . -name '*.java' | sed 's|^\./||' | sort) > "$work/javac.list"
+  for n in 1 2; do
+    rm -rf "$work/ref$n"
+    mkdir -p "$work/ref$n"
+    # java.base's options of the JDK build that change class files (test/j2c/jdk.bash)
+    (cd "$work/src/java.base" && javac -J-Xmx3g -XDstringConcat=inline --patch-module "java.base=$work/src/java.base" \
+       -implicit:none --enable-preview -source 26 -nowarn -XDsuppressNotes -d "$work/ref$n" \
+       "@$work/javac.list") > "$work/log/javac$n.log" 2>&1 || { echo "javac failed: $work/log/javac$n.log"; status=1; }
+  done
+  echo "$(find "$work/ref1" -name '*.class' | wc -l) classes ($(( $(date +%s) - t0 )) s)"
+fi
+
+if has check; then
+  echo "== compile the forms and compare with javac's classes ($jobs JVMs)"
+  t0=$(date +%s)
+  rm -rf "$work/res" "$work/chunks" "$work/forms-classes"
+  mkdir -p "$work/res" "$work/chunks" "$work/forms-classes"
+  # largest files first, dealt round-robin into chunks of about 8
+  (cd "$work/conv" && find . -mindepth 2 -name '*.clj' -printf '%s %P\n' | sort -k1,1nr -k2) |
+    awk -v n=$(( ($(find "$work/conv" -mindepth 2 -name '*.clj' | wc -l) + 7) / 8 )) \
+      '{ f = sprintf("'"$work"'/chunks/c.%04d", (NR - 1) % n); print $2 > f }'
+  ls "$work/chunks" | xargs -P "$jobs" -I{} bash -c '
+    k=${1#c.}
+    CONCAT=inline FILES="$2/chunks/$1" REF="$2/ref1:$2/ref2" CLASS_FORMS_CP="$2/conv" WRITE="$2/forms-classes" \
+      OUT="$2/res/$k.edn" JAVA_OPTS="-Xmx3g -XX:+UseSerialGC --add-modules ALL-SYSTEM" \
+      timeout 1800 bin/class-forms-check "$2/conv" > "$2/log/check-$k.log" 2>&1
+    [ -s "$2/res/$k.edn" ] || echo "check $k: no result, see $2/log/check-$k.log"' _ {} "$work"
+  echo "($(( $(date +%s) - t0 )) s)"
+fi
+
+if has edge; then
+  echo "== the edge"
+  clj "(g2c.jrt-sources/write-edge \"$work/forms-classes\" \"$surface\" \"$work/edge.edn\")
+       (g2c.jrt-sources/write-edge \"$work/ref1\" \"$surface\" \"$work/edge-javac.edn\")" || status=1
+fi
+
+if has report; then
+  echo "== report ($work/report.md)"
+  (cd "$work" && find src conv forms-classes -type f | LC_ALL=C sort | xargs sha256sum) > "$work/manifest.sha256"
+  out=$(clj "(let [s (g2c.jrt-sources/report \"$work\")]
+                (System/exit (if (and (= (:java-files s) (:converted s) (:checked-files s) (:identical-files s))
+                                      (zero? (:convert-failures s)) (zero? (:javac-errors s)))
+                               0 1)))") || status=1
+  echo "$out"
+fi
+
+if [ $twice = 1 ]; then
+  echo "== again: sources, generators and j2c a second time ($work/again)"
+  t0=$(date +%s)
+  mkdir -p "$work/again"
+  make_sources "$work/again/src" && generate "$work/again/src" "$work/again/gen-tools" > "$work/log/generate-again.log" 2>&1 \
+    && convert "$work/again/src" "$work/again/conv" "$work/log/convert-again.log" || status=1
+  if diff -r "$work/src" "$work/again/src" > "$work/log/again-src.diff" &&
+     diff -r "$work/conv" "$work/again/conv" > "$work/log/again-conv.diff"; then
+    echo "deterministic: $(find "$work/again/src" -type f | wc -l) sources and $(find "$work/again/conv" -type f | wc -l) converted files identical ($(( $(date +%s) - t0 )) s)"
+  else
+    echo "NOT deterministic: see $work/log/again-*.diff"; status=1
+  fi
+fi
+echo "jrt-convert: $(( $(date +%s) - t00 )) s, status $status"
+exit $status
