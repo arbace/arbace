@@ -86,9 +86,12 @@
       [[n "<clinit>" "()V"]])))
 
 (defn standin-roots
-  "Roots for the translated classes that replace jrt's stand-ins: the members the stand-in
-  defined (jrt's code may use them)."
+  "Roots for the translated classes that replace jrt's stand-ins: their static initializer
+  and the members the stand-in defined (jrt's code may use them)."
   [scan T]
+  (concat
+    (for [n T :let [jc (get (:jrt-classes m/*w*) n)] :when (and jc (:standin jc) (a/decl n))]
+      [n "<clinit>" "()V"])
   (for [n T
         :let [jc (get (:jrt-classes m/*w*) n)]
         :when (and jc (:standin jc))
@@ -101,7 +104,7 @@
                        (m/static? mm) (str g "_" (nm/method-base (:name mm) (:desc mm)))
                        :else (nm/method-base (:name mm) (:desc mm)))]
         :when (or (contains? funcs gn) (contains? meths gn))]
-    [n (:name mm) (:desc mm)]))
+    [n (:name mm) (:desc mm)])))
 
 ;; ---------------------------------------------------------------------------------------
 ;; filtering jrt's stand-ins
@@ -223,9 +226,11 @@
             slice? (fn [n] (boolean (in-slice? (top-of n))))
             ;; the stand-ins the translated classes replace: the members they define are roots
             ;; too (jrt's own code uses them), to a fixpoint
-            res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice?})) n 0]
+            ;; every stand-in c2g can translate (in the slice) is replaced (C2G-SPEC §4.3)
+            standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
+            res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
                   (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
-                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice?}))]
+                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
             wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
@@ -274,6 +279,18 @@
               (when-let [fr (out/frames-forms pkg classes)] (swap! files assoc [pkg "c2g_frames.go"] (vec fr)))
               (when (= pkg :jrt) (swap! files assoc [pkg "c2g_support.go"] (out/support-forms))))
             (swap! files assoc [pkg "c2g_cut.go"] (vec (out/cut-forms pkg (filter #(= pkg (m/pkg %)) @cuts))))
+            ;; the classes that replace jrt's stand-ins initialize at Go package initialization:
+            ;; jrt's hand-written code reads their statics as the stand-ins' package variables
+            ;; (C2G-NOTES.md, proposed amendment A3)
+            (when (= pkg :jrt)
+              (let [eager (sort (for [n T :let [j (get jc n)]
+                                      :when (and j (:standin j) (a/decl n) (not (m/trivial-init? n))
+                                                 (contains? (:reached res) [n "<clinit>" "()V"]))]
+                                  n))]
+                (when (seq eager)
+                  (swap! files assoc [pkg "c2g_init.go"]
+                         [(apply list 'go/func 'init []
+                                 (for [n eager] (list (symbol (str (m/go-name n) "_Init")))))]))))
             (swap! files assoc [pkg "c2g_strings.go"] (vec (out/strings-forms pkg @(:lits ps))))
             (swap! files assoc [pkg "c2g_up.go"] (vec (out/ups-forms pkg @(:ups ps)))))
           (let [t-trans (secs t2)
@@ -291,9 +308,16 @@
                 _ (when (.exists (io/file prog-dir)) (doseq [f (reverse (file-seq (io/file prog-dir)))] (io/delete-file f true)))
                 replaced (for [n T :let [j (get jc n)] :when (and j (:standin j))] n)
                 replaced-by-file (group-by #(:file (get jc %)) replaced)
+                ;; a stand-in file all of whose classes are translated goes as a whole (its
+                ;; helpers refer to the stand-in's own shapes)
+                whole-files (set (for [[fname defined] (group-by :file (vals jc))
+                                       :when (and fname (str/starts-with? fname "standin_"))
+                                       :when (every? (fn [j] (some #(= (:go j) (m/go-name %)) (get replaced-by-file fname))) defined)]
+                                   fname))
                 hw-files (sort (for [^java.io.File f (.listFiles (io/file jrt-dir))
                                      :let [nme (.getName f)]
                                      :when (and (str/ends-with? nme ".clj")
+                                                (not (contains? whole-files nme))
                                                 (or (:tests opts) (not (str/ends-with? nme "_test.clj"))))]
                                  nme))
                 _ (doseq [fname hw-files]
