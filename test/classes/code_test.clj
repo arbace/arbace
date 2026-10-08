@@ -1,5 +1,5 @@
 (ns classes.code-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest control-flow-shape
@@ -125,7 +125,7 @@
                        (unchecked-add-int 1 (try (Integer/parseInt s) (catch NumberFormatException e -1))))
                      (method ^:public ^:static truth ^String [o]
                        (if o "yes" "no")))])
-        call (fn [m & args] (clojure.lang.Reflector/invokeStaticMethod Flow (name m) (object-array args)))]
+        call (fn [m & args] (arbace.lang.Reflector/invokeStaticMethod Flow (name m) (object-array args)))]
     (is (= (+ 45 300) (call 'loops 10)))
     (is (= 31 (call 'labeled 3)))
     (is (= 6 (call 'labeled -3)))
@@ -144,14 +144,14 @@
                     {:n n :kw :foo :sym 'bar :vec [1 "two" n] :set #{:a} :twice (twice n)
                      :quoted '(1 (2 3) {:x [y]})}))])]
     (is (= {:n 3 :kw :foo :sym 'bar :vec [1 "two" 3] :set #{:a} :twice 6 :quoted '(1 (2 3) {:x [y]})}
-           (clojure.lang.Reflector/invokeStaticMethod C "data" (object-array [(int 3)]))))))
+           (arbace.lang.Reflector/invokeStaticMethod C "data" (object-array [(int 3)]))))))
 
 (deftest reflection-escape
   (let [[C] (load-forms 'classes.code-test
               '[(^:public ^{:reflection :warn} Refl
                   (method ^:public ^:static len [o] (.length o)))])]
-    (is (= 3 (clojure.lang.Reflector/invokeStaticMethod C "len" (object-array ["abc"]))))
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (= 3 (arbace.lang.Reflector/invokeStaticMethod C "len" (object-array ["abc"]))))
+    (is (thrown? arbace.lang.ExceptionInfo
                  (load-forms 'classes.code-test '[(^:public NoRefl (method ^:public ^:static len [o] (.length o)))])))))
 
 (deftest jumps-and-handlers-in-argument-positions
@@ -173,7 +173,7 @@
                                        (label :out
                                          (for-each [^int x xs] (when (< x 0) (break :out x)))
                                          0))))])
-        call (fn [m & args] (clojure.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
+        call (fn [m & args] (arbace.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
     (is (= 3 (call 'a "2")))
     (is (= 1 (call 'a "x")))
     (is (= ["yes" "no"] [(call 'b true) (call 'b false)]))

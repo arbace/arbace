@@ -2,7 +2,7 @@
   "Prints converted forms as Clojure source text: ordered metadata, class references named
   by the file's import table, and a layout in the usual Clojure style."
   (:require [arbace.j2c.forms :as f]
-            [clojure.string :as str])
+            [arbace.string :as str])
   (:import [arbace.j2c.forms CRef Raw]))
 
 (def width 100)

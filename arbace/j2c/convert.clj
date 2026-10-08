@@ -4,7 +4,7 @@
   (:require [arbace.j2c.forms :as f :refer [m+ tag member cref]]
             [arbace.j2c.jtypes :as jt :refer [erasure prim? ref-type? same? subtype? tag-name]]
             [arbace.j2c.resolve :as res]
-            [clojure.string :as str])
+            [arbace.string :as str])
   (:import [arbace.j2c.forms CRef]
            [com.sun.tools.javac.tree JCTree JCTree$JCCompilationUnit JCTree$JCClassDecl
             JCTree$JCMethodDecl JCTree$JCVariableDecl JCTree$JCBlock JCTree$JCExpressionStatement
@@ -53,21 +53,13 @@
   (let [n (swap! (:counter env) inc)]
     (symbol (str base "-" n))))
 
-(def new-heads
-  "Names of the new forms and operators (spec §5.4, §9.5), qualified with arbace.core/ when a
-  local or field shadows them."
-  #{"label" "break" "continue" "return" "switch" "lambda" "method-ref" "java-str" "java-assert"
-    "for-each" "with-resources" "if-instance" "when-instance" "anon" "letclass"})
-
 (defn h
-  "The head symbol `s`, qualified when a local or field of that name is in scope."
+  "The head symbol `s`, qualified as arbace.core/s when a local or field of that name is in
+  scope."
   [env s]
   (let [n (name s)]
     (if (or (contains? (:names env) n) (contains? (:fields env) n))
-      (symbol (if (or (new-heads n) (str/ends-with? n "-float") (str/ends-with? n "-int")
-                      (#{"unchecked-divide" "unchecked-remainder"} n))
-                "arbace.core" "clojure.core")
-              n)
+      (symbol "arbace.core" n)
       s)))
 
 (defn- shadow-set [env]
@@ -3097,7 +3089,7 @@
 
 (defn- sh [s]
   (if (contains? *local-names* (name s))
-    (symbol (if (new-heads (name s)) "arbace.core" "clojure.core") (name s))
+    (symbol "arbace.core" (name s))
     s))
 
 (defn simplify [x]

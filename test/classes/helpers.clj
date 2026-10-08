@@ -1,9 +1,9 @@
 (ns classes.helpers
   "Helpers for the class forms tests: compile class forms and equivalent Java with javac, and
   compare the class shapes (SPEC §3). Everything is written under .tmp/class-forms-tests/."
-  (:require [clojure.test :refer [is]]
-            [clojure.java.io :as io]
-            [clojure.string :as str]
+  (:require [arbace.test :refer [is]]
+            [arbace.java.io :as io]
+            [arbace.string :as str]
             [arbace.classes.analyze :as a]
             [arbace.classes.compiler :as compiler]
             [arbace.classes.shape :as shape]))

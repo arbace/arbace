@@ -1,16 +1,16 @@
 (ns arbace.j2c.build
-  "Compile converted files with the class forms compiler (arbace.classes, stage 0) into class
+  "Compile converted files with the class forms compiler (arbace.classes) into class
   files, to run the converted baseline: Clojure's test suite against classes compiled from the
   converter's output.
 
   bin/j2c -m arbace.j2c.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
     Compiles every converted file of the package directories (default: all directories with
     .clj files) and writes the classes under CLASSES-DIR. Prints the files that do not compile."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]))
+  (:require [arbace.java.io :as io]
+            [arbace.string :as str]))
 
 (defn- read-forms [f]
-  (with-open [r (clojure.lang.LineNumberingPushbackReader. (io/reader f))]
+  (with-open [r (arbace.lang.LineNumberingPushbackReader. (io/reader f))]
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
 
@@ -24,10 +24,8 @@
         nsname (if (= 'ns (first ns-form)) (second ns-form) (second (second ns-form)))
         ns (create-ns nsname)]
     (binding [*ns* ns]
-      (refer 'clojure.core)
-      ;; heads the converter qualifies as arbace.core/... are clojure.core's at stage 0
-      (when-not (find-ns 'arbace.core) (alias 'arbace.core 'clojure.core))
-      (doseq [fm forms :when (and (seq? fm) (#{'import 'clojure.core/import} (first fm)))] (eval fm)))
+      (refer 'arbace.core)
+      (doseq [fm forms :when (and (seq? fm) (#{'import 'arbace.core/import} (first fm)))] (eval fm)))
     (let [cforms (for [fm forms :when (and (seq? fm) (= 'defclass (first fm)))] (rest fm))]
       (try
         (compile-forms ns cforms)

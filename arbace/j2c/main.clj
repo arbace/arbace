@@ -8,17 +8,17 @@
     Options:
       --rename FROM=TO   rename the package prefix FROM to TO (e.g. clojure=arbace)
       --javac OPT        pass an option to javac (repeatable)
-      --check            also check that every output reads with clojure.core/read and
-                         clojure.edn/read, and write a coverage report to OUT/j2c-report.edn"
+      --check            also check that every output reads with arbace.core/read and
+                         arbace.edn/read, and write a coverage report to OUT/j2c-report.edn"
   (:require [arbace.j2c.javac :as javac]
             [arbace.j2c.convert :as cv]
             [arbace.j2c.jtypes :as jt]
             [arbace.j2c.names :as names]
             [arbace.j2c.print :as pr]
-            [clojure.edn :as edn]
-            [clojure.java.io :as io]
-            [clojure.pprint :as pp]
-            [clojure.string :as str])
+            [arbace.edn :as edn]
+            [arbace.java.io :as io]
+            [arbace.pprint :as pp]
+            [arbace.string :as str])
   (:import [java.io File PushbackReader StringReader]))
 
 (defn java-files [paths]
@@ -52,7 +52,7 @@
        (catch Throwable e (str (.getMessage e) (some->> (.getCause e) .getMessage (str ": "))))))
 
 (defn readable
-  "{:core err :edn err}: nil errors when clojure.core/read and clojure.edn/read read `text`."
+  "{:core err :edn err}: nil errors when arbace.core/read and arbace.edn/read read `text`."
   [text]
   {:core (read-error (fn [t] (binding [*read-eval* false] (read-all #(read %1 false %2) t))) text)
    :edn (read-error (fn [t] (read-all #(edn/read {:eof %2 :default (fn [t v] v)} %1) t)) text)})
@@ -121,7 +121,7 @@
   (let [counts (volatile! {})]
     (letfn [(bump [k] (vswap! counts update k (fnil inc 0)))
             (walk [x]
-              (when (instance? clojure.lang.IObj x)
+              (when (instance? arbace.lang.IObj x)
                 (doseq [it (arbace.j2c.forms/items x)]
                   (if (keyword? it) (bump (str "^:" (name it))) (bump (str "^" (name (first it)))))))
               (cond
@@ -162,7 +162,7 @@
     (doseq [f failures] (println "FAILED" (:source f) (:error f)) (run! #(println "   " %) (:trace f)))
     (doseq [u unreadable] (println "UNREADABLE" (:path u) (:core u)))
     (when (seq edn-errors)
-      (println "clojure.edn/read errors by kind:"
+      (println "arbace.edn/read errors by kind:"
                (frequencies (map #(cond (re-find #"Invalid token: .*/[0-9]+$" %) "array class symbol"
                                         (re-find #"Metadata must be" %) "param-tags metadata"
                                         :else %)

@@ -10,7 +10,7 @@ SPEC.md, last section).
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/classes/boot.clj` | `arbace.classes.boot` | driver: at stage 0 loads the others mapping `arbace.*` to `clojure.*`, and loads `arbace/core_classes.clj` into `clojure.core`; from stage 1 on just requires them |
+| `arbace/classes/boot.clj` | `arbace.classes.boot` | driver: requires the others (until the freeze it also ran them at stage 0, the frozen Clojure, mapping `arbace.*` to `clojure.*` and loading `arbace/core_classes.clj` into `clojure.core`; that path is on the branch `arbace-for-java-26`) |
 | `arbace/classes/types.clj` | `arbace.classes.types` | type forms (§4.3), descriptors, erasure, `Signature` strings |
 | `arbace/classes/env.clj` | `arbace.classes.env` | class environment (§9.2): class infos from the compilation, from earlier definitions and by reflection (constants from class files); member lookup and access; package class loaders (§10) |
 | `arbace/classes/parse.clj` | `arbace.classes.parse` | syntax of class forms and members, class access flags |
@@ -18,25 +18,24 @@ SPEC.md, last section).
 | `arbace/classes/emit.clj` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
 | `arbace/classes/compiler.clj` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
 | `arbace/classes/lower.clj` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into class forms and other forms the compiler knows (section "Clojure in class bodies" below) |
-| `arbace/classes/build.clj` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` and `bin/vendor-arbace` (`doc/VENDOR-NOTES.md`) |
+| `arbace/classes/build.clj` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` (`doc/VENDOR-NOTES.md`) |
 | `arbace/classes/native.clj` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
 | `arbace/core_classes.clj` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.clj` (formerly `arbace.classes.core`) |
 | `arbace/classes/verify.clj` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.clj` |
 | `arbace/classes/shape.clj` | `arbace.classes.shape` | class shapes (§3) as data, and their differences, for comparing with javac |
 | `test/classes/*_test.clj` | `classes.*-test` | the tests; `test/classes/helpers.clj` compiles Java with javac in-process and compares shapes |
-| `bin/class-forms-tests` | | runs the tests |
+| `bin/class-forms-tests` | | runs the tests, on Arbace (below) |
 
-The compiler's sources name ASM `arbace.asm`: the boot driver rewrites those symbols while it
-reads the files (also inside metadata such as type hints), so the same sources are also
-compiled into stage 1 and later stages against the vendored `arbace.asm`. Its other
-dependencies on the frozen Clojure are ordinary `clojure.core` functions, `proxy` (for ASM's
-`ClassWriter` and visitors) and `clojure.lang.DynamicClassLoader`/`RT` for the REPL loaders.
+The compiler's sources name ASM `arbace.asm` and the runtime `arbace.*`. Until the freeze, the
+boot driver rewrote those symbols to `clojure.*` while it read the files at stage 0 (also inside
+metadata such as type hints), so the same sources ran on the frozen Clojure and built stage 1.
+Its other dependencies are ordinary core functions, `proxy` (for ASM's `ClassWriter` and
+visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
 ## Use
 
 ```
-$ java -cp . clojure.main
-user=> (require 'arbace.classes.boot)
+$ bin/arbace
 user=> (defclass ^:public Counter
          (field ^:private ^int n)
          (method ^:public inc ^int [this] (set! n (unchecked-inc-int n))))
@@ -45,9 +44,9 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
 2
 ```
 
-- Loading `arbace.classes.boot` loads the compiler and interns the new names into `clojure.core`,
-  so namespaces created afterwards refer them; `user` gets them referred directly
-  (`(arbace.classes.boot/install! 'some.ns)` refers them into another existing namespace).
+- The class forms are native (section "Native class forms" below): `arbace.core` holds their
+  names and the compiler loads `arbace.classes` on first use. `(require 'arbace.classes.boot)`
+  loads the compiler's namespaces at once.
 - `defclass` compiles at macroexpansion time, defines the classes in their package's loader,
   imports the top-level class and evaluates to it. Under `*compile-files*` (`compile`) the classes
   are also written to `*compile-path*`; the compiled namespace then imports them from the class
@@ -60,7 +59,12 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   modules); `*method-parameters*`, `true` for javac's `-parameters`.
 
 Tests: `bin/class-forms-tests [namespace...]`, for example `bin/class-forms-tests
-classes.nested-test`. They write only under `.tmp/class-forms-tests/`. Most compare the classes
+classes.nested-test`. They write only under `.tmp/class-forms-tests/`. Since the freeze they run
+on Arbace, `target/stage2` (built by `bin/build-arbace`) with the checkout's sources, so an
+edited compiler namespace loads from source; and with the frozen `clojure/`'s javac classes on
+the class path, extracted once from the tag `arbace-for-java-26-v1` into `.tmp/frozen/` (both by
+`bin/lib/tools.bash`): some tests compare with them (`Keyword`, `Reduced`). Until the freeze they
+ran at stage 0. Most compare the classes
 compiled from class forms with javac's for the equivalent Java (in-process `javax.tools`), by
 shape: flags, supertypes, signatures, nest and inner class attributes, fields, methods,
 `MethodParameters`, annotations and the symbolic content of code (member and class references,
@@ -344,7 +348,8 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
 `bin/class-forms-check DIR [PACKAGE-DIR]` compiles converted files (one file per Java file:
 `in-ns`, `import`, `defclass` forms) without defining anything, and compares the shape of every
 class with the class of the same name on the class path. For `clojure/lang` and `clojure/asm`
-those are the baseline's javac classes. On 2026-10-06 the converter's output for the 183 baseline
+those are the baseline's javac classes (`CLASS_FORMS_CP`: `bin/j2c-check` puts the frozen tree
+of `.tmp/frozen/` there). It runs on Arbace (`bin/lib/tools.bash`). On 2026-10-06 the converter's output for the 183 baseline
 files (read from its work area, not committed) first gave 138 of 139 `clojure/lang` files and
 4 of 5 `clojure/asm/commons` ones shape-identical to javac (the others all), after patching two
 converter issues by hand (notes for the converter, below); with the converter's later output all

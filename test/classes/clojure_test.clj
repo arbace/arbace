@@ -1,12 +1,12 @@
 (ns classes.clojure-test
-  "Clojure code in class bodies (SPEC §5.13), beyond the Java subset, also at stage 0: fn,
+  "Clojure code in class bodies (SPEC §5.13), beyond the Java subset: fn,
   letfn, case, def and var, calls of locals and other values, Clojure's operations on any
   value, constants of any kind."
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (defn- call [c m & args]
-  (clojure.lang.Reflector/invokeStaticMethod ^Class c ^String m (object-array args)))
+  (arbace.lang.Reflector/invokeStaticMethod ^Class c ^String m (object-array args)))
 
 (def ^:dynamic *dyn* 1)
 

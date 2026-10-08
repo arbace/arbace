@@ -1,8 +1,8 @@
 ;; Compiles converted Java files (class forms written by the converter, one file per Java file:
 ;; (in-ns ...) and (import ...) then defclass forms) with the class forms compiler, without
 ;; defining anything, and compares each class's shape with the class of the same name on the class
-;; path (the baseline's javac classes for clojure/, the running JDK's own classes for a converted
-;; JDK module).
+;; path (for the frozen clojure/, its javac classes, which bin/j2c-check puts on the class path;
+;; for a converted JDK module, the running JDK's own classes). Runs on Arbace (bin/lib/tools.bash).
 ;;
 ;; Usage: bin/class-forms-check DIR [SUBDIR]
 ;;   checks every .clj file under DIR/SUBDIR (SUBDIR defaults to clojure/lang); each file is
@@ -24,10 +24,9 @@
 ;;                    are compiled and compared (package-info, module-info)
 ;; For a JDK module run the JVM with --add-modules ALL-SYSTEM (bin/class-forms-check passes
 ;; JAVA_OPTS) so that all of the JDK's classes resolve.
-(require 'arbace.classes.boot)
 (require '[arbace.classes.compiler :as compiler] '[arbace.classes.analyze :as a]
          '[arbace.classes.emit :as e] '[arbace.classes.shape :as shape]
-         '[clojure.java.io :as io] '[clojure.string :as str])
+         '[arbace.java.io :as io] '[arbace.string :as str])
 
 (def src-root (or (first *command-line-args*)
                   (throw (IllegalArgumentException. "usage: bin/class-forms-check DIR [SUBDIR]"))))
@@ -35,7 +34,7 @@
 (def only (set (remove str/blank? (str/split (or (System/getenv "ONLY") "") #","))))
 
 (defn read-forms [f]
-  (with-open [r (clojure.lang.LineNumberingPushbackReader. (io/reader f))]
+  (with-open [r (arbace.lang.LineNumberingPushbackReader. (io/reader f))]
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
 
@@ -60,10 +59,10 @@
      (let [d (io/file (first ref-dirs) pkg-path)]
        (reduce (fn [m ^java.io.File f]
                  (let [src (atom nil)
-                       cr (clojure.asm.ClassReader. (java.nio.file.Files/readAllBytes (.toPath f)))]
-                   (.accept cr (proxy [clojure.asm.ClassVisitor] [clojure.asm.Opcodes/ASM9]
+                       cr (arbace.asm.ClassReader. (java.nio.file.Files/readAllBytes (.toPath f)))]
+                   (.accept cr (proxy [arbace.asm.ClassVisitor] [arbace.asm.Opcodes/ASM9]
                                  (visitSource [s _] (reset! src s)))
-                            (bit-or clojure.asm.ClassReader/SKIP_CODE clojure.asm.ClassReader/SKIP_FRAMES))
+                            (bit-or arbace.asm.ClassReader/SKIP_CODE arbace.asm.ClassReader/SKIP_FRAMES))
                    (update m @src (fnil conj #{}) (str (when (seq pkg-path) (str pkg-path "/"))
                                                        (str/replace (.getName f) #"\.class$" "")))))
                {}
@@ -98,10 +97,7 @@
               nsname (second (second ns-form))
               ns (do (remove-ns nsname) (create-ns nsname))
               collisions (binding [*ns* ns]
-                           (refer 'clojure.core)
-                           ;; heads the converter qualifies as arbace.core/... (shadowed names)
-                           ;; are clojure.core's at stage 0
-                           (when-not (find-ns 'arbace.core) (alias 'arbace.core 'clojure.core))
+                           (refer 'arbace.core)
                            (vec (mapcat #(a/import-classes! ns %)
                                         (filter #(and (seq? %) (= 'import (first %))) forms))))
               classes (binding [*ns* ns

@@ -1,5 +1,5 @@
 (ns classes.forms-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest strings-asserts-loops-resources
@@ -64,7 +64,7 @@
                     (anon AutoCloseable [] (method ^:public close ^void [this] (.append sb (java-str "close " n ";")))))
                   (method ^:static bad ^AutoCloseable []
                     (anon AutoCloseable [] (method ^:public close ^void [this] (throw (RuntimeException. "close"))))))])
-        call (fn [m & args] (clojure.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
+        call (fn [m & args] (arbace.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
     (is (= "i=5, o=[1 2], c=c, n=null" (call 'strs (int 5) [1 2])))
     (is (= -2 (call 'firstNeg (int-array [1 -2 -3]))))
     (is (nil? (call 'firstNeg (int-array [1 2]))))
@@ -131,8 +131,8 @@
         o (.newInstance (.getConstructor C (into-array Class [])) (object-array 0))]
     (is (= 15 (.applyAsInt (.adder o 2) 3)))
     (is (= 0 (.applyAsInt (.adder o 2) -3)))
-    (is (= ["a" "b" "c"] (vec (clojure.lang.Reflector/invokeStaticMethod C "sorted" (object-array [["c" "a" "b"]])))))
-    (is (= ["X" "Y"] (vec (clojure.lang.Reflector/invokeStaticMethod C "upper" (object-array [["x" "y"]])))))))
+    (is (= ["a" "b" "c"] (vec (arbace.lang.Reflector/invokeStaticMethod C "sorted" (object-array [["c" "a" "b"]])))))
+    (is (= ["X" "Y"] (vec (arbace.lang.Reflector/invokeStaticMethod C "upper" (object-array [["x" "y"]])))))))
 
 (deftest varargs-method-refs
   (same-shapes? 'classes.forms-test
@@ -166,7 +166,7 @@
               '[(^:public SL2
                   (method ^:public ^:static make ^java.util.function.IntSupplier [^int k]
                     (lambda (& java.util.function.IntSupplier java.io.Serializable) [] (unchecked-add-int k 1))))])
-        f (clojure.lang.Reflector/invokeStaticMethod C "make" (object-array [(int 41)]))
+        f (arbace.lang.Reflector/invokeStaticMethod C "make" (object-array [(int 41)]))
         bytes (let [bo (java.io.ByteArrayOutputStream.)]
                 (with-open [o (java.io.ObjectOutputStream. bo)] (.writeObject o f))
                 (.toByteArray bo))

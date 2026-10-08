@@ -1,5 +1,5 @@
 (ns classes.kinds-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest enum-shapes
@@ -49,8 +49,8 @@
                    (constructor [this ^String sym] (set! (.-sym this) sym))
                    (method ^:public ^:abstract apply ^int [this ^int a ^int b])
                    (method ^:public sym ^String [this] sym))])
-        vs (clojure.lang.Reflector/invokeStaticMethod Op "values" (object-array 0))
-        times (clojure.lang.Reflector/invokeStaticMethod Op "valueOf" (object-array ["TIMES"]))]
+        vs (arbace.lang.Reflector/invokeStaticMethod Op "values" (object-array 0))
+        times (arbace.lang.Reflector/invokeStaticMethod Op "valueOf" (object-array ["TIMES"]))]
     (is (= ["PLUS" "TIMES"] (map str vs)))
     (is (= 12 (.apply times 3 4)))
     (is (= "*" (.sym times)))

@@ -1,5 +1,5 @@
-;; The driver of Arbace's benchmark suite (bin/arbace-bench, doc/BENCHMARKS.md), run by the
-;; frozen clojure/ (it is a tool, not a workload). It launches every measured JVM itself, one
+;; The driver of Arbace's benchmark suite (bin/arbace-bench, doc/BENCHMARKS.md), run by Arbace
+;; (bin/lib/tools.bash; it is a tool, not a workload). It launches every measured JVM itself, one
 ;; at a time, and never measures inside its own JVM:
 ;;   startup  wall time of a launch (-e 1, a short REPL session on stdin), after warm-up runs
 ;;   load     (require LIB) timed inside a fresh JVM (test/bench/workload.clj load LIB)
@@ -9,16 +9,16 @@
 ;; rotating order), so a change of machine load spreads over all of them. The load average
 ;; (/proc/loadavg, 1 minute) is recorded with every launch.
 ;;
-;; Usage: java -cp ROOT clojure.main test/bench/driver.clj run CONFIG.edn OUT.edn
-;;        java -cp ROOT clojure.main test/bench/driver.clj report OUT.edn
+;; Usage: java -cp target/stage2:ROOT arbace.lang.Main test/bench/driver.clj run CONFIG.edn OUT.edn
+;;        java -cp target/stage2:ROOT arbace.lang.Main test/bench/driver.clj report OUT.edn
 ;; CONFIG.edn (written by bin/arbace-bench): {:root :impls {key {:label :cmd :env}} :steady-opts
 ;; :sections :forks :startup-runs :startup-warmup :load-forks :warmup-ms :measure-ms :only}
 ;; OUT.edn gets the raw results, appended as they come; `report` prints the Markdown tables.
 
 (ns bench.driver
-  (:require [clojure.string :as str]
-            [clojure.java.io :as io]
-            [clojure.pprint :as pp])
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.pprint :as pp])
   (:import (java.lang ProcessBuilder ProcessBuilder$Redirect)
            (java.io File)))
 
@@ -201,7 +201,7 @@
         (println "Benchmarks:")
         (println)
         (doseq [{:keys [name desc]} (vals (into (sorted-map) (map (fn [x] [(:name x) x]) sd)))]
-          (println (str "- `" (clojure.core/name name) "`: " desc)))))))
+          (println (str "- `" (arbace.core/name name) "`: " desc)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 

@@ -1,6 +1,6 @@
 (ns classes.module-test
-  (:require [clojure.test :refer :all]
-            [clojure.java.io :as io]
+  (:require [arbace.test :refer :all]
+            [arbace.java.io :as io]
             [classes.helpers :refer :all]
             [arbace.classes.compiler :as compiler]
             [arbace.classes.shape :as shape]))

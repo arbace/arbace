@@ -1,5 +1,5 @@
 (ns classes.switch-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest switch-shapes
@@ -90,7 +90,7 @@
                     (switch d 0 "Sun" (1 2 3 4 5) "work" "Sat"))
                   (method ^:public ^:static word ^int [^String s]
                     (switch s "one" 1 "two" 2 ("Aa" "BB") 99 -1)))])
-        call (fn [m & args] (clojure.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
+        call (fn [m & args] (arbace.lang.Reflector/invokeStaticMethod C (name m) (object-array args)))]
     (is (= ["nil" "empty" "str:x" "long" "other"] (map #(call 'kind %) [nil "" "x" 5 1.0])))
     (is (= ["Sun" "work" "Sat"] (map #(call 'day (int %)) [0 3 6])))
     (is (= [1 2 99 99 -1] (map #(call 'word %) ["one" "two" "Aa" "BB" "x"])))))
@@ -140,6 +140,6 @@
                       o)))])
         P (Class/forName "classes.switch_test.MR2$Pair" false (.getClassLoader C))
         pair (fn [a b] (.newInstance (.getConstructor P (into-array Class [Object Object])) (object-array [a b])))
-        f #(clojure.lang.Reflector/invokeStaticMethod C "f" (object-array [%]))]
+        f #(arbace.lang.Reflector/invokeStaticMethod C "f" (object-array [%]))]
     (is (= ["null" 3 "long" "s" "x" 5]
            [(f nil) (f (pair (int 1) (int 2))) (f (pair 1 "a")) (f (pair "s" "t")) (f "x") (f (pair (int 5) "q"))]))))

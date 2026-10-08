@@ -13,7 +13,8 @@ profiles, is summarized there.
   `clojure.string` or `arbace.string`, so the same source is read, compiled and run by each
   implementation as a script.
 - **A small own harness**, no external libraries. The driver `test/bench/driver.clj` (run by the
-  frozen `clojure/`, never measured itself) launches every measured JVM, one at a time:
+  frozen `clojure/` for the run below, by Arbace's `target/stage2` since the freeze; never
+  measured itself) launches every measured JVM, one at a time:
   - *Startup*: the wall time of a whole launch (`-e 1`, and a 17-form REPL session on stdin,
     `test/bench/repl-session.clj`), 3 warm-up launches, then 20 timed ones; median and the
     spread (min, max) around it.
@@ -59,8 +60,8 @@ in about 8; `--forks`, `--warmup`, `--measure`, `--sections`, `--only`), after
   Also `clojure-aot`: the same jars with a JDK AOT cache trained like Arbace's (on
   `test/aot-training.clj` renamed to `clojure.*`, without its `defclass`), to tell the JDK's
   share of Arbace's startup from Arbace's own.
-- **The frozen baseline** `clojure/` (upstream 1.13 master `98d735f`, spec stubbed out):
-  `baseline` has its 35 namespaces AOT-compiled with direct linking into
+- **The frozen baseline** `clojure/` (upstream 1.13 master `98d735f`, spec stubbed out; since
+  the freeze extracted from the tag `arbace-for-java-26-v1` into `.tmp/frozen/`): `baseline` has its 35 namespaces AOT-compiled with direct linking into
   `.tmp/bench/baseline-classes/`, as upstream's release build does, so it compares with the
   two jars. `baseline-src` is the tree as it is, compiling `clojure.core` from source at every
   launch (startup only).

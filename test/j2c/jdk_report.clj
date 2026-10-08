@@ -2,9 +2,9 @@
 ;; compiled by the class forms compiler, those whose classes are all shape-identical to javac's,
 ;; and the differences and compile errors by kind.
 ;;
-;; Usage: java -cp . clojure.main test/j2c/jdk_report.clj WORK MODULE...
+;; Usage: run by test/j2c/jdk.bash on Arbace: arbace.lang.Main test/j2c/jdk_report.clj WORK MODULE...
 ;; Reads WORK/conv/M/j2c-report.edn and WORK/res/M.*.edn; writes WORK/report.md, WORK/report.edn.
-(require '[clojure.java.io :as io] '[clojure.string :as str] '[clojure.pprint :as pp])
+(require '[arbace.java.io :as io] '[arbace.string :as str] '[arbace.pprint :as pp])
 
 (def work (first *command-line-args*))
 (def modules (rest *command-line-args*))

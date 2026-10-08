@@ -4,7 +4,7 @@
   class is named by it; the others are written by binary name."
   (:require [arbace.j2c.forms :as f]
             [arbace.j2c.print :as pr]
-            [clojure.string :as str])
+            [arbace.string :as str])
   (:import [arbace.j2c.forms CRef]))
 
 (defn package-of [^String binary]
@@ -18,7 +18,7 @@
   [x]
   (let [out (volatile! [])]
     (letfn [(walk [x]
-              (when (instance? clojure.lang.IObj x)
+              (when (instance? arbace.lang.IObj x)
                 (doseq [it (f/items x)]
                   (when (vector? it) (run! walk (rest it)))))
               (cond
@@ -30,7 +30,7 @@
 
 (def default-imports
   "Simple name -> class name of the classes every Clojure namespace imports."
-  (delay (into {} (for [[k v] clojure.lang.RT/DEFAULT_IMPORTS
+  (delay (into {} (for [[k v] arbace.lang.RT/DEFAULT_IMPORTS
                         :when (class? v)]
                     [(str k) (.getName ^Class v)]))))
 

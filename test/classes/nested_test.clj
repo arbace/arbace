@@ -1,5 +1,5 @@
 (ns classes.nested-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all])
   (:import (java.util Iterator ArrayList NoSuchElementException)))
 
@@ -88,7 +88,7 @@
     (is (= 6 (.deeper o)))
     (.run (.counter o box))
     (is (= 6 (aget box 0)))
-    (.run (clojure.lang.Reflector/invokeStaticMethod O "ofStatic" (object-array [box (int 10)])))
+    (.run (arbace.lang.Reflector/invokeStaticMethod O "ofStatic" (object-array [box (int 10)])))
     (is (= 26 (aget box 0)))))
 
 (deftest qualified-new-shape

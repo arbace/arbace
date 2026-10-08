@@ -1,7 +1,7 @@
 (ns classes.pins-test
   "Param-tags on constructor calls (SPEC §4.7, §4.8, §4.10, §5.6), anonymous subclasses of inner
   classes with an explicit outer instance (§4.8), all-literal conditionals as operands (§5.4)."
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest constructor-call-param-tags
@@ -49,10 +49,10 @@
                   (constructor ^:public [this ^String unpinned] (this. 1))
                   (method ^:public ^:static anonWhich ^String [^boolean pinned]
                     (.-which (if pinned (anon KL ^[int] [1]) (anon KL [1])))))])]
-    (is (= "long" (.-which (clojure.lang.Reflector/invokeConstructor c (object-array ["x"])))))
-    (is (= "int" (.-which (clojure.lang.Reflector/invokeConstructor c (object-array [true])))))
-    (is (= "long" (clojure.lang.Reflector/invokeStaticMethod c "anonWhich" (object-array [false]))))
-    (is (= "int" (clojure.lang.Reflector/invokeStaticMethod c "anonWhich" (object-array [true]))))))
+    (is (= "long" (.-which (arbace.lang.Reflector/invokeConstructor c (object-array ["x"])))))
+    (is (= "int" (.-which (arbace.lang.Reflector/invokeConstructor c (object-array [true])))))
+    (is (= "long" (arbace.lang.Reflector/invokeStaticMethod c "anonWhich" (object-array [false]))))
+    (is (= "int" (arbace.lang.Reflector/invokeStaticMethod c "anonWhich" (object-array [true]))))))
 
 (deftest anonymous-subclass-with-outer
   (same-shapes? 'classes.pins-test
@@ -93,11 +93,11 @@
                   (method ^:public ^:static make ^In [^PB o ^int k]
                     (anon In [k] :outer o
                       (method ^:public g ^int [this] (unchecked-multiply-int 10 (.g super))))))])
-        o (clojure.lang.Reflector/invokeConstructor c (object-array [(int 3)]))
-        in (clojure.lang.Reflector/invokeStaticMethod c "make" (object-array [o (int 4)]))]
-    (is (= 70 (clojure.lang.Reflector/invokeInstanceMethod in "g" (object-array 0))))
+        o (arbace.lang.Reflector/invokeConstructor c (object-array [(int 3)]))
+        in (arbace.lang.Reflector/invokeStaticMethod c "make" (object-array [o (int 4)]))]
+    (is (= 70 (arbace.lang.Reflector/invokeInstanceMethod in "g" (object-array 0))))
     (is (thrown? NullPointerException
-                 (clojure.lang.Reflector/invokeStaticMethod c "make" (object-array [nil (int 4)]))))))
+                 (arbace.lang.Reflector/invokeStaticMethod c "make" (object-array [nil (int 4)]))))))
 
 (deftest literal-conditionals-as-operands
   (same-shapes? 'classes.pins-test

@@ -3,7 +3,7 @@
   for them, from the reports (j2c-report.edn) of converter runs.
 
   bin/j2c -m arbace.j2c.coverage REPORT.edn... prints a Markdown summary."
-  (:require [clojure.string :as str])
+  (:require [arbace.string :as str])
   (:import [com.sun.source.tree Tree$Kind]))
 
 (def kind-forms

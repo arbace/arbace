@@ -1,5 +1,5 @@
 (ns classes.access-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (def base-java "package classes.access_base;

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run Clojure's upstream test suite against a Clojure, by default the baseline in clojure/
-# (CLOJURE_SRC), and compare the outcome with the recorded reference,
+# Run Clojure's upstream test suite against a Clojure, by default the frozen baseline clojure/
+# (CLOJURE_SRC; extracted from the freeze tag into .tmp/frozen/, bin/lib/tools.bash), and compare the outcome with the recorded reference,
 # test/baseline-results.edn (in rename mode, against Arbace: test/arbace-results.edn). Writes
 # only under .tmp/clojure-tests/.
 #
@@ -10,7 +10,7 @@
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
 # Environment:
 #   CLOJURE_SRC             class path of the Clojure under test: its Java classes and .clj
-#                           sources (default: the repo root, whose clojure/ is the baseline)
+#                           sources (default: .tmp/frozen, whose clojure/ is the baseline)
 #   CLOJURE_TESTS_RUN       name of the run, its files go to .tmp/clojure-tests/RUN
 #                           (default: baseline)
 #   CLOJURE_TESTS_EXPECTED  the reference results (default: test/baseline-results.edn, the
@@ -21,8 +21,9 @@
 #   CLOJURE_TESTS_RENAME    "arbace": the Clojure under test is Arbace's, renamed clojure.* ->
 #                           arbace.* (doc/VENDOR-NOTES.md). The suite, its test libraries, the
 #                           runner, the class and namespace names and the system properties
-#                           used here are renamed alike with arbace.j2c.rename (run on the
-#                           frozen clojure/), into RUN/suite and .tmp/clojure-tests/lib-arbace/.
+#                           used here are renamed alike with arbace.j2c.rename (run on Arbace,
+#                           bin/lib/tools.bash, which needs bin/build-arbace's target/stage2),
+#                           into RUN/suite and .tmp/clojure-tests/lib-arbace/.
 #                           The test namespaces keep their names, so the reference applies.
 #   CLOJURE_TESTS_PRECOMPILED  1: the Clojure under test already holds its namespaces
 #                           AOT-compiled with direct linking, as a release jar does (Arbace's
@@ -57,15 +58,19 @@ case $rename in
   arbace) suite=$work/suite ;;
   *) echo "CLOJURE_TESTS_RENAME: only arbace is known" >&2; exit 2 ;;
 esac
+. "$root/bin/lib/tools.bash"
+# arbace.j2c.rename ARGS..., on Arbace
+rename_tool() { [ -n "${ARBACE_CP:-}" ] || arbace_runtime; java -cp "$ARBACE_CP" arbace.lang.Main -m arbace.j2c.rename "$@"; }
 # Rename standard input (clojure.* -> arbace.*) in rename mode.
-rn() { if [ -n "$rename" ]; then java -cp "$root" clojure.main -m arbace.j2c.rename stdin; else cat; fi; }
+rn() { if [ -n "$rename" ]; then rename_tool stdin; else cat; fi; }
 rev=98d735fab02f337cee654cb0629bddc09883a75a
 runner=$root/test/run_clojure_tests.clj
 [ -n "$rename" ] && runner=$work/run_clojure_tests.clj
 default_expected=$root/test/baseline-results.edn
 [ -n "$rename" ] && default_expected=$root/test/arbace-results.edn
 expected=${CLOJURE_TESTS_EXPECTED:-$default_expected}
-clojure_src=${CLOJURE_SRC:-$root}
+clojure_src=${CLOJURE_SRC:-}
+if [ -z "$clojure_src" ]; then clojure_src=$(frozen_clojure); fi
 gen_msec=${CLOJURE_TESTS_GEN_MSEC:-60000}
 timeout_s=${CLOJURE_TESTS_TIMEOUT:-900}
 
@@ -176,7 +181,7 @@ if [ -n "$rename" ]; then
   cp -r "$src/test" "$suite/"
   cp -r "$src/src/script" "$suite/src/"
   find "$src" -maxdepth 1 -type f -exec cp {} "$suite/" \;   # readme.txt, read by a test
-  java -cp "$root" clojure.main -m arbace.j2c.rename tree "$suite" .clj .cljc .java
+  rename_tool tree "$suite" .clj .cljc .java
   # Renaming artifact: clojure.pprint is one character longer than arbace.pprint, and
   # test_pretty.clj's expected layouts align continuation lines under "[clojure.pprint :only (".
   sed -i '/\[arbace\.pprint :only/,/]/ s/^ \(  *[a-z]\)/\1/' \
@@ -204,7 +209,7 @@ while read -r coord sha; do
     step "rename $coord into $lib"
     mkdir -p "$lib.tmp"
     (cd "$lib.tmp" && jar xf "$jar")
-    java -cp "$root" clojure.main -m arbace.j2c.rename tree "$lib.tmp" .clj .cljc .java
+    rename_tool tree "$lib.tmp" .clj .cljc .java
     mv "$lib.tmp" "$lib"
   fi
 done <<< "$deps"

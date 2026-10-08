@@ -1,7 +1,7 @@
 (ns classes.spec-examples-test
   "The worked examples of SPEC §11, compared with javac's classes."
-  (:require [clojure.test :refer :all]
-            [clojure.java.io :as io]
+  (:require [arbace.test :refer :all]
+            [arbace.java.io :as io]
             [classes.helpers :refer :all]
             [arbace.classes.shape :as shape]))
 

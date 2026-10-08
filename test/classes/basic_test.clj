@@ -1,5 +1,5 @@
 (ns classes.basic-test
-  (:require [clojure.test :refer :all]
+  (:require [arbace.test :refer :all]
             [classes.helpers :refer :all]))
 
 (deftest reduced-shape

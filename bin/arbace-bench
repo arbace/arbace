@@ -1,11 +1,12 @@
 #!/bin/bash
 # Arbace's benchmark suite (doc/BENCHMARKS.md): Arbace (bin/arbace, target/arbace.jar and its
 # AOT cache) against upstream Clojure 1.12 (the release jar from Maven Central) and the frozen
-# baseline clojure/, all on the java on the PATH. Writes only under .tmp/bench/.
+# baseline clojure/ (extracted from the freeze tag into .tmp/frozen/, bin/lib/tools.bash), all
+# on the java on the PATH. Writes only under .tmp/bench/.
 #
 # The workloads are one Clojure file run unchanged by all three, test/bench/workload.clj; the
-# driver test/bench/driver.clj (run by the frozen clojure/) launches every measured JVM, one at
-# a time, and writes the raw results and the Markdown tables of doc/BENCHMARKS.md.
+# driver test/bench/driver.clj (run by Arbace, target/stage2) launches every measured JVM, one
+# at a time, and writes the raw results and the Markdown tables of doc/BENCHMARKS.md.
 #
 # Usage: bin/arbace-bench [OPTION...]
 #   --quick            1 fork, 0.5 s warm-up and measurement, 5 startup runs (a smoke test)
@@ -17,7 +18,7 @@
 #                      `workload.clj list`)
 #   --out FILE         raw results (default .tmp/bench/results-DATE.edn)
 #   report FILE        only print the tables of an earlier run
-# Needs target/arbace.jar (bin/build-arbace). Prepares, once, in .tmp/bench/:
+# Needs target/arbace.jar and target/stage2 (bin/build-arbace). Prepares, once, in .tmp/bench/:
 #   lib/        Clojure 1.12.6 and its dependencies spec.alpha 0.5.238 and core.specs.alpha
 #               0.4.74 (clojure-1.12.6.pom), from Maven Central, checked by SHA-256
 #   baseline-classes/  the frozen clojure/'s namespaces AOT-compiled with direct linking, as
@@ -28,12 +29,14 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+. bin/lib/tools.bash
+arbace_runtime
 work=$root/.tmp/bench
 lib=$work/lib
 mkdir -p "$lib"
 
 if [ "${1:-}" = report ]; then
-  exec java -cp "$root" clojure.main test/bench/driver.clj report "$2"
+  exec java -cp "$ARBACE_CP" arbace.lang.Main test/bench/driver.clj report "$2"
 fi
 
 forks=3 warmup=3000 measure=3000 sections=startup,load,steady only= runs=20 out=
@@ -72,7 +75,7 @@ while read -r coord sha; do
 done <<< "$deps"
 
 # The frozen baseline's namespaces, AOT-compiled with direct linking (as bin/clojure-tests'
-# step 3); remade when clojure/ has changed
+# step 3); remade when the frozen tree has changed
 base_nss="clojure.core clojure.core.protocols clojure.core.server clojure.main clojure.set
 clojure.edn clojure.xml clojure.zip clojure.inspector clojure.walk clojure.stacktrace
 clojure.template clojure.test clojure.test.tap clojure.test.junit clojure.pprint clojure.java.io
@@ -80,12 +83,13 @@ clojure.repl clojure.java.browse clojure.java.javadoc clojure.java.shell clojure
 clojure.java.browse-ui clojure.java.basis.impl clojure.java.basis clojure.string clojure.data
 clojure.reflect clojure.datafy clojure.instant clojure.uuid clojure.core.reducers clojure.math
 clojure.tools.deps.interop clojure.repl.deps"
+frozen=$(frozen_clojure)
 bc=$work/baseline-classes
-if [ ! -f "$bc/clojure/core__init.class" ] || [ -n "$(find clojure -newer "$bc/clojure/core__init.class" -print -quit)" ]; then
+if [ ! -f "$bc/clojure/core__init.class" ] || [ -n "$(find "$frozen/clojure" -newer "$bc/clojure/core__init.class" -print -quit)" ]; then
   echo "== AOT-compile the frozen clojure/ into $bc"
   rm -rf "$bc"; mkdir -p "$bc"
   # shellcheck disable=SC2086
-  java -cp "$bc:$root" -Dclojure.compile.path="$bc" -Dclojure.compiler.direct-linking=true \
+  java -cp "$bc:$frozen" -Dclojure.compile.path="$bc" -Dclojure.compiler.direct-linking=true \
     -Djava.awt.headless=true clojure.lang.Compile $base_nss > "$work/baseline-classes.log" 2>&1 ||
     { cat "$work/baseline-classes.log"; exit 1; }
 fi
@@ -121,9 +125,9 @@ cat > "$work/config.edn" <<EOF
                        :cmd ["java" "$copts" "-XX:AOTCache=$caot" "-Xlog:aot*=off" "-Xlog:cds*=off"
                              "-cp" "$cljcp" "clojure.main"] :env {}}
          :baseline {:label "frozen clojure/ (1.13 master $base_rev), AOT-compiled with direct linking"
-                    :cmd ["java" "-cp" "$bc:$root" "clojure.main"] :env {}}
+                    :cmd ["java" "-cp" "$bc:$frozen" "clojure.main"] :env {}}
          :baseline-src {:label "frozen clojure/ as the tree is (namespaces from source)"
-                        :cmd ["java" "-cp" "$root" "clojure.main"] :env {}}}
+                        :cmd ["java" "-cp" "$frozen" "clojure.main"] :env {}}}
  :java "$java_version"
  :sections #{$(kw_list "$sections")}
  :startup [:arbace :arbace-nocache :clojure :clojure-aot :baseline :baseline-src]
@@ -137,6 +141,6 @@ cat > "$work/config.edn" <<EOF
  :only [$(edn_list "$only")]}
 EOF
 echo "== $(java -version 2>&1 | head -1); $(nproc) cores; load average $(cut -d' ' -f1-3 /proc/loadavg)"
-java -cp "$root" clojure.main test/bench/driver.clj run "$work/config.edn" "$out"
+java -cp "$ARBACE_CP" arbace.lang.Main test/bench/driver.clj run "$work/config.edn" "$out"
 echo "== load average at the end $(cut -d' ' -f1-3 /proc/loadavg)"
-java -cp "$root" clojure.main test/bench/driver.clj report "$out"
+java -cp "$ARBACE_CP" arbace.lang.Main test/bench/driver.clj report "$out"

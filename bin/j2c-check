@@ -3,10 +3,12 @@
 #
 # Usage: bin/j2c-check [--suite]
 #        bin/j2c-check --jdk [MODULE...]   (long; not part of the default checks, see below)
+# Runs on Arbace (bin/lib/tools.bash: needs bin/build-arbace's target/stage2). The baseline is
+# the frozen clojure/, extracted from the freeze tag into .tmp/frozen/ (frozen_clojure).
 #   1. converts the baseline's 183 Java files (clojure/) with --check: no failures, every file
-#      read by clojure.core/read;
+#      read by arbace.core/read;
 #   2. compiles the converted baseline with the class forms compiler (arbace.classes) and
-#      compares every class's shape with javac's (bin/class-forms-check);
+#      compares every class's shape with the frozen tree's javac classes (bin/class-forms-check);
 #   3. converts test/j2c/java (the language features the baseline does not use) and compares
 #      the compiled classes with javac's the same way (all identical); 3b. converts
 #      test/j2c/module (a module declaration and package annotations) without failures;
@@ -25,6 +27,7 @@
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+. bin/lib/tools.bash
 
 if [ "${1:-}" = "--jdk" ]; then
   shift
@@ -34,14 +37,15 @@ work=.tmp/j2c-check
 rm -rf "$work"
 mkdir -p "$work"
 status=0
+frozen=$(frozen_clojure) || exit 1
 
 echo "== 1. convert the baseline"
-bin/j2c -m arbace.j2c.main convert --check "$work/baseline" . clojure | grep -v '^slowest' | tee "$work/convert.log"
+bin/j2c -m arbace.j2c.main convert --check "$work/baseline" "$frozen" clojure | grep -v '^slowest' | tee "$work/convert.log"
 grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/convert.log" || status=1
 
 echo "== 2. compile the converted baseline and compare with javac's classes"
 for d in clojure clojure/lang clojure/asm clojure/asm/signature clojure/asm/commons clojure/java/api; do
-  out=$(bin/class-forms-check "$work/baseline" "$d" 2>&1)
+  out=$(CLASS_FORMS_CP=$frozen bin/class-forms-check "$work/baseline" "$d" 2>&1)
   echo "$d: $(echo "$out" | grep -o 'files .*')"
   echo "$out" | grep -q "errors 0 diffs 0" || { echo "$out" | tail -20; status=1; }
 done
@@ -50,7 +54,7 @@ echo "== 3. language features (test/j2c/java)"
 javac -d "$work/sample-classes" $(find test/j2c/java -name '*.java') || status=1
 bin/j2c -m arbace.j2c.main convert --check "$work/sample" test/j2c/java | grep -v '^slowest'
 for d in $(cd test/j2c/java && find . -mindepth 1 -type d | sed 's|^\./||'); do
-  out=$(ALL=1 java -cp ".:$work/sample-classes" clojure.main test/classes/check_converted.clj "$work/sample" "$d" 2>&1)
+  out=$(ALL=1 CLASS_FORMS_CP=$work/sample-classes bin/class-forms-check "$work/sample" "$d" 2>&1)
   echo "$out" | tail -20
   echo "$out" | grep -q "errors 0 diffs 0" || status=1
 done
@@ -61,10 +65,11 @@ grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/module.log" || statu
 
 if [ "${1:-}" = "--suite" ]; then
   echo "== 4. Clojure's test suite on the converted baseline"
-  bin/j2c -m arbace.j2c.build "$work/baseline" "$work/run/classes" || status=1
+  # compiled against the frozen tree's javac classes (the classes the converted ones replace)
+  J2C_CP=$frozen bin/j2c -m arbace.j2c.build "$work/baseline" "$work/run/classes" || status=1
   mkdir -p "$work/run/src"
-  (find clojure -type f ! -name '*.java' ! -name '*.class' | while read -r f; do
-     mkdir -p "$work/run/src/$(dirname "$f")"; cp "$f" "$work/run/src/$f"; done)
+  (cd "$frozen" && find clojure -type f ! -name '*.java' ! -name '*.class' | while read -r f; do
+     mkdir -p "$root/$work/run/src/$(dirname "$f")"; cp "$f" "$root/$work/run/src/$f"; done)
   CLOJURE_SRC="$root/$work/run/classes:$root/$work/run/src" CLOJURE_TESTS_RUN=converted \
     bin/clojure-tests -j "${J2C_TEST_JOBS:-16}" | tail -6 || status=1
 fi

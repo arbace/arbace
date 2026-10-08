@@ -8,7 +8,7 @@
             [arbace.classes.analyze :as a]
             [arbace.classes.env :as env]
             [arbace.j2c.jtypes :as jt]
-            [clojure.string :as str])
+            [arbace.string :as str])
   (:import [com.sun.tools.javac.code Type Type$ArrayType Symbol Symbol$ClassSymbol
             Symbol$MethodSymbol Flags]))
 
@@ -96,12 +96,12 @@
           info))))
 
 (def ^:private lookup
-  (reify clojure.lang.ILookup
+  (reify arbace.lang.ILookup
     (valAt [this k] (.valAt this k nil))
     (valAt [_ k nf]
       (or (when (string? k) (some-> (find-class k) class-info)) nf))))
 
-(def ^:private compile-set (reify clojure.lang.IDeref (deref [_] lookup)))
+(def ^:private compile-set (reify arbace.lang.IDeref (deref [_] lookup)))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Arguments
@@ -150,7 +150,7 @@
             (when (seq cands)
               (let [[m va] (a/select-method {} cands (vec args) mname nil)]
                 [(:desc m) (boolean va)])))
-          (catch clojure.lang.ExceptionInfo e
+          (catch arbace.lang.ExceptionInfo e
             (if (:arbace/compile-error (ex-data e)) nil (throw e))))))))
 
 (defn- params-part [^String d] (subs d 0 (inc (.indexOf d ")"))))

@@ -23,8 +23,8 @@
   merely contain the word (clojure-version, *clojure-version*, refer-clojure, CLOJURE_NS,
   __clojureFnMap, thread names clojure-agent-*; some were renamed by hand after vendoring, see
   doc/VENDOR-NOTES.md), prose and URLs (clojure.org)."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]))
+  (:require [arbace.java.io :as io]
+            [arbace.string :as str]))
 
 (def namespaces
   "The namespaces of the vendored Clojure (clojure/**/*.clj), plus the files loaded into them,

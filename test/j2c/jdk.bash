@@ -10,7 +10,11 @@
 #   check     bin/class-forms-check on chunks of the converted files, in parallel, against
 #             $work/ref1/M (REF), results in $work/res/M.*.edn
 #   report    test/j2c/jdk_report.clj: $work/report.md and $work/report.edn
+# Runs on Arbace (bin/lib/tools.bash).
 set -uo pipefail
+root=$(cd "$(dirname "$0")/../.." && pwd)
+. "$root/bin/lib/tools.bash"
+arbace_runtime || exit 1
 work=.tmp/j2c-jdk
 src=${JDK_SRC:-/root/jdk26u/src}
 jobs=${JDK_JOBS:-40}
@@ -99,5 +103,5 @@ if has check; then
 fi
 if has report; then
   echo "== report"
-  java -cp . clojure.main test/j2c/jdk_report.clj "$work" $modules
+  java -cp "$ARBACE_CP" arbace.lang.Main test/j2c/jdk_report.clj "$work" $modules
 fi

@@ -20,13 +20,21 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/j2c/build.clj` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
 | `arbace/j2c/coverage.clj` | `arbace.j2c.coverage` | coverage summary from run reports |
 | `arbace/j2c/resolve.clj` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `arbace/j2c/rename.clj` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules for the vendored sources and Clojure's test suite (`doc/VENDOR-NOTES.md`) |
-| `bin/j2c` | | starts the frozen Clojure with access to javac's internals |
+| `arbace/j2c/rename.clj` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules, for Clojure's test suite (`bin/clojure-tests`); they derived the vendored sources (`doc/VENDOR-NOTES.md`) |
+| `bin/j2c` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
 | `bin/j2c-check` | | the checks (below) |
 | `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
 | `test/j2c/module/` | | a module declaration and package annotations |
 
 The converted files are not kept in the repository: they are regenerated (the user's decision).
+
+Since the freeze the converter runs on Arbace: `bin/lib/tools.bash` puts `target/stage2` (built
+by `bin/build-arbace`) before the checkout on the class path, so the converter and an edited
+compiler namespace load from source and the rest from the stage's classes. Until then it ran on
+the frozen Clojure. Its output names the running core: a head shadowed by a local or field is
+qualified `arbace.core/` (before, `clojure.core/` for Clojure's own names). The baseline
+`clojure/` is no longer in main's tree: `bin/j2c-check` extracts it from the tag
+`arbace-for-java-26-v1` into `.tmp/frozen/` once (`frozen_clojure` in `bin/lib/tools.bash`).
 
 ## Use
 
@@ -40,12 +48,15 @@ bin/j2c-check --jdk [MODULE...]
 ```
 
 - `convert` converts the `.java` files under `ROOT` (or under the `PATH`s) into `OUT`, with
-  `ROOT` as javac's source path. `bin/j2c -m arbace.j2c.main convert .tmp/j2c/clojure-out . clojure`
-  converts the baseline; put the output under `.tmp/`.
+  `ROOT` as javac's source path. `bin/j2c -m arbace.j2c.main convert .tmp/j2c/clojure-out
+  .tmp/frozen clojure` converts the baseline (extracted by `bin/j2c-check`); put the output
+  under `.tmp/`.
 - `--rename clojure=arbace` renames the package prefix in every class name, namespace and path
   (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays); step 4
-  renames them afterwards with `arbace.j2c.rename` (`doc/VENDOR-NOTES.md`).
-- `--check` reads every output file back with `clojure.core/read` and `clojure.edn/read`, and
+  renamed them afterwards with `arbace.j2c.rename` (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
+  on the branch `arbace-for-java-26`).
+- `--check` reads every output file back with the core's `read` and the EDN reader (on Arbace
+  `arbace.core/read`, `arbace.edn/read`), and
   writes `OUT/j2c-report.edn`: failures, unreadable files, counters of tree kinds met and of the
   forms and conversions written.
 - `jdk` converts a JDK module's sources against the running JDK's own classes: the files are
@@ -53,7 +64,9 @@ bin/j2c-check --jdk [MODULE...]
   converted in parallel (`J2C_THREADS`, default 12). A `module-info.java` cannot be patched in
   and is skipped (modules are converted from ordinary source trees, `test/j2c/module`).
 - `build` compiles converted files with the class forms compiler (`arbace.classes`, the other
-  half of the work, loaded through `arbace.classes.boot`) and writes the class files.
+  half of the work, loaded through `arbace.classes.boot`) and writes the class files. Classes
+  it does not compile are looked up on the class path: `J2C_CP` adds to it (`bin/j2c-check`
+  passes the frozen tree's javac classes).
 
 Output layout (§9.1): for package `p.q`, `p/q.clj` holds `(ns p.q)` and a `(load "q/File")` per
 Java file, supertypes in the same package first; `p/q/File.clj` holds `(in-ns 'p.q)`, an
