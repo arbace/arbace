@@ -251,7 +251,9 @@ package fewer at export and code is `unsafe`, skipped.)
 - **reprint** is `gocmp reprint`: each file parsed, its comments dropped except the directives,
   every position reset, printed again by `go/printer`, the directives put back before what they
   preceded, then `go/format`ted (which also sorts imports). It is what a printer from a tree
-  without positions or comments produces, which is what the forms printer will be.
+  without positions or comments produces, which is what the forms printer will be. The files
+  that do not parse (45 under `testdata/`, 80 error tests of `GOROOT/test`) are copied as they
+  are and listed; none is in the corpus.
 - **canon** is `gocmp reprint -canon`: reprint after respelling the trees in every way level 1
   normalizes: imports one per declaration in reverse order, `var` and `type` groups split, field
   groups expanded (outside generic declarations), parentheses around every operand of a binary
