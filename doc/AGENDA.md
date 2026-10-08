@@ -107,6 +107,9 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Open: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s directory
     tests.
 
+- B1, Arbace in the box via gc: plan in [go/B1-PLAN.md](go/B1-PLAN.md), for the user's review
+  (decisions D1-D6).
+
 ## Later
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.

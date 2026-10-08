@@ -315,3 +315,13 @@ decision (2026-10-08).
   trip 1m49s under the gate's load; std 373 and `$GOROOT/test` 1,707 at all three levels, no
   regressions). CLAUDE.md says to run `--full` when the class forms compiler, j2c or g2c
   change.
+
+## 2026-10-08: A plan for B1
+
+- At the user's request, `doc/go/B1-PLAN.md`: ten steps with gates, from bringing up the box
+  (go-whim's monitor and TamaGo board) through the image's own Go as round-tripped forms, a
+  measured JDK surface, a class forms → Go forms converter (c2g) over a Java runtime subset in
+  Go forms (jrt), an evaluator over `Compiler`'s `Expr` tree, to the REPL in the box on amd64
+  and arm64, and speed. Measured for it: `arbace/lang` is 142 class-form files, about 36,000
+  lines, using `java.lang.reflect`, `java.util`, `java.io`, concurrency, regex, `java.math`,
+  `java.lang.invoke`. Six decisions are the user's (D1-D6), each with a recommendation.
