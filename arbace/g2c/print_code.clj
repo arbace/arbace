@@ -340,20 +340,18 @@
 
 (def ^:private non-directive-keys
   #{:go/tag :go/via :go/breaks :go/end :go/pos :go/apos :go/inst :go/grouped :go/implicit
-    :go/paren :go/label :go/directives})
+    :go/paren :go/label})
 
 (defn directives-of
   "The directive lines of a declared name's metadata (§9.1): :go/<name> true or text (a
-  vector for several), sorted by name, then the verbatim lines of :go/directives (A6:
-  directives not spelled //go:, such as //export f)."
+  vector for several), sorted by name. Directives not spelled //go: are free-standing
+  (go/directive \"...\") forms (A6, in the converter's spelling), never metadata."
   [m]
-  (concat
-    (for [[k v] (sort-by (comp name key) (filter (fn [[k _]] (and (keyword? k) (= (namespace k) "go")
-                                                                  (not (non-directive-keys k))))
-                                                 m))
-          v (if (vector? v) v [v])]
-      (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v)))
-    (map str (:go/directives m))))
+  (for [[k v] (sort-by (comp name key) (filter (fn [[k _]] (and (keyword? k) (= (namespace k) "go")
+                                                                (not (non-directive-keys k))))
+                                               m))
+        v (if (vector? v) v [v])]
+    (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v))))
 
 (defn pre-lines
   "The number of comment lines before a declaration: doc, a // line between doc and
@@ -1163,7 +1161,8 @@
   (let [[_ l s] f]
     (tok (label-name l)) (tok ":")
     (cond
-      (some? s) (do (e/stmt-break! (line-of s) false nil indent)
+      (some? s) (do (e/stmt-break! (line-of s) false nil
+                                   (if (and (seq? s) (= (op s) "label")) (max 0 (dec indent)) indent))
                     (e/push-open! indent)
                     (cond
                       (and (seq? s) (#{"let" "let-type"} (op s))) (block-body [s] {})
@@ -1261,11 +1260,16 @@
                   (e/comment-line (second f) indent))
               :else
               (do
-                (e/stmt-break! (if (:const-group it) (group-target (:t it)) (:t it))
+                (e/stmt-break! (cond
+                                 decl-label (group-target (:t it))
+                                 (:const-group it) (group-target (:t it))
+                                 :else (:t it))
                                (zero? i) ";" (if (or label? decl-label) (max 0 (dec indent)) indent))
                 (e/push-open! indent)
                 (when decl-label
-                  (tok (label-name decl-label)) (tok ":") (sp))
+                  ;; L: on the line before the declaration when free, as gofmt writes it
+                  (tok (label-name decl-label)) (tok ":")
+                  (e/stmt-break! (if (:const-group it) (group-target (:t it)) (:t it)) false nil indent))
                 (cond
                   (:const-group it) (const-group (:const-group it) indent)
                   (:bind it) (apply binding-stmt (:bind it))

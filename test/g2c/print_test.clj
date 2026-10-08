@@ -144,7 +144,9 @@
 (def spec-meta-keys
   "Metadata the forms use (§5-§10)."
   [:tag :val :doc :go/tag :go/via :inst :go/end :go/breaks :line :alias :assign :const :var
-   :extern :go/embed :go/linkname :go/noinline :go/nosplit])
+   :extern :go/embed :go/linkname :go/noinline :go/nosplit
+   ;; the amendments of 2026-10-08 (§5.3, §7.3, §7.5)
+   :go/grouped :go/implicit :go/label :go/paren :type-params])
 
 (def spec-options
   "go/package and go/file options (§4.2, §4.3) the printer reads."
