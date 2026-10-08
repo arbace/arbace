@@ -307,3 +307,11 @@ decision (2026-10-08).
   roundtrip amd64` reproduced the agent's result (std 373 trees, 372 export and code with
   `unsafe` skipped; `$GOROOT/test` 1,707 at all three levels; no regressions against
   `test/g2c/roundtrip-amd64.edn`) in 56 s.
+
+## 2026-10-08: The g2c round trip in `bin/gate --full`
+
+- At the user's decision, `bin/gate --full` runs `bin/g2c roundtrip amd64` concurrently with
+  its other checks; the essential gate is unchanged. First run: passed in 7m06s (the round
+  trip 1m49s under the gate's load; std 373 and `$GOROOT/test` 1,707 at all three levels, no
+  regressions). CLAUDE.md says to run `--full` when the class forms compiler, j2c or g2c
+  change.
