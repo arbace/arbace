@@ -156,6 +156,7 @@
             (set! _ (+ (real z) (imag z)))
             (set! _ (min 1 2 n))
             (set! _ (max n 3))
+            (print n)
             (println bs s p q r)
             (sink (spread args))
             (set! _ (^{:inst [int]} Ident 1))

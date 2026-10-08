@@ -119,3 +119,53 @@
         (is (zero? status) (str "go build -overlay: " text)))
       (let [bad (assoc-in package [:package :embed-files] [["a.txt" "00"]])]
         (is (thrown-with-msg? Exception #"embedded file a.txt" (print/copy-files bad src out files)))))))
+
+(defn- walk-forms
+  "Every form of a forms tree, the metadata maps' values included."
+  [x]
+  (tree-seq (fn [x] (or (coll? x) (some? (meta x))))
+            (fn [x] (concat (when (coll? x) (if (map? x) (concat (keys x) (vals x)) (seq x)))
+                            (when-let [m (meta x)] (vals (dissoc m :line :column)))))
+            x))
+
+(def spec-heads
+  "SPEC §13.5, the reserved heads, and the forms of §4-§9 named by a head."
+  (concat
+    '[let let-type set! aset inc! dec! >! go defer return break continue goto fallthrough label
+      do if when cond switch type-switch select case default for while range]
+    '[+ - * / % << >> == != < <= > >= and or not bit-and bit-or bit-xor bit-not bit-and-not addr
+      <! lit conv assert aget subslice spread values inst method-expr fn zero rune imaginary
+      byte-string deref]
+    '[append cap clear close complex copy delete imag len make max min new panic print println
+      real recover]
+    '[slice array map chan func struct interface | tilde]
+    '[go/package go/file go/type go/const go/var go/func go/method go/directive go/call go/id]))
+
+(def spec-meta-keys
+  "Metadata the forms use (§5-§10)."
+  [:tag :val :doc :go/tag :go/via :inst :go/end :go/breaks :line :alias :assign :const :var
+   :extern :go/embed :go/linkname :go/noinline :go/nosplit])
+
+(def spec-options
+  "go/package and go/file options (§4.2, §4.3) the printer reads."
+  [:path :config :files :other-files :embed-files :init-order :positions :test-files
+   :package :build :directives :doc :imports])
+
+(deftest spec-coverage
+  ;; every head of SPEC §13.5 and every piece of metadata the printer reads occurs in a case
+  (when-not only
+    (let [forms (for [c (cases) :when (not (:error (:opts c)))
+                      f (print/read-forms (.getPath ^File (:forms c)))]
+                  f)
+          all (mapcat walk-forms forms)
+          heads (set (keep (fn [x] (binding [arbace.g2c.print-code/*go-ns* #{"go"}]
+                                     (arbace.g2c.print-code/op x)))
+                           all))
+          metas (set (mapcat (fn [x] (keys (meta x))) all))
+          opts (set (filter keyword? all))]
+      (doseq [h spec-heads]
+        (is (contains? heads (str h)) (str "no case uses " h)))
+      (doseq [k spec-meta-keys]
+        (is (contains? metas k) (str "no case uses metadata " k)))
+      (doseq [k spec-options]
+        (is (contains? opts k) (str "no case uses option " k))))))

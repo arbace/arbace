@@ -120,10 +120,27 @@
 (defn- breaks-of [f] (set (:go/breaks (meta f))))
 
 (defn- child-target
-  "The recorded line of child i of a list: its own, or a new line by the list's :go/breaks."
-  [parent i child]
-  (or (line-of child)
-      (when (and (e/lines?) (contains? (breaks-of parent) i)) :break)))
+  "The recorded line of child i of a list: its own, or a new line by the list's :go/breaks
+  (brk: the set of those indexes, when the caller has it)."
+  ([parent i child] (child-target parent i child nil))
+  ([parent i child brk]
+   (or (line-of child)
+       (when (and (e/lines?) parent
+                  (let [b (or brk (:go/breaks (meta parent)))]
+                    (if (set? b) (contains? b i) (some #(= % i) b))))
+         :break))))
+
+(defn- next-targets
+  "For targets ts (lines, :break or nil), the first line after each: a vector."
+  [ts]
+  (let [ts (vec ts)
+        n (count ts)
+        out (object-array n)]
+    (loop [i (dec n) nxt nil]
+      (when (>= i 0)
+        (aset out i nxt)
+        (recur (dec i) (let [t (nth ts i)] (if (integer? t) t nxt)))))
+    (vec out)))
 
 (defn- room? [n] (e/room? n))
 
@@ -177,13 +194,16 @@
   (e/push-open!)
   (let [start (e/line)
         xs (vec xs)
-        n (count xs)]
+        n (count xs)
+        brk (breaks-of parent)
+        ts (mapv (fn [i x] (if parent (child-target parent (+ i offset) x brk) (line-of x))) (range n) xs)
+        nxt (next-targets ts)]
     (dotimes [i n]
       (let [x (nth xs i)
-            t (if parent (child-target parent (+ i offset) x) (line-of x))]
+            t (nth ts i)]
         (when (pos? i) (tok ",") (sp))
         (e/break-to! t)
-        (binding [e/*next* (next-line (subvec xs (inc i)))]
+        (binding [e/*next* (or (nth nxt i) e/*next*)]
           (print-one x i))))
     (let [indent (e/pop-open!)
           multi? (> (e/line) start)]
@@ -610,19 +630,18 @@
       (when-not (= t '_) (type-expr t))
       (let [els (lit-elements f)
             start (e/line)
-            multi? (some (fn [el] (let [x (or (:src el) (:value el))
-                                         tl (child-target f (:i el) x)]
-                                     (and tl (or (= tl :break) (> (long tl) start)))))
-                         els)]
+            brk (breaks-of f)
+            ts (mapv (fn [el] (child-target f (:i el) (or (:src el) (:value el)) brk)) els)
+            nxt (next-targets ts)
+            multi? (some (fn [tl] (and tl (or (= tl :break) (> (long tl) start)))) ts)]
         (tok "{")
         (e/push-open!)
         (let [n (count els)]
           (doseq [[i el] (map-indexed vector els)]
-            (let [x (or (:src el) (:value el))
-                  tl (child-target f (:i el) x)]
+            (let [tl (nth ts i)]
               (when (pos? i) (tok ",") (sp))
               (e/break-to! tl)
-              (binding [e/*next* (next-line (map #(or (:src %) (:value %)) (drop (inc i) els)))]
+              (binding [e/*next* (or (nth nxt i) e/*next*)]
                 (case (:kind el)
                   :pos (expr0 (:value el) 1)
                   (do (if (= (:kind el) :field) (tok (name (:key el))) (expr0 (:key el) 1))
@@ -1058,7 +1077,8 @@
   forms and the index of the first (for :go/breaks)."
   [forms parent offset]
   (let [forms (vec forms)
-        n (count forms)]
+        n (count forms)
+        brk (breaks-of parent)]
     (into []
           (mapcat
             (fn [i f]
@@ -1078,7 +1098,7 @@
                               pairs)]
                   (when (odd? (count bv)) (fail "let needs pairs" f))
                   (concat items (flatten-stmts body f 2)))
-                :else [{:form f :t (if parent (child-target parent (+ offset i) f) (line-of f))}]))
+                :else [{:form f :t (if parent (child-target parent (+ offset i) f brk) (line-of f))}]))
             (range n) forms))))
 
 (defn- item-t [it] (:t it))
@@ -1089,10 +1109,11 @@
   locate the forms in their list (for :go/breaks)."
   [forms {:keys [indent results? parent offset] :as opts}]
   (let [items (flatten-stmts forms parent (or offset 0))
-        n (count items)]
+        n (count items)
+        nxts (next-targets (map item-t items))]
     (dotimes [i n]
       (let [it (nth items i)
-            nxt (or (some item-t (subvec items (inc i))) e/*next*)]
+            nxt (or (nth nxts i) e/*next*)]
         (binding [e/*next* nxt]
           (let [f (:form it)
                 label? (and (seq? f) (= (op f) "label"))

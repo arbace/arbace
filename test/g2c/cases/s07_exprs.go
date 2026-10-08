@@ -165,6 +165,7 @@ func Calls(xs []int, args ...any) int {
 	_ = real(z) + imag(z)
 	_ = min(1, 2, n)
 	_ = max(n, 3)
+	print(n)
 	println(bs, s, p, q, r)
 	sink(args...)
 	_ = Ident(1)
