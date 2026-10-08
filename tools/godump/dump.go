@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/importer"
@@ -27,10 +29,17 @@ type dumper struct {
 	info  *types.Info
 	pkg   *types.Package
 	sizes types.Sizes
+	types *typeTable
+	keys  map[*ast.KeyValueExpr]*litKey // fields of struct literal keys
 	w     out
-	file  string            // base name of the file being written
-	names []*types.TypeName // named types declared in the package, in source order
-	dirs  [][2]string       // directives: position, text
+	file  string                     // base name of the file being written
+	names []*types.TypeName          // named types declared in the package, in source order
+	dirs  [][2]string                // directives: position, text
+	srcs  [][]byte                   // the files' sources
+	src   []byte                     // the source of the file being written
+	tfile *token.File                // the file being written
+	docs  map[*ast.CommentGroup]bool // comment groups that are some node's Doc
+	warns []string                   // things of the source the dump cannot represent
 }
 
 // importer resolves an import path through the importing package's ImportMap to its export
@@ -60,14 +69,20 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 		r.status, r.msg = "fail", fmt.Sprintf("language version %s is newer than the pinned %s", j.lang, pinnedLang)
 		return r
 	}
-	if j.pkg != nil && j.pkg.Error != nil {
-		r.status, r.msg = "fail", j.pkg.Error.Err
+	if j.listErr != nil {
+		r.status, r.msg = "fail", j.listErr.Err
 		return r
 	}
 	d := &dumper{cfg: cfg, job: j, fset: token.NewFileSet(), sizes: types.SizesFor("gc", cfg.goarch)}
 	var files []*ast.File
 	for _, name := range j.files {
-		f, err := parser.ParseFile(d.fset, filepath.Join(j.dir, name), nil, parser.ParseComments|parser.SkipObjectResolution)
+		src, err := os.ReadFile(filepath.Join(j.dir, name))
+		if err != nil {
+			r.status, r.msg = "fail", err.Error()
+			return r
+		}
+		d.srcs = append(d.srcs, src)
+		f, err := parser.ParseFile(d.fset, filepath.Join(j.dir, name), src, parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			r.status, r.msg = "fail", err.Error()
 			return r
@@ -87,10 +102,6 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 		Implicits:    map[ast.Node]types.Object{},
 		FileVersions: map[*ast.File]string{},
 	}
-	var importMap map[string]string
-	if j.pkg != nil {
-		importMap = j.pkg.ImportMap
-	}
 	lookup := func(path string) (io.ReadCloser, error) {
 		f, ok := exports.export[path]
 		if !ok {
@@ -101,7 +112,7 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 	var errs []string
 	conf := types.Config{
 		GoVersion: j.lang,
-		Importer:  &mappedImporter{imp: importer.ForCompiler(d.fset, "gc", lookup), importMap: importMap},
+		Importer:  &mappedImporter{imp: importer.ForCompiler(d.fset, "gc", lookup), importMap: j.importMap},
 		Sizes:     d.sizes,
 		Error: func(err error) {
 			if te, ok := err.(types.Error); ok {
@@ -125,6 +136,7 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 	defer fh.Close()
 	bw := bufio.NewWriterSize(fh, 1<<20)
 	d.w = out{bw}
+	d.types = newTypeTable()
 	d.write(files, errs)
 	if err := bw.Flush(); err != nil {
 		panic(err)
@@ -143,7 +155,7 @@ func dump(cfg *config, exports *exportMap, j *job) (r result) {
 func (d *dumper) write(files []*ast.File, errs []string) {
 	w, j, c := d.w, d.job, d.cfg
 	w.WriteString(";; godump: the typed AST of a Go package for arbace.g2c (doc/go/HELPER-NOTES.md)\n")
-	w.WriteString("{:godump 1\n :package ")
+	w.WriteString("{:godump 2\n :package ")
 	w.str(j.path)
 	w.WriteString(" :name ")
 	w.str(d.pkg.Name())
@@ -173,13 +185,12 @@ func (d *dumper) write(files []*ast.File, errs []string) {
 	w.int(d.sizes.Alignof(types.Typ[types.Complex128]))
 	w.WriteString("}\n :dir ")
 	w.str(relDir(c, j.dir))
+	if j.forTest != "" {
+		w.WriteString("\n :for-test ")
+		w.str(j.forTest)
+	}
 	if p := j.pkg; p != nil {
-		d.list(" :go-files ", p.GoFiles)
-		d.list(" :cgo-files ", p.CgoFiles)
-		d.list(" :s-files ", p.SFiles)
-		d.list(" :ignored-go-files ", p.IgnoredGoFiles)
-		d.list(" :embed-patterns ", p.EmbedPatterns)
-		d.list(" :embed-files ", p.EmbedFiles)
+		d.fileLists(p, j)
 	} else {
 		d.list(" :go-files ", j.files)
 	}
@@ -195,6 +206,9 @@ func (d *dumper) write(files []*ast.File, errs []string) {
 	w.WriteString("\n :files [")
 	for i, f := range files {
 		d.file = j.files[i]
+		d.src = d.srcs[i]
+		d.tfile = d.fset.File(f.FileStart)
+		d.docs = map[*ast.CommentGroup]bool{}
 		if i > 0 {
 			w.WriteString("\n ")
 		}
@@ -206,27 +220,10 @@ func (d *dumper) write(files []*ast.File, errs []string) {
 		}
 		w.WriteString("\n  :ast ")
 		d.node(f)
-		w.WriteString("\n  :comments [")
-		first := true
-		for _, g := range f.Comments {
-			for _, cm := range g.List {
-				if !first {
-					w.WriteByte(' ')
-				}
-				first = false
-				w.WriteByte('[')
-				d.pos(cm.Slash)
-				w.WriteByte(' ')
-				w.str(cm.Text)
-				w.WriteByte(']')
-				if isDirective(cm.Text) {
-					d.dirs = append(d.dirs, [2]string{d.posFile(cm.Slash), cm.Text})
-				}
-			}
-		}
-		w.WriteString("]}")
+		d.comments(f)
+		w.WriteString("}")
 	}
-	d.file = ""
+	d.file, d.src, d.tfile = "", nil, nil
 	w.WriteString("]\n :directives [")
 	for i, dv := range d.dirs {
 		if i > 0 {
@@ -265,13 +262,114 @@ func (d *dumper) write(files []*ast.File, errs []string) {
 		}
 		d.typeView(tn)
 	}
-	w.WriteString("]}\n")
+	w.WriteString("]")
+	if len(d.warns) > 0 {
+		w.WriteString("\n :warnings ")
+		d.strs(d.warns)
+	}
+	d.writeTypeTable()
+	w.WriteString("}\n")
 }
 
+// isDirective: //go: directives, build constraints, line directives, cgo's //export,
+// gccgo's //extern, and every other directive go/ast recognises (//tool:name ...).
 func isDirective(text string) bool {
-	return strings.HasPrefix(text, "//go:") || strings.HasPrefix(text, "//line ") ||
+	if strings.HasPrefix(text, "//go:") || strings.HasPrefix(text, "//line ") ||
 		strings.HasPrefix(text, "/*line ") || strings.HasPrefix(text, "// +build") ||
-		strings.HasPrefix(text, "//export ") || strings.HasPrefix(text, "//extern ")
+		strings.HasPrefix(text, "//export ") || strings.HasPrefix(text, "//extern ") {
+		return true
+	}
+	_, ok := ast.ParseDirective(token.NoPos, text)
+	return ok
+}
+
+// comments writes a file's comment groups, in order:
+//
+//	:comments [{:list [["L:C" "// text"] ...] [:text "..."]} ...]
+//
+// :text, go/ast's CommentGroup.Text (comment markers, directives and surrounding blank lines
+// removed), is given for the groups that are some node's :doc. Directives are also collected
+// for the package's :directives; a /*line*/ directive inside an expression is a warning
+// (doc/go/SPEC.md §10.3).
+func (d *dumper) comments(f *ast.File) {
+	w := d.w
+	w.WriteString("\n  :comments [")
+	for i, g := range f.Comments {
+		if i > 0 {
+			w.WriteString("\n   ")
+		}
+		w.WriteString("{:list [")
+		for k, cm := range g.List {
+			if k > 0 {
+				w.WriteByte(' ')
+			}
+			w.WriteByte('[')
+			d.pos(cm.Slash)
+			w.WriteByte(' ')
+			w.str(cm.Text)
+			w.WriteByte(']')
+			if isDirective(cm.Text) {
+				d.dirs = append(d.dirs, [2]string{d.posFile(cm.Slash), cm.Text})
+				if strings.HasPrefix(cm.Text, "/*line ") && inExpr(f, cm.Slash) {
+					d.warns = append(d.warns, d.posFile(cm.Slash)+": /*line*/ directive inside an expression")
+				}
+			}
+		}
+		w.WriteByte(']')
+		if d.docs[g] {
+			w.WriteString(" :text ")
+			w.str(g.Text())
+		}
+		w.WriteByte('}')
+	}
+	w.WriteString("]")
+}
+
+// inExpr reports whether position p lies strictly inside an expression of f.
+func inExpr(f *ast.File, p token.Pos) bool {
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		if found || n == nil || p < n.Pos() || p >= n.End() {
+			return false
+		}
+		if _, ok := n.(ast.Expr); ok && n.Pos() < p {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// dotAfter is the position of the first "." at or after from (a selector's or a type
+// assertion's dot, after its operand), skipping white space and comments; NoPos if another
+// token comes first.
+func (d *dumper) dotAfter(from token.Pos) token.Pos {
+	src, tf := d.src, d.tfile
+	if tf == nil || !from.IsValid() {
+		return token.NoPos
+	}
+	off := tf.Offset(from)
+	for off < len(src) {
+		switch c := src[off]; {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			off++
+		case c == '/' && off+1 < len(src) && src[off+1] == '/':
+			for off < len(src) && src[off] != '\n' {
+				off++
+			}
+		case c == '/' && off+1 < len(src) && src[off+1] == '*':
+			end := strings.Index(string(src[off+2:]), "*/")
+			if end < 0 {
+				return token.NoPos
+			}
+			off += 2 + end + 2
+		case c == '.':
+			return tf.Pos(off)
+		default:
+			return token.NoPos
+		}
+	}
+	return token.NoPos
 }
 
 func (d *dumper) strs(ss []string) {
@@ -478,13 +576,33 @@ func (d *dumper) node(n ast.Node) {
 			}
 		case fComment:
 			if !fv.IsNil() {
+				g := fv.Interface().(*ast.CommentGroup)
 				key(f.key)
-				d.pos(fv.Interface().(*ast.CommentGroup).Pos())
+				d.pos(g.Pos())
+				if f.key == "doc" && d.docs != nil {
+					d.docs[g] = true
+				}
 			}
 		case fNode:
 			if !fv.IsNil() {
 				key(f.key)
 				d.node(fv.Interface().(ast.Node))
+				if f.key == "x" {
+					// the selector's or type assertion's ".", which go/ast does not record
+					var xe ast.Expr
+					switch x := n.(type) {
+					case *ast.SelectorExpr:
+						xe = x.X
+					case *ast.TypeAssertExpr:
+						xe = x.X
+					}
+					if xe != nil {
+						if dot := d.dotAfter(xe.End()); dot.IsValid() {
+							key("dot")
+							d.pos(dot)
+						}
+					}
+				}
 			}
 		case fNodes:
 			if !fv.IsNil() {
@@ -505,4 +623,63 @@ func (d *dumper) node(n ast.Node) {
 	if _, ok := n.(ast.Decl); ok {
 		w.WriteString("\n  ")
 	}
+}
+
+// fileLists writes go list's file lists of the package (those that are not empty), relative
+// to its directory: Go files in gc's order, the other files the build uses or ignores, the
+// embed patterns, and the embedded files with their SHA-256. With -tests, the in-package test
+// files and their embeds; for an external test package, its own files and embeds.
+func (d *dumper) fileLists(p *listPkg, j *job) {
+	if j.xtest {
+		d.list(" :go-files ", p.XTestGoFiles)
+		d.list(" :embed-patterns ", p.XTestEmbedPatterns)
+		d.embedFiles(" :embed-files ", p.Dir, p.XTestEmbedFiles)
+		return
+	}
+	d.list(" :go-files ", p.GoFiles)
+	d.list(" :cgo-files ", p.CgoFiles)
+	d.list(" :c-files ", p.CFiles)
+	d.list(" :cxx-files ", p.CXXFiles)
+	d.list(" :m-files ", p.MFiles)
+	d.list(" :h-files ", p.HFiles)
+	d.list(" :f-files ", p.FFiles)
+	d.list(" :s-files ", p.SFiles)
+	d.list(" :swig-files ", p.SwigFiles)
+	d.list(" :swig-cxx-files ", p.SwigCXXFiles)
+	d.list(" :syso-files ", p.SysoFiles)
+	d.list(" :ignored-go-files ", p.IgnoredGoFiles)
+	d.list(" :ignored-other-files ", p.IgnoredOtherFiles)
+	d.list(" :embed-patterns ", p.EmbedPatterns)
+	d.embedFiles(" :embed-files ", p.Dir, p.EmbedFiles)
+	if j.tests {
+		d.list(" :test-go-files ", p.TestGoFiles)
+		d.list(" :test-embed-patterns ", p.TestEmbedPatterns)
+		d.embedFiles(" :test-embed-files ", p.Dir, p.TestEmbedFiles)
+	}
+}
+
+// embedFiles writes embedded files as [["path" "sha256-hex"] ...].
+func (d *dumper) embedFiles(key, dir string, files []string) {
+	if len(files) == 0 {
+		return
+	}
+	w := d.w
+	w.WriteString(key)
+	w.WriteByte('[')
+	for i, f := range files {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(f)))
+		if err != nil {
+			panic(err)
+		}
+		if i > 0 {
+			w.WriteByte(' ')
+		}
+		w.WriteByte('[')
+		w.str(f)
+		w.WriteByte(' ')
+		sum := sha256.Sum256(data)
+		w.str(hex.EncodeToString(sum[:]))
+		w.WriteByte(']')
+	}
+	w.WriteByte(']')
 }

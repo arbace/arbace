@@ -14,6 +14,7 @@ import (
 //	:def :use  the object an identifier declares or denotes
 //	:inst      the type arguments of a generic use, and the instantiated type
 //	:sel       a selector's selection (field, method or method-expr; path; indirect; receiver)
+//	:field     a struct literal key's field: its index path, and the embedded fields traversed
 //	:implicit  the object a node declares implicitly (import specs, type switch clauses, ...)
 func (d *dumper) annotate(n ast.Node) {
 	info := d.info
@@ -34,8 +35,15 @@ func (d *dumper) annotate(n ast.Node) {
 	if se, ok := n.(*ast.SelectorExpr); ok {
 		sel = info.Selections[se]
 	}
+	if cl, ok := n.(*ast.CompositeLit); ok {
+		d.litKeys(cl)
+	}
+	var kv *litKey
+	if e, ok := n.(*ast.KeyValueExpr); ok {
+		kv = d.keys[e]
+	}
 	impl := info.Implicits[n]
-	if !hasTV && def == nil && use == nil && !hasInst && sel == nil && impl == nil {
+	if !hasTV && def == nil && use == nil && !hasInst && sel == nil && kv == nil && impl == nil {
 		return
 	}
 	w := d.w
@@ -53,7 +61,7 @@ func (d *dumper) annotate(n ast.Node) {
 		w.WriteString(mode(tv))
 		if tv.Type != nil {
 			key(":t ")
-			w.str(d.tstr(tv.Type))
+			d.tid(tv.Type)
 		}
 		if tv.Value != nil {
 			key(":val ")
@@ -74,10 +82,10 @@ func (d *dumper) annotate(n ast.Node) {
 			if i > 0 {
 				w.WriteByte(' ')
 			}
-			w.str(d.tstr(inst.TypeArgs.At(i)))
+			d.tid(inst.TypeArgs.At(i))
 		}
 		w.WriteString("] :t ")
-		w.str(d.tstr(inst.Type))
+		d.tid(inst.Type)
 		w.WriteString("}")
 	}
 	if sel != nil {
@@ -95,7 +103,20 @@ func (d *dumper) annotate(n ast.Node) {
 		w.WriteString(" :indirect ")
 		w.bool(sel.Indirect())
 		w.WriteString(" :recv ")
-		w.str(d.tstr(sel.Recv()))
+		d.tid(sel.Recv())
+		if via := embeddedNames(sel.Recv(), sel.Index()); len(via) > 0 {
+			w.WriteString(" :via ")
+			d.strs(via)
+		}
+		w.WriteString("}")
+	}
+	if kv != nil {
+		key(":field {:path ")
+		d.ints(kv.path)
+		if len(kv.via) > 0 {
+			w.WriteString(" :via ")
+			d.strs(kv.via)
+		}
 		w.WriteString("}")
 	}
 	if impl != nil {
@@ -196,7 +217,7 @@ func (d *dumper) obj(o types.Object, isDef bool) {
 	default:
 		if t := o.Type(); t != nil {
 			w.WriteString(" :t ")
-			w.str(d.tstr(t))
+			d.tid(t)
 		}
 	}
 	if p := o.Parent(); p != nil {
@@ -210,7 +231,7 @@ func (d *dumper) obj(o types.Object, isDef bool) {
 	case *types.Func:
 		if sig, ok := x.Type().(*types.Signature); ok && sig.Recv() != nil {
 			w.WriteString(" :recv ")
-			w.str(d.tstr(sig.Recv().Type()))
+			d.tid(sig.Recv().Type())
 		}
 	case *types.Var:
 		if x.Embedded() {
@@ -238,11 +259,12 @@ func (d *dumper) obj(o types.Object, isDef bool) {
 // typeView writes a named type (or alias) declared in the package, at package level or local:
 //
 //	{:name N :decl POS [:local true] :t T :underlying U
-//	 [:alias true :rhs R] [:type-params ["T any" ...]]
+//	 [:alias true :rhs R] [:type-params [{:t TP :constraint C} ...]]
 //	 :method-set [M ...] [:ptr-method-set [M ...]]
 //	 [:size S :align A [:fields [{:name F :t T :offset O :size S :align A [:embedded true]} ...]]]}
 //
-// with M = {:name N [:pkg P] :t SIG :recv R :path [I ...] :indirect B}. Method sets are go/types'
+// with M = {:name N [:pkg P] :t SIG :recv R :path [I ...] :indirect B}, every type an id in the
+// type table (types.go). Method sets are go/types'
 // (sorted by name and package). Layouts are types.SizesFor("gc", GOARCH)'s, for types without
 // type parameters.
 func (d *dumper) typeView(tn *types.TypeName) {
@@ -256,13 +278,13 @@ func (d *dumper) typeView(tn *types.TypeName) {
 	}
 	t := tn.Type()
 	w.WriteString(" :t ")
-	w.str(d.tstr(t))
+	d.tid(t)
 	if tn.IsAlias() {
 		w.WriteString(" :alias true :rhs ")
 		if a, ok := t.(*types.Alias); ok {
-			w.str(d.tstr(a.Rhs()))
+			d.tid(a.Rhs())
 		} else {
-			w.str(d.tstr(t))
+			d.tid(t)
 		}
 		if a, ok := t.(*types.Alias); ok && a.TypeParams().Len() > 0 {
 			d.tparams(a.TypeParams())
@@ -271,7 +293,7 @@ func (d *dumper) typeView(tn *types.TypeName) {
 		return
 	}
 	w.WriteString(" :underlying ")
-	w.str(d.tstr(t.Underlying()))
+	d.tid(t.Underlying())
 	named, _ := t.(*types.Named)
 	if named != nil && named.TypeParams().Len() > 0 {
 		d.tparams(named.TypeParams())
@@ -287,16 +309,8 @@ func (d *dumper) typeView(tn *types.TypeName) {
 }
 
 func (d *dumper) tparams(tps *types.TypeParamList) {
-	w := d.w
-	w.WriteString(" :type-params [")
-	for i := range tps.Len() {
-		if i > 0 {
-			w.WriteByte(' ')
-		}
-		tp := tps.At(i)
-		w.str(tp.Obj().Name() + " " + d.tstr(tp.Constraint()))
-	}
-	w.WriteString("]")
+	d.w.WriteString(" :type-params ")
+	d.typeParams(d.w, tps)
 }
 
 func (d *dumper) methodSet(ms *types.MethodSet) {
@@ -315,10 +329,10 @@ func (d *dumper) methodSet(ms *types.MethodSet) {
 			w.str(f.Pkg().Path())
 		}
 		w.WriteString(" :t ")
-		w.str(d.tstr(f.Type()))
+		d.tid(f.Type())
 		if sig, ok := f.Type().(*types.Signature); ok && sig.Recv() != nil {
 			w.WriteString(" :recv ")
-			w.str(d.tstr(sig.Recv().Type()))
+			d.tid(sig.Recv().Type())
 		}
 		w.WriteString(" :path ")
 		d.ints(s.Index())
@@ -374,7 +388,7 @@ func (d *dumper) layout(t types.Type) {
 		w.WriteString("{:name ")
 		w.str(f.Name())
 		w.WriteString(" :t ")
-		w.str(d.tstr(f.Type()))
+		d.tid(f.Type())
 		w.WriteString(" :offset ")
 		w.int(offsets[i])
 		w.WriteString(" :size ")
@@ -427,4 +441,108 @@ func dependsOnTypeParams(t types.Type, seen map[types.Type]bool) bool {
 		}
 	}
 	return false
+}
+
+// tid writes the type table id of t.
+func (d *dumper) tid(t types.Type) {
+	d.w.int(int64(d.typ(t)))
+}
+
+// A litKey is the field a key of a struct literal selects (go/types records only the field
+// object): its index path through embedded fields and the names of the embedded fields.
+type litKey struct {
+	path []int
+	via  []string
+}
+
+// litKeys finds the fields of the keys of a struct literal, before its elements are written.
+func (d *dumper) litKeys(cl *ast.CompositeLit) {
+	tv, ok := d.info.Types[cl]
+	if !ok || tv.Type == nil || len(cl.Elts) == 0 {
+		return
+	}
+	st := structOf(tv.Type)
+	if st == nil {
+		return
+	}
+	for _, e := range cl.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		id, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		f, ok := d.info.Uses[id].(*types.Var)
+		if !ok || !f.IsField() {
+			continue
+		}
+		obj, index, _ := types.LookupFieldOrMethod(st, false, f.Pkg(), f.Name())
+		if obj != f {
+			continue
+		}
+		if d.keys == nil {
+			d.keys = map[*ast.KeyValueExpr]*litKey{}
+		}
+		d.keys[kv] = &litKey{path: index, via: embeddedNames(st, index)}
+	}
+}
+
+// structOf is the struct type behind t: through aliases, names, one pointer (an elided &T in
+// a literal, a selection's receiver) and a type parameter's common underlying type.
+func structOf(t types.Type) *types.Struct {
+	t = types.Unalias(t)
+	if p, ok := t.Underlying().(*types.Pointer); ok {
+		t = types.Unalias(p.Elem())
+	}
+	if tp, ok := t.(*types.TypeParam); ok {
+		return commonStruct(tp.Constraint(), nil)
+	}
+	st, _ := t.Underlying().(*types.Struct)
+	return st
+}
+
+// commonStruct is the struct type of a constraint's type set, when its terms have one.
+func commonStruct(t types.Type, seen map[types.Type]bool) *types.Struct {
+	if seen[t] {
+		return nil
+	}
+	if seen == nil {
+		seen = map[types.Type]bool{}
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Struct:
+		return u
+	case *types.Interface:
+		for i := range u.NumEmbeddeds() {
+			if st := commonStruct(u.EmbeddedType(i), seen); st != nil {
+				return st
+			}
+		}
+	case *types.Union:
+		for i := range u.Len() {
+			if st := commonStruct(u.Term(i).Type(), seen); st != nil {
+				return st
+			}
+		}
+	}
+	return nil
+}
+
+// embeddedNames are the names of the embedded fields an index path (of a selection or a
+// literal key) traverses from t: all its indexes but the last.
+func embeddedNames(t types.Type, index []int) []string {
+	var names []string
+	for _, i := range index[:max(0, len(index)-1)] {
+		st := structOf(t)
+		if st == nil || i >= st.NumFields() {
+			return nil
+		}
+		f := st.Field(i)
+		names = append(names, f.Name())
+		t = f.Type()
+	}
+	return names
 }

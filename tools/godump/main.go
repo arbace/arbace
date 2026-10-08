@@ -2,12 +2,14 @@
 // type-checks them with go/types and writes, per package, one forms file for Arbace's reader
 // (the Clojure reader with *read-eval* false, not strict EDN). The file holds the typed AST of
 // every file, generically (one form per go/ast node), with what go/types decided as reader
-// metadata, and the package view: the build configuration, init order, method sets, struct
-// layouts and directives. It decides nothing: the converter (arbace.g2c) does.
+// metadata, the package view (the build configuration, file lists, init order, method sets,
+// struct layouts, directives) and the type table, every type mentioned as structured data. It
+// decides nothing: the converter (arbace.g2c) does.
 //
 // Usage:
 //
-//	godump [flags] PACKAGE...      import paths or patterns, as `go list` takes them
+//	godump [flags] PACKAGE...      import paths or patterns, as `go list` takes them; with
+//	                               -tests, each with its _test.go files, and its PATH_test
 //	godump [flags] -files FILE...  single-file programs ($GOROOT/test); FILE,FILE... is one
 //	                               program of several files (the others in the first one's directory)
 //
@@ -42,6 +44,7 @@ var (
 	flagGo     = flag.String("go", "go", "the go command (TamaGo's, for GOOS=tamago)")
 	flagFiles  = flag.Bool("files", false, "arguments are single-file programs, not packages")
 	flagDeps   = flag.Bool("deps", false, "also dump the dependencies of the named packages")
+	flagTests  = flag.Bool("tests", false, "dump packages with their _test.go files, and external test packages (PATH_test)")
 )
 
 // A job is one package to dump.
@@ -52,6 +55,12 @@ type job struct {
 	files []string // file names in dir
 	pkg   *listPkg // go list's view (nil for single files)
 	lang  string   // language version
+
+	importMap map[string]string     // the import paths of the files as go list resolved them
+	listErr   *struct{ Err string } // go list's error for the package (or its test variant)
+	tests     bool                  // with -tests: the package with its in-package test files
+	xtest     bool                  // with -tests: the external test package of pkg
+	forTest   string                // the package tested, for tests and xtest
 }
 
 // A result is one line of the summary.

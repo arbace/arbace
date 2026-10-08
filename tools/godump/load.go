@@ -117,22 +117,38 @@ func (c *config) buildContext() *build.Context {
 
 // listPkg is the part of `go list -json` the helper uses.
 type listPkg struct {
-	Dir            string
-	ImportPath     string
-	Name           string
-	Export         string
-	Goroot         bool
-	Standard       bool
-	DepOnly        bool
-	GoFiles        []string
-	CgoFiles       []string
-	SFiles         []string
-	IgnoredGoFiles []string
-	EmbedPatterns  []string
-	EmbedFiles     []string
-	Imports        []string
-	ImportMap      map[string]string
-	Module         *struct {
+	Dir                string
+	ImportPath         string
+	Name               string
+	Export             string
+	Goroot             bool
+	Standard           bool
+	DepOnly            bool
+	ForTest            string
+	GoFiles            []string
+	CgoFiles           []string
+	CFiles             []string
+	CXXFiles           []string
+	MFiles             []string
+	HFiles             []string
+	FFiles             []string
+	SFiles             []string
+	SwigFiles          []string
+	SwigCXXFiles       []string
+	SysoFiles          []string
+	IgnoredGoFiles     []string
+	IgnoredOtherFiles  []string
+	EmbedPatterns      []string
+	EmbedFiles         []string
+	TestGoFiles        []string
+	XTestGoFiles       []string
+	TestEmbedPatterns  []string
+	TestEmbedFiles     []string
+	XTestEmbedPatterns []string
+	XTestEmbedFiles    []string
+	Imports            []string
+	ImportMap          map[string]string
+	Module             *struct {
 		Path      string
 		GoVersion string
 	}
@@ -146,6 +162,9 @@ func (c *config) goList(args []string) ([]*listPkg, error) {
 		return nil, nil
 	}
 	a := []string{"list", "-e", "-json", "-export", "-deps"}
+	if *flagTests {
+		a = append(a, "-test")
+	}
 	if len(c.tags) > 0 {
 		a = append(a, "-tags", strings.Join(c.tags, ","))
 	}
@@ -191,18 +210,42 @@ func packageJobs(c *config, args []string) ([]*job, *exportMap, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	byPath := map[string]*listPkg{}
+	for _, p := range pkgs {
+		byPath[p.ImportPath] = p
+	}
 	var jobs []*job
 	for _, p := range pkgs {
-		if p.DepOnly && !*flagDeps {
-			continue
+		if p.DepOnly && !*flagDeps || p.ForTest != "" {
+			continue // test variants are found from their package
+		}
+		if *flagTests && p.Name == "main" && strings.HasSuffix(p.ImportPath, ".test") && byPath[strings.TrimSuffix(p.ImportPath, ".test")] != nil {
+			continue // a generated test main
 		}
 		lang := pinnedLang
 		if p.Module != nil && p.Module.GoVersion != "" {
 			lang = "go" + p.Module.GoVersion
 		}
-		j := &job{key: p.ImportPath, path: p.ImportPath, dir: p.Dir, pkg: p, lang: lang}
+		j := &job{key: p.ImportPath, path: p.ImportPath, dir: p.Dir, pkg: p, lang: lang, importMap: p.ImportMap, listErr: p.Error}
 		j.files = append(append(j.files, p.GoFiles...), p.CgoFiles...)
+		if !*flagTests {
+			jobs = append(jobs, j)
+			continue
+		}
+		// with -tests: the package with its in-package _test.go files, as go test compiles it
+		// ("p [p.test]"), and the external test package p_test ("p_test [p.test]")
+		if v := byPath[p.ImportPath+" ["+p.ImportPath+".test]"]; v != nil {
+			j.tests = true
+			j.forTest = p.ImportPath
+			j.files = slices.Clone(v.GoFiles)
+			j.importMap, j.listErr = v.ImportMap, v.Error
+		}
 		jobs = append(jobs, j)
+		if v := byPath[p.ImportPath+"_test ["+p.ImportPath+".test]"]; v != nil {
+			xj := &job{key: p.ImportPath + "_test", path: p.ImportPath + "_test", dir: v.Dir, pkg: p, lang: lang,
+				xtest: true, forTest: p.ImportPath, files: slices.Clone(v.GoFiles), importMap: v.ImportMap, listErr: v.Error}
+			jobs = append(jobs, xj)
+		}
 	}
 	return jobs, newExportMap(pkgs), nil
 }
