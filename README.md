@@ -25,10 +25,10 @@ can be repeated. Prior art: [Clojure](https://github.com/clojure/clojure),
 
 ## Arbace for Java 26
 
-Before the break, Arbace on the JVM is frozen on the branch `arbace-for-java-26` (tag
-`arbace-for-java-26-v1`): the final state of Arbace on the JVM, binary compatible with the Java
-ecosystem. It is where to go for Arbace on the JVM: what it holds, how to build, run and verify
-it, and its known limits are in [doc/FREEZE.md](doc/FREEZE.md).
+The branch `arbace-for-java-26` (tag `arbace-for-java-26-v1`) preserves the final state of
+Arbace on the JVM, binary compatible with the Java ecosystem, before main leaves the JVM behind.
+[doc/FREEZE.md](doc/FREEZE.md) describes what it holds, how to build, run and verify it, and its
+known limits.
 
 ```sh
 bin/build-arbace         # bootstrap into target/: the stages, target/arbace.jar and its AOT cache
