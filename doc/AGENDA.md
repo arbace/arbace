@@ -19,7 +19,7 @@ Other documents refer to these step numbers.
 
 1. Spec: every construct javac can emit as idiomatic Clojure, the class forms
    ([classes/SPEC.md](classes/SPEC.md)). Reviewed: the user accepted all 17 recommendations of
-   §12. The 32 amendments found while implementing (13 compiler, 19 converter) were accepted
+   §12. The 33 amendments found while implementing (14 compiler, 19 converter) were accepted
    and are folded in.
 2. The class forms compiler `arbace/classes/` (`bin/class-forms-tests`,
    [classes/COMPILER-NOTES.md](classes/COMPILER-NOTES.md)).

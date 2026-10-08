@@ -533,3 +533,6 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 11. **`this` in instance initializers.** Accepted (2026-10-07), folded into SPEC §4.5, §4.7, §5.2.
 12. **Anonymous subclasses of inner classes, `:outer`.** Accepted (2026-10-07), folded into SPEC §4.8.
 13. **javac options.** Accepted (2026-10-07), folded into SPEC §3, §5.10.
+14. **Java's order of imports in name resolution.** The own package comes before Clojure's
+    default imports and `java.lang`, as implemented since the vendoring (VENDOR-NOTES,
+    "Changes to arbace.classes" 5). Accepted (2026-10-08), folded into SPEC §5.2.

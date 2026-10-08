@@ -1152,3 +1152,18 @@ recommended:
   package, then the default imports and `java.lang`; VENDOR-NOTES, "Changes to
   arbace.classes" 5), an amendment for the user to accept; and the local branch
   `condy-item1-experiment` (`bdd773b`), the condy experiment that was not kept.
+
+## 2026-10-08: SPEC §5.2 amended to Java's order of imports; the condy branch deleted
+
+- The user accepted the amendment the read-through found: SPEC §5.2 now resolves a class name
+  in a class body through the namespace's explicit imports, then the class's own package, then
+  Clojure's default imports and `java.lang`, as the compiler has done since the vendoring
+  (VENDOR-NOTES, "Changes to arbace.classes" 5). The alternative, changing the code to the
+  spec's old order, was rejected: at stage 0 `Compiler$FISupport` in `arbace.lang.Reflector`
+  resolved to `clojure.lang.Compiler` under it. COMPILER-NOTES lists it as amendment 14; 33
+  amendments in all. The docstring of `arbace.classes.analyze/resolve-class-sym` said the old
+  order too and was corrected; `bin/build-arbace` rebuilt (stages identical at 5,756 classes,
+  the verifier clean).
+- At the user's decision the local branch `condy-item1-experiment` (`bdd773b`, the condy
+  constants experiment, journal 2026-10-07) was deleted; this journal records what it tried
+  and measured.

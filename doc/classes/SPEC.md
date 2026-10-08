@@ -668,10 +668,11 @@ An unqualified symbol in a class body resolves, in order, to:
 
 1. a local or parameter (the receiver parameter included),
 2. a field of the class or of an enclosing class body, innermost first (§4.5, §4.8),
-3. what the namespace maps it to (vars, imported classes), as Clojure does,
-4. a class in the class's own package, as Java sees same-package classes without import
-   (a new fallback; today the symbol is an error),
-5. `java.lang`, which Clojure imports anyway.
+3. what the namespace maps it to (vars, classes it imports explicitly), as Clojure does,
+4. a class in the class's own package, as Java sees same-package classes without import,
+5. Clojure's default imports (`RT/DEFAULT_IMPORTS`) and `java.lang`, as Java's imports on
+   demand: after the own package, so that a class of the package named like a default import
+   (`Compiler`, `RT`) is that class (amendment, accepted 2026-10-08).
 
 Type names (§4.3) resolve to member classes of the class and of enclosing class bodies first,
 then as 3 to 5.
@@ -1957,11 +1958,11 @@ public final class Shapes {
 **Settled (2026-10-06):** the user accepted every recommendation below. They are now part of
 the spec, and where the text above leaves a choice open, the recommendation applies.
 
-**Amendments (2026-10-07):** implementing the compiler and the converter raised 32 proposed
-amendments (13 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`). The user accepted all of
-them; they are folded into the text above (§1, §3, §4.4 to §4.8, §4.10, §4.11, §5.2 to §5.8,
-§5.10, §5.12, §6, §7, §9.1, §9.2, §9.5, §10). The last four are marked "amendment, accepted
-2026-10-07" where they apply.
+**Amendments (2026-10-07, 2026-10-08):** implementing the compiler and the converter raised 33
+proposed amendments (14 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`). The user accepted
+all of them; they are folded into the text above (§1, §3, §4.4 to §4.8, §4.10, §4.11, §5.2 to §5.8,
+§5.10, §5.12, §6, §7, §9.1, §9.2, §9.5, §10). The last five are marked "amendment, accepted"
+with their date where they apply.
 
 Each with the recommendation the spec follows.
 

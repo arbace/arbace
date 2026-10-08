@@ -54,8 +54,9 @@
 
 (defn resolve-class-sym
   "Resolves a class name symbol from `scope` {:class internal-name :ns ns :local-classes {}}:
-  member classes of the class and its enclosing classes, then the namespace's mappings, then the
-  class's own package, then java.lang. Returns an internal name or nil."
+  member classes of the class and its enclosing classes, then the namespace's explicit imports,
+  then the class's own package, then Clojure's default imports and java.lang (SPEC §5.2).
+  Returns an internal name or nil."
   [scope sym]
   (when (and (symbol? sym) (nil? (namespace sym)))
     (let [s (name sym)
