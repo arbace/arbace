@@ -1,8 +1,11 @@
 # g2c: Go as Arbace forms — survey and plan
 
-Status: survey, 2026-10-07. No decision has been taken; the open questions in §9 are the
-user's. Nothing here is implemented in `arbace/`. The experiments it cites ran in `.tmp/g2c/`
-(§10).
+Status: survey, 2026-10-07. The user decided its open questions (§9) the same day. Two
+decisions differ from the survey's recommendations: phase a (G3-G6) is skipped, and the build
+configuration is `GOOS=tamago`. The decisions are in
+[JOURNAL.md](JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions) and noted in §9; the survey
+is otherwise left as written. Nothing here is implemented in `arbace/`. The experiments it cites
+ran in `.tmp/g2c/` (§10).
 
 g2c is a Go → Clojure mechanism, the counterpart of j2c (`arbace/j2c/`,
 [classes/CONVERTER-NOTES.md](classes/CONVERTER-NOTES.md)). It would let Arbace take in what the
@@ -177,8 +180,8 @@ typed AST. Keep go/ssa in mind for a "lowered" mode, should the native back end 
 
 ### 2.2 What the helper emits
 
-Following the coordinator's guidance and SPEC §1.5, everything targets **`clojure.core/read`
-(Arbace's reader), not EDN**. The helper may use metadata (`^{...}`), symbols with dots and
+Following the project's convention (CLAUDE.md) and SPEC §1, principle 5, everything targets
+**`clojure.core/read` (Arbace's reader), not EDN**. The helper may use metadata (`^{...}`), symbols with dots and
 slashes, ratios and BigInts, and tagged literals where a data reader is registered.
 
 - **The tree.** One form per AST node, in source order: `(:binary-expr {...})` and so on,
@@ -222,7 +225,8 @@ go1.27.1:
 Under wasip1 most remaining `.s` files are empty stubs (`stub.s`, `empty.s`). What is left
 outside runtime, reflect and atomics is `internal/bytealg` (3), `math` floor, `math/big` arith
 (and the `math_big_pure_go` tag removes it), and `internal/cpu`. **Recommendation:** type-check
-for `GOOS=wasip1 GOARCH=wasm` with tags `purego,math_big_pure_go`.
+for `GOOS=wasip1 GOARCH=wasm` with tags `purego,math_big_pure_go`. (Decided otherwise:
+`GOOS=tamago`, open question 5 in §9.)
 
 - `int` and `uintptr` are 64-bit there, which suits `long`.
 - The OS layer is a small, documented interface. It is implementable on the JVM and later in
@@ -280,9 +284,9 @@ Spirit: as the class forms are for Java (SPEC §1):
 - what go/types infers written out where Arbace's compiler would otherwise need a full checker;
 - the Clojure reader only.
 
-All names below are **tentative** (open question 4). Top-level Go declarations are written with
-the alias `go` (for `arbace.go`): `go/type`, `go/func`, `go/method`, `go/var`, `go/const`.
-That way they never shadow `clojure.core`'s `type` or the `var` special form.
+All names below are **tentative** (open question 4; adopted as proposed, §9). Top-level Go
+declarations are written with the alias `go` (for `arbace.go`): `go/type`, `go/func`,
+`go/method`, `go/var`, `go/const`. That way they never shadow `clojure.core`'s `type` or the `var` special form.
 
 ### 3.1 Packages, files, imports, build tags
 
@@ -297,7 +301,7 @@ That way they never shadow `clojure.core`'s `type` or the `var` special form.
 - Build tags are resolved by the helper: the forms are for one configuration. The
   configuration is recorded in the package namespace's metadata. Files excluded by tags are
   not converted. A multi-configuration source, where one form set covers several GOOS, is out
-  of scope (open question 7).
+  of scope (open question 7; so decided, §9).
 
 ### 3.2 Types
 
@@ -410,7 +414,7 @@ points decide the design:
   narrowing after every narrow operation. That is faithful to principle 1 but unreadable.
   Recommendation: a `go/func` body is a **Go context**, the way a class body changes name
   resolution (SPEC §5.2). It is the one place where Clojure's `+` (overflow-checked) does not
-  apply. This is a conscious exception to principle 1 (open question 3).
+  apply. This is a conscious exception to principle 1 (open question 3; so decided, §9).
 - **Closures capture variables, not values.** A Go `func` literal captures by reference, and
   since Go 1.22 each loop iteration has its own variable. Class forms forbid capturing a
   `^:mutable` local (SPEC §5.3), which makes that an error today and so free for Go's meaning:
@@ -606,12 +610,12 @@ and `bytes` use it in one file (§10, table).
   never names. Options:
   1. `invokedynamic` per call site, bootstrapped to look up the receiver's method by Go name
      and signature, with an inline cache keyed by class. This is the JVM's own answer to
-     dynamic dispatch (MODERN-COMPILER.md already ranks indy for keyword and reflective call
-     sites). It works incrementally at the REPL.
+     dynamic dispatch (MODERN-COMPILER.md ranks indy for keyword and reflective call sites,
+     and both have since been adopted). It works incrementally at the REPL.
   2. Whole-program: generate a Java interface per Go interface and make each class implement
      every interface its method set satisfies. This is fastest (`invokeinterface`), but it
      breaks when a new interface appears after the type was compiled, which is the REPL case.
-  
+
   Recommendation: 1, with 2 as an optimisation for closed-world builds. Type assertions and
   type switches use the same per-type descriptors.
 - **Embedding:** promoted methods get forwarding methods on the outer type (Go's compiler
@@ -1007,35 +1011,53 @@ grows down the table.
 
 ## 9. Open questions for the user
 
+The user answered all ten on 2026-10-07 ("Decisions on g2c's open questions" in
+[JOURNAL.md](JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions)). Each answer is noted
+after its question.
+
 1. **Priority of the phases.** Is phase a, Go libraries on the JVM before the freeze, worth
    G3-G6? Or should g2c go straight from G2 (round trip) to B1 (the box via gc)? The front
    end, spec and round trip serve both. Everything after differs.
+   *Decided:* G0-G2, then B1. Phase a (G3-G6) is skipped, since the freeze would leave it behind.
 2. **The box via gc.** Is it acceptable that the first bare-metal Arbace is built by Go's
    toolchain plus TamaGo, with "Arbace all the way down" reached by replacing gc step by step
    (§5.2)? The alternative is that Arbace's own native compiler is a precondition.
+   *Decided:* yes, with gc as the reference while it is replaced layer by layer.
 3. **Go context for operators.** In Go bodies, should `+`, `-`, `<<` and the others mean Go's
    operators at the operands' type (recommended, §3.4)? The alternative keeps Clojure's
    meaning everywhere and writes Go's arithmetic with explicit `unchecked-*` and narrowing
    forms, as class forms do for Java.
+   *Decided:* the Go context, a deliberate exception to "Clojure keeps its meaning".
 4. **Names.** The `go/type`, `go/func` and `go/method` heads; `(addr x)` against go-lisp's
    `(& x)`; core.async's `<!` and `>!` for channels; `(values ...)` binding targets; Go
    identifiers verbatim (recommended) against go-lisp's kebab-case with `-` for unexported.
+   *Decided:* the survey's proposal, as listed.
 5. **The build configuration** for phase a: `wasip1/wasm` with `purego,math_big_pure_go`
    (recommended), or an own `GOOS=arbace` overlay as GopherJS and TinyGo have.
+   *Decided:* neither: `GOOS=tamago` for amd64 and arm64, the box's own configuration.
 6. **Go version pinning:** go1.27.1, the version of the local toolchain and of TamaGo, for the
    first g2c. Who moves it, and when?
+   *Decided:* pinned to TamaGo's release (go1.27.1 now). Claude proposes moves, the user
+   approves, and the journal records them.
 7. **One configuration per conversion,** or forms that keep build-tag alternatives (as source
    does) so that one Arbace package serves the JVM and the box?
+   *Decided:* one configuration per conversion, recorded in the forms.
 8. **The Go helper as a tool dependency:** g2c needs the Go toolchain at conversion time, as
    j2c needs javac. Is a small Go program under `bin/` or `tools/` acceptable in this
    repository (BSD-licensed Go APIs, Arbace's own code under EPL)? If yes, the experiment's
    `godump` becomes its seed. Converted Go code is BSD-3-Clause (Go, TamaGo), and
    `LICENSE.md` would need that license when the first converted package is kept.
+   *Decided:* yes, under `tools/`, seeded from `godump`, under EPL. BSD-3-Clause goes into
+   `LICENSE.md` once converted Go code is kept.
 9. **Converted output in the repository?** j2c's output is regenerated, not tracked (the
    user's decision for j2c). The same for g2c? For phase b the transcribed runtime would
    eventually *become* source, as `arbace/` did for Clojure.
+   *Decided:* regenerated, not tracked, until a package becomes hand-maintained source by a
+   recorded decision.
 10. **go-lisp's role:** keep it as a separate tool and use its toolchain as the `.lgo` back end
     (§5.2), or fold its round-trip corpus tests into Arbace's checks?
+    *Decided:* its coverage tables, round-trip method and corpus are reused; no `.lgo` back end,
+    and go-lisp stays a separate tool.
 
 ## 10. Experiments (reproducible; scratch in `.tmp/g2c/`, not tracked)
 

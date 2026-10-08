@@ -17,6 +17,8 @@ SPEC.md, last section).
 | `arbace/classes/analyze.clj` | `arbace.classes.analyze` | entering classes (headers, members, derived members), name resolution, code analysis into typed nodes |
 | `arbace/classes/emit.clj` | `arbace.classes.emit` | bytecode for nodes and classes, `InnerClasses` by a post-pass over the constant pool |
 | `arbace/classes/compiler.clj` | `arbace.classes.compiler` | one compilation: enter, analyze, emit; define and/or write the classes |
+| `arbace/classes/lower.clj` | `arbace.classes.lower` | Clojure's `fn*`, `reify*`, `deftype*`, `letfn*`, `case*` and `def` rewritten into class forms and other forms the compiler knows (section "Clojure in class bodies" below) |
+| `arbace/classes/build.clj` | `arbace.classes.build` | compiles trees of class forms files into class files at any stage, for `bin/build-arbace` and `bin/vendor-arbace` (`doc/VENDOR-NOTES.md`) |
 | `arbace/classes/native.clj` | `arbace.classes.native` | the boundary with `arbace.lang.Compiler` (stage 1 on): what the compiler calls for the class forms' special forms (SPEC §9.5, section "Native class forms" below) |
 | `arbace/core_classes.clj` | `arbace.core` | the user-facing macros and operators, loaded by `arbace/core.clj` (formerly `arbace.classes.core`) |
 | `arbace/classes/verify.clj` | `arbace.classes.verify` | the JDK's class file verifier (`java.lang.classfile`, JEP 484) as a test oracle over a tree of class files; run on every stage by `bin/build-arbace` and on run-time compiled classes by `test/native/verify_test.clj` |
@@ -25,10 +27,10 @@ SPEC.md, last section).
 | `bin/class-forms-tests` | | runs the tests |
 
 The compiler's sources name ASM `arbace.asm`: the boot driver rewrites those symbols while it
-reads the files (also inside metadata such as type hints), so the same sources can later be
-compiled into stage 1 against a vendored `arbace.asm`. Its other dependencies on the frozen
-Clojure are ordinary `clojure.core` functions, `proxy` (for ASM's `ClassWriter` and visitors) and
-`clojure.lang.DynamicClassLoader`/`RT` for the REPL loaders.
+reads the files (also inside metadata such as type hints), so the same sources are also
+compiled into stage 1 and later stages against the vendored `arbace.asm`. Its other
+dependencies on the frozen Clojure are ordinary `clojure.core` functions, `proxy` (for ASM's
+`ClassWriter` and visitors) and `clojure.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 
 ## Use
 
@@ -71,8 +73,9 @@ hierarchy questions (for stack map frames and assignability) are answered by par
 from the tree first, then the JDK, never from classes loaded in the verifying runtime. From a
 stage: `java -cp target/stageN:. arbace.lang.Main -m arbace.classes.verify DIR [CLASS-DIR...]`
 (exit status 1 on any error, with a report grouped by kind). `bin/build-arbace` runs it on
-stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each, the class forms' and the Clojure
-compiler's, verified in about 0.9 s (1.7 s with the JVM launch).
+stages 1 and 2 (stage 3 equals stage 2): 5,091 classes each when it was added, the class forms'
+and the Clojure compiler's, verified in about 0.9 s (1.7 s with the JVM launch); 5,756 each at
+the last check (2026-10-07).
 
 ## How it works
 
@@ -259,10 +262,11 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
     binding for the files it loads.
   - `compile-fn`: any other class form in code the compiler compiles itself, and the forms that
     are errors for Clojure but class forms for the spec (a primitive tag on a local with a
-    primitive initializer, `set!` of a local of the method, `new` of an array class), throw `Compiler$ClassFormsExpr$Signal`. `FnExpr/parse` catches it
-    and hands the whole fn over, unless the fn is one of the compiler's own `(fn* ^:once [] ...)`
-    wrappers (loops and `try` in expression position, `lazy-seq` bodies) or a `letfn*`
-    initializer (`CLASS_FORMS_NO_DELEGATE`): then the enclosing fn is handed over. At the top
+    primitive initializer, `set!` of a local of the method, `new` of an array class), throw
+    `Compiler$ClassFormsExpr$Signal`. `FnExpr/parse` catches it and hands the whole fn over,
+    unless the fn is one of the compiler's own `(fn* ^:once [] ...)` wrappers (loops and `try`
+    in expression position, `lazy-seq` bodies) or a `letfn*` initializer
+    (`CLASS_FORMS_NO_DELEGATE`): then the enclosing fn is handed over. At the top
     level (a `def`'s initializer) `eval` and `compile1` retry the form as `((fn* [] form))`.
     `compile-fn` makes the fn class the compiler would have made, with the compiler's name for
     it (`ns$f__123`), `public final`, extending `AFunction` or `RestFn` (and the `IFn$...`
@@ -276,10 +280,10 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
     `*warn-on-reflection*`: `^{:reflection :clojure}` on the class), `Object` values converted
     by `RT.intCast` where an `int` is needed (array dimensions and indexes) and by
     `RT.longCast`... where a method returns a primitive, a `switch` with integer labels on a
-    `long` or any other value (Clojure's integers) converting it by `RT.intCast`, hinted reference locals taking any
-    reference from `recur` (checked), and the loop at the top of an arity is not a target of
-    `break`. Overloads (methods, static methods, `new`; without param-tags) are chosen as
-    Clojure's compiler chooses them (`analyze/clj-select`), not by Java's rules: among the
+    `long` or any other value (Clojure's integers) converting it by `RT.intCast`, hinted
+    reference locals taking any reference from `recur` (checked), and the loop at the top of an
+    arity is not a target of `break`. Overloads (methods, static methods, `new`; without
+    param-tags) are chosen as Clojure's compiler chooses them (`analyze/clj-select`), not by Java's rules: among the
     candidates of that arity (the accessible ones; Clojure's are the public ones), the only
     one, else `Compiler.getMatchingParams` (exact argument classes first, then
     `Reflector.paramArgTypeMatch`, with `Long` for `int`, `int` for `long`, an `IFn` for a
@@ -329,10 +333,11 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   `defclasses`, a top-level `do`, the code forms in fns, Clojure in handed-over fns and in class
   bodies, extended special forms, primitive signatures, deftypes and records with the class
   forms in their methods (their shape against the compiler's), `reify` methods chosen by hints
-  and Clojure's errors, protocols implemented and extended by such types, `deftype` and `defrecord` inside
-  handed-over fns and class bodies (`nested_deftype_test`), and AOT compilation
-  (a handed-over deftype and a deftype inside a handed-over fn included) loaded by a fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies at
-  stage 0 (`deftype` and `defrecord` in them included).
+  and Clojure's errors, protocols implemented and extended by such types, `deftype` and
+  `defrecord` inside handed-over fns and class bodies (`nested_deftype_test`), and AOT
+  compilation (a handed-over deftype and a deftype inside a handed-over fn included) loaded by a
+  fresh JVM from the class path. `test/classes/clojure_test.clj` covers Clojure in class bodies
+  at stage 0 (`deftype` and `defrecord` in them included).
 
 ## Checking converted code
 
@@ -353,7 +358,7 @@ committed). The running JDK is built from the same sources, so its own classes a
 reference: `JAVA_OPTS='--add-modules ALL-SYSTEM' bin/class-forms-check <dir> <module>` per module,
 with the javac options the JDK build uses for that module (`make/modules/*/Java.gmk`:
 `CONCAT=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`, `jdk.internal.vm.ci`;
-`PARAMETERS=1 VERSION=69` for `jdk.internal.vm.ci`). The last complete run over all modules
+`PARAMETERS=1 VERSION=69` for `jdk.internal.vm.ci`). The first complete run over all modules
 (2026-10-06, 12,444 files with class forms) gave 11,351 files whose classes are all
 shape-identical to the JDK's (91%), 233 compile errors and 860 files with differences; a later
 partial run after more fixes gave 8,872 of 9,418 (94%). Each round of differences was triaged:
@@ -443,7 +448,7 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | attribute | status |
 |---|---|
 | `ConstantValue` | done ≡ (static and instance final constant fields; constants of loaded classes read from class files) |
-| `Code`, `StackMapTable`, `Exceptions` table | done ≡ |
+| `Code` (with its exception table), `StackMapTable` | done ≡ |
 | `Exceptions` | done ≡ (`:throws`; lambda methods get their interface method's) |
 | `Signature` | done ≡ |
 | `InnerClasses`, `EnclosingMethod`, `NestHost`, `NestMembers` | done ≡ |
@@ -464,8 +469,8 @@ Status: **done** (implemented and tested), ≡ (compared with javac's classes in
 | §9.2 class environment: current form, defined classes, class path, source path | done (a name that resolves to nothing is looked up as `p/C.clj` on the class path; its `in-ns`/`ns`/`import` forms are evaluated and its class forms entered as declarations only; tested with two files referring to each other) |
 | §9.3 AOT | done (tested: a baseline JVM without the compiler loads the compiled namespace) |
 | §10 REPL: package loaders, generations | done (tested) |
-| §5.13 Clojure in class bodies | partial: vars (read and call), keywords, quoted data, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`); `fn`, `letfn`, `case` todo |
-| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `clojure.lang.Reflector` with a warning |
+| §5.13 Clojure in class bodies | done: vars (read, call, `set!`, `def`, `var`), keywords, quoted data and other constants, vector/map/set literals (constants in private static synthetic `const__N` fields set in `<clinit>`, collections built with `RT.vector`/`map`/`set`), core operations as instructions or their `:inline` expansions, any value called, `fn`, `letfn`, `case`, `reify`, `deftype` (section "Clojure in class bodies") |
+| §5.6 reflection is an error | done: unresolved members are compile errors; with `^{:reflection :warn}` on the class (or an enclosing one) unresolved instance method calls go through `Reflector` (`clojure.lang` at stage 0, `arbace.lang` from stage 1) with a warning; `^{:reflection :clojure}` (handed-over fns and deftypes) reflects as Clojure does (section "Native class forms") |
 | `access$NNN` accessors, `Outer/super` | done ≡ (protected members of a superclass in another package from nested classes and lambdas, `C/super` calls; javac's numbering) |
 
 ## Notes for the converter
@@ -507,12 +512,13 @@ Found by compiling the converter's output of the baseline (`bin/class-forms-chec
 10. javac gives the constructor of an anonymous class of an interface that captures locals a
     `Signature` attribute, except when the Java source used the diamond (`new I<>() {...}`); the
     forms do not say which was written, and the compiler always emits it. Done (2026-10-07):
-    `^:diamond` on the supertype (proposed amendment).
+    `^:diamond` on the supertype (amendment 16 of [CONVERTER-NOTES.md](CONVERTER-NOTES.md),
+    accepted).
 
 ## Spec amendments (accepted)
 
 All accepted by the user and folded into SPEC.md; the original texts are in git history
-(commit 7229dd9).
+(commit `7229dd9`).
 
 1. **Top-level `do` at stage 0, `defclasses`.** Accepted (2026-10-07), folded into SPEC §9.2, §9.5, §10.
 2. **Overload resolution as JLS 15.12.2 on erased types, with a literal narrowing phase.** Accepted (2026-10-07), folded into SPEC §5.6.

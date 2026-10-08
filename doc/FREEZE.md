@@ -2,13 +2,12 @@
 
 Arbace runs on the JVM today: a Clojure, written in Clojure, that compiles itself to `.class`
 files for Java 26. Its long-term direction leaves the JVM and the `.class` format behind (see
-the README). Before that break, the JVM state of the art is frozen on a
-well-known branch:
+the README). Before that break, the JVM state of the art is frozen on a well-known branch:
 
 - **branch `arbace-for-java-26`**, with the annotated tag **`arbace-for-java-26-v1`** on the
   same commit: Arbace on the JVM as it was on main at the freeze.
 
-`bin/freeze` creates both, at the user's confirmation (see "Making the freeze" below). Until it
+`bin/freeze` creates both, on the user's confirmation (see "Making the freeze" below). Until it
 has run, this document describes what the branch will hold. After it, the branch is where
 Arbace on the JVM lives; main moves on.
 
@@ -46,7 +45,7 @@ unzip, on Linux. About 64 GB of memory and many cores make the checks fast, but 
 find clojure -name '*.class' -exec touch {} +   # once, in a fresh checkout
 bin/build-arbace                 # stages 1-3, verifier, native tests, target/arbace.jar + .aot
 bin/arbace                       # a REPL; also bin/arbace -e '(+ 1 2)', bin/arbace script.clj
-bin/arbace-image                 # target/arbace-image: a self-contained runtime (131 MB)
+bin/arbace-image                 # target/arbace-image: a self-contained runtime (about 130 MB)
 ```
 
 `bin/arbace` runs `target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache
@@ -56,8 +55,8 @@ directory anywhere and run `arbace-image/bin/arbace`; further JDK modules go in
 `ARBACE_IMAGE_MODULES` (e.g. `java.net.http`). `send-off`, `future` and `pmap` run on virtual
 threads with `ARBACE_JAVA_OPTS=-Darbace.virtual-threads=true`, or after
 `(set-agent-send-off-executor! (arbace.lang.Agent/newVirtualThreadExecutor))`; virtual threads
-are daemon threads, so the JVM does not wait for them at exit (`doc/VENDOR-NOTES.md`, hand
-change 9; the image: "The runtime image").
+are daemon threads, so the JVM does not wait for them at exit. Details in `doc/VENDOR-NOTES.md`:
+"The runtime image", and hand change 9 for the virtual threads.
 
 **The gate**, the checks every change had to pass, run one after the other:
 
@@ -69,11 +68,11 @@ bin/j2c-check --suite            # the converter on clojure/ and its samples, an
 ```
 
 They take about 10 to 40 minutes on the development machine (64 cores, shared), and about 45
-minutes on a 2-core GitHub runner. The gate
-needs no path outside the checkout; it downloads the clojure/clojure test sources (a shallow
-git fetch) and six test libraries from Maven Central, checked by SHA-1. The larger checks over
-jdk26u (`bin/j2c` on `/root/jdk26u`, see `doc/classes/CONVERTER-NOTES.md`) need a jdk26u
-checkout and are not part of the gate.
+minutes on a 2-core GitHub runner. The gate needs no path outside the checkout; it downloads
+the clojure/clojure test sources (a shallow git fetch) and six test libraries from Maven
+Central, checked by SHA-1. The larger check over jdk26u (`bin/j2c-check --jdk`, see
+`doc/classes/CONVERTER-NOTES.md`) needs a jdk26u checkout (`JDK_SRC`, default
+`/root/jdk26u/src`) and is not part of the gate.
 
 **CI**: `.github/workflows/gate.yml` runs the gate on Temurin JDK 26 (actions/setup-java) on
 every push to `arbace-for-java-26`, and by hand on any ref (`gh workflow run gate.yml --ref
@@ -86,7 +85,7 @@ workflow caches the test libraries and uploads the suite logs when a step fails.
 
 ## Benchmark summary
 
-From `doc/BENCHMARKS.md` (2026-10-08, Arbace `fc77cba`, JDK 26.0.2.1, a quiet 64-core
+From `doc/BENCHMARKS.md` (2026-10-08, Arbace `fb8d58e`, JDK 26.0.2.1, a quiet 64-core
 machine; ratios against Clojure 1.12.6 on the same JDK, below 1 is faster):
 
 - **Startup**: `bin/arbace -e 1` 201 ms against 558 ms, a REPL session 457 ms against
@@ -107,11 +106,8 @@ machine; ratios against Clojure 1.12.6 on the same JDK, below 1 is faster):
   checkout and is not part of the gate). The remaining 68 files (switch fall-through
   duplicating a lambda, javac's anonymous-class numbering in chained calls, a few InnerClasses
   entries, three compile errors, module-infos not converted) are listed in
-  `doc/classes/CONVERTER-NOTES.md`, "The converted JDK".
-- The class forms compiler lags its amended spec in a few places (`doc/AGENDA.md`, step 3 of the class forms):
-  constructor-call param-tags, `(anon Inner [args] :outer o ...)`, `int` typing of all-literal
-  conditionals under `long`/`float`/`double` operators, and the converter deciding pins with
-  the compiler's resolution.
+  `doc/classes/CONVERTER-NOTES.md`, "The converted JDK"; what else the converter leaves open is
+  in its "What remains".
 - `recur` stays an error out of tail position and across `try` in code Clojure's compiler
   compiles itself (Clojure's suite asserts it); class forms lift that only in class bodies.
 - `bin/arbace` does not notice a jar that is stale against edited sources: rerun
@@ -133,9 +129,8 @@ machine; ratios against Clojure 1.12.6 on the same JDK, below 1 is faster):
 - The language becomes the Arbace language (Clojure plus the class forms, later forms for Go
   via g2c, `doc/G2C-SURVEY.md`), aimed at a self-sustaining REPL in a virtual sandbox, written
   in Arbace down to the bare-metal ISA (/dev/kvm on amd64, Hypervisor.framework on arm64).
-- On main, `clojure/` is replaced after the break, preferably by a Go-style binary seed (the
-  freeze tag's jar as stage 0, pinned by hash), otherwise by a pinned upstream fetch plus the
-  recorded patches; decided at the break (`doc/AGENDA.md`).
+- On main, `clojure/` is replaced after the break by a Go-style binary seed: the jar built from
+  the freeze tag, pinned by hash, as stage 0 (the user's decision, `doc/AGENDA.md`).
 - The branch takes fixes only where they keep Arbace on Java 26 working (a later tag
   `arbace-for-java-26-v2` and so on); new features land on main.
 
@@ -150,4 +145,5 @@ bin/freeze --yes                 # creates arbace-for-java-26 and arbace-for-jav
 `bin/freeze` requires a clean tree on main equal to `origin/main`, a branch and tag that do
 not exist yet, the README's "Arbace for Java 26" section, and a passing gate on that very
 commit: a successful `gate.yml` run whose head is the commit, or the gate run locally with
-`--run-gate`. The tag message records the commit, the gate run and the JDK.
+`--run-gate`. The tag message records the commit and the gate run (for `--run-gate`, also the
+JDK).

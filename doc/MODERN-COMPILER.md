@@ -1,12 +1,13 @@
 # Modernizing Arbace's compilers for Java 26: a survey
 
-Research only; nothing here is implemented. This survey covers Arbace's Clojure compiler
-(`arbace/lang/Compiler.clj`, converted from the frozen `clojure/lang/Compiler.java`) and the
-class forms compiler (`arbace/classes/`). Both emit through the vendored ASM (`arbace/asm`). The
-question is which classfile and platform features added since Java 8 they should use, with Java 26
-as the target. Status claims were checked against the local JDK sources (`/root/jdk26u`, commit
-`baf63fbe42b8`, `DEFAULT_VERSION_FEATURE=26`, classfile major 70) and the local JDK
-(26.0.2.1). Survey date: 2026-10-07, on `0bb80fa`.
+This survey covers Arbace's Clojure compiler (`arbace/lang/Compiler.clj`, converted from the
+frozen `clojure/lang/Compiler.java`) and the class forms compiler (`arbace/classes/`). Both emit
+through the vendored ASM (`arbace/asm`). The question is which classfile and platform features
+added since Java 8 they should use, with Java 26 as the target. Status claims were checked
+against the local JDK sources (`/root/jdk26u`, commit `baf63fbe42b8`,
+`DEFAULT_VERSION_FEATURE=26`, classfile major 70) and the local JDK (26.0.2.1). Survey date:
+2026-10-07, on `0bb80fa`; the text describes the state at that commit. What was decided and done
+since is in the dated status notes of §1, and in [JOURNAL.md](JOURNAL.md).
 
 ## 1. Executive summary
 
@@ -62,26 +63,12 @@ link the first time.
 
 Items 1 to 3 are done (2026-10-07): see `doc/VENDOR-NOTES.md` ("Compiled namespaces, the jar
 and the AOT cache", and hand change 7) and `doc/classes/COMPILER-NOTES.md` (verification).
-`bin/build-arbace` verifies every class of stages 1 and 2 (5,091 each), and both compilers emit
-major version 70.
+`bin/build-arbace` verifies every class of stages 1 and 2 (5,091 each at the time), and both
+compilers emit major version 70. Since 2026-10-08 the AOT cache is trained without method
+profiles (JEP 515): the profiles of the short training run made long hot loops 15-60% slower
+(`doc/BENCHMARKS.md`, "The AOT cache's method profiles").
 
 **Do next, measured, one at a time**
-
-Status (2026-10-07), each measured on its own and kept only if it pays off:
-- Item 4, condy constants: tried and **not kept**. Keywords, vars, symbols and read-back
-  literals as `ldc` of dynamic constants (bootstraps in a new `arbace.lang.Bootstraps`), and no
-  `<clinit>` when nothing is left for it, gave smaller classes (AOT-compiled namespaces -0.8%
-  bytes, 4,237 → 1,238 `<clinit>`s, 20,568 → 12,856 static fields) but no gain in time: `-e 1`
-  with the AOT cache 170 → 171 ms, without it 491 → 499 ms, loading 15 test namespaces from
-  source 5.33 → 5.31 s (medians, all within noise). Condys in a namespace's `__init` class made
-  the launch 8% slower (its constants are each used once, and the bootstrap costs more than the
-  static call it replaces), so they were limited to fn classes. The constants that laziness
-  skips are too few and too cheap to show at a launch, since direct-linked calls need no Var
-  constants. The experiment is on the local branch `condy-item1-experiment`.
-- Item 5, keyword sites: **done**, see `doc/VENDOR-NOTES.md` (hand change 12). Steady-state
-  lookups 28-37% faster, classes 6.6% smaller, launch unchanged.
-- `StringConcatFactory` for `str` (folded into this round): **done**, see `doc/VENDOR-NOTES.md`
-  (hand change 13). Calls 1.5-2.5 times faster, launch unchanged.
 
 4. **Constant dynamic (`ldc` of condy) for the compiler's constants**: keywords, vars, symbols
    and read-back literals. These are now 7,350 `RT.var` calls and many `Keyword.intern` calls
@@ -96,11 +83,29 @@ Status (2026-10-07), each measured on its own and kept only if it pays off:
    level). `locking` no longer pins carriers since JEP 491 (24), and `LazySeq` and `Delay`
    already use `ReentrantLock`.
 
-Item 5, reflective calls: done (2026-10-07). Unresolved instance calls, no-argument members,
-fields, static methods and constructors are `invokedynamic` sites, `arbace.lang.ReflectorCallSite`,
-caching `Reflector`'s choice per receiver class (and argument classes where it depends on them):
-100 to 1,700 times faster per call at steady state, for 10 to 100 µs more once per site; see
-`doc/VENDOR-NOTES.md`, hand change 10.
+Status (2026-10-07). The user started all three items, each measured on its own and kept only
+if it paid off:
+- Item 4, condy constants: tried and **not kept**. Keywords, vars, symbols and read-back
+  literals as `ldc` of dynamic constants (bootstraps in a new `arbace.lang.Bootstraps`), and no
+  `<clinit>` when nothing is left for it, gave smaller classes (AOT-compiled namespaces -0.8%
+  bytes, 4,237 → 1,238 `<clinit>`s, 20,568 → 12,856 static fields) but no gain in time: `-e 1`
+  with the AOT cache 170 → 171 ms, without it 491 → 499 ms, loading 15 test namespaces from
+  source 5.33 → 5.31 s (medians, all within noise). Condys in a namespace's `__init` class made
+  the launch 8% slower (its constants are each used once, and the bootstrap costs more than the
+  static call it replaces), so they were limited to fn classes. The constants that laziness
+  skips are too few and too cheap to show at a launch, since direct-linked calls need no Var
+  constants. The experiment is on the local branch `condy-item1-experiment` (`bdd773b`).
+- Item 5, keyword sites: **done**, see `doc/VENDOR-NOTES.md` (hand change 12). Steady-state
+  lookups 28-37% faster, classes 6.6% smaller, launch unchanged.
+- Item 5, reflective calls: **done**. Unresolved instance calls, no-argument members, field
+  reads, static methods and constructors are `invokedynamic` sites,
+  `arbace.lang.ReflectorCallSite`, caching `Reflector`'s choice per receiver class (and
+  argument classes where it depends on them). Field writes, calls with more than 20 arguments
+  and sites that name a class outside the JDK keep `Reflector`. Per call at steady state about
+  30 to 1,700 times faster (megamorphic sites at the low end), for up to about 0.1 ms more once
+  per site; see `doc/VENDOR-NOTES.md`, hand change 10.
+- Item 6, the virtual-thread executor: **done**, opt-in (`-Darbace.virtual-threads=true`, or
+  `set-agent-send-off-executor!`); see `doc/VENDOR-NOTES.md`, hand change 9.
 
 **Defer**
 
@@ -116,6 +121,18 @@ caching `Reflector`'s choice per receiver class (and argument classes where it d
   all of jdk26u.
 - `StringConcatFactory` for `str`, VarHandles for `Atom`, JPMS modules and `jlink` images, FFM
   (an interop library, not the compiler).
+
+Status (2026-10-07). The user decided to keep the vendored ASM (`java.lang.classfile` is not
+adopted; vendoring it through j2c stays a later option) and to keep Var calls indirect (no
+`invokedynamic` for them, no direct linking by default for user code). Three of the smaller
+items were folded into the "do next" round:
+- `StringConcatFactory` for `str` with 2 to 99 arguments: **done**, see `doc/VENDOR-NOTES.md`
+  (hand change 13). Calls 1.5-2.5 times faster, launch unchanged.
+- `Atom` on a `VarHandle`: tried and **reverted** (hand change 8). It saved 16 bytes per atom,
+  but one atom swapped by 8 threads became about 25% slower.
+- A `jlink` image without JPMS modules: **done** (`bin/arbace-image`, `doc/VENDOR-NOTES.md`, "The
+  runtime image"). JDK 26.0.2's AOT class linking fails for some module sets of an image (for
+  example `java.base,java.sql`), so the image adds `jdk.unsupported.desktop` (same section).
 
 **Avoid**
 
@@ -267,7 +284,7 @@ changes that.
 ## 3. Measurements
 
 All on 2026-10-07, JDK 26.0.2.1, a 64-core machine shared with two other agents (so absolute
-numbers are noisy, ±10-15 %). The scripts are in `.tmp/survey/` (gitignored), not committed.
+numbers are noisy, ±10-15%). The scripts are in `.tmp/survey/` (gitignored), not committed.
 
 ### 3.1 Startup
 
@@ -345,7 +362,8 @@ errors.
 ## 4. Candidates
 
 Each entry: what it is and its status in 26; how the compilers would use it; pros; cons and
-risks; effort; and what it means for the constraints and for an own runtime.
+risks; effort; and what it means for the constraints and for an own runtime. The verdicts are the
+survey's; the status notes of §1 record what became of them.
 
 ### 4.1 `invokedynamic` call sites
 
@@ -434,7 +452,7 @@ Cons and risks:
   methods, `applyTo`, `getRequiredArity` (`RestFn`), `withMeta` and the `IFn$LO` primitive
   interfaces. A generic holder dispatching to method handles would lose the per-class type
   profile that makes Clojure calls fast.
-- The proxy classes are hidden (see 4.5). The bodies stay in visible synthetic methods, so
+- The proxy classes are hidden (see §4.5). The bodies stay in visible synthetic methods, so
   stack traces show `ns$lambda$f$0` frames instead of `ns$f__123.invoke`. Clojure's
   `demunge`-based stack trace tools, `clojure.repl/pst` and error reporting all assume the
   latter. The suite checks some of it.
@@ -559,7 +577,7 @@ Arbace through `defclass`. Both are metadata, cheap for any own runtime.
   `.toString`, so each argument needs a filter. The recipe could carry `nil` checks with constants
   folded in. The gain is small (`str` with a `StringBuilder` is already fast), but it is one of
   the two bootstraps the AOT cache pre-resolves. Defer.
-- `ObjectMethods` (Java 16): record `equals`, `hashCode` and `toString`. Not applicable, see 4.6.
+- `ObjectMethods` (Java 16): record `equals`, `hashCode` and `toString`. Not applicable, see §4.6.
 - `SwitchBootstraps.typeSwitch` and `enumSwitch` (JEP 441, Java 21). The class forms emit them.
   Clojure's `case*` is already a hash `tableswitch` or `lookupswitch` with equality checks
   (`CaseExpr`), and Clojure has no type switch. A `typeSwitch` could speed up `cond` chains of
@@ -640,7 +658,7 @@ vendored ASM already knows `V26`, `arbace/asm/Opcodes.clj:105`).
 
 JEP 261, Java 9. Final. Arbace runs on the class path, and its runtime-defined classes live in
 unnamed modules. Making `arbace.*` a named module would need `module-info`. The class forms can
-write one with `defmodule` (SPEC §9.3). It would also need `Lookup`-based class definition for
+write one with `defmodule` (SPEC §4.14). It would also need `Lookup`-based class definition for
 the package loaders, or `--add-opens` for anything reflective. User code at the REPL would sit
 in unnamed modules reading Arbace's.
 
@@ -692,7 +710,8 @@ It needs `--add-modules jdk.incubator.vector` and waits on Valhalla. **Verdict:*
 
 - JEP 483 (24): AOT class loading and linking (`-XX:AOTCache`, `AOTMode=record/create`).
 - JEP 514 (25): one-step `-XX:AOTCacheOutput`.
-- JEP 515 (25): method profiles in the cache, for faster warm-up.
+- JEP 515 (25): method profiles in the cache, for faster warm-up. (Arbace's cache is trained
+  without them since 2026-10-08; see the status notes of §1.)
 - JEP 516 (26): AOT object caching with any GC (`AOTStreamableObjects`, `cds_globals.hpp:79`).
 
 All final. AOT-compiled machine code is not in 26: `AOTAdapterCaching` and `AOTStubCaching`
@@ -731,7 +750,7 @@ compiler-side laziness today.
 
 ### 4.17 Other items in 26
 
-- **JEP 500, final means final (26)**: see 4.8. No change needed. Keep `Reflector` from mutating
+- **JEP 500, final means final (26)**: see §4.8. No change needed. Keep `Reflector` from mutating
   finals.
 - **JEP 486 (24), Security Manager permanently disabled**: `RT`'s default imports still name
   `SecurityManager`. The class still exists in jdk26u, so nothing breaks, but it is a candidate
@@ -750,6 +769,8 @@ compiler-side laziness today.
   Clojure compiler.
 
 ## 5. Summary table
+
+The verdicts are the survey's; for what was decided and done, see the status notes of §1.
 
 Abbreviations: P = portability to an own runtime (good: maps onto a simple runtime; medium:
 needs a contained mechanism; poor: needs JSR 292 machinery or HotSpot internals).

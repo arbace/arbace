@@ -32,9 +32,10 @@ Prior art:
 
 - `clojure/` is the frozen reference baseline: upstream Clojure and ASM sources as seeded by
   `SEED.bash` (now only in git history, commit `d21dc91`). Its compiled classes are tracked too,
-  built in place with `javac -g $(find clojure -name '*.java')`; rebuild them after a fix. Don't modify it, except for bug
-  fixes the user approves, each recorded in the journal. The rewrite is derived from it but
-  lives elsewhere.
+  built in place with `javac -g $(find clojure -name '*.java')`; rebuild them after a fix.
+  Don't modify it, except for bug fixes the user approves, each recorded in the journal. The
+  rewrite is derived from it but lives elsewhere. After the freeze, main replaces it with a
+  binary seed (`doc/AGENDA.md`, "Later").
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   baseline, and checks the result against `test/baseline-results.edn`.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
@@ -48,11 +49,11 @@ Prior art:
     `arbace.classes`) builds `target/stage1`, which builds `target/stage2`, which must rebuild
     itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
     its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
-    (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2, reproducible) and the
-    JDK AOT cache `target/arbace.aot` (training workload `test/aot-training.clj`). With
-    `--suite` it also runs Clojure's test suite on stages 1 and 2. Run Arbace with `bin/arbace`
-    (the jar, with the cache when it applies), or a stage with
-    `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
+    (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
+    reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
+    `test/aot-training.clj`). With `--suite` it also runs Clojure's test suite on stages 1
+    and 2. Run Arbace with `bin/arbace` (the jar, with the cache when it applies), or a stage
+    with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
   - `arbace/j2c/`: the Java → class forms converter.
@@ -64,7 +65,9 @@ Prior art:
 - `doc/JOURNAL.md` is append-only. Add a dated entry for every important decision or action: what
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
-  Correct them with a new entry. Write it so the progress could be recreated from it.
+  Correct them with a new entry. Write it so the progress could be recreated from it. The one
+  exception, decided by the user: after the freeze, main's journal starts over, the history
+  up to it staying in git and on `arbace-for-java-26`.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.clj` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.
@@ -73,9 +76,7 @@ Prior art:
 
 - Data and source formats target the Clojure reader (`read`), not strict EDN; the two differ
   slightly, and where in doubt the Clojure reader wins.
-
 - In a fresh git worktree, run `find clojure -name '*.class' -exec touch {} +` first: checkout
   leaves the `.java` files newer than their tracked classes, and the checks then recompile them.
-
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.

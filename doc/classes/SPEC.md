@@ -1,8 +1,8 @@
 # Class forms: Java's class files written in Clojure
 
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
-(2026-10-07). Implemented at stage 0 by `arbace/classes/` (the compiler) and `arbace/j2c/` (the
-converter).
+(2026-10-07). Implemented by `arbace/classes/` (the compiler, at stage 0 and, behind the special
+forms of `arbace.lang.Compiler`, at every later stage, §9.5) and `arbace/j2c/` (the converter).
 
 This spec defines the **class forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary `.clj` sources, and compiled by Arbace's own compiler
@@ -15,8 +15,9 @@ Words used throughout:
   `defmodule`, `defpackage`).
 - **class body**: the member forms inside a class form.
 - **the compiler**: Arbace's compiler. At stage 0 it is a bootstrap library running on the
-  frozen `clojure/` and emitting bytecode with `clojure.asm`. Later it is Arbace's self-hosted
-  compiler. Both implement this spec.
+  frozen `clojure/` and emitting bytecode with `clojure.asm`. From stage 1 on, the same
+  implementation is part of Arbace's self-hosted compiler, which hands it the class forms
+  (§9.5, §9.6).
 - **the converter**: the Java → Clojure converter (agenda step 3), working on javac's
   attributed trees.
 - **Java subset**: the part of Clojure that compiles to plain JVM code without the Clojure
@@ -44,11 +45,11 @@ Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 Declarations �
    types the way javac does. Generic types appear only in declarations, for `Signature`
    attributes. Erasure casts, narrowing conversions and the overloads Arbace would choose
    differently are written out (§7).
-5. **Plain Clojure syntax.** Everything reads with the frozen Clojure 1.12 reader: `^meta`,
-   `^[param-tags]`, array class symbols like `String/1`, qualified symbols like `Outer/this`.
-   There are no reader changes. Class-form files are Clojure source, read by
-   `clojure.core/read` (Clojure 1.12 and later), not EDN: array class symbols and param-tags
-   are not EDN.
+5. **Plain Clojure syntax.** Everything reads with the reader of the frozen `clojure/` (Clojure 1.12
+   syntax): `^meta`, `^[param-tags]`, array class symbols like `String/1`, qualified symbols like
+   `Outer/this`. There are no reader changes. Class-form files are Clojure source, read by
+   `clojure.core/read` (Clojure 1.12 and later), not EDN: array class symbols and param-tags are not
+   EDN.
 6. **The Java subset needs no runtime.** A class body that uses only the Java subset compiles to
    bytecode that references nothing of Clojure: no vars, no `clojure.lang.RT`. That is how
    `arbace.lang` itself can be written with these forms.
@@ -115,7 +116,8 @@ byte identity do not matter. Two sets of classes are equivalent when:
    bootstrap methods and static arguments; the constants. Order and instruction choice may
    differ. Behaviour is checked by tests (Clojure's test suite for the converted baseline).
 6. Member order does not matter. javac's few non-deterministic names (for example
-   identity-hash lambda names like `$1522236047`, seen during the javalisp work) are exempt.
+   identity-hash lambda names like `$1522236047`, seen during the javalisp work, the class
+   forms' predecessor, since dropped) are exempt.
 
 The class file version is the target release, by default the running JDK's (major 70 for JDK 26),
 and configurable. The comparison compiles with javac at the same `--release`. Preview features
@@ -293,7 +295,8 @@ place Java allows annotations:
   `(new ^{B true} (ArrayList ^{A true} String))`, `(new (array ^{A true} String) n)`,
   `(catch [^{A true} E1 ^{B true} E2] e ...)`. Explicit type arguments of a call or method
   reference go on its method symbol as `^{:type-args [^{A true} String]}`, the qualifying type
-  of a method reference as `^{:qualifier (ArrayList ^{A true} String)}` (amendment, accepted 2026-10-07).
+  of a method reference as `^{:qualifier (ArrayList ^{A true} String)}` (amendment, accepted
+  2026-10-07).
 - Annotations on record components propagate to the field, accessor and canonical constructor
   parameter by `@Target`, as javac does.
 
@@ -386,8 +389,8 @@ place Java allows annotations:
   `static-initializer` bodies and static field initializers make up `<clinit>`.
 - Without constructors, the class gets Java's default constructor. An anonymous class's
   constructor passes its arguments to the superclass constructor (§4.8).
-- Enum constructors get the name and ordinal parameters prepended, record and inner class
-  constructors what §4.10, §4.11 and §4.8 describe. The forms show only the declared
+- Enum constructors get the name and ordinal parameters prepended (§4.10), record and inner
+  class constructors what §4.11 and §4.8 describe. The forms show only the declared
   parameters.
 
 ### 4.8 Nested, inner, local and anonymous classes
@@ -439,9 +442,9 @@ passes `this` (or the right enclosing instance) implicitly. `(.new o Inner args)
 
 `Super` is one class or interface, possibly generic: `(anon (Comparator String) [] ...)`;
 `^:diamond` on it records Java's diamond (`new Comparator<>() {...}`), after which javac gives
-the constructor of an anonymous class of an interface no `Signature` (amendment, accepted 2026-10-07). The
-arguments go to the superclass constructor; param-tags on the vector pin its overload,
-`(anon C ^[int] [x] ...)`. Members are any members but constructors.
+the constructor of an anonymous class of an interface no `Signature` (amendment, accepted
+2026-10-07). The arguments go to the superclass constructor; param-tags on the vector pin its
+overload, `(anon C ^[int] [x] ...)`. Members are any members but constructors.
 
 When `Super` is an inner class, its outer instance is passed as javac passes it: as a mandated
 first constructor parameter of the anonymous class, which is also the anonymous class's own
@@ -720,8 +723,8 @@ Methods are never in scope by name. Java's `m(x)` is `(.m this x)` for an instan
 ### 5.4 Literals and primitive arithmetic
 
 Java's operators are written with Clojure's unchecked and bit operators, completed where Clojure
-lacks them. `+`, `-`, `*`, `/`, `inc`, `quot`, `rem` keep their Clojure meaning and do not appear
-in converted code for Java arithmetic. In class bodies they compile without the runtime:
+lacks them. `+`, `-`, `*`, `/`, `inc`, `dec`, `quot`, `rem` keep their Clojure meaning and do not
+appear in converted code for Java arithmetic. In class bodies they compile without the runtime:
 
 | Clojure | on `long` | on `double` (or mixed) |
 |---|---|---|
@@ -777,10 +780,10 @@ values are all integer literals that fit is an `int` conditional, as Java's `c ?
 narrows in those contexts (`(.substring s (if k 1 0))`, an argument of an `int` parameter), and
 as an operand of any primitive operator it has type `int`, widened as an `int` operand would be
 (`(unchecked-add d (if z 1 2))` loads `int` constants and `i2d`, as javac compiles
-`d + (z ? 1 : 2)`). Method resolution narrows literals only in its last phase (§5.6). Java's hexadecimal,
-octal and binary `int` literals above `0x7fffffff` denote negative numbers; in Clojure they are
-large `long`s, so `0x9e3779b9` is written `(unchecked-int 0x9e3779b9)`, a constant expression.
-The same goes for `long` literals above `0x7fffffffffffffff`.
+`d + (z ? 1 : 2)`). Method resolution narrows literals only in its last phase (§5.6). Java's
+hexadecimal, octal and binary `int` literals above `0x7fffffff` denote negative numbers; in
+Clojure they are large `long`s, so `0x9e3779b9` is written `(unchecked-int 0x9e3779b9)`, a
+constant expression. The same goes for `long` literals above `0x7fffffffffffffff`.
 
 **Constant expressions.** The compiler folds Java's constant expressions (JLS 15.29) built from
 literals, constant variables, constant static fields, the operators above, the primitive casts
@@ -906,8 +909,9 @@ their Clojure meaning. New:
 - `(continue args)` jumps to the head of the innermost loop with new values for its bindings:
   it is `recur` from any position in the loop body, not only the tail, and also across `try`,
   `locking` and inner loops (where `recur` is an error today). `(continue :L args)` does that
-  for an outer labeled loop. `while` and `for-each` loops have no bindings to give: `(continue)`. Java's
-  `continue` in a `for` loop repeats the update: `(continue (unchecked-inc-int i))`.
+  for an outer labeled loop. `while` and `for-each` loops have no bindings to give:
+  `(continue)`. Java's `continue` in a `for` loop repeats the update:
+  `(continue (unchecked-inc-int i))`.
 - `(return v)` returns from the enclosing method or `lambda` (never across a `fn`).
 - Jumps out of `try` run `finally` blocks and leave `locking` monitors, as in Java.
 - **Forms that do not complete** (`throw`, `return`, `break`, `continue`, `recur`, a `loop` whose
@@ -969,9 +973,8 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
 - The compiler translates as javac does: `tableswitch` or `lookupswitch` on `int`-like
   selectors; `hashCode` and `equals` on strings; an enum's ordinal, directly for an enum nested
   in the same top-level class as the switch and otherwise through javac's `$SwitchMap$` holder
-  class (§6);
-  `SwitchBootstraps.typeSwitch` and `enumSwitch` with restart indexes for pattern and `null`
-  switches; record components read through accessors whose exceptions become
+  class (§6); `SwitchBootstraps.typeSwitch` and `enumSwitch` with restart indexes for pattern
+  and `null` switches; record components read through accessors whose exceptions become
   `MatchException`.
 
 `case` keeps Clojure's semantics. It differs from Java's switch on strings (no
@@ -1175,8 +1178,7 @@ implicit conversion and inferred type. It writes out what Arbace would otherwise
    types), erasure casts as `TransTypes` inserts them, unboxing from non-wrapper types,
    `int`/`long` to `float` promotions in comparisons, branch types (§5.5).
 5. **Constants**: `int` literals that look out of range (§5.4); `switch` labels that are
-   constant expressions, folded (§5.8); `^:const` on constant local
-   variables.
+   constant expressions, folded (§5.8); `^:const` on constant local variables.
 6. **Evaluation order**: temporaries for `i++` in expressions, compound assignments with
    side-effecting targets, and wherever restructuring would reorder side effects.
 7. **Arithmetic** with the typed operators of §5.4, chosen by the operation's promoted type.
@@ -1190,8 +1192,8 @@ implicit conversion and inferred type. It writes out what Arbace would otherwise
     ones may be left out, as Java leaves them out), annotations except `SOURCE` ones (which may
     be kept as documentation).
 
-Comments do not count for equivalence. Since the converted Clojure becomes the source (step 4),
-the converter carries Java's comments over as `;` comments where that is easy.
+Comments do not count for equivalence. Since the converted Clojure becomes the source
+(agenda step 4), the converter carries Java's comments over as `;` comments where that is easy.
 
 ## 8. Coverage
 
@@ -1263,7 +1265,7 @@ come from `defmodule` metadata or are derived.
 | attribute | where | source |
 |---|---|---|
 | `ConstantValue` | field | final field with constant initializer |
-| `Code`, `StackMapTable`, `Exceptions` (table) | method | the body |
+| `Code` (with its exception table), `StackMapTable` | method | the body |
 | `Exceptions` | method | `:throws` |
 | `Signature` | class, field, method, record component | generic types (§4.3) |
 | `InnerClasses`, `EnclosingMethod`, `NestHost`, `NestMembers` | class | nesting (§4.8) |
@@ -1304,15 +1306,16 @@ arbace/lang/Keyword.clj    (in-ns 'arbace.lang) (import ...) (defclass ^:public 
 arbace/lang/RT.clj         (in-ns 'arbace.lang) ...
 ```
 
-One file per Java source file, named after its top-level class, holding that file's class
-forms. When the source directory also has a `.clj` file of that name, `_class` is appended:
+One file per Java source file, named after its top-level class, holding that file's class forms.
+When the source directory also has a `.clj` file of that name, `_class` is appended:
 `clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.clj`, since
-`clojure/main.clj` is the namespace `clojure.main` (and `(load "clojure/main")` would also pick
-up `clojure/main__init.class`). A package with a single segment gets the single-segment
-namespace: package `clojure` is namespace `clojure`. Same-package classes need no import (§5.2). Java's per-file imports become `import`
-calls in the file; when two files import different classes under one simple name, the converter
-writes binary names instead. The alternative, one namespace per class in `gen-class` style
-(`(ns arbace.lang.Keyword)` with `(defclass arbace.lang.Keyword ...)`), is question 5 in §12.
+`clojure/main.clj` is the namespace `clojure.main` (and `(load "clojure/main")` would also pick up
+`clojure/main__init.class`). A package with a single segment gets the single-segment namespace:
+package `clojure` is namespace `clojure`. Same-package classes need no import (§5.2). Java's
+per-file imports become `import` calls in the file; when two files import different classes under
+one simple name, the converter writes binary names instead. The alternative, one namespace per class
+in `gen-class` style (`(ns arbace.lang.Keyword)` with `(defclass arbace.lang.Keyword ...)`), is
+question 5 in §12.
 
 ### 9.2 Declarations before code, and cycles
 
@@ -1374,35 +1377,34 @@ part of this spec.
 
 ### 9.5 Special forms and macros
 
-The new names are vars in `arbace.core`, so code can `:exclude` them. The compiler knows a few
-new special forms with starred names, which no namespace can shadow, as `let*` and `fn*` today:
-`class*` (one for every kind of class), `label*`, `break*`, `continue*`, `return*`, `switch*`,
-`lambda*`, `method-ref*`, `java-str*`, `java-assert*`, `for-each*`. The macros `defclass`, `defclasses`, `anon`,
-`letclass`, `defmodule`, `defpackage`, `label`, `break`, `continue`, `return`, `switch`, `lambda`,
-`method-ref`, `java-str`, `java-assert`, `for-each`, `with-resources`, `if-instance` and
-`when-instance` expand to them and to existing forms; `with-resources` and the pattern tests need
-no special form of their own. The operators of §5.4 are functions with `:inline` expansions to
+The new names are vars in `arbace.core`, so code can `:exclude` them. The compiler knows a few new
+special forms with starred names, which no namespace can shadow, as `let*` and `fn*` today: `class*`
+(one for every kind of class), `label*`, `break*`, `continue*`, `return*`, `switch*`, `lambda*`,
+`method-ref*`, `java-str*`, `java-assert*`, `for-each*`. The macros `defclass`, `defclasses`,
+`anon`, `letclass`, `defmodule`, `defpackage`, `label`, `break`, `continue`, `return`, `switch`,
+`lambda`, `method-ref`, `java-str`, `java-assert`, `for-each`, `with-resources`, `if-instance` and
+`when-instance` expand to them and to existing forms; `with-resources` and the pattern tests need no
+special form of their own. The operators of §5.4 are functions with `:inline` expansions to
 `Numbers` methods that the compiler emits as instructions where the operands and the result are
-primitive, as Clojure's intrinsics do (a boxed result is a call of the method). Other operands
-are converted as Clojure converts those of `unchecked-add-int`: to `int` or `float` by `RT`'s
-casts for the `-int` and `-float` operators; `unchecked-divide` and `unchecked-remainder` are
-`long` or `double` by the operands' runtime types, `double` when one is a `Double` or `Float`.
-Extensions of existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recur`) are listed in
-§1.1.
+primitive, as Clojure's intrinsics do (a boxed result is a call of the method). Other operands are
+converted as Clojure converts those of `unchecked-add-int`: to `int` or `float` by `RT`'s casts for
+the `-int` and `-float` operators; `unchecked-divide` and `unchecked-remainder` are `long` or
+`double` by the operands' runtime types, `double` when one is a `Double` or `Float`. Extensions of
+existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recur`) are listed in §1.1.
 
 **One implementation.** Arbace's compiler knows these special forms but compiles none of them
-itself: the class forms compiler (§12 question 17), loaded on first use, does, at this boundary:
+itself: the class forms compiler (§12, question 17), loaded on first use, does, at this boundary:
 
 - `(class* :top form)` and `(class* :tops forms)`, the expansions of `defclass` and
   `defclasses`, are compiled and defined while the compiler analyzes them, and stand for the
   imports of their classes and the classes.
-- A fn whose code uses any other class form, or one of the extensions above where Clojure's
-  compiler reports an error (a primitive tag on a local with a primitive initializer, `set!` of
-  a local, `new` of an array class), is compiled whole by the class
-  forms compiler: the innermost such `fn*` becomes the same fn class (name, `AFunction` or
-  `RestFn`, primitive interfaces), its code compiled with Clojure's meaning (§5.13), the locals
-  it uses passed to its constructor. A class form in a `def`'s initializer at the top level is
-  compiled as a fn. So the code forms work in any fn, not only in class bodies.
+- A fn whose code uses any other class form, or one of the extensions above where Clojure's compiler
+  reports an error (a primitive tag on a local with a primitive initializer, `set!` of a local,
+  `new` of an array class), is compiled whole by the class forms compiler: the innermost such `fn*`
+  becomes the same fn class (name, `AFunction` or `RestFn`, primitive interfaces), its code compiled
+  with Clojure's meaning (§5.13), the locals it uses passed to its constructor. A class form in a
+  `def`'s initializer at the top level is compiled as a fn. So the code forms work in any fn, not
+  only in class bodies.
 - A `deftype*` (of `deftype` or `defrecord`) one of whose method bodies uses a class form is
   compiled whole by the class forms compiler into the class Clojure's compiler would make
   (`public final`, its fields public final, `volatile` for `^:volatile-mutable`,
@@ -1419,19 +1421,20 @@ are compiled by rewriting them into class forms (a `fn` is an anonymous `AFuncti
 local class), and a core operation whose operands do not fit an instruction compiles as Clojure
 compiles it (§5.13); so do calls of methods and constructors there: the overload is the one
 Clojure's compiler chooses (the only one of that arity, else `Compiler.getMatchingParams`, with
-its errors, and reflection where it chooses none), not Java's. A method of `reify` or of a deftype compiled this way implements the
-interface (or `Object`) method that Clojure's compiler chooses, not one inferred as in §4.6: the
-only one with its (munged) name and arity when nothing is hinted, otherwise the one whose
-parameter types are the hinted classes (`Object` where unhinted), whose return type must be the
-name's hint (`Object` when unhinted); with Clojure's errors ("Must hint overloaded method",
-"Can't find matching overloaded method", "Mismatched return type", "Can't define method not in
-interfaces"). Such a class gets the compiler's covariant bridges, not javac's: one per return
-type overridden by a more specific one among the supertypes' methods of the same name and
-parameter types, implemented or not, `ACC_BRIDGE` (not `ACC_SYNTHETIC`). A `deftype*` (of `deftype` or `defrecord`) inside class bodies and such fns sees
-only its fields, never the enclosing locals, so Arbace's compiler compiles and defines it while
-the enclosing code is analyzed, as anywhere else (handing it over as above when its methods use
-class forms); its value is `nil`. `import*` imports into the current namespace at run time, as
-Clojure's `ImportExpr` does.
+its errors, and reflection where it chooses none), not Java's. A method of `reify` or of a
+`deftype` compiled this way implements the interface (or `Object`) method that Clojure's
+compiler chooses, not one inferred as in §4.6: the only one with its (munged) name and arity
+when nothing is hinted, otherwise the one whose parameter types are the hinted classes
+(`Object` where unhinted), whose return type must be the name's hint (`Object` when unhinted);
+with Clojure's errors ("Must hint overloaded method", "Can't find matching overloaded method",
+"Mismatched return type", "Can't define method not in interfaces"). Such a class gets the compiler's
+covariant bridges, not javac's: one per return type overridden by a more specific one among the
+supertypes' methods of the same name and parameter types, implemented or not, `ACC_BRIDGE` (not
+`ACC_SYNTHETIC`). A `deftype*` (of `deftype` or `defrecord`) inside class bodies and such fns sees
+only its fields, never the enclosing locals, so Arbace's compiler compiles and defines it while the
+enclosing code is analyzed, as anywhere else (handing it over as above when its methods use class
+forms); its value is `nil`. `import*` imports into the current namespace at run time, as Clojure's
+`ImportExpr` does.
 
 ### 9.6 Bootstrap
 
@@ -1441,13 +1444,12 @@ Clojure's `ImportExpr` does.
   defines or writes the classes. The stage-0 driver interns the library's macros into the running
   `clojure.core` namespace (at run time; the frozen sources are not touched), so the same
   `arbace/**/*.clj` sources work at every stage without qualifying the new names.
-- **Stage 1**: stage 0 compiles `arbace/**/*.clj`. Its classes are self-contained `arbace.*`
-  classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among them;
-  `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
+- **Stage 1**: stage 0 compiles the class forms of `arbace/`. Its classes are self-contained
+  `arbace.*` classes, `arbace.lang.Compiler` (converted, knowing the special forms of §9.5) among
+  them; `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
   from classes that each stage AOT-compiles into itself, as it does `arbace.core` and the other
-  namespaces (so they too must reproduce). Clojure-level
-  namespaces such as `arbace.core` must be compiled by Arbace's own compiler, since the frozen one
-  emits references to `clojure.lang`; the order of that is a matter for steps 2 and 4.
+  namespaces (so they too must reproduce). Clojure-level namespaces such as `arbace.core` are
+  compiled by Arbace's own compiler, since the frozen one emits references to `clojure.lang`.
 - **Stage 2** recompiles with stage 1, and must reproduce itself.
 
 ## 10. The REPL
@@ -1955,10 +1957,11 @@ public final class Shapes {
 **Settled (2026-10-06):** the user accepted every recommendation below. They are now part of
 the spec, and where the text above leaves a choice open, the recommendation applies.
 
-**Amendments (2026-10-07):** implementing the compiler and the converter raised 28 proposed
-amendments (13 in `COMPILER-NOTES.md`, 15 in `CONVERTER-NOTES.md`). The user accepted all of
-them; they are folded into the text above (§1, §3, §4.5 to §4.8, §4.10, §5.2 to §5.8, §5.10,
-§6, §7, §9.1, §9.2, §9.5, §10).
+**Amendments (2026-10-07):** implementing the compiler and the converter raised 32 proposed
+amendments (13 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`). The user accepted all of
+them; they are folded into the text above (§1, §3, §4.4 to §4.8, §4.10, §4.11, §5.2 to §5.8,
+§5.10, §5.12, §6, §7, §9.1, §9.2, §9.5, §10). The last four are marked "amendment, accepted
+2026-10-07" where they apply.
 
 Each with the recommendation the spec follows.
 
@@ -1978,9 +1981,9 @@ Each with the recommendation the spec follows.
    extension `^(List T)` once Arbace has its own reader (not readable at stage 0).
    *Recommendation: the map form now; revisit the reader extension after self-hosting.*
 5. **Layout of converted packages.** One namespace per Java package with one loaded file per Java
-   file (§9.1), or one namespace per class in `gen-class` style? The first keeps package = 
-   namespace as for `deftype` and shares imports; the second matches Clojure's one-file-one-namespace
-   rule. *Recommendation: per package.*
+   file (§9.1), or one namespace per class in `gen-class` style? The first keeps package = namespace
+   as for `deftype` and shares imports; the second matches Clojure's one-file-one-namespace rule.
+   *Recommendation: per package.*
 6. **Cycles.** A class environment fed from the current top-level form and from sources on the
    source path (§9.2), or explicit forward declarations (`(declare-class ...)` with member
    signatures), or compiling a package directory as one unit? *Recommendation: the class

@@ -8,7 +8,9 @@ What `arbace/` holds (all `.clj`): Arbace's Clojure code. Two kinds of things li
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.clj`), and the Java classes as class
   forms, one namespace per Java package (`lang.clj`, `asm.clj`, `java/api.clj`) with one file per
   Java file (`lang/RT.clj`, `asm/ClassReader.clj`, ...). Clojure's main class `clojure.main` is
-  `arbace.lang.Main` (`lang/Main.clj`).
+  `arbace.lang.Main` (`lang/Main.clj`). A few files among them are Arbace's own, not derived from
+  Clojure, and say so in their header (`lang/KeywordInvokeSite.clj`,
+  `lang/ReflectorCallSite.clj`).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` of this repository, that is
 https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a` with ASM
@@ -25,5 +27,6 @@ from https://github.com/clojure/core.specs.alpha at `v0.6.133-alpha10`,
 `75875946b7e827a1cec91ce645d5e1dcfc475e49`), derived on 2026-10-07 by `bin/vendor-spec` and
 maintained by hand since; each file names its origin in a comment.
 
-The converted files keep their Java file's notice as a comment; which license
-covers which file is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and run it: [VENDOR-NOTES.md](VENDOR-NOTES.md).
+The converted files keep their Java file's notice as a comment; which license covers which file
+is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and
+run it: [VENDOR-NOTES.md](VENDOR-NOTES.md).

@@ -6,7 +6,7 @@ The vendored tree is the source of truth from now on and is maintained by hand; 
 derived is recorded below and can be replayed with `bin/vendor-arbace`. The bootstrap of SPEC
 §9.6 works: stage 0 compiles it into stage 1, stage 1 into stage 2, stage 2 into stage 3, and
 stage 1, 2 and 3 are byte-identical. Clojure's test suite gives the baseline's result on stage 1
-and stage 2.
+and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 
 ## Layout
 
@@ -24,7 +24,7 @@ and stage 2.
 | `bin/vendor-spec` | replays the vendoring of spec into `.tmp/vendor-spec/` |
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
-| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` (815) and the AOT-compiled `arbace.classes` namespaces (1,289) |
+| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-07) |
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
@@ -51,8 +51,8 @@ seeded, with the two seed fixes of the journal). `bin/vendor-arbace` replays exa
    - `clojure/**/*.clj` (48 files): path and text renamed by the same rules, then two hand edits
      (each checked to apply exactly once): the `version.properties` fold and the server
      property prefix (below).
-3. Copied into the worktree: `cp -r OUT/tree/* .` (giving `arbace.clj`, since removed, and the vendored files
-   under `arbace/`).
+3. Copied into the worktree: `cp -r OUT/tree/* .` (giving `arbace.clj`, since removed, and the
+   vendored files under `arbace/`).
 
 Check (step 3 of `bin/vendor-arbace`): the Java of `clojure/` renamed by the same rules (plus
 `package clojure;` → `package arbace;` in `main.java`, a single-segment package the rules leave
@@ -60,7 +60,8 @@ alone) and compiled by javac gives 812 classes; the vendored class forms compile
 812 classes of the same names, all with javac's class shapes (SPEC §3: flags, signatures,
 attributes, members, symbolic content of code). Since the strings of the renamed Java are what the
 rules make of the original strings, this also checks that the converted files' strings are renamed
-as the Java would be. `diff -r .tmp/vendor/tree/arbace arbace` shows only the tools and the README.
+as the Java would be. `diff -r .tmp/vendor/tree/arbace arbace` showed only the tools and the
+README (now `doc/ARBACE.md`); since then the hand changes below differ too.
 
 ## What is renamed
 
@@ -111,9 +112,8 @@ Left alone (with the reason):
   (the CLI's `-X`/`-T` protocol), `"clojure"` (the CLI command `tools.deps.interop` runs),
   `~/.clojure/deps.edn`; in the test libraries `clojure.test.check`, `clojure.test.generative`,
   `clojure.tools.namespace`, `clojure.tools.reader`, `clojure.data.generators`,
-  `clojure.java.classpath`. Spec is stubbed out in the baseline already (since vendored and
-  renamed as well, below, "Spec"); the others are not part
-  of Clojure.
+  `clojure.java.classpath`. Spec is stubbed out in the baseline already (it has since been
+  vendored and renamed as well: below, "Spec"); the others are not part of Clojure.
 - Identifiers that merely contain the word: `clojure-version`, `*clojure-version*`,
   `refer-clojure`/`:refer-clojure`, `clojure-fn?` (locals), `CLOJURE_NS` and other Java
   constants, the generated proxy field `__clojureFnMap`, the thread names
@@ -143,10 +143,11 @@ Left alone (with the reason):
 `bin/build-arbace` (about 1.5 minutes):
 
 - **Stage 0 → stage 1.** The frozen `clojure/` loads `arbace.classes` through
-  `arbace.classes.boot` and runs `arbace.classes.build` over the packages
-  (`arbace` until the main class moved, below), `arbace/lang`, `arbace/asm`, `arbace/asm/commons`, `arbace/asm/signature`, `arbace/java/api`:
-  183 files → 812 classes in `target/stage1` (20 s). Every class those files declare is entered
-  from its source (SPEC §9.2): none exists at stage 0.
+  `arbace.classes.boot` and runs `arbace.classes.build` over the packages (`arbace` until the
+  main class moved, below), `arbace/lang`, `arbace/asm`, `arbace/asm/commons`,
+  `arbace/asm/signature`, `arbace/java/api`: 183 files → 812 classes in `target/stage1` (20 s).
+  Every class those files declare is entered from its source (SPEC §9.2): none exists at
+  stage 0.
 - **Stage 1** is `target/stage1` plus the `.clj` sources: `java -cp target/stage1:. arbace.lang.Main`
   starts a REPL (`Clojure 1.13.0-master-SNAPSHOT`, `(class [])` is
   `arbace.lang.PersistentVector`, `#'arbace.core/map`); `arbace.lang.RT` loads `arbace/core.clj`
@@ -194,10 +195,11 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   2000-01-01T00:00:00Z and classes ten seconds later. They must differ: `RT.load` takes a
   namespace's `__init` class only when it is strictly newer than its source, and `jar --date`
   gives every entry the same time (with it all namespaces loaded from source).
-- **`target/arbace.aot`**: a JDK AOT cache (JEP 483, 514, 515; 36 MB), made by a training run
-  `bin/arbace --aot-train < test/aot-training.clj` (`-XX:AOTCacheOutput`, one step): a REPL
-  session requiring the common libraries, a `defclass`, deftype/defrecord/protocols,
-  `arbace.test`, futures, `pmap`, agents, `doc` and `source`. The cache refuses directories on the
+- **`target/arbace.aot`**: a JDK AOT cache (JEP 483, 514; 36 MB at first, 39.4 MB on
+  2026-10-08), made by a training run `bin/arbace --aot-train < test/aot-training.clj`
+  (`-XX:AOTCacheOutput`, one step): a REPL session requiring the common libraries, a
+  `defclass`, deftype/defrecord/protocols, `arbace.test`, futures, `pmap`, agents, `doc` and
+  `source`. The cache refuses directories on the
   class path at creation, hence the jar. It is tied to the JDK build, the jar (path, size, mtime)
   and the JVM options (e.g. compact headers), so every build remakes it; it is not compared
   between stages (it is not reproducible and holds nothing of Arbace's own making).
@@ -223,7 +225,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   as upstream's runs against its build: `bin/clojure-tests` got `CLOJURE_TESTS_PRECOMPILED=1`,
   which skips its step 3 (compiling the namespaces into the run's `classes/`). Result on stages
   1 and 2: 83 namespaces, 809 tests, 20,718 / 20,750 assertions, test.generative 27 / 27, no
-  regressions.
+  regressions (before spec was vendored; below, "Spec").
 
 Measured on 2026-10-07 (JDK 26.0.2.1, 64 cores shared with other agents, load average 2 to 7
 during the runs; hyperfine, 3 warmups, 20 runs; noise about ±5 %):
@@ -363,7 +365,7 @@ compiled are the running runtime's own. Changes:
    tools' own `arbace.classes.*`, `arbace.j2c.*` (and then `arbace.javalisp.*`). From stage 1 on it just
    requires them. It interns the class forms' names into the running core namespace
    (`clojure.core` or `arbace.core`). The file itself names neither runtime (it finds the running
-   core as `(namespace `ns)`).
+   core as ``(namespace `ns)``).
 3. **`arbace.classes.build`** (new): compiles trees of class forms files into class files at any
    stage; `bin/build-arbace` and `bin/vendor-arbace` use it. It binds
    `arbace.classes.env/*from-source*` to the packages being built: their classes are never taken
@@ -402,7 +404,8 @@ worktree where git wrote `clojure/**/*.java` after the `.class` files a test com
 ## Changes to arbace.j2c
 
 - `arbace.j2c.rename` (new): the renaming rules, `vendor!`, and a command line (`files`,
-  `stdin`, `tree DIR EXT...`, `vendor CONV SRC OUT`). The converter itself is unchanged.
+  `stdin`, `tree DIR EXT...`, `vendor CONV SRC OUT`; later also `vendor-lib SRC OUT REPO REV`,
+  below, "Spec"). The converter itself is unchanged.
 
 ## Decisions taken, and alternatives
 
@@ -416,7 +419,7 @@ worktree where git wrote `clojure/**/*.java` after the `.class` files a test com
 - **Exact name lists** rather than renaming every `clojure.` prefix: other libraries keep their
   names (`clojure.spec.alpha`, `clojure.test.check`, `clojure.tools.namespace`), so their jars
   work unrenamed apart from their uses of Clojure, and the suite's namespace names, and so the
-  reference results, stay.
+  reference results, stay. (Spec has since been vendored and renamed: below, "Spec".)
 - **System properties renamed** (`arbace.compile.path`, ...): they are Clojure's
   configuration names in the `clojure.` namespace of names.
 - **Build output in `target/`** (already gitignored, as the vendored javac's build used it), one
@@ -427,8 +430,9 @@ worktree where git wrote `clojure/**/*.java` after the `.class` files a test com
 
 ## After vendoring: hand changes
 
-The user's decisions on the open points of step 4 (2026-10-07), applied by hand to `arbace/`
-(so `bin/vendor-arbace`'s replay no longer equals `arbace/` in these places):
+Changes applied by hand to `arbace/` after vendoring (so `bin/vendor-arbace`'s replay no longer
+equals `arbace/` in these places). Items 1 and 2 are the user's decisions on the open points of
+step 4 (2026-10-07); the others came with later work, as each says:
 
 1. **The main class is `arbace.lang.Main`.** The class `clojure.main`, vendored as `arbace.main`
    in the single-segment package `arbace` (`arbace/main_class.clj`, with the package file
@@ -438,8 +442,8 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    namespace `arbace.main` keeps its name. References updated: `Repl.clj` and `Script.clj`
    (`Main/legacy_repl`, `Main/legacy_script`), the usage texts of `arbace/main.clj`,
    `bin/build-arbace` (stage launcher, and the package list loses `arbace`), `bin/clojure-tests`
-   (rename mode runs `arbace.lang.Main`), `CLAUDE.md`, `arbace/README.md`. Launch a stage with
-   `java -cp target/stageN:. arbace.lang.Main`.
+   (rename mode runs `arbace.lang.Main`), `CLAUDE.md`, `arbace/README.md` (now `doc/ARBACE.md`).
+   Launch a stage with `java -cp target/stageN:. arbace.lang.Main`.
 2. **Runtime-visible `clojure` names renamed to `arbace`:**
 
    | where | before | after |
@@ -464,7 +468,8 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
    `switch*`, ...), handing them to `arbace.classes` through `arbace.classes.native`: new parser
    `Compiler$ClassFormsExpr`, the signal it throws caught by `FnExpr/parse`, `eval` and
    `compile1`, top-level `do` siblings, and signals instead of three errors (a primitive tag on a
-   local with a primitive initializer, `set!` of a local, `new` of an array class). Stage 1 needs no `arbace.classes.boot`.
+   local with a primitive initializer, `set!` of a local, `new` of an array class). Stage 1
+   needs no `arbace.classes.boot`.
 4. **The §5.4 operators inlined** (SPEC §9.5; `doc/classes/COMPILER-NOTES.md`, "Native class
    forms"): `arbace/lang/Numbers.clj` gains the static methods the operators' `:inline`
    expansions call: `andInt`, `orInt`, `xorInt`, `notInt` (`int`), `unchecked_float_add`,
@@ -533,6 +538,150 @@ The user's decisions on the open points of step 4 (2026-10-07), applied by hand 
 
    (thread counts are the JVM's peak of platform threads; the virtual threads run on the
    carrier pool.) The JDK AOT cache still applies with the property set.
+
+10. **Reflective calls are `invokedynamic` inline caches** (`doc/MODERN-COMPILER.md` §2.2, §4.1,
+    §4.8). The Clojure compiler emitted a call of `Reflector` for each call it could not resolve,
+    and `Reflector` searched the class's methods on every call. Now:
+    - `arbace/lang/Compiler.clj`: the unresolved emissions of `InstanceMethodExpr` (upstream
+      `Compiler.java` `invokeInstanceMethod`/`invokeInstanceMethodOfClass`), `InstanceFieldExpr`
+      (`invokeNoArgInstanceMember`, `requireField` or not), `StaticMethodExpr`
+      (`invokeStaticMethod`) and `NewExpr` (`invokeConstructor`) emit the target and arguments as
+      before (each as an `Object`, in the same order), then `invokedynamic "invoke"
+      (Object...)Object` with the bootstrap `ReflectorCallSite.bootstrap` and the static arguments
+      member name, class name (the qualifying class, or the class of a static method or
+      constructor; `""` for none) and kind (`METHOD`, `MEMBER`, `FIELD`, `STATIC`, `NEW`). The
+      new `Compiler/emitReflectorSite` and `Compiler/isSystemClass` do it. The old emission stays
+      for more than 20 arguments, for a static method named `new`, and when the class named in
+      the site is not of the boot or platform loader (a user class: its name can denote a newer
+      class after a REPL redefinition, which `RT.classForName` per call finds and a cached class
+      would not); unqualified instance calls are guarded on the receiver's class and need no
+      name. Field assignment (`setInstanceField`) keeps `Reflector`: it is rare, and a cached
+      setter would be the place where JEP 500's final-field rules bite. Reflection warnings are
+      made at analysis, unchanged; `eval` of top-level forms uses `Reflector` as before.
+    - `arbace/lang/ReflectorCallSite.clj` (new, Arbace's own class form): a `MutableCallSite`
+      per site. Its fallback goes through `Reflector`'s unchanged path for the first call of a
+      site (a site run once never links), and from the second call on it first links an entry:
+      it finds the member `Reflector` would call with `Reflector`'s own code, unreflects it from
+      its own lookup (in `arbace.lang`, as `Reflector`, so the same access rules and the same
+      caller for caller-sensitive methods), and adapts it with `Reflector`'s argument conversion
+      (a `boxArg` filter, after `widenBoxedArgs` where `Reflector` widened; a plain cast or unboxing
+      where the guarded argument class makes `boxArg` one) and return conversion (`prepRet` for a
+      `Boolean` result). The entry is guarded on the receiver's class, and on the argument
+      classes (nil as `Void`) when there was more than one candidate, so the choice, which then
+      depends on them, is `Reflector`'s for every call it takes. Entries are prepended to the
+      site's target as `guardWithTest` (8 at most); past that the site is megamorphic and its
+      fallback scans the entries (64 at most), then goes through `Reflector`. The call that links
+      still goes through `Reflector`. Whatever is not cached goes through `Reflector` too, which
+      so throws its own exceptions with its own messages: a nil receiver, a call `Reflector`
+      refuses, a member a method handle cannot reach (after 8 failed links a site stops
+      trying). Exceptions of the called member pass through unwrapped, as `Reflector` unwraps
+      `InvocationTargetException`; an exception of `boxArg` is unwrapped as `Reflector` does.
+      No field is written through it (JEP 500). A site keeps the classes of its entries
+      reachable, as a protocol call site's `__cached_class__` field does: a site in a long-lived
+      class that saw a REPL-defined receiver class keeps that class's loader alive.
+    - `arbace/lang/Reflector.clj`: the selection is split from the invocation, unchanged, so
+      both paths share it: `selectMatchingMethod` (what `invokeMatchingMethod` chose and checked;
+      it returns the widened arguments through a one-element array), `instanceMethods` (the
+      candidates of `invokeInstanceMethodOfClass`), `selectConstructor` and `constructors` (of
+      `invokeConstructor`). The public methods behave as before.
+    - `test/native/reflect_test.clj` compares each kind of site, on its first calls and cached,
+      with `Reflector`'s results and exceptions: mono-, poly- and megamorphic receivers (80
+      classes), threads, overloads chosen by runtime argument types (widened `Integer`, `Short`,
+      `Byte`, `Float`; `Ratio`, `BigInt`, nil), nil receivers and arguments, error messages, fields
+      and no-argument members, canonical `Boolean`s, functional-interface adaptation, qualified
+      calls, static methods and constructors; and checks by the stack (no `Method.invoke` frame)
+      that cached calls bypass `Reflector`. `test/aot-training.clj` runs a few reflective sites,
+      so the AOT cache holds what they load.
+
+    Measured (JDK 26, one JVM per row, after warm-up, best of five runs of 10⁶-2·10⁶ calls, the
+    arguments un-hinted):
+
+    | call | `Reflector` | call site |
+    |---|---:|---:|
+    | `(.length s)` (a member, monomorphic) | 1,053 ns | 2.0 ns |
+    | `(.get m k)` (`HashMap`) | 492 ns | 8 ns |
+    | `(.append sb x)` (overloads, `Long`) | 1,972 ns | 14-17 ns |
+    | `(.indexOf s "c" 1)` (overloads) | 1,443 ns | 7 ns |
+    | `(.size c)`, 2 / 4 receiver classes | 521 / 611 ns | 6 / 6 ns |
+    | `(.size c)`, 10 classes (megamorphic) | 690 ns | 14-21 ns |
+    | `(.contains c x)`, 3 classes | 920 ns | 6 ns |
+    | `(Math/abs x)`, `(Math/max x y)` | 2,041 / 2,123 ns | 1.2 / 3.3 ns |
+    | `(ArrayList. x)`, `(StringBuilder. x)` | 427 / 465 ns | 9 / 12 ns |
+
+    The cost is once per site. A site's first call (the JVM's linkage of the `invokedynamic` and
+    the bootstrap, then `Reflector`) and its second (the link) cost more than `Reflector`'s
+    calls; from the third call on it is cheaper. In a cold JVM (the jar with its AOT cache, 300
+    fresh sites, each called thrice): 108 / 91 / 3 µs per site against 64 / 20 / 12 µs; with the
+    JIT warm, 8-20 / 5-28 / 1 µs against 3.5-4 / 2 / 2 µs. So a site called fewer than about 20
+    times in a cold JVM costs more than before, by at most about 0.1 ms; a script of 300
+    reflective sites each run once took 1.07 → 1.18 s, each run 100 times 1.52 → 1.50 s.
+    Startup is unchanged (`bin/arbace -e '(+ 1 2)'` 213 ms → 214 ms, the AOT training session
+    802 → 779 ms): no reflective site runs at startup. The JDK AOT cache does not pre-resolve
+    custom bootstraps, so every launch pays the linkage again. The stages hold 31 classes with
+    such sites (`ReflectorCallSite` itself not counted).
+
+11. **`SecurityManager` is no longer a default import** (`doc/MODERN-COMPILER.md` §4.17): the
+    entry `SecurityManager` of `RT/DEFAULT_IMPORTS` (`arbace/lang/RT.clj`, upstream
+    `RT.java:119`) is gone, since JEP 486 (Java 24) disabled the Security Manager for good.
+    Upstream still imports it (`clojure/clojure` master `4278bcea`, 2026-10-07); nothing in
+    `arbace/`, its tools or Clojure's test suite names the class unqualified. The class still
+    exists in JDK 26, so `java.lang.SecurityManager` resolves; the class forms compiler's own
+    `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
+
+12. **Keyword invoke sites are `invokedynamic`** (`doc/MODERN-COMPILER.md` §4.1; 2026-10-07):
+    `Compiler$KeywordInvokeExpr/emit` (`arbace/lang/Compiler.clj`) emitted Clojure's hand-written
+    inline cache, a `__site__N` (`KeywordLookupSite`) and a `__thunk__N` (`ILookupThunk`) static
+    field per site, set in `<clinit>`, a call of the thunk, an identity test for a miss, and on a
+    miss `fault` and a store of the new thunk (upstream `Compiler.java:3825-3847`). It now emits
+    the target and `invokedynamic invoke (Object)Object`, bootstrapped by
+    `arbace.lang.KeywordInvokeSite/bootstrap` with the keyword's namespace (if any) and name as
+    static arguments. The fields, their `<clinit>` code, `registerKeywordCallsite`,
+    `ObjExpr/emitKeywordCallsites` and the site/thunk name helpers are gone;
+    `KEYWORD_CALLSITES` stays bound as before (it marks code inside a fn, where keyword invokes
+    are sites). The new class `arbace/lang/KeywordInvokeSite.clj` (Arbace's own) holds a
+    `MutableCallSite` whose value is always `(get target :k)`: for its first 256 calls it calls
+    `RT.get`; then it links an inline cache of up to four class guards (`guardWithTest` on the
+    exact class of the target), each bound to what `KeywordLookupSite` would cache for that
+    class: a record's `IKeywordLookup` thunk (its field read), `ILookup.valAt`, or `RT.get`. At a
+    fifth class it becomes `RT.get` for good; `nil` is never cached. `KeywordLookupSite`,
+    `ILookupSite` and `ILookupThunk` stay (records implement `getLookupThunk`, and classes
+    compiled elsewhere may use them). The warm-up threshold keeps launches from paying for
+    method handles: the JDK spins LambdaForm classes for the first `guardWithTest`,
+    `insertArguments` and bootstrap invocation, so linking at the first call made 8 more spun
+    classes at `bin/arbace -e 1` (9 against 1) and the launch 5-8% slower; with the threshold, 1
+    as before. Measured (2026-10-07, loaded 64-core machine): AOT-compiled namespaces 9,449,063
+    → 8,822,445 bytes (-6.6%), static fields 20,568 → 14,432, 1,979 sites; `bin/arbace -e 1`
+    median 301 ms → 301 ms with the AOT cache, 717 → 696 ms without (noise ±15 ms); loading 15
+    test namespaces from source unchanged (5.44 s → 5.54 s median, noise ±0.3 s); a lookup
+    loop (`(:a x)` over 1,000 values, min of 7) records 7.8 → 5.1 ns, array maps 10.6 → 7.3 ns,
+    hash maps 11.4 → 8.2 ns, six classes (records, maps, `java.util.HashMap`, `nil`) at one site
+    18 → 11.5 ns.
+
+13. **`str` with two or more arguments is `StringConcatFactory`** (`doc/MODERN-COMPILER.md`
+    §4.7; 2026-10-07): `Compiler$InvokeExpr/parse` (`arbace/lang/Compiler.clj`) turns a call of
+    `#'arbace.core/str` with 2 to 99 arguments, inside a fn, into the new
+    `Compiler$StrConcatExpr`, an intrinsic like an `:inline` (a redefinition of `str` does not
+    reach it, as with other inlined fns). It emits `invokedynamic makeConcatWithConstants`
+    (JEP 280) with exactly `str`'s result: constants whose text is fixed (strings, characters,
+    booleans, longs, doubles, keywords, `nil`) are folded into the recipe (passed as recipe
+    constants when they hold `\u0001` or `\u0002`); primitive arguments are passed as such (the
+    factory prints them as `toString` of their box does); any other argument is converted
+    inline: `nil` to `""`, else its `toString`. A `null` from `toString` gives `"null"` (as
+    `StringBuilder.append` does in `str`), except for the first argument, where `str`'s
+    `new StringBuilder` throws, and the intrinsic throws the same `NullPointerException` from
+    the same constructor. The arguments are evaluated in order before any conversion, as for a
+    call: when an argument with effects (anything but a folded constant or an immutable local) follows
+    an object argument, every argument goes through a temporary local first (reserved below the
+    arguments' own locals, cleared after use). All-constant calls make `new String(text)`, so
+    each evaluation still gives a new string. `eval` (top level, outside a fn) calls `str`.
+    Stack traces of an exception from a `toString` lack the `arbace.core$str` frame. Measured
+    (2026-10-07, machine under heavy load): 515 sites in the AOT-compiled namespaces, classes
+    8,822,445 → 8,989,918 bytes (+1.9%: recipes and bootstrap entries); calls 1.5 to 2.5 times
+    faster (min of 7 rounds: `(str "n=" x)` 105-119 → 66-69 ns, five arguments 186-260 → 89-134
+    ns, with a `nil` 132-199 → 60-94 ns, with a primitive 162-199 → 68-108 ns); `bin/arbace -e
+    1` unchanged (median 393 → 391 ms with the AOT cache, which pre-resolves these sites; 833 →
+    842 ms without, noise ±20 ms).
+
 ## Spec (2026-10-07)
 
 The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of
@@ -611,153 +760,10 @@ default run of `bin/clojure-tests`), with its 32 spec failures. Result on stages
 20,750 / 20,750, no regressions. spec.alpha's own tests (its `src/test/clojure`, renamed, with
 the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
 
-10. **Reflective calls are `invokedynamic` inline caches** (`doc/MODERN-COMPILER.md` §2.2, §4.1,
-   §4.8). The Clojure compiler emitted a call of `Reflector` for each call it could not resolve,
-   and `Reflector` searched the class's methods on every call. Now:
-   - `arbace/lang/Compiler.clj`: the unresolved emissions of `InstanceMethodExpr` (upstream
-     `Compiler.java` `invokeInstanceMethod`/`invokeInstanceMethodOfClass`), `InstanceFieldExpr`
-     (`invokeNoArgInstanceMember`, `requireField` or not), `StaticMethodExpr`
-     (`invokeStaticMethod`) and `NewExpr` (`invokeConstructor`) emit the target and arguments as
-     before (each as an `Object`, in the same order), then `invokedynamic "invoke"
-     (Object...)Object` with the bootstrap `ReflectorCallSite.bootstrap` and the static arguments
-     member name, class name (the qualifying class, or the class of a static method or
-     constructor; `""` for none) and kind (`METHOD`, `MEMBER`, `FIELD`, `STATIC`, `NEW`). The
-     new `Compiler/emitReflectorSite` and `Compiler/isSystemClass` do it. The old emission stays
-     for more than 20 arguments, for a static method named `new`, and when the class named in
-     the site is not of the boot or platform loader (a user class: its name can denote a newer
-     class after a REPL redefinition, which `RT.classForName` per call finds and a cached class
-     would not); unqualified instance calls are guarded on the receiver's class and need no
-     name. Field assignment (`setInstanceField`) keeps `Reflector`: it is rare, and a cached
-     setter would be the place where JEP 500's final-field rules bite. Reflection warnings are
-     made at analysis, unchanged; `eval` of top-level forms uses `Reflector` as before.
-   - `arbace/lang/ReflectorCallSite.clj` (new, Arbace's own class form): a `MutableCallSite`
-     per site. Its fallback goes through `Reflector`'s unchanged path for the first call of a
-     site (a site run once never links), and from the second call on it first links an entry:
-     it finds the member `Reflector` would call with `Reflector`'s own code, unreflects it from
-     its own lookup (in `arbace.lang`, as `Reflector`, so the same access rules and the same
-     caller for caller-sensitive methods), and adapts it with `Reflector`'s argument conversion
-     (a `boxArg` filter, after `widenBoxedArgs` where `Reflector` widened; a plain cast or unboxing
-     where the guarded argument class makes `boxArg` one) and return conversion (`prepRet` for a
-     `Boolean` result). The entry is guarded on the receiver's class, and on the argument
-     classes (nil as `Void`) when there was more than one candidate, so the choice, which then
-     depends on them, is `Reflector`'s for every call it takes. Entries are prepended to the
-     site's target as `guardWithTest` (8 at most); past that the site is megamorphic and its
-     fallback scans the entries (64 at most), then goes through `Reflector`. The call that links
-     still goes through `Reflector`. Whatever is not cached goes through `Reflector` too, which
-     so throws its own exceptions with its own messages: a nil receiver, a call `Reflector`
-     refuses, a member a method handle cannot reach (after 8 failed links a site stops
-     trying). Exceptions of the called member pass through unwrapped, as `Reflector` unwraps
-     `InvocationTargetException`; an exception of `boxArg` is unwrapped as `Reflector` does.
-     No field is written through it (JEP 500). A site keeps the classes of its entries
-     reachable, as a protocol call site's `__cached_class__` field does: a site in a long-lived
-     class that saw a REPL-defined receiver class keeps that class's loader alive.
-   - `arbace/lang/Reflector.clj`: the selection is split from the invocation, unchanged, so
-     both paths share it: `selectMatchingMethod` (what `invokeMatchingMethod` chose and checked;
-     it returns the widened arguments through a one-element array), `instanceMethods` (the
-     candidates of `invokeInstanceMethodOfClass`), `selectConstructor` and `constructors` (of
-     `invokeConstructor`). The public methods behave as before.
-   - `test/native/reflect_test.clj` compares each kind of site, on its first calls and cached,
-     with `Reflector`'s results and exceptions: mono-, poly- and megamorphic receivers (80
-     classes), threads, overloads chosen by runtime argument types (widened `Integer`, `Short`,
-     `Byte`, `Float`; `Ratio`, `BigInt`, nil), nil receivers and arguments, error messages, fields
-     and no-argument members, canonical `Boolean`s, functional-interface adaptation, qualified
-     calls, static methods and constructors; and checks by the stack (no `Method.invoke` frame)
-     that cached calls bypass `Reflector`. `test/aot-training.clj` runs a few reflective sites,
-     so the AOT cache holds what they load.
-
-   Measured (JDK 26, one JVM per row, after warm-up, best of five runs of 10⁶-2·10⁶ calls, the
-   arguments un-hinted):
-
-   | call | `Reflector` | call site |
-   |---|---:|---:|
-   | `(.length s)` (a member, monomorphic) | 1,053 ns | 2.0 ns |
-   | `(.get m k)` (`HashMap`) | 492 ns | 8 ns |
-   | `(.append sb x)` (overloads, `Long`) | 1,972 ns | 14-17 ns |
-   | `(.indexOf s "c" 1)` (overloads) | 1,443 ns | 7 ns |
-   | `(.size c)`, 2 / 4 receiver classes | 521 / 611 ns | 6 / 6 ns |
-   | `(.size c)`, 10 classes (megamorphic) | 690 ns | 14-21 ns |
-   | `(.contains c x)`, 3 classes | 920 ns | 6 ns |
-   | `(Math/abs x)`, `(Math/max x y)` | 2,041 / 2,123 ns | 1.2 / 3.3 ns |
-   | `(ArrayList. x)`, `(StringBuilder. x)` | 427 / 465 ns | 9 / 12 ns |
-
-   The cost is once per site. A site's first call (the JVM's linkage of the `invokedynamic` and
-   the bootstrap, then `Reflector`) and its second (the link) cost more than `Reflector`'s
-   calls; from the third call on it is cheaper. In a cold JVM (the jar with its AOT cache, 300
-   fresh sites, each called thrice): 108 / 91 / 3 µs per site against 64 / 20 / 12 µs; with the
-   JIT warm, 8-20 / 5-28 / 1 µs against 3.5-4 / 2 / 2 µs. So a site called fewer than about 20
-   times in a cold JVM costs more than before, by at most about 0.1 ms; a script of 300
-   reflective sites each run once took 1.07 → 1.18 s, each run 100 times 1.52 → 1.50 s.
-   Startup is unchanged (`bin/arbace -e '(+ 1 2)'` 213 ms → 214 ms, the AOT training session
-   802 → 779 ms): no reflective site runs at startup. The JDK AOT cache does not pre-resolve
-   custom bootstraps, so every launch pays the linkage again. The stages hold 31 classes with
-   such sites (`ReflectorCallSite` itself not counted).
-
-11. **`SecurityManager` is no longer a default import** (`doc/MODERN-COMPILER.md` §4.17): the
-    entry `SecurityManager` of `RT/DEFAULT_IMPORTS` (`arbace/lang/RT.clj`, upstream
-    `RT.java:119`) is gone, since JEP 486 (Java 24) disabled the Security Manager for good.
-    Upstream still imports it (`clojure/clojure` master `4278bcea`, 2026-10-07); nothing in
-    `arbace/`, its tools or Clojure's test suite names the class unqualified. The class still
-    exists in JDK 26, so `java.lang.SecurityManager` resolves; the class forms compiler's own
-    `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
-
-12. **Keyword invoke sites are `invokedynamic`** (`doc/MODERN-COMPILER.md` §4.1; 2026-10-07):
-   `Compiler$KeywordInvokeExpr/emit` (`arbace/lang/Compiler.clj`) emitted Clojure's hand-written
-   inline cache, a `__site__N` (`KeywordLookupSite`) and a `__thunk__N` (`ILookupThunk`) static
-   field per site, set in `<clinit>`, a call of the thunk, an identity test for a miss, and on a
-   miss `fault` and a store of the new thunk (upstream `Compiler.java:3825-3847`). It now emits
-   the target and `invokedynamic invoke (Object)Object`, bootstrapped by
-   `arbace.lang.KeywordInvokeSite/bootstrap` with the keyword's namespace (if any) and name as
-   static arguments. The fields, their `<clinit>` code, `registerKeywordCallsite`,
-   `ObjExpr/emitKeywordCallsites` and the site/thunk name helpers are gone;
-   `KEYWORD_CALLSITES` stays bound as before (it marks code inside a fn, where keyword invokes
-   are sites). The new class `arbace/lang/KeywordInvokeSite.clj` (Arbace's own) holds a
-   `MutableCallSite` whose value is always `(get target :k)`: for its first 256 calls it calls
-   `RT.get`; then it links an inline cache of up to four class guards (`guardWithTest` on the
-   exact class of the target), each bound to what `KeywordLookupSite` would cache for that
-   class: a record's `IKeywordLookup` thunk (its field read), `ILookup.valAt`, or `RT.get`. At a
-   fifth class it becomes `RT.get` for good; `nil` is never cached. `KeywordLookupSite`,
-   `ILookupSite` and `ILookupThunk` stay (records implement `getLookupThunk`, and classes
-   compiled elsewhere may use them). The warm-up threshold keeps launches from paying for
-   method handles: the JDK spins LambdaForm classes for the first `guardWithTest`,
-   `insertArguments` and bootstrap invocation, so linking at the first call made 8 more spun
-   classes at `bin/arbace -e 1` (9 against 1) and the launch 5-8% slower; with the threshold, 1
-   as before. Measured (2026-10-07, loaded 64-core machine): AOT-compiled namespaces 9,449,063
-   → 8,822,445 bytes (-6.6%), static fields 20,568 → 14,432, 1,979 sites; `bin/arbace -e 1`
-   median 301 ms → 301 ms with the AOT cache, 717 → 696 ms without (noise ±15 ms); loading 15
-   test namespaces from source unchanged (5.44 s → 5.54 s median, noise ±0.3 s); a lookup
-   loop (`(:a x)` over 1,000 values, min of 7) records 7.8 → 5.1 ns, array maps 10.6 → 7.3 ns,
-   hash maps 11.4 → 8.2 ns, six classes (records, maps, `java.util.HashMap`, `nil`) at one site
-   18 → 11.5 ns.
-
-13. **`str` with two or more arguments is `StringConcatFactory`** (`doc/MODERN-COMPILER.md`
-   §4.7; 2026-10-07): `Compiler$InvokeExpr/parse` (`arbace/lang/Compiler.clj`) turns a call of
-   `#'arbace.core/str` with 2 to 99 arguments, inside a fn, into the new
-   `Compiler$StrConcatExpr`, an intrinsic like an `:inline` (a redefinition of `str` does not
-   reach it, as with other inlined fns). It emits `invokedynamic makeConcatWithConstants`
-   (JEP 280) with exactly `str`'s result: constants whose text is fixed (strings, characters,
-   booleans, longs, doubles, keywords, `nil`) are folded into the recipe (passed as recipe
-   constants when they hold `\u0001` or `\u0002`); primitive arguments are passed as such (the
-   factory prints them as `toString` of their box does); any other argument is converted
-   inline: `nil` to `""`, else its `toString`. A `null` from `toString` gives `"null"` (as
-   `StringBuilder.append` does in `str`), except for the first argument, where `str`'s
-   `new StringBuilder` throws, and the intrinsic throws the same `NullPointerException` from
-   the same constructor. The arguments are evaluated in order before any conversion, as for a
-   call: when an argument with effects (anything but a folded constant or an immutable local) follows
-   an object argument, every argument goes through a temporary local first (reserved below the
-   arguments' own locals, cleared after use). All-constant calls make `new String(text)`, so
-   each evaluation still gives a new string. `eval` (top level, outside a fn) calls `str`.
-   Stack traces of an exception from a `toString` lack the `arbace.core$str` frame. Measured
-   (2026-10-07, machine under heavy load): 515 sites in the AOT-compiled namespaces, classes
-   8,822,445 → 8,989,918 bytes (+1.9%: recipes and bootstrap entries); calls 1.5 to 2.5 times
-   faster (min of 7 rounds: `(str "n=" x)` 105-119 → 66-69 ns, five arguments 186-260 → 89-134
-   ns, with a `nil` 132-199 → 60-94 ns, with a primitive 162-199 → 68-108 ns); `bin/arbace -e
-   1` unchanged (median 393 → 391 ms with the AOT cache, which pre-resolves these sites; 833 →
-   842 ms without, noise ±20 ms).
-
 ## Open decisions for the user
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.
 2. (decided, above) the leftover `clojure` identifiers.
-3. **`CLAUDE.md`'s layout section** still describes `arbace/` as the tools only; it could name
-   the vendored tree and `bin/build-arbace` (left to the main session).
+3. (done, `9cfc9b9`) `CLAUDE.md`'s layout section names the vendored tree and
+   `bin/build-arbace`.
 4. (done, item 3 of "After vendoring") the class forms native at stage 1.

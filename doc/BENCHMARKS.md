@@ -1,9 +1,10 @@
 # Benchmarks
 
 Arbace against upstream Clojure 1.12 and the frozen baseline `clojure/`, all on the same JDK 26,
-with `bin/arbace-bench` (pre-freeze item 4). Measured on 2026-10-08 at Arbace `fc77cba` with the AOT cache trained without method
-profiles (the change of that day, see "The AOT cache's method profiles"); the first run, on
-2026-10-07 at `e311a30` with profiles, is summarized there.
+with `bin/arbace-bench` (pre-freeze item 4). Measured on 2026-10-08 at Arbace `fc77cba` with
+the AOT cache trained without method profiles (the change of that day, committed as `fb8d58e`;
+see "The AOT cache's method profiles"); the first run, on 2026-10-07 at `e311a30` with
+profiles, is summarized there.
 
 ## Method
 
@@ -16,15 +17,15 @@ profiles (the change of that day, see "The AOT cache's method profiles"); the fi
   - *Startup*: the wall time of a whole launch (`-e 1`, and a 17-form REPL session on stdin,
     `test/bench/repl-session.clj`), 3 warm-up launches, then 20 timed ones; median and the
     spread (min, max) around it.
-  - *Load time*: `(require LIB)` timed inside a fresh JVM (a script), 15 forks per library;
-    median and spread. Libraries that the launcher already loads (`spec.alpha`, `string`, `edn`,
-    `walk`, ...) are not measured.
-  - *Steady state*: each benchmark in its own fresh JVM per fork (5 forks). In a fork the
-    benchmark's thunk runs for 3 s of warm-up, while the calls per sample are doubled until a
-    sample takes at least 20 ms, then samples are taken for 3 s (at least 10). A sample's
-    value is its time divided by its calls; the fork's value is its median sample. Reported:
-    the median of the 5 fork values, and their spread (min, max). Every result goes into a
-    volatile, so the JIT cannot drop the work.
+  - *Load time*: `(require LIB)` timed inside a fresh JVM (a script), three times as many forks
+    per library as steady state has (15 in the run below); median and spread. Libraries that
+    the launcher already loads (`spec.alpha`, `string`, `edn`, `walk`, ...) are not measured.
+  - *Steady state*: each benchmark in its own fresh JVM per fork (`--forks`, default 3; 5 in
+    the run below). In a fork the benchmark's thunk runs for 3 s of warm-up, while the calls
+    per sample are doubled until a sample takes at least 20 ms, then samples are taken for 3 s
+    (at least 10). A sample's value is its time divided by its calls; the fork's value is its
+    median sample. Reported: the median of the fork values, and their spread (min, max). Every
+    result goes into a volatile, so the JIT cannot drop the work.
   - Forks are interleaved: round *r* runs every implementation once, in a rotating order, so
     changes of machine load fall on all of them alike. The 1-minute load average is recorded
     with every launch.
@@ -35,16 +36,17 @@ profiles (the change of that day, see "The AOT cache's method profiles"); the fi
 - **Ratios** are Arbace / Clojure 1.12.6 and baseline / Clojure 1.12.6: below 1 is faster than
   Clojure 1.12.6, above 1 slower.
 
-Run it with `bin/arbace-bench` (about 75 minutes; `--quick` for a smoke test in about 8;
-`--forks`, `--warmup`, `--measure`, `--sections`, `--only`), after `bin/build-arbace`. It
-writes raw results to `.tmp/bench/results-DATE.edn`, and `bin/arbace-bench report FILE` prints
-the tables below from them.
+Run it with `bin/arbace-bench` (about 75 minutes with `--forks 5`; `--quick` for a smoke test
+in about 8; `--forks`, `--warmup`, `--measure`, `--sections`, `--only`), after
+`bin/build-arbace`. It writes raw results to `.tmp/bench/results-DATE.edn`, and
+`bin/arbace-bench report FILE` prints the tables below from them.
 
 ## What was measured
 
-- **Arbace** `fc77cba`: `bin/arbace`, i.e. `target/arbace.jar` with the JDK AOT cache
-  `target/arbace.aot`, both made by `bin/build-arbace`. Its namespaces are AOT-compiled with
-  direct linking. Also `arbace-nocache`: the same jar with `ARBACE_AOT=off`.
+- **Arbace** `fc77cba` with the training change of `fb8d58e`: `bin/arbace`, i.e.
+  `target/arbace.jar` with the JDK AOT cache `target/arbace.aot`, both made by
+  `bin/build-arbace`. Its namespaces are AOT-compiled with direct linking. Also
+  `arbace-nocache`: the same jar with `ARBACE_AOT=off`.
 - **Clojure 1.12.6**, the latest 1.12.x release (2026-09-02; Maven Central's latest overall is
   1.13.0-alpha8), with the dependencies its pom names, from Maven Central into `.tmp/bench/lib/`:
 
@@ -211,9 +213,10 @@ not tracked (`.tmp/bench/full2.edn`).
   300 at times. Under load the spread of fork medians reached +150 % and single benchmarks
   moved by 2x; the quiet run above has spreads of a few % for most benchmarks. Compare only
   runs with a similar load average (it is printed for each section).
-- Wide spreads that remain in the quiet run (`set-into-contains` +61 %, `protocol` +47 %,
-  `map-get`, `transduce` and `pmap` in other runs) come from forks whose JIT took another
-  path, not from load. Five forks and medians tame them but do not remove them.
+- Wide spreads that remain in the quiet run (`map-get` +34 %, `protocol` +26 %, `into-xform`
+  -22 %, `vector-transient` -19 %; `set-into-contains`, `transduce` and `pmap` in other runs)
+  come from forks whose JIT took another path, not from load. Five forks and medians tame them
+  but do not remove them.
 - `atom-contended`, `future` and `pmap` depend on thread scheduling and are the most sensitive
   to other load on the machine.
 - Startup and load times include the bash launcher for `bin/arbace` (a few ms).

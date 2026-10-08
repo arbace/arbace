@@ -20,6 +20,7 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/j2c/build.clj` | `arbace.j2c.build` | compiles converted files with the class forms compiler into class files |
 | `arbace/j2c/coverage.clj` | `arbace.j2c.coverage` | coverage summary from run reports |
 | `arbace/j2c/resolve.clj` | `arbace.j2c.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
+| `arbace/j2c/rename.clj` | `arbace.j2c.rename` | the `clojure` → `arbace` renaming rules for the vendored sources and Clojure's test suite (`doc/VENDOR-NOTES.md`) |
 | `bin/j2c` | | starts the frozen Clojure with access to javac's internals |
 | `bin/j2c-check` | | the checks (below) |
 | `test/j2c/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
@@ -35,14 +36,15 @@ bin/j2c -m arbace.j2c.main jdk [--check] OUT MODULE MODULE-SRC [PATH...]
 bin/j2c -m arbace.j2c.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
 bin/j2c -m arbace.j2c.coverage REPORT.edn...
 bin/j2c-check [--suite]
+bin/j2c-check --jdk [MODULE...]
 ```
 
 - `convert` converts the `.java` files under `ROOT` (or under the `PATH`s) into `OUT`, with
-  `ROOT` as javac's source path. `bin/j2c -m arbace.j2c.main convert .tmp/j2c clojure-out . clojure`
-  would be the baseline; use a directory under `.tmp/`.
+  `ROOT` as javac's source path. `bin/j2c -m arbace.j2c.main convert .tmp/j2c/clojure-out . clojure`
+  converts the baseline; put the output under `.tmp/`.
 - `--rename clojure=arbace` renames the package prefix in every class name, namespace and path
-  (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays; step 4
-  decides).
+  (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays); step 4
+  renames them afterwards with `arbace.j2c.rename` (`doc/VENDOR-NOTES.md`).
 - `--check` reads every output file back with `clojure.core/read` and `clojure.edn/read`, and
   writes `OUT/j2c-report.edn`: failures, unreadable files, counters of tree kinds met and of the
   forms and conversions written.
@@ -155,7 +157,9 @@ All on 2026-10-06, jdk26u at the system JDK (26.0.2.1).
   32 failures expect spec's messages). No regressions.
 - `test/j2c/java/sample`: all 6 files shape-identical to javac, §11.4 included (2026-10-07;
   before, `Features` differed in the constants of `d + (z ? 1 : 2)`, a serializable lambda's
-  name and record pattern merging, all fixed in the compiler since; `Pins` was added).
+  name and record pattern merging, all fixed in the compiler since; `Pins` was added). Later
+  `TypeAnns.java` and its annotation types `TypeUseA` to `TypeUseC` were added (10 files, all
+  shape-identical; `bin/j2c-check`).
 - A sample of the JDK conversion compiled the same way (`javax/security/auth/x500`,
   `sun/util/calendar`, `jdk/internal/util`): the differences are javac's string concatenation
   with `StringBuilder` (java.base is built with `-XDstringConcat=inline`), one array upcast
@@ -222,6 +226,7 @@ the work). Files are converted Java files with class forms; 286 have none (no an
 
 All 12,730 files convert; 24,127 classes compile from the forms. What differs or fails at the
 end (68 files), by cause:
+
 - **Code duplicated by the forms.** `switch` fall-through repeats the following arms' code
   (SPEC §12 question 9), so a lambda or anonymous class there is made twice (`JavacParser`,
   `GraphUtils`, `PrintingProcessor`, `DeferredAttr`: missing and extra lambda methods and
@@ -297,7 +302,7 @@ and the shape comparison above covers it for the baseline.
 ## Spec amendments (accepted)
 
 All accepted by the user and folded into SPEC.md; the original texts are in git history
-(commit 7229dd9).
+(commit `7229dd9`).
 
 1. **§5.5, erasure casts as `TransTypes` inserts them.** Accepted (2026-10-07), folded into SPEC §5.5, §7.4.
 2. **§1.5, readers: `clojure.core/read`, not EDN.** Accepted (2026-10-07), folded into SPEC §1.5.
@@ -315,10 +320,10 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 14. **§5.3, cross-case locals.** Accepted (2026-10-07), folded into SPEC §5.3, §7.10.
 15. **§7.3, resolution.** Accepted (2026-10-07), folded into SPEC §5.6, §7.3.
 
-## Spec amendments (proposed, 2026-10-07)
+## Spec amendments 16-19 (accepted, 2026-10-07)
 
-Found while compiling the converted JDK; in SPEC.md, marked "amendment, accepted 2026-10-07".
-The user accepted all four on 2026-10-07:
+Found while compiling the converted JDK. The user accepted all four on 2026-10-07; in SPEC.md
+they are marked "amendment, accepted 2026-10-07".
 
 16. **§4.8, `^:diamond`.** javac gives the constructor of an anonymous class of an interface
     that captures locals a `Signature`, except when Java wrote the diamond; the forms say so

@@ -1123,3 +1123,32 @@ recommended:
 - Per the user, the gate is not run for this change: it runs at the freeze on the final main
   commit. Checked: the build and the image with the new training (`bin/build-arbace`,
   `bin/arbace-image`), and the benchmark run.
+
+## 2026-10-08: After the freeze, the journal starts over on main
+
+- The user decided: after the freeze, `doc/JOURNAL.md` is reset on main. The history up to the
+  freeze is preserved in git, and in full on the branch `arbace-for-java-26` and its tag
+  `arbace-for-java-26-v1`. The new journal starts with an entry pointing there, and stays
+  append-only from then on.
+
+## 2026-10-08: A last read-through of the docs before the freeze
+
+- At the user's request, four agents read all docs (except this journal, which is append-only)
+  for sloppiness, each owning disjoint files; the main session reviewed and committed.
+- Fixed: stale status (spec amendments 16-19 "proposed"; the count of 28 amendments, now 32:
+  13 compiler, 19 converter; agenda follow-ups closed by `f240a04`, `90ba9ae`, `13ef825`; the
+  JEP 515 mentions; the survey intros of MODERN-COMPILER.md and G2C-SURVEY.md, which now point
+  to the decisions taken since), VENDOR-NOTES' hand changes 10-13 sitting under its Spec
+  section (moved; list indentation fixed), a broken j2c example command, missing layout rows,
+  usage headers of the scripts, the benchmark method's fork counts, the duplicate "Next" in the
+  agenda (rewritten, step numbers 1-6 kept since other docs cite them), and wording and
+  wrapping throughout. `bin/arbace-bench` now also retrains its Clojure cache when the script
+  is newer than it.
+- Repo: `.gitignore` lost the Leiningen leftovers of upstream's template (`pom.xml`, `/lib/`,
+  `/classes/`, `/checkouts/`, `.lein-*`). Untracked scratch in `.tmp/` went from 2.8 GB to
+  316 MB, keeping the caches the scripts use and `g2c/` and `survey/`, which the docs cite.
+- Found and left for the user: SPEC §5.2's resolution order (namespace mappings, then the own
+  package) disagrees with the implementation, which follows Java (explicit imports, the own
+  package, then the default imports and `java.lang`; VENDOR-NOTES, "Changes to
+  arbace.classes" 5), an amendment for the user to accept; and the local branch
+  `condy-item1-experiment` (`bdd773b`), the condy experiment that was not kept.
