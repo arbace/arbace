@@ -113,7 +113,9 @@ fallbacks of `arbace/core_classes.clj` are gone.
   a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
   B1a ends with a freeze (a branch and tag, as for Java 26) and includes `linux/arm64`, tested
   under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
-  static executables for both). Next: step 1, measuring the Java surface of `arbace/lang`.
+  static executables for both). Step 1 done: the Java surface measured
+  ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Next: step 2, the
+  c2g spec.
 
 ## Later
 

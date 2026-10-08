@@ -428,3 +428,12 @@ decision (2026-10-08).
   resolves every interop form with it. The `invokedynamic` sites become plain evaluation, ASM
   is not needed, class loading becomes source loading plus a name registry. Estimate 13-19
   agent-days in all (jrt 10-15 against the plan's 6-10). Seven decisions for the user.
+- The user took the seven decisions, each as recommended: reflection hand-written over member
+  tables c2g generates (`Compiler` and `Reflector` translated unchanged); all plain Java of the
+  closure translated with j2c, the VM's edge hand-written (so `BigInteger`/`BigDecimal` are
+  translated, not built on `math/big` as the plan first said); a hand-written UTF-16 `String`;
+  concurrency mixed (hand-written atomics, locks, executors over Go; `ConcurrentHashMap` and
+  the queues translated over a small `Unsafe`); thread identity by a goroutine-local slot added
+  to the Go runtime held as forms (the goroutine id from `runtime.Stack` as the stopgap); a
+  trimmed REPL start; `#inst` over a small `Date` on Go's `time`. Recorded in JAVA-SURFACE.md
+  and B1-PLAN.md (jrt now 10-15 days).
