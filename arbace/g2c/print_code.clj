@@ -127,6 +127,10 @@
 
 (defn- room? [n] (e/room? n))
 
+(defn- body-offset
+  "The index in f of the first of its trailing body forms."
+  [f body] (- (count f) (count body)))
+
 (defn- next-line
   "The first recorded line among forms, else *next*."
   [forms]
@@ -305,12 +309,15 @@
     (if (true? v) (str "//go:" (name k)) (str "//go:" (name k) " " v))))
 
 (defn pre-lines
-  "The number of comment lines before a declaration: doc and directives."
+  "The number of comment lines before a declaration: doc, a // line between doc and
+  directives (gofmt's doc comment format), directives."
   [doc dirs]
-  (+ (if (and doc (not= doc "")) (count (doc-lines doc)) 0) (count dirs)))
+  (let [d (if (and doc (not= doc "")) (count (doc-lines doc)) 0)]
+    (+ d (if (and (pos? d) (seq dirs)) 1 0) (count dirs))))
 
-(defn- write-pre [doc dirs indent]
+(defn write-pre [doc dirs indent]
   (write-doc doc indent)
+  (when (and doc (not= doc "") (seq dirs)) (e/comment-line "//" indent))
   (doseq [d dirs] (e/comment-line d indent)))
 
 (defn- interface-method? [x]
@@ -657,7 +664,8 @@
     (binding [*header* false]
       (param-list params)
       (print-results res)
-      (block-body body {:results? (seq res) :end (:go/end (meta f)) :func? true :sep sp}))))
+      (block-body body {:results? (seq res) :end (:go/end (meta f)) :func? true :sep sp
+                        :parent f :offset (body-offset f body)}))))
 
 (defn- new-arg [x]
   ;; new(T) or Go 1.26's new(value): a type unless the operand is clearly an expression
@@ -857,15 +865,20 @@
   [b]
   (if (and (seq? b) (= (op b) "do")) (vec (rest b)) [b]))
 
+(defn- branch-opts
+  "block-body's :parent and :offset for branch b, child i of parent."
+  [parent i b]
+  (if (and (seq? b) (= (op b) "do")) {:parent b :offset 1} {:parent parent :offset i}))
+
 (defn- if-like? [f] (and (seq? f) (#{"if" "when" "cond"} (op f))))
 
 (declare if-stmt)
 
-(defn- else-part [els]
+(defn- else-part [els opts]
   (sp) (tok "else") (sp)
   (if (if-like? els)
     (print-stmt els)
-    (block-body (branch-forms els) {})))
+    (block-body (branch-forms els) opts)))
 
 (defn- if-stmt [f]
   (let [o (op f)]
@@ -875,32 +888,35 @@
                  [c then & more] xs]
              (when (> (count more) 1) (fail "if takes a condition, then and else" f))
              (tok "if") (control-clause false init c nil)
-             (if (seq more)
-               (let [els (first more)]
-                 (block-body (branch-forms then) {:next (or (line-of els)
-                                                            (when-not (if-like? els)
-                                                              (next-line (branch-forms els))))
-                                                  :else-follows? (if-like? els)})
-                 (else-part els))
-               (block-body (branch-forms then) {})))
+             (let [ti (if init 3 2)]
+               (if (seq more)
+                 (let [els (first more)]
+                   (block-body (branch-forms then) (merge (branch-opts f ti then)
+                                                          {:next (or (line-of els)
+                                                                     (when-not (if-like? els)
+                                                                       (next-line (branch-forms els))))
+                                                           :else-follows? (if-like? els)}))
+                   (else-part els (branch-opts f (inc ti) els)))
+                 (block-body (branch-forms then) (branch-opts f ti then)))))
       "when" (let [[_ & xs] f
                    [init xs] (if (vector? (first xs)) [(first xs) (rest xs)] [nil xs])
                    [c & body] xs]
                (tok "if") (control-clause false init c nil)
-               (block-body (vec body) {}))
+               (block-body (vec body) {:parent f :offset (body-offset f body)}))
       "cond" (let [pairs (partition 2 (rest f))]
                (when (odd? (count (rest f))) (fail "cond takes test-branch pairs" f))
-               (loop [[[t b] & more] pairs first? true]
+               (loop [[[t b] & more] pairs bi 2]
                  (if (= t :else)
-                   (block-body (branch-forms b) {})
+                   (block-body (branch-forms b) (branch-opts f bi b))
                    (do (tok "if") (control-clause false nil t nil)
                        (if (seq more)
                          (let [[nt nb] (first more)
                                nl (if (= nt :else) (next-line (branch-forms nb)) (line-of nt))]
-                           (block-body (branch-forms b) {:next nl :else-follows? (not= nt :else)})
+                           (block-body (branch-forms b) (merge (branch-opts f bi b)
+                                                               {:next nl :else-follows? (not= nt :else)}))
                            (sp) (tok "else") (sp)
-                           (recur more false))
-                         (block-body (branch-forms b) {})))))))))
+                           (recur more (+ bi 2)))
+                         (block-body (branch-forms b) (branch-opts f bi b))))))))))
 
 (defn- clause-list
   "The clauses of a switch, type switch or select, between braces."
@@ -916,10 +932,10 @@
             (e/stmt-break! (line-of c) false ";" indent)
             (if (= (op c) "default")
               (do (tok "default") (tok ":")
-                  (stmt-list (vec (rest c)) {:indent (inc indent)}))
+                  (stmt-list (vec (rest c)) {:indent (inc indent) :parent c :offset 1}))
               (let [[_ head & body] c]
                 (tok "case") (sp) (print-head head) (tok ":")
-                (stmt-list (vec body) {:indent (inc indent)})))))))
+                (stmt-list (vec body) {:indent (inc indent) :parent c :offset 2})))))))
     (e/pop-open!)
     (e/close-break! nil true true indent)
     (tok "}")))
@@ -981,13 +997,13 @@
     (when-not (vector? init) (fail "for needs an init vector" f))
     (tok "for")
     (control-clause true init c post)
-    (block-body (vec body) {})))
+    (block-body (vec body) {:parent f :offset 5})))
 
 (defn- while-stmt [f]
   (let [[_ c & body] f]
     (tok "for")
     (when-not (true? c) (binding [*header* true] (sp) (expr0 c 1)))
-    (block-body (vec body) {})))
+    (block-body (vec body) {:parent f :offset 2})))
 
 (defn- range-stmt [f]
   (let [[_ v & body] f
@@ -1002,7 +1018,7 @@
             (expr0 k 1))
           (sp) (tok (if assign? "=" ":=")) (sp))
         (tok "range") (sp) (expr0 x 1)))
-    (block-body (vec body) {})))
+    (block-body (vec body) {:parent f :offset 2})))
 
 (defn print-stmt
   "Prints one statement form (not a let: stmt-list flattens those)."
@@ -1022,7 +1038,7 @@
       "continue" (do (tok "continue") (when-let [l (second f)] (sp) (tok (label-name l))))
       "goto" (do (tok "goto") (sp) (tok (label-name (second f))))
       "fallthrough" (tok "fallthrough")
-      "do" (block-body (vec (rest f)) {})
+      "do" (block-body (vec (rest f)) {:parent f :offset 1})
       ("if" "when" "cond") (if-stmt f)
       "switch" (switch-stmt f)
       "type-switch" (type-switch-stmt f)
@@ -1038,8 +1054,9 @@
 (defn- flatten-stmts
   "The items of a statement list: {:form f} or {:bind [target init] :t line} or
   {:type-bind [name type]}; a let (or let-type) last in a list continues the list with its
-  body, one that is not last is a block of its own."
-  [forms]
+  body, one that is not last is a block of its own. parent and offset: the list holding the
+  forms and the index of the first (for :go/breaks)."
+  [forms parent offset]
   (let [forms (vec forms)
         n (count forms)]
     (into []
@@ -1060,17 +1077,18 @@
                                     {:type-bind [t x] :t tl})))
                               pairs)]
                   (when (odd? (count bv)) (fail "let needs pairs" f))
-                  (concat items (flatten-stmts body)))
-                :else [{:form f :t (line-of f)}]))
+                  (concat items (flatten-stmts body f 2)))
+                :else [{:form f :t (if parent (child-target parent (+ offset i) f) (line-of f))}]))
             (range n) forms))))
 
 (defn- item-t [it] (:t it))
 
 (defn stmt-list
   "Prints a statement list at indent (opts :indent), each statement on its recorded line.
-  :results? makes a final expression the function's return (§6.4)."
-  [forms {:keys [indent results?] :as opts}]
-  (let [items (flatten-stmts forms)
+  :results? makes a final expression the function's return (§6.4). :parent and :offset
+  locate the forms in their list (for :go/breaks)."
+  [forms {:keys [indent results? parent offset] :as opts}]
+  (let [items (flatten-stmts forms parent (or offset 0))
         n (count items)]
     (dotimes [i n]
       (let [it (nth items i)
@@ -1110,7 +1128,7 @@
   :end (the recorded line of the closing brace), :func? (a function body: gofmt keeps it on
   one line when the source has it so), :sep (whitespace before the brace), :next (the line
   of what follows the brace), :else-follows?."
-  [forms {:keys [results? end func? sep next] :as opts}]
+  [forms {:keys [results? end func? sep next parent offset] :as opts}]
   (let [indent (if (e/bol?) @(:indent e/*p*) (e/cur-indent))
         start (e/line)
         forms (vec forms)
@@ -1118,6 +1136,7 @@
                     (if (integer? end)
                       (= (long end) start)
                       (and func? (every? #(let [t (line-of %)] (or (nil? t) (= t start))) forms)
+                           (not (some (breaks-of parent) (range (or offset 0) (+ (or offset 0) (count forms)))))
                            (or (seq forms) (nil? next) (room? 0))))
                     (and func? (empty? forms)))]
     (if one-line? ((or sep sp)) (sp))
@@ -1129,7 +1148,7 @@
           (binding [e/*next* nil]
             (sp)
             (stmt-list-one-line forms results? (inc indent)))
-          (stmt-list forms {:indent (inc indent) :results? results?})))
+          (stmt-list forms {:indent (inc indent) :results? results? :parent parent :offset offset})))
       (e/pop-open!)
       (if one-line?
         (do (when (seq forms) (sp)) (tok "}"))
@@ -1139,7 +1158,7 @@
 (defn- stmt-list-one-line
   "A function body on one line: statements separated by semicolons (go/printer's funcBody)."
   [forms results? indent]
-  (let [items (flatten-stmts forms)
+  (let [items (flatten-stmts forms nil 0)
         n (count items)]
     (dotimes [i n]
       (let [it (nth items i) f (:form it)]
@@ -1155,7 +1174,7 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Declarations (§6)
 
-(defn- parse-decl-head
+(defn parse-decl-head
   "[doc opts rest] of the arguments after a declaration's name: an optional doc string, then
   :type-params."
   [xs]
@@ -1194,6 +1213,7 @@
       (print-results res)
       (when-not extern?
         (block-body (vec body) {:results? (seq res) :end (:go/end (meta f)) :func? true
+                                :parent f :offset (body-offset f body)
                                 :sep (if (e/lines?) vtab sp)})))))
 
 (defn- spec-name [t] (if (and (seq? t) (= (op t) "values")) (second t) t))
@@ -1209,7 +1229,7 @@
       (tok (ident-string t)))
     (when (or typ (and group? keep-type)) (sep))
     (when typ (type-expr typ))
-    (when (and (some? init) (not= init ::none))
+    (when (not= init ::none)
       (sep) (tok "=") (sp) (expr-list init 1))))
 
 (defn- keep-type-column

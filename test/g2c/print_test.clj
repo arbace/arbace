@@ -99,3 +99,23 @@
                   (is (zero? s) (str (name layout) " layout, gocmp:\n" o))))
               (when-let [[s o] (:lines (:lines r))]
                 (is (zero? s) (str "lines layout, golines: " o))))))))))
+
+(deftest package-build
+  ;; SPEC §12.4: the non-Go files copied (embedded ones checked by hash), the overlay, and
+  ;; go build -overlay under the forms' configuration
+  (when (or (nil? only) (re-find only "s09_directives"))
+    (let [src (File. (str root "/test/g2c/cases/s09_directives"))
+          out (File. (str work "/package-build/out"))
+          _ (doseq [^File f (reverse (file-seq (.getParentFile out)))] (.delete f))
+          {:keys [package files]} (print/print-package (str root "/test/g2c/cases/s09_directives.clj")
+                                                       (.getPath out) {})]
+      (print/copy-files package src out files)
+      (doseq [f ["dirs.go" "asm_amd64.s" "a.txt" "b.txt" "overlay.json"]]
+        (is (.isFile (File. out ^String f)) (str f " written")))
+      (is (str/includes? (slurp (File. out "overlay.json"))
+                         (str (.getPath (File. (.getAbsoluteFile src) "dirs.go")) "\": \""
+                              (.getPath (File. (.getAbsoluteFile out) "dirs.go")))))
+      (let [[status text] (print/build package src out goroot)]
+        (is (zero? status) (str "go build -overlay: " text)))
+      (let [bad (assoc-in package [:package :embed-files] [["a.txt" "00"]])]
+        (is (thrown-with-msg? Exception #"embedded file a.txt" (print/copy-files bad src out files)))))))

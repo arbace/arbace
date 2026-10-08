@@ -128,6 +128,19 @@
               (recur more v)))
           (e/tok ")") (e/nl 0)))))
 
+(defn- one-line-func?
+  "Whether a declaration is a function printed on one line: its closing brace on its first
+  line (mode :lines), or an empty body (gofmt's layout)."
+  [f lines? t]
+  (and (#{"go/func" "go/method"} (code/op f))
+       (if lines?
+         (and t (= (:go/end (meta f)) t))
+         (let [[_ nm & xs] f
+               [_ _ xs] (code/parse-decl-head xs)
+               body (rest xs)
+               body (if (= (first body) :results) (nnext body) body)]
+           (and (empty? body) (not (:extern (meta nm))))))))
+
 (defn print-file
   "The Go text of one file: {:name :opts :decls} as collect gives it. pkg-name is the
   package clause's name unless the file's :package says otherwise."
@@ -157,18 +170,19 @@
                                                                   (code/decl-doc-and-directives d))]
                                                  (- (long t) (code/pre-lines doc dirs)))))
                                      (subvec decls (inc i)))]
-              ;; form feeds: a top-level line never aligns with the lines before it
-              (cond
-                (not lines?) (do (when-not (e/bol?) (e/nl 0 true)) (e/nl 0 true))
-                (nil? t) (do (when-not (e/bol?) (e/nl 0 true)) (e/nl 0 true))
-                :else (let [want (- (long t) pre)]
-                        (when-not (e/bol?) (e/nl 0 true))
-                        (while (< (e/line) want) (e/nl 0 true))))
+              ;; a new alignment section (form feed) unless a one-line function follows a
+              ;; line at the left margin (go/printer's declList): one-line functions in a row
+              ;; align their bodies
+              (let [ff (or (not (one-line-func? f lines? t)) (pos? (e/cur-indent)))]
+                (cond
+                  (or (not lines?) (nil? t)) (do (when-not (e/bol?) (e/nl 0 ff)) (e/nl 0 ff))
+                  :else (let [want (- (long t) pre)]
+                          (when-not (e/bol?) (e/nl 0 ff))
+                          (while (< (e/line) want) (e/nl 0 ff)))))
               (if directive?
                 (e/comment-line (str (second f)) 0)
                 (do
-                  (code/write-doc doc 0)
-                  (doseq [d dirs] (e/comment-line d 0))
+                  (code/write-pre doc dirs 0)
                   (when (and lines? t (not= (long t) (e/line)) (:line-directives? (or popts {}) true))
                     (cond
                       (> (long t) (e/line)) (while (< (e/line) (long t)) (e/nl 0))
