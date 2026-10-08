@@ -303,3 +303,7 @@ decision (2026-10-08).
   1,707 trees). Tests: `bin/g2c-print-tests` 5 tests, 256 assertions (new cases
   `s14_5_amended`, SPEC §14.5, and `s15_roundtrip`); `bin/g2c-convert-tests` 6 tests, 150
   assertions; `go test` in `tools/gocmp`.
+- The main session merged the branch and checked it: `bin/gate` passed (3m48s); `bin/g2c
+  roundtrip amd64` reproduced the agent's result (std 373 trees, 372 export and code with
+  `unsafe` skipped; `$GOROOT/test` 1,707 at all three levels; no regressions against
+  `test/g2c/roundtrip-amd64.edn`) in 56 s.
