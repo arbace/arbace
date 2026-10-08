@@ -112,7 +112,8 @@ fallbacks of `arbace/core_classes.clj` are gone.
   (TamaGo, arm64) later as B1b. Decided: c2g + jrt, an evaluator first, Java's UTF-16 strings,
   a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
   B1a ends with a freeze (a branch and tag, as for Java 26) and includes `linux/arm64`, tested
-  under `qemu-aarch64`. In progress: step 0, g2c for linux.
+  under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
+  static executables for both). Next: step 1, measuring the Java surface of `arbace/lang`.
 
 ## Later
 

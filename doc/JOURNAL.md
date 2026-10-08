@@ -373,3 +373,29 @@ decision (2026-10-08).
   different but equally reproducible executables.
 - Four proposed spec amendments (programs and modules; files of hand-written packages; the
   `//line` file name; `:config` overridden by the build target), collected for the user.
+
+## 2026-10-08: B1a step 0 done: the round trip for linux, in the full gate
+
+- Agent, `8f6b3e2`, merged: the configuration is a parameter end to end; the round trip passes
+  for linux/amd64 (std 376, `$GOROOT/test` 1,713) and linux/arm64 (374, 1,707) at all three
+  levels, `unsafe` skipped at export and code, no known differences; references
+  `test/g2c/roundtrip-linux-{amd64,arm64}.edn`; tamago unchanged. The helper, converter and
+  printer needed no change; `bin/g2c` and `bin/g2c-check` gained `GOOS/ARCH` and `--goos`,
+  and both set `CGO_ENABLED=0` (gcc is on this host, and `go` turns cgo on for linux).
+  TamaGo's go1.27.1 builds linux too (its std differs from upstream only in tamago's files and
+  the GOOS tables), so one tree and one build cache serve the four configurations. Warm round
+  trip about 40 s per configuration, 93-98 s cold.
+- An oracle bug found and fixed by the agent: the go command replays a cached compile's `-S`
+  listing from the build cache and prints nothing when that entry is missing, so two programs'
+  code level passed vacuously; gocmp now recompiles under a fresh cache key when a listing is
+  empty, and reports an error if it stays empty.
+- `bin/gate --full` runs the tamago and the linux round trips on amd64, one after the other in
+  one job. Run concurrently, the second converter was killed by the kernel's out-of-memory
+  killer (two 12 GB heaps beside three suite runs and j2c-check on 62 GB), and the round trip
+  then reported one missing package instead of failing: `bin/g2c roundtrip` now stops when the
+  converter dies by a signal, and `bin/g2c build` builds the helper under a lock into a
+  temporary file moved into place, so concurrent runs never overwrite a running helper.
+  `bin/gate --full` passed in 6m54s.
+- Five more proposed spec amendments (the configurations `tamago` and `linux`, each amd64 and
+  arm64, cgo off everywhere; one tree per configuration), collected for the user with the build
+  agent's four.

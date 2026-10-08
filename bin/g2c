@@ -63,10 +63,16 @@ build() {
     return 1
   fi
   mkdir -p "$work"
-  # for the host: GOOS=tamago is the configuration of the code converted, not of the helper
-  (cd "$root/tools/godump" &&
-     env -u GOOS -u GOARCH GOROOT="$goroot" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-       "$goroot/bin/go" build -trimpath -o "$helper" .)
+  # Concurrent runs (bin/gate --full runs two round trips) share the helper: build one at a
+  # time, into a temporary file moved into place, so a running helper is never overwritten.
+  (
+    flock 7
+    # for the host: GOOS=tamago is the configuration of the code converted, not of the helper
+    cd "$root/tools/godump" &&
+      env -u GOOS -u GOARCH GOROOT="$goroot" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+        "$goroot/bin/go" build -trimpath -o "$helper.new.$$" . &&
+      mv -f "$helper.new.$$" "$helper"
+  ) 7> "$work/build.lock"
 }
 
 godump() {
@@ -227,13 +233,23 @@ roundtrip() {
   fi
   rm -rf "$cand"
   t0=$(date +%s.%N)
+  # A conversion's failures are the check's to report; a converter killed by a signal (the
+  # out-of-memory killer, 137) leaves a partial candidate, so the round trip stops there.
+  converted() {
+    local s=0
+    convert "$@" || s=$?
+    if [ $s -ge 128 ]; then
+      echo "roundtrip: the converter died (exit status $s); the candidate is incomplete" >&2
+      return 1
+    fi
+  }
   if [ -n "$with_tests" ]; then
-    convert --corpus tests --print "$cand" || true
+    converted --corpus tests --print "$cand" || return 1
   else
     local tests=test
     [ "$arch" = arm64 ] && tests=test-arm64
-    convert --corpus "$prefix$arch" --print "$cand" || true
-    convert --corpus "$prefix$tests" --print "$cand" || true
+    converted --corpus "$prefix$arch" --print "$cand" || return 1
+    converted --corpus "$prefix$tests" --print "$cand" || return 1
   fi
   t1=$(date +%s.%N)
   status=0
