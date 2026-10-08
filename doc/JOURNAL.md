@@ -399,3 +399,15 @@ decision (2026-10-08).
 - Five more proposed spec amendments (the configurations `tamago` and `linux`, each amd64 and
   arm64, cgo off everywhere; one tree per configuration), collected for the user with the build
   agent's four.
+
+## 2026-10-08: Nine more Go forms amendments accepted; step 1 started
+
+- The user accepted the nine amendments from step 0: the pinned configurations are
+  `GOOS=tamago` and `GOOS=linux`, each amd64 and arm64, cgo off everywhere, TamaGo's go1.27.1
+  the one toolchain, one form tree per configuration; a hand-written program states its module
+  in `program.edn` (not a `go/module` form); a hand-written package's other and embedded
+  files live in its forms directory; `//line` names the forms file relative to it; the build
+  target overrides a program's `:goos`/`:goarch`. An agent folds them into `doc/go/SPEC.md`.
+- B1a step 1 started (agent): the Java surface of `arbace/lang` and the namespaces, measured
+  from the compiled bytecode, with a treatment per JDK class (translate from the JDK's source
+  with j2c, shim, cut, or rework) and the decisions for the user.
