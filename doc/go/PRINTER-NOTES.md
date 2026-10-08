@@ -145,9 +145,12 @@ only in ordinary comments and literal spellings; `s10_positions` only in its imp
 forms file of 32,000 table elements and 3,000 statements prints in 2.5 s, the JVM's start
 included.
 
-## Findings: proposed amendments to SPEC.md
+## Findings: amendments to SPEC.md (accepted 2026-10-08)
 
-SPEC.md is unchanged; these are proposals.
+Proposed by the printer; the user accepted all ten on 2026-10-08, with the helper's H1-H7 and
+the converter's C1-C11, and they are folded into SPEC.md, marked "(amendment, accepted
+2026-10-08)" (SPEC §15, "Amendments (2026-10-08)"). Where they disagreed, the converter's
+wins over the printer's over the helper's; the cases are noted below.
 
 - **A1. Field groups in generic declarations.** N3 drops the grouping of names (`a, b T`), but
   gc's output depends on it in generic declarations (ROUNDTRIP.md, known gaps: "must keep the
@@ -156,47 +159,64 @@ SPEC.md is unchanged; these are proposals.
   Proposal: the converter marks each name declared together with the name before it with
   `^:go/grouped` (parameters, results, type parameters, struct fields), at least inside
   generic declarations; a file that uses the marker is printed with exactly those groups.
-  Implemented (`s05_groups`).
+  Implemented (`s05_groups`). *Accepted 2026-10-08, folded into SPEC §5.3 (and §3.2 N3,
+  §12.2, §13.1, §14.5).* The converter's form wins: the marker only inside generic
+  declarations, plus `^{:go/grouped false}` for names of equal type declared apart; C2 reuses
+  it for local `const` groups.
 - **A2. `:go/breaks` indexes** are not defined precisely (the example `[17 33 49]` fits no
   obvious counting). Proposal: the index of the child as `nth` gives it, the head being 0;
   and `:go/breaks` applies to every list, statement lists included (a final `nil`, `-1` or
-  `"?"` begins its Go line as `return nil`). Implemented so.
+  `"?"` begins its Go line as `return nil`). Implemented so. *Accepted 2026-10-08, folded
+  into SPEC §10.1.*
 - **A3. `/*line :N*/`** (§12.3) records an empty file name: a line directive without a column
   takes the previous file name only when it has a column (`cmd/compile/doc.go`;
   `syntax/parser.go`, `updateBase`). Proposal: `/*line :N:C*/` (or the file name). The
-  printer writes `/*line :N:1*/` and `//line :N:1`.
+  printer writes `/*line :N:1*/` and `//line :N:1`. *Accepted 2026-10-08, folded into SPEC
+  §12.3.*
 - **A4. Conversions** (§12.2): a type beginning with `[` needs no parentheses (`[]byte(s)`;
   go/printer adds them only for function types); channel types are safer with them. Proposal:
-  "around conversions to types that begin with `*`, `<-`, `func` or `chan`".
+  "around conversions to types that begin with `*`, `<-`, `func` or `chan`". *Accepted
+  2026-10-08, folded into SPEC §12.2.*
 - **A5. `new`'s operand.** `(new (G T))` is either `new(G[T])` (a generic type's instance) or
   Go 1.26's `new(G(T))` (a call's value); the printer cannot tell without declarations. It
   takes such a list as a type (std has `new(atomic.Pointer[T])`, and `new` of a call is new
   and rare). Proposal: a generic type instance in `new`'s operand is written `(inst G T)`
   (which prints `G[T]` in any position) and a list with a plain head there is a call.
+  *Accepted 2026-10-08, folded into SPEC §5.5 and §7.7*, extended by the converter to
+  `method-expr`'s operand.
 - **A6. Directives other than `//go:`** (§9.1 mentions `//export`): keyed `:go/<name>`, they
   would print as `//go:<name>`. Proposal: keep them verbatim, e.g. `:go/directives
-  ["//export f"]`. (cgo is excluded for tamago, so none occurs in the corpus.)
+  ["//export f"]`. (cgo is excluded for tamago, so none occurs in the corpus.) *Accepted
+  2026-10-08, folded into SPEC §9.1* in the converter's spelling, which wins: every directive
+  other than a `//go:` line is a free-standing `(go/directive "...")` form where it stands,
+  never metadata; the text stays verbatim.
 - **A7. Doc comment and directives** (§9.1): gofmt separates a doc comment's text from the
   directives after it by a `//` line, and the converter's line accounting must count it.
   Proposal: "between the doc comment and the declaration, after a `//` line when there is a
-  doc comment, as gofmt writes them". Implemented so.
+  doc comment, as gofmt writes them". Implemented so. *Accepted 2026-10-08, folded into SPEC
+  §9.1.*
 - **A8. Lines of lists in metadata** (§10.1): the reader gives every list the forms text's
   line, including type forms in tags (`^{:tag (func [int] [bool])} f`), which the printer
   takes as recorded lines; a doc string on its own forms line before a signature therefore
   pushes the signature's types to later lines. The converter must write a declaration's doc
   string, name and signature on the declaration's line (the test forms do). Alternative: lists
   inside metadata never carry Go lines (only explicit `:line` on symbols and vectors would).
+  *Accepted 2026-10-08, folded into SPEC §10.1* as the converter does it (doc string, name and
+  signature on the declaration's line); the alternative was not taken.
 - **A9. A labeled declaration** (`L: x := 1`, legal Go) has no form: `(label :L (let ...))`
   makes the let's body the label's. Rare (none seen); proposal: `(let [^{:go/label :L} x 1]
-  ...)` if one turns up.
+  ...)` if one turns up. *Accepted 2026-10-08, folded into SPEC §7.1 and §7.3* in the
+  converter's C9 form, which wins: `:go/label` on the first target of the `let` binding that
+  holds the declaration (`:=` or `var`), 20 in std.
 - **A10. gofmt over printed output** (§12.3, §14.4 "comes from running gofmt on the output,
   which keeps the lines"): gofmt keeps lines only where the layout is already gofmt's, and
   gofmt 1.27.1 itself breaks `switch (P[int]{}) {`: its `stripParens` does not count an
   instantiated type as a type name and drops parentheses the parser needs (the output does
   not parse). The printer does the spacing and alignment itself and needs no gofmt pass.
+  *Accepted 2026-10-08, folded into SPEC §12.3 and §14.4.*
 - The spec's §14.1 forms are illustrative: their lines are not the Go lines (off by one, and
   `:go/end 15` where its own `Move` is on line 14); `s14_1_sample_lines` has the forms on
-  Go's lines.
+  Go's lines. *Accepted 2026-10-08 (with the converter's same note), folded into SPEC §14.*
 
 ## What remains for the round trip
 

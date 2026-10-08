@@ -368,6 +368,34 @@ three, in 1.4 s, 1.3 s and 0.8 s, read in 5.7 s, 5.5 s and 2.5 s: the type ids m
   (`*read-eval*` false) as exactly one form, and its type table is in dependency order.
   Constants exercise every value encoding, `(:float M E)` included (3 dumps).
 
+## Spec amendments (accepted 2026-10-08)
+
+Writing format 2 raised seven amendments to [SPEC.md](SPEC.md) (journal, 2026-10-08, "The
+helper's format 2"). The user accepted all seven on 2026-10-08, with the printer's A1-A10 and
+the converter's C1-C11; where they disagreed, the converter's wins over the printer's over the
+helper's (SPEC §15, "Amendments (2026-10-08)").
+
+- **H1. `:dot` also on type assertions.** gc positions `x.(T)` at its dot as it does a
+  selector, so the helper writes `:dot` on `type-assert-expr` too. Accepted 2026-10-08, folded
+  into SPEC §10.2 (and §11.3 item 1, §13.1).
+- **H2. Do `//go:` lines attach across blank lines?** Left open for verification. Accepted
+  2026-10-08, settled by the converter's C1 (gc attaches them across blank lines), folded into
+  SPEC §9.1. C1, the later and more specific, is the rule.
+- **H3. The type table as §11.3 item 4's shape.** Types are ids into `:type-table`; local
+  types and type parameters are told apart by `:decl`. Accepted 2026-10-08, folded into SPEC
+  §11.3 item 4.
+- **H4. Values narrower than their type.** go/constant's kind can be narrower than the
+  expression's type (`1` in `1 + 2i`); §8.2's representation is built from `:t`. Accepted
+  2026-10-08, folded into SPEC §8.2 (and §11.1, §11.3 item 5, §13.3), with the converter's
+  refinement (named types of other packages: the value's kind decides).
+- **H5. `:go/via` names from the helper's `:via`** on `:sel` and `:field`. Accepted
+  2026-10-08, folded into SPEC §7.6 (and §11.1, §11.3 item 6, §13.3).
+- **H6. Separate file lists.** The helper writes each of go list's lists apart; the converter
+  merges the non-Go ones into §4.2's `:other-files`. Accepted 2026-10-08, folded into SPEC §4.2
+  (and §11.3 item 7).
+- **H7. The external test package's path** is `p_test`, its namespace `go.<path>_test`.
+  Accepted 2026-10-08, folded into SPEC §4.1.
+
 ## What is left
 
 - **The converter** `arbace.g2c` (G1's other half, per `doc/go/SPEC.md`): the forms of survey

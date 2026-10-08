@@ -242,3 +242,16 @@ decision (2026-10-08).
   `(binary-float M E)` for huge constants; `:go/label`; `^:var (values ...)`; the positions
   of spliced nodes in `:full`. Also the spec's text: `1.0E100` is exact by §8.1's rule;
   §14.2's `runeErrorByte0` is an untyped rune.
+
+## 2026-10-08: The Go forms spec's 28 amendments accepted
+
+- The user accepted, in four groups, all 28 amendments proposed by the helper (7), the
+  printer (A1-A10) and the converter (C1-C11): round-trip markers (`^:go/grouped`,
+  `^:go/implicit`, `^:go/paren`, `:type-params` on local generic types); new spellings
+  (`:go/label` for labeled declarations, `^:var (values a b)`, `(inst G T)` in `new` and
+  method expressions, `(binary-float M E)`); directive and file rules (`//go:` lines attach
+  across blank lines, as verified in gc; directives among imports; non-`//go:` directives
+  verbatim; `/*line :N:C*/`; `x.go.clj` on name collisions); and the factual fixes and
+  clarifications, folded in without separate questions. Two agents: one folds them into
+  `doc/go/SPEC.md`, one closes the round trip (printer support, the helper's and the oracle's
+  `$GOROOT/test` selections made to agree, a recorded reference).
