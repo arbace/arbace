@@ -190,3 +190,24 @@ decision (2026-10-08).
   `//go:` lines across blank lines, to verify; the type table as §11.3's shape; values
   narrower than their type; `:go/via` from the helper; separate file lists; the `p_test`
   path). Collected for the user with the printer's.
+
+## 2026-10-08: g2c's printer, Go forms → Go
+
+- Agent, `7e28713` .. `1666677`, merged: `arbace.g2c.print` (reading, headers, imports,
+  declarations, the §12.4 package build with `go build -trimpath -overlay`),
+  `arbace.g2c.print-code` (forms → tokens), `arbace.g2c.print-emit` (Go's semicolon rule,
+  indentation, lines), `arbace.g2c.print-text` (literal spellings, a port of
+  `text/tabwriter`); spacing ported from go/printer (go1.27.1 `nodes.go`); parentheses only
+  where the grammar needs them. Two layouts: `gofmt` and `lines` (forms placed on their
+  recorded Go lines, with `//line` corrections where a line cannot be reached); `--line-file`.
+  Not yet: mode `:full`. `bin/g2c-print`, `bin/g2c-print-tests`; notes in
+  `doc/go/PRINTER-NOTES.md`.
+- Tests: hand-written forms for every spec section and the §14 examples (real `unicode/utf8`
+  and `sort` excerpts), 5 tests, 241 assertions: both layouts parse; the 17 cases with an
+  original Go file equal it at gocmp's tree, export and code levels in both layouts; the
+  line-aligned cases have the original's lines (checked by a small Go tool,
+  `test/g2c/golines`); `s14_3_sort` prints byte-identical in the lines layout.
+- Ten proposed spec amendments (A1-A10 in PRINTER-NOTES: `^:go/grouped` for generic field
+  groups; `:go/breaks` indexes; `/*line :N:C*/`; conversion parentheses; `(inst G T)` for
+  instances; non-`//go:` directives verbatim; doc text and directives; lines inside metadata;
+  labeled `:=`; gofmt not safe on the output), collected for the user with the helper's seven.
