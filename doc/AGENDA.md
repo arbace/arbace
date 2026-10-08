@@ -82,11 +82,11 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Later
 
 - `clojure/` (the frozen seed) stays until the freeze and remains on `arbace-for-java-26` for
-  good, so that branch builds and verifies from its own checkout. It still serves as stage 0 of
-  the bootstrap, j2c's regression corpus, the suite's reference results, and the replay of the
-  derivation. On main after the break, replace it, preferably with a Go-style binary seed: stage
-  0 becomes the jar built from the freeze tag, pinned by hash. The alternative is a pinned
-  fetch of upstream `98d735fab02f` plus the recorded patches. Decide at the break.
+  good, so that branch builds and verifies from its own checkout. On main after the break it is
+  replaced by a Go-style binary seed (the user's decision, 2026-10-08): stage 0 becomes the jar
+  built from the freeze tag, pinned by hash. Its other roles (j2c's regression corpus, the
+  suite's reference results, the replay of the derivation) move to the frozen branch or are
+  re-anchored on the seed.
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style

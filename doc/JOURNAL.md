@@ -1082,3 +1082,11 @@ recommended:
   annotated list).
 - The README section prepared by the freeze agent (`c57969f`, local branch `freeze-readme`) is
   superseded by the new README's section, and the branch was deleted.
+
+## 2026-10-08: After the freeze, `clojure/` is replaced by a binary seed
+
+- The user decided the open question of the 2026-10-07 entry on `clojure/`: on main after the
+  break, `clojure/` is replaced by a Go-style binary seed, the jar built from the freeze tag
+  `arbace-for-java-26-v1`, pinned by hash, as stage 0 of the bootstrap.
+- The alternative, a pinned fetch of upstream `98d735fab02f` plus the recorded patches, is not
+  taken. `clojure/` stays on `arbace-for-java-26` for good.
