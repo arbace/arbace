@@ -634,10 +634,11 @@
                    "I" (.visitJumpInsn m (first (cmp-jumps2 c)) label)
                    "J" (do (insn gen Opcodes/LCMP) (.visitJumpInsn m (second (cmp-jumps2 c)) label))
                    ("F" "D")
-                   ;; NaN makes every comparison but != false: choose cmpg/cmpl so it does
-                   (let [nan-true? (= c :!=)
-                         ;; with cmpg NaN gives 1, with cmpl -1
-                         g? (case c (:< :<=) true (:> :>=) false (:== :!=) true)]
+                   ;; NaN makes every comparison but != false. The choice of cmpg/cmpl follows
+                   ;; the comparison as written (cmp), not the one jumped on (c): when the
+                   ;; jump is on the negation, NaN must make the negation true, which is what
+                   ;; the written comparison's choice gives (with cmpg NaN gives 1, with cmpl -1).
+                   (let [g? (case cmp (:< :<=) true (:> :>=) false (:== :!=) true)]
                      (insn gen (if (= t "F") (if g? Opcodes/FCMPG Opcodes/FCMPL)
                                    (if g? Opcodes/DCMPG Opcodes/DCMPL)))
                      (.visitJumpInsn m (second (cmp-jumps2 c)) label))))

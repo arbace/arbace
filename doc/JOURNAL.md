@@ -589,3 +589,21 @@ decision (2026-10-08).
   `overlay/go/runtime/`); the reduced scope (no `Proxy.newProxyInstance`, `jrt.AdaptFn`
   instead; plain generic reflection, no annotations; en_US with root data; three charsets);
   and BUILD.md B6 (`--print-only`, `--tests`, `--module`). An agent folds them into the specs.
+
+## 2026-10-08: A NaN comparison bug in the class forms compiler, fixed
+
+- Found by c2g's differential check (step 4): on the JVM Arbace every ordered comparison with
+  NaN was true (`(< 1.0 ##NaN)`, `(>= ##NaN 1.0)`, ...); Clojure 1.12.6 gives false, as Java
+  does; `==` was right. Cause: `arbace.classes.emit/emit-cond` chose `dcmpg`/`dcmpl` (`fcmpg`/
+  `fcmpl`) from the comparison it jumps on, which is the negation when the code jumps past the
+  true branch; NaN then made the negation false and the code fell into the true branch. Since
+  `arbace.lang.Numbers` is class forms, Clojure's `<` and friends inherited it. Fixed: the
+  choice follows the comparison as written. Clojure's test suite never checks this, which is
+  why the gate passed throughout; the frozen `arbace-for-java-26` has the bug too.
+- New regression test `test/native/nan_test.clj` (class bodies, both jump shapes, `and`/`or`,
+  floats, and Clojure's comparison functions on doubles, longs, BigInts and ratios). The native
+  tests now run on stage 2, the stage the jar ships: stage 1 is compiled by the seed's compiler
+  and keeps the old bug until the seed moves (stages 1 and 2 now differ in `Numbers`,
+  `Numbers$DoubleOps`, `RT` and ASM's `GeneratorAdapter`, reported, not a failure).
+- The oracle's expectations, recorded from the buggy JVM, were re-recorded: 67 cases in 6 files
+  changed, every one involving NaN. `bin/gate --full` passed (7m13s).
