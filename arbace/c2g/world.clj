@@ -203,6 +203,10 @@
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
     {:compile-set cs :unit unit :from-source from-source :files files :tops tops
+     ;; the class forms file of each top-level class (the Go file named after it, §4.3)
+     :source-of (into {} (for [{:keys [file ns forms]} parsed :when ns
+                               n (top-names ns forms)]
+                           [n (str file)]))
      :failed @failed :variants @applied}))
 
 (defmacro with-world

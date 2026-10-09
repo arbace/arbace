@@ -333,6 +333,16 @@ positions or length, then ranges (ArrayIndexOutOfBoundsException); overlapping c
 one array are correct; a reference copy that needs element checks copies up to the first
 element that fails and throws ArrayStoreException.\n"
   [^any src ^int32 srcPos ^any dst ^int32 dstPos ^int32 n]
+  ;; the common case first: reference arrays whose element types need no checks, in range
+  (let [(values x xok) (assert (* RefArray) src)
+        (values y yok) (assert (* RefArray) dst)]
+    (when (and xok yok (!= x nil) (!= y nil)
+               (or (== x y) (== (.-Comp y) Object_class) (== (.-Comp y) (.-Comp x)))
+               (>= srcPos 0) (>= dstPos 0) (>= n 0)
+               (<= (+ (conv int64 srcPos) (conv int64 n)) (conv int64 (len (.-A x))))
+               (<= (+ (conv int64 dstPos) (conv int64 n)) (conv int64 (len (.-A y)))))
+      (copy (subslice (.-A y) dstPos) (subslice (.-A x) srcPos (+ srcPos n)))
+      (return)))
   (when (or (== src nil) (== dst nil))
     (panic (NPE)))
   (let [sc (GetClass src)

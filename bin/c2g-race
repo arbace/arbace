@@ -1,0 +1,39 @@
+#!/bin/bash
+# c2g under Go's race detector (C2G-SPEC §8.3, doc/go/C2G-NOTES.md "Phase 2D: races"):
+# translates the classes test/c2g/race's program uses (threads sharing hash caches,
+# interned symbols and keywords, namespaces, an atom), builds it with -race (linux/amd64,
+# cgo on, as the race detector needs), runs it and summarizes the reports by the Go
+# functions involved. With a program root as argument (e.g. .tmp/c2g/check/prog-Seqs, a
+# bin/c2g-check program) it builds and runs that one instead.
+#
+# Usage: bin/c2g-race [PROG-DIR]
+# Environment: C2G_RACE_OUT (default .tmp/c2g/race), C2G_JVM_OPTS, G2C_GOROOT.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+out=${C2G_RACE_OUT:-$root/.tmp/c2g/race}
+goroot=${G2C_GOROOT:-/root/tamago-go}
+mkdir -p "$out"
+if [ $# -ge 1 ]; then
+  prog=$1; pkg=$(cd "$prog/go" && ls -d arbace/cmd/*/ | head -1); pkg=${pkg%/}
+else
+  C2G_JVM_OPTS=${C2G_JVM_OPTS:--Xmx10g} bin/c2g --out "$out/c2g" --main test/c2g/race \
+    --root arbace.lang.Util#hasheq --root arbace.lang.PersistentVector --root arbace.lang.PersistentHashMap \
+    --root arbace.lang.Keyword#intern --root arbace.lang.Symbol#intern --root arbace.lang.Namespace#findOrCreate \
+    --root arbace.lang.Atom --root arbace.lang.RT#nextID | grep -v WARNING
+  prog=$out/c2g/prog; pkg=arbace/cmd/race
+fi
+overlay=$(bin/jrt overlay)
+rm -rf "$out/work"
+bin/g2c build --print-only --line-file --work "$out/work" "$prog"
+(cd "$out/work/mod" && GOROOT=$goroot GOOS=linux GOARCH=amd64 GOFLAGS= GOWORK=off GOTOOLCHAIN=local \
+  GOPROXY=off CGO_ENABLED=1 "$goroot/bin/go" build -race -trimpath -overlay "$overlay" -o "$out/prog-race" "$pkg")
+set +e
+GORACE="halt_on_error=0" "$out/prog-race" > "$out/stdout.txt" 2> "$out/stderr.txt"
+status=$?
+set -e
+n=$(grep -c 'WARNING: DATA RACE' "$out/stderr.txt" || true)
+echo "c2g-race: status $status, $n race reports (GORACE reports each pair once); $out/stderr.txt"
+tail -3 "$out/stdout.txt"
+# the first Java frame of each report's two accesses
+awk '/WARNING: DATA RACE/{r++; k=0} /^(Read|Write|Previous write|Previous read|Atomic)/{getline; k++; f[r","k]=$0} END {for (i=1;i<=r;i++) print "  " f[i",1"] "  <->  " f[i",2"]}' "$out/stderr.txt" | sed 's/^ *//' | sort | uniq -c | sort -rn | head -40

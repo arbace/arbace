@@ -307,3 +307,84 @@
                              (or (nil? (:super d)) (trivial-init? (:super d))))))]
         (swap! cache assoc n r)
         r))))
+
+;; ---------------------------------------------------------------------------------------
+;; benign initialization (C2G-NOTES, phase 2D: static methods without an entry guard)
+
+(declare pure-node?)
+
+(defn- top-class [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn- pure-ctor?
+  "Is constructor m of class c (in the file of class n) free of effects beyond its object's
+  fields: field stores of pure values on this, a super or this constructor call that is pure
+  too (Object's at the end)?"
+  [n c m seen]
+  (let [d (a/decl c)
+        ab (when d (get (:bodies @(:state d)) ["<init>" (:desc m)]))]
+    (and d ab (translated? c)
+         (= (top-class c) (top-class n))
+         (not (contains? seen [c (:desc m)]))
+         (let [seen (conj seen [c (:desc m)])
+               call (:call ab)
+               sup (:super d)]
+           (and (empty? (:prologue ab))
+                (not (:nested-call ab))
+                (or (nil? call)
+                    (and (every? #(pure-node? n % seen) (:args call))
+                         (or (nil? (:class call)) (#{"java/lang/Object" "java/lang/Enum" "java/lang/Record"} (:class call))
+                             (pure-ctor? n (:class call) (:ctor call) seen))))
+                (or (some? call) (nil? sup) (= sup "java/lang/Object"))
+                (every? #(pure-node? n % seen) (:init @(:state d)))
+                (or (nil? (:body ab)) (pure-node? n (:body ab) seen)))))))
+
+(defn- pure-node?
+  "Can node, run inside the static initializer of class n, neither be observed outside n's
+  statics and new objects nor throw (bar running out of memory)?"
+  [n node seen]
+  (case (:op node)
+    (:const :class-lit :local :this-path) true
+    :do (and (every? #(pure-node? n % seen) (:statements node)) (pure-node? n (:ret node) seen))
+    :let (and (every? (fn [[_ init]] (pure-node? n init seen)) (:bindings node)) (pure-node? n (:body node) seen))
+    :array-init (every? #(pure-node? n % seen) (:elems node))
+    :new-array (every? #(and (= :const (:op %)) (number? (:val %)) (not (neg? (long (:val %))))) (:dims node))
+    :get-static (= n (or (:declarer (:field node)) (:owner (:field node))))
+    :set-static (and (= n (or (:declarer (:field node)) (:owner (:field node)))) (pure-node? n (:val node) seen))
+    :set-field (and (= :this-path (:op (:target node))) (empty? (:path (:target node))) (pure-node? n (:val node) seen))
+    :new (and (every? #(pure-node? n % seen) (:args node))
+              (nil? (:outer node))
+              (or (= "java/lang/Object" (:class node))
+                  (and (or (= (:class node) n) (trivial-init? (:class node)))
+                       (pure-ctor? n (:class node) (:ctor node) seen))))
+    :invoke (and (= :static (:kind node))
+                 (or (and (= "java/lang/Class" (:owner node)) (= "getPrimitiveClass" (:name node)))
+                     ;; an enum's $values(): its constants in an array
+                     (and (= n (:owner node)) (= "$values" (:name node))))
+                 (every? #(pure-node? n % seen) (:args node)))
+    :convert (and (t/prim? (:from node)) (t/prim? (:to node)) (pure-node? n (:expr node) seen))
+    :arith (and (not (#{:div :rem} (:o node))) (not= :exact (:family node)) (every? #(pure-node? n % seen) (:args node)))
+    false))
+
+(defn benign-init?
+  "Is class n's initialization unobservable but through n's own static fields: trivial, or a
+  static initializer that only stores pure values (constants, arrays, n's own objects built by
+  pure constructors) into n's statics, over a superclass whose initialization is benign too?
+  Then a static method of n that reads no static field of n needs no initialization guard
+  (C2G-NOTES, phase 2D)."
+  [n]
+  (let [cache (:trivial-cache *w*)
+        k [:benign n]]
+    (if (contains? @cache k)
+      (get @cache k)
+      (let [r (cond
+                (trivial-init? n) true
+                (nil? (a/decl n)) false
+                :else (let [d (a/decl n)
+                            st @(:state d)]
+                        (and (empty? (:clj-consts st))
+                             (not (:uses-assert st))
+                             (not (:interface-assert st))
+                             (or (nil? (:super d)) (benign-init? (:super d)))
+                             (every? #(pure-node? n % #{}) (:clinit st)))))]
+        (swap! cache assoc k r)
+        r))))

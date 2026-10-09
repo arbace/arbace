@@ -623,7 +623,7 @@
               exe (str out-dir "/bin/" arch "/" f)
               _ (io/make-parents (io/file exe))
               t0 (System/nanoTime)
-              [code bo] (sh "bin/g2c" "build" "--arch" arch "--work" (str out-dir "/work-" f "-" arch) "-o" exe
+              [code bo] (sh "bin/g2c" "build" "--line-file" "--arch" arch "--work" (str out-dir "/work-" f "-" arch) "-o" exe
                             "--overlay" overlay dir)
               tb (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0)]
           (if-not (zero? code)
