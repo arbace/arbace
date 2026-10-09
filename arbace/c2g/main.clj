@@ -35,6 +35,7 @@
             [arbace.c2g.decls :as d]
             [arbace.c2g.out :as out]
             [arbace.c2g.dyn :as dyn]
+            [arbace.c2g.fromfn :as fromfn]
             [arbace.g2c.print :as gp]
             [arbace.pprint]))
 
@@ -229,6 +230,7 @@
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
                                ;; what the evaluator's Dyn (c2g_dyn.go) calls
                                (when (a/decl dyn/api-class) (dyn/roots))
+                               (when (a/decl "arbace/lang/RT") (fromfn/roots))
                                (when formatter?
                                  [["java/util/Formatter" "<init>" "()V"]
                                   ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]
@@ -241,7 +243,8 @@
             standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
             res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
                   (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
-                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins}))]
+                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins
+                                                          :fis (binding [m/*w* (assoc wst :T (:T res))] (fromfn/fis (:T res)))}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
             wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
@@ -275,6 +278,11 @@
           (when (dyn/enabled?)
             (binding [c/*pkgstate* (get pkgstates :lang)]
               (swap! files assoc [:lang "c2g_dyn.go"] (vec (dyn/forms T)))))
+          ;; FromFn of the functional interfaces (C2G-SPEC §7.11), their adapters with the lambdas'
+          (let [fis (filter #(contains? T %) (fromfn/fis T))]
+            (when (seq fis)
+              (swap! (:lambdas (get pkgstates :lang)) into fis)
+              (swap! files assoc [:lang "c2g_fromfn.go"] (vec (fromfn/forms fis)))))
           ;; adapters of the functional interfaces lambdas target (in the interface's package)
           (loop [done #{}]
             (let [todo (doall (distinct (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))))]

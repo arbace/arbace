@@ -289,7 +289,16 @@
             (use! (t/lang-class "IFn"))
             (vcall! (t/lang-class "IFn") "invoke"
                     (t/method-desc (repeat (count (:args node)) "Ljava/lang/Object;") "Ljava/lang/Object;"))))
-      :fi-adapter (note-unavailable! "Clojure's functional interface adapter (:fi-adapter) is not translated yet")
+      ;; Clojure's adapter of an IFn to a functional interface (Compiler's FISupport): the
+      ;; interface's adapter (as for a lambda) calling FnInvokers' invoker
+      :fi-adapter
+      (let [fi (t/desc->internal (:type node))
+            fni (t/lang-class "FnInvokers")]
+        (use! (t/lang-class "IFn"))
+        (when (use! fi) (lambda! fi))
+        (when (use! fni)
+          (init! fni)
+          (reach! [fni (:invoker node) (:invoker-desc node)])))
       nil)
     ;; patterns name classes too
     (when (= :if-instance (:op node))
@@ -361,8 +370,8 @@
 
 (defn run
   "Reachability from roots (method keys [class name desc]; classes to instantiate
-  :instantiate). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
-  [{:keys [roots instantiate classes slice?]}]
+  :instantiate; functional interfaces with adapters :fis). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
+  [{:keys [roots instantiate classes slice? fis]}]
   (let [st {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
             :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})
             :lambda-fis (atom #{})}]
@@ -376,6 +385,8 @@
           ;; a root constructor: its class is instantiated (by the caller of the roots)
           (when (and (= "<init>" (second k)) (*slice?* c)) (instantiate! c))))
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
+      ;; functional interfaces whose adapters exist without a lambda (FromFn, C2G-SPEC §7.11)
+      (doseq [fi fis] (when (use! fi) (lambda! fi)))
       (loop []
         (when-let [k (first @(:queue st))]
           (swap! (:queue st) subvec 1)

@@ -167,6 +167,22 @@ instance from Go (translated code's interface calls and checks) and from evaluat
     (fmt/Printf "form   %s\neval   %s\n" src (try (fn ^string [] (pr (evalStr src))))))
   (fmt/Println))
 
+(go/func fromFnDemo
+  "fromFnDemo adapts an evaluated fn to java.util.function.Function through jrt.AdaptFn, as
+Reflector's boxArg does (ClassInfo.FromFn, C2G-SPEC §7.11), and asks Function and Comparable
+whether they are functional interfaces (isAnnotationPresent)."
+  []
+  (fmt/Println "== a fn as a functional interface (FromFn)")
+  (let [f (evalStr "(fn* [x] (arbace.lang.Numbers/multiply x 2))")]
+    (fmt/Printf "AdaptFn Function    %s\n"
+                (try (fn ^string []
+                       (let [g (jrt/Function_Cast (jrt/AdaptFn jrt/Function_class f))]
+                         (fmt/Sprintf "%s, apply 21: %s" (cls g) (pr (.Apply_O__O g (jrt/Box (conv int64 21)))))))))
+    (fmt/Printf "@FunctionalInterface Function %v, String %v\n"
+                (.IsAnnotationPresent_Class__Z jrt/Function_class jrt/FunctionalInterface_class)
+                (.IsAnnotationPresent_Class__Z jrt/String_class jrt/FunctionalInterface_class)))
+  (fmt/Println))
+
 (go/func main []
   (lang/Compiler_C_Init)
   (fmt/Println "== the translated reader and analyzer, Expr.eval, and the evaluator")
@@ -194,4 +210,5 @@ instance from Go (translated code's interface calls and checks) and from evaluat
                      "((fn* [& xs] xs) 1 2 3)"
                      "(nosuch 1)")]
     (show src))
-  (dynDemo))
+  (dynDemo)
+  (fromFnDemo))
