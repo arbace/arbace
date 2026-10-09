@@ -118,8 +118,10 @@ fallbacks of `arbace/core_classes.clj` are gone.
   ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Step 2 done: the c2g spec
   ([go/C2G-SPEC.md](go/C2G-SPEC.md)), accepted with its 23 recommendations. Done alongside:
   jrt's JDK sources through j2c (`bin/jrt-convert`, 184 files shape-identical; unreached
-  methods to be stubbed by c2g) and the JVM oracle (`bin/oracle`, 15,854 cases). Next: step 3,
-  jrt.
+  methods to be stubbed by c2g) and the JVM oracle (`bin/oracle`, 15,854 cases). Step 3 done: jrt
+  hand-written (core, reflection, threads and the host). Step 4 done: c2g translates the runtime
+  and the JDK closure (8,955 of 9,002 oracle steps; 47 need `arbace.core`). Next: step 5, the
+  evaluator ([go/EVAL-PLAN.md](go/EVAL-PLAN.md)).
 
 ## Later
 

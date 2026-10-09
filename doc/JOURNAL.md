@@ -703,3 +703,25 @@ decision (2026-10-08).
   `bin/c2g-evalproof` as expected; `bin/jrt test`; `bin/gate --full` passed (7m28s).
 - Proposed amendments P2C-1..3 (jrt's own Java and JDK variants under `overlay/jdk`; the jrt
   members c2g writes; all stand-ins translated), for the user.
+
+## 2026-10-09: B1a step 4, phase 2D: quality and the whole program; step 4 done
+
+- Agent, `7f7cfe9`, merged (conflicts with 2B/2C in `arbace.c2g.code`, `main` and `world`
+  resolved: the race note goes into phase 2A's `set-field!`, both sides' requires and world
+  keys kept): line positions (forms laid out on the class forms' lines, `--line-file` builds;
+  Java stack traces and Go tracebacks show the source file and line); pattern switches as one
+  `if` chain in a labeled block (guards had made code grow exponentially) and javac's
+  `MatchException` wrapping; checks for duplicate Go names and package-private overrides (none);
+  race candidates reported and `bin/c2g-race` (only one-word hash-cache races, which Java
+  allows); `bin/c2g-perf` (8 workloads: the translated runtime is 4-53x slower than the JVM,
+  mostly allocation, boxing and interface assertions, not c2g's code; `GOGC=400` gains 20-40%;
+  class-init guards elided where initialization is benign, e.g. `Murmur3.hashLong` 9.4 -> 3.7
+  ns); `bin/c2g --program`, the whole program rooted at `arbace.lang.Main#main` (668 classes,
+  23.5 MB on amd64, 22.3 on arm64, about 7 ms to start; it stops where `arbace.core` must load,
+  step 5's work).
+- Checked by the main session after the merge: `bin/c2g-check` 8,955 of 9,002 steps on each
+  architecture, 0 fail, 47 need core; `bin/c2g-regex` 1,204 of 1,233 cases; `bin/c2g-evalproof`
+  as expected; `bin/jrt test`; `bin/gate --full` passed (7m25s).
+- Step 4 (c2g) is done: the runtime and the JDK closure translate and pass the oracle's class
+  scripts except what needs `arbace.core` loaded. Proposed amendments D1-D7 and P2C-1..3 for
+  the user.
