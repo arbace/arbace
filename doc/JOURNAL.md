@@ -866,3 +866,24 @@ decision (2026-10-08).
   `bin/c2g-check -- --program` 9,010 of 9,010, `bin/jrt test` on amd64, arm64 and `--race`.
 - Step 5 is done. Open before the `.ae` rename: the amendments (A1-A4, B1-B8; V1-V8 to fold),
   the Go checks in `bin/gate --full`, and the `polymorphism.clj:176` determinism issue.
+
+## 2026-10-09: the step 5 decisions; amendments folded
+
+- The user's decisions on step 5's open items, all as recommended: B7, the transcribed jdk26u
+  parts of the overlay's `Calendar`, `GregorianCalendar`, `TimeZone` and `TimeText`, are kept as
+  recorded in LICENSE.md (not rewritten); all amendments accepted and folded; the Go checks join
+  `bin/gate --full` (amd64; the essential gate unchanged); the ambiguous-interface message at
+  `test/oracle/forms/polymorphism.clj:176` lists the interfaces sorted by class name. The last
+  two went to an agent (branch `gate-go`).
+- Agent, `0655138`, merged: the amendments folded, renamed to avoid clashes (V1-V8 → M1-M8,
+  A1-A4 → X1-X4, B1-B8 → S1-S8; the scheme and the placements in C2G-SPEC §16) into C2G-SPEC,
+  B1-PLAN (D6 partly reversed: `proxy` back, the fork-join pool real), JAVA-SURFACE, EVAL-PLAN,
+  ORACLE, JRT-SOURCES, BUILD, classes/SPEC §6 (S8, COMPILER-NOTES amendment 15). Inaccuracies
+  fixed on the way: wrong section references in B5 and B8, stale ORACLE.md and C2G-SPEC §4.1
+  figures (340 closure files), JRT-NOTES' "Dates" amendments numbered W1-W4 (clashing with
+  C2G-SPEC's). Open in ORACLE.md: `test/oracle/harvest.clj` still leaves out the forms that name
+  `proxy`.
+- LICENSE.md completed: the agent added jrt's FdLibm port (`fdlibm.clj`, part of `math.clj`) and
+  `LocalDate.java` as a source of `TimeText`; the main session added `codec.clj`'s UTF-16 coders
+  (after `sun.nio.cs.UnicodeDecoder`/`UnicodeEncoder`) and `string.clj`'s `indent`,
+  `stripIndent`, `translateEscapes` (after `String`), recorded as ports by B7's rule, to be safe.

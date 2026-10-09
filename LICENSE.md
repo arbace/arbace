@@ -68,6 +68,13 @@ covers what.
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
+- `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.clj`, and `indent`, `stripIndent` and
+  `translateEscapes` in `go/arbace/jrt/string.clj`: jrt's hand-written Go forms following the code
+  of https://github.com/openjdk/jdk26u at `baf63fb`
+  (`src/java.base/share/classes/sun/nio/cs/UnicodeDecoder.java`, `UnicodeEncoder.java`,
+  `java/lang/String.java`): Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); recorded as ports to be
+  safe, by the rule of B7 (step 5).
 - `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`

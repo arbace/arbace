@@ -69,7 +69,7 @@
            ;; and the like): java.util.stream whole, the functional interfaces, Optional and
            ;; its primitive kin, the summary statistics, StringJoiner, Spliterator,
            ;; PrimitiveIterator, and CountedCompleter, the parallel tasks' superclass (whose
-           ;; ForkJoinTask internals are jrt's: parallel streams are left out)
+           ;; ForkJoinTask internals are jrt's; parallel streams run on jrt's pool)
            (map #(str "java/util/stream/" % ".java")
                 ["AbstractPipeline" "AbstractShortCircuitTask" "AbstractSpinedBuffer" "AbstractTask"
                  "BaseStream" "Collector" "Collectors" "DistinctOps" "DoublePipeline" "DoubleStream"
