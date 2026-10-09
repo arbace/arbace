@@ -560,11 +560,18 @@
             real (if outer? (cons (t/internal->desc (:outer (env/info cn))) ps) ps)
             ctor (try (doto (.getDeclaredConstructor c (into-array Class (map desc->class real)))
                         (.setAccessible true))
-                      (catch Exception e (fail (str "No constructor " (:desc m) " of " cn))))]
+                      (catch Exception e
+                        (if (= cn "java/lang/MatchException")
+                          nil
+                          (fail (str "No constructor " (:desc m) " of " cn)))))]
+        (if (nil? ctor)
+          ;; jrt's MatchException has no member table: Rt/matchException
+          (Compiler$CF$CallR. \L (find-method Compiler$CF$Rt "matchException" "(Ljava/lang/String;Ljava/lang/Throwable;)Ljava/lang/RuntimeException;")
+                              nil (nodes (map (fn [a ty] (coerce ctx a ty)) (:args an) ps)) (char-array [\L \L]))
         (Compiler$CF$NewR. ctor
                            (nodes (concat (when outer? [(node ctx (:outer an))])
                                           (map (fn [a ty] (coerce ctx a ty)) (:args an) ps)))
-                           (char-array (map tc real)))))))
+                           (char-array (map tc real))))))))
 
 (defn- clj-const-value
   "The value of a Clojure constant field (const__N) of class owner, or ::none."
@@ -1080,6 +1087,21 @@
               _ (params! ctx mt (:params ab))
               body (node ctx (:body ab))]
           (finish! ctx mt body))
+
+        (has? (:flags m) 0x0100)
+        (let [ctx (if static? (new-ctx n (:ret m)) (receiver-ctx n (:ret m)))
+              slots (vec (for [p (first (t/parse-method-desc (:desc m)))] (slot! ctx p)))]
+          (set! (.-pslots mt) (int-array slots))
+          (finish! ctx mt (Compiler$CF$Throw. (Compiler$CF$NewR. (.getConstructor UnsatisfiedLinkError (into-array Class [String]))
+                                                                 (nodes [(konst "Ljava/lang/String;" (str (str/replace n "/" ".") "." (:name m) (:desc m)))])
+                                                                 (char-array [\L])))))
+
+        ;; a void method without body forms is empty (as emit writes it)
+        (= "V" (:ret m))
+        (let [ctx (if static? (new-ctx n "V") (receiver-ctx n "V"))
+              slots (vec (for [p (first (t/parse-method-desc (:desc m)))] (slot! ctx p)))]
+          (set! (.-pslots mt) (int-array slots))
+          (finish! ctx mt (konst "V" nil)))
 
         :else
         (fail (str "Method " (:name m) (:desc m) " of " n " has no body"))))))

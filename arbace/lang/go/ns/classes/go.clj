@@ -86,6 +86,8 @@
   [n]
   (or (:ctors (get @world-generics n))
       (get {"java/lang/Enum" [["(Ljava/lang/String;I)V" 4]]
+            ;; a stand-in of jrt without a member table
+            "java/lang/MatchException" [["(Ljava/lang/String;Ljava/lang/Throwable;)V" 1]]
             "java/lang/Record" [["()V" 4]]
             "java/lang/Object" [["()V" 1]]}
            n)))

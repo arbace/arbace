@@ -324,9 +324,13 @@ value.\n"
   :supers [tnode] :methods [...]}}, methods only for generic classes (the others' come from
   reflection)."
   [T]
-  (let [entries (for [n (sort T)
+  (let [extendable (set (concat dyn/sub-supers ["arbace/lang/AFunction" "arbace/lang/RestFn"]))
+        entries (for [n (sort T)
                       :let [d (a/decl n)]
-                      :when (and d (not (#{:anon :local} (:nesting d))))
+                      ;; what an interpreted class can extend or implement: interfaces, the
+                      ;; superclasses with a DynSub type, a Clojure fn's superclasses
+                      :when (and d (not (#{:anon :local} (:nesting d)))
+                                 (or (m/interface? n) (extendable n)))
                       :let [g (try (#'a/class-generics n) (catch Throwable _ nil))]
                       :when g
                       :let [generic? (seq (:tparams g))

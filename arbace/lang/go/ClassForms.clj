@@ -132,6 +132,9 @@
               (.getCause e)
               e))
 
+        (method ^:public ^:static matchException ^RuntimeException [^String msg ^Throwable cause]
+          (MatchException. msg cause))
+
         (method ^:public ^:static isInstance ^boolean [^Class c ^Klass k o]
           (cond
             (nil? o) false
