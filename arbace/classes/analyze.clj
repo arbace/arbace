@@ -1856,20 +1856,34 @@
 
 (def ^:private clj-fi-excluded #{"java/util/concurrent/Callable" "java/lang/Runnable" "java/util/Comparator"})
 
+(declare find-sam)
+
 (defn clj-fi-method
   "Compiler's FISupport.maybeFIMethod: for a parameter of type desc that is a
   @FunctionalInterface other than Callable, Runnable and Comparator, its method (an abstract
   one, of at most 10 parameters, other than equals, toString and hashCode) that an IFn argument
-  is adapted to; else nil."
+  is adapted to, as {:name :ps [param desc ...] :ret desc}; else nil. A class compiled from
+  source (*from-source*: c2g's world, where the JDK's classes have class forms) is asked
+  through its declaration: its annotations and its single abstract method."
   [desc]
   (when (and (t/class-desc? desc) (not (clj-fi-excluded (t/desc->internal desc))))
-    (when-let [^Class c (env/load-class (t/desc->internal desc))]
-      (when (.isAnnotationPresent c java.lang.FunctionalInterface)
-        (first (filter (fn [^java.lang.reflect.Method m]
-                         (and (<= (.getParameterCount m) 10)
-                              (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
-                              (not (#{"equals" "toString" "hashCode"} (.getName m)))))
-                       (.getMethods c)))))))
+    (let [n (t/desc->internal desc)]
+      (if-let [^Class c (env/load-class n)]
+        (when (.isAnnotationPresent c java.lang.FunctionalInterface)
+          (when-let [^java.lang.reflect.Method m
+                     (first (filter (fn [^java.lang.reflect.Method m]
+                                      (and (<= (.getParameterCount m) 10)
+                                           (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
+                                           (not (#{"equals" "toString" "hashCode"} (.getName m)))))
+                                    (.getMethods c)))]
+            {:name (.getName m) :ps (mapv t/class->desc (.getParameterTypes m))
+             :ret (t/class->desc (.getReturnType m))}))
+        (when-let [d (and (env/from-source? n) (decl n))]
+          (when (some #(= "Ljava/lang/FunctionalInterface;" (:type %)) (force (:annotations d)))
+            (when-let [sam (try (find-sam n) (catch Exception _ nil))]
+              (let [[ps r] (t/parse-method-desc (:desc sam))]
+                (when (and (<= (count ps) 10) (not (#{"equals" "toString" "hashCode"} (:name sam))))
+                  {:name (:name sam) :ps (vec ps) :ret r})))))))))
 
 (defn- clj-arg-class
   "The class arbace.lang.Compiler knows for an argument node (Expr.getJavaClass), as a
@@ -2046,24 +2060,23 @@
       ;; FISupport.maybeEmitFIAdapter: an IFn that is not an instance of the functional interface
       ;; is adapted to it (invokedynamic on LambdaMetafactory with a FnInvokers method)
       (and (t/ref? from) (t/ref? to) (clj-fi-method to))
-      (let [^java.lang.reflect.Method sam (clj-fi-method to)
-            pc (.getParameterCount sam)
-            ip (fn [^Class c] (if (<= pc 2)
-                                (cond (#{Byte/TYPE Short/TYPE Integer/TYPE Long/TYPE} c) Long/TYPE
-                                      (#{Float/TYPE Double/TYPE} c) Double/TYPE
-                                      :else Object)
-                                Object))
-            code (fn [^Class c] (get {Long/TYPE "L" Double/TYPE "D" Integer/TYPE "I" Short/TYPE "S"
-                                      Byte/TYPE "B" Float/TYPE "F"} c "O"))
-            params (map ip (.getParameterTypes sam))
+      (let [sam (clj-fi-method to)
+            pc (count (:ps sam))
+            ip (fn [d] (if (<= pc 2)
+                         (cond (#{"B" "S" "I" "J"} d) "J"
+                               (#{"F" "D"} d) "D"
+                               :else t/object-desc)
+                         t/object-desc))
+            code (fn [d] (get {"J" "L" "D" "D" "I" "I" "S" "S" "B" "B" "F" "F"} d "O"))
+            params (map ip (:ps sam))
             iname (apply str "invoke" (concat (map code params)
-                                              [(code (if (<= pc 2) (.getReturnType sam) Object))]))
+                                              [(code (if (<= pc 2) (:ret sam) t/object-desc))]))
             fn-invokers (Class/forName (str/replace (t/lang-class "FnInvokers") "/" "."))
             ^java.lang.reflect.Method im (.getMethod fn-invokers iname
                                                      (into-array Class (cons (Class/forName (str/replace (t/lang-class "IFn") "/" "."))
-                                                                             params)))]
-        {:op :fi-adapter :expr node :type to :sam-name (.getName sam)
-         :sam-desc (t/method-desc (map t/class->desc (.getParameterTypes sam)) (t/class->desc (.getReturnType sam)))
+                                                                             (map {"J" Long/TYPE "D" Double/TYPE t/object-desc Object} params))))]
+        {:op :fi-adapter :expr node :type to :sam-name (:name sam)
+         :sam-desc (t/method-desc (:ps sam) (:ret sam))
          :invoker iname
          :invoker-desc (t/method-desc (map t/class->desc (.getParameterTypes im)) (t/class->desc (.getReturnType im)))})
       (and (t/ref? from) (cast-fn to))

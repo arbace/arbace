@@ -5,7 +5,7 @@
 
 (go/package jrt
   :path "arbace/jrt"
-  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go"
+  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "dyn.go"
           "enum.go" "executor.go" "forkjoin.go" "host.go" "locale.go" "locks.go" "math.go" "monitor.go"
           "natives.go" "numconv.go" "object.go" "reference.go" "reflect.go" "reflect_array.go"
           "reflect_tables.go" "standin_character.go" "standin_lang.go" "standin_reflect.go"
@@ -23,6 +23,7 @@
 (load "jrt/classloader")
 (load "jrt/codec")
 (load "jrt/date")
+(load "jrt/dyn")
 (load "jrt/enum")
 (load "jrt/executor")
 (load "jrt/forkjoin")

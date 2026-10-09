@@ -14,8 +14,9 @@
                        (repeatable) are translated; everything else is outside the closed
                        world and the operations needing it throw (phase 1's slices)
     --root SPEC        a reachability root: CLASS (all its public members), CLASS#name (its
-                       members named name), CLASS#<init> (its constructors); internal names
-                       with / or binary names with . (repeatable)
+                       members named name), CLASS#<init> (its constructors), CLASS$* (the
+                       class and its named nested classes, all their public members);
+                       internal names with / or binary names with . (repeatable)
     --tests            also copy jrt's test files into the program
     --main DIR         a main package's forms tree to add to the program (its go/... files)"
   (:require [arbace.string :as str]
@@ -33,6 +34,8 @@
             [arbace.c2g.code :as c]
             [arbace.c2g.decls :as d]
             [arbace.c2g.out :as out]
+            [arbace.c2g.dyn :as dyn]
+            [arbace.c2g.fromfn :as fromfn]
             [arbace.g2c.print :as gp]
             [arbace.pprint]))
 
@@ -72,8 +75,14 @@
     (into {} (for [[jn v] (:classes scan)] [(internal jn) v]))))
 
 (defn- root-keys
-  "Method keys of a root spec."
+  "Method keys of a root spec. CLASS$* is the class and every named class nested in it (the
+  whole of Compiler, say)."
   [spec]
+  (if (str/ends-with? spec "$*")
+    (let [n (internal (subs spec 0 (- (count spec) 2)))]
+      (mapcat root-keys (cons n (filter #(and (str/starts-with? % (str n "$"))
+                                              (not (re-find #"\$\d" %)))
+                                        @(:order a/*unit*)))))
   (let [[cls mname] (str/split spec #"#" 2)
         n (internal cls)
         dd (a/decl n)]
@@ -83,7 +92,7 @@
             :when (if mname (= mname (:name mm))
                       (m/has? (:flags mm) 1))]
         [n (:name mm) (:desc mm)])
-      [[n "<clinit>" "()V"]])))
+      [[n "<clinit>" "()V"]]))))
 
 (defn standin-roots
   "Roots for the translated classes that replace jrt's stand-ins: their static initializer
@@ -215,9 +224,13 @@
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
         cs (:compile-set world)]
     (w/with-world world
-      (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})}
+      (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
+                 :erased (:erased world)}
             t1 (now)
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
+                               ;; what the evaluator's Dyn (c2g_dyn.go) calls
+                               (when (a/decl dyn/api-class) (dyn/roots))
+                               (when (a/decl "arbace/lang/RT") (fromfn/roots))
                                (when formatter?
                                  [["java/util/Formatter" "<init>" "()V"]
                                   ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]
@@ -230,7 +243,8 @@
             standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
             res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
                   (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
-                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins}))]
+                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins
+                                                          :fis (binding [m/*w* (assoc wst :T (:T res))] (fromfn/fis (:T res)))}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
             wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
@@ -260,6 +274,15 @@
                     (swap! errors conj [n (.getMessage ex)])
                     (println "c2g: error in" n ":" (.getMessage ex))
                     (when (System/getenv "C2G_TRACE") (.printStackTrace ex)))))))
+          ;; the type of the objects of classes made at run time (C2G-SPEC §5.12)
+          (when (dyn/enabled?)
+            (binding [c/*pkgstate* (get pkgstates :lang)]
+              (swap! files assoc [:lang "c2g_dyn.go"] (vec (dyn/forms T)))))
+          ;; FromFn of the functional interfaces (C2G-SPEC §7.11), their adapters with the lambdas'
+          (let [fis (filter #(contains? T %) (fromfn/fis T))]
+            (when (seq fis)
+              (swap! (:lambdas (get pkgstates :lang)) into fis)
+              (swap! files assoc [:lang "c2g_fromfn.go"] (vec (fromfn/forms fis)))))
           ;; adapters of the functional interfaces lambdas target (in the interface's package)
           (loop [done #{}]
             (let [todo (doall (distinct (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))))]

@@ -193,7 +193,7 @@
 (def ^:private simple-ops
   #{:const :local :this-path :outer-param-path :class-lit :get-static :get-field :invoke :new
     :arith :compare :convert :cast :instance? :not :nil? :identical? :bool= :aget :alength
-    :java-str :null-checked :var-deref :var-invoke :new-array :array-init :lambda :method-ref
+    :java-str :null-checked :var-deref :var-invoke :new-array :array-init :lambda :method-ref :fi-adapter
     :none ::go})
 
 (defn expressible?
@@ -358,8 +358,11 @@
 ;; UnsupportedOperationException when reached (JRT-SOURCES.md, "Decided")
 
 (defn missing-expr [why d]
-  (list (list 'inst (jsym "C2g_Missing") (if (or (= d "V") (nil? d) (keyword? d)) 'bool (gotype d)))
-        (str why)))
+  (if (m/erased-desc? d)
+    ;; a value of an erased type (c2g/erase): nothing uses it but what the Go build cuts
+    (list 'conv (gotype d) nil)
+    (list (list 'inst (jsym "C2g_Missing") (if (or (= d "V") (nil? d) (keyword? d)) 'bool (gotype d)))
+          (str why))))
 
 (defn- class-missing [n]
   (when-not (m/in-world? n) (str "class " (str/replace n "/" ".") " is not in the closed world")))
@@ -414,7 +417,7 @@
       (:new-array :array-init) (desc-missing (:type node))
       :lambda (class-missing (:fi node))
       :method-ref (or (class-missing (:fi node)) (class-missing (:owner node)) (mdesc-missing (:desc node)))
-      :fi-adapter "Clojure's functional interface adapter"
+      :fi-adapter (class-missing (t/desc->internal (:type node)))
       :const (when (= :bigint (:type node)) "a BigInt constant")
       nil)))
 
@@ -535,7 +538,7 @@
 ;; expressions
 
 (declare invoke-val new-val arith-val convert-val cast-val instance-val java-str-val
-         lambda-val method-ref-val array-val const-or-missing)
+         lambda-val method-ref-val array-val const-or-missing fi-adapter-val)
 
 (defn hoist
   "Translates a node that is not one Go expression into a fresh temporary (assign context)."
@@ -555,7 +558,9 @@
   (let [node (acc/unaccess node)]
     (if-let [why (missing-reason node)]
       (let [d (vt node) d (if (keyword? d) "Ljava/lang/Object;" d)]
-        (v (missing-expr why d) d :missing why))
+        (if (m/erased-desc? d)
+          (v (missing-expr why d) d)
+          (v (missing-expr why d) d :missing why)))
       (cond
         (= ::go (:op node)) (v (:x node) (:t node) :nn (:nn node))
         (not (expressible? node)) (hoist node)
@@ -625,6 +630,7 @@
                              (:t x) :nn true))
           (:new-array :array-init) (array-val node)
           :lambda (lambda-val node)
+          :fi-adapter (fi-adapter-val node)
           :method-ref (method-ref-val node)
           :var-deref (let [f (:field node)]
                        (v (list '.Deref__O (static-place f)) "Ljava/lang/Object;"))
@@ -1012,7 +1018,11 @@
         (and (#{:set-field :set-static} (:op node))
              (not (m/desc-in-world? (:desc f)))
              (let [vn (acc/unaccess (:val node))] (and (= :const (:op vn)) (nil? (:val vn))))
-             (or (= :set-static (:op node)) (= :this-path (:op (acc/unaccess (:target node)))))))))
+             (or (= :set-static (:op node)) (= :this-path (:op (acc/unaccess (:target node))))))
+        ;; a store into a field of an erased type (c2g/erase, proposed amendment B2): the field
+        ;; does not exist in Go, and the value, being of an erased type, has no effects to keep
+        (and (#{:set-static :set-field} (:op node))
+             (m/erased-desc? (:desc f))))))
 
 (defn- set-field! [node]
   (let [f (:field node)
@@ -1046,12 +1056,15 @@
                      (emit! (list 'set! (binding-sym b) x)))
         :get-static (do (when (guarded-static? node) (emit! (class-init-call (or (:declarer (:field node)) (:owner (:field node))))))
                         nil)
-        :aset (let [[a i val] (operands [(:array node) (:index node) (:val node)]
+        :aset (if (m/erased-desc? (vt (:array node)))
+                ;; a store into an array of an erased type: the array is nil (c2g/erase)
+                nil
+                (let [[a i val] (operands [(:array node) (:index node) (:val node)]
                                         [nil "I" (let [et (t/elem-type (vt (:array node)))] (if (t/prim? et) et "Ljava/lang/Object;"))])
                     et (t/elem-type (:t a))]
                 (emit! (if (t/prim? et)
                          (list 'aset (list '.-A (:x a)) (:x i) (:x val))
-                         (list '.Store (:x a) (:x i) (:x val)))))
+                         (list '.Store (:x a) (:x i) (:x val))))))
         (:invoke :new :var-invoke) (let [x (expr-op node)] (emit! (:x x)))
         :throw (let [x (expr-as (:expr node) "Ljava/lang/Throwable;")]
                  (emit! (list 'panic (list (jsym "Thrown") x))))
@@ -1700,6 +1713,32 @@
                                         (not= "V" r) (vary-meta assoc :tag (gotype r))))
                             body)))))]
     (v (list 'addr (list 'lit (adapter-sym fi) :Fn fnf)) (str "L" fi ";") :nn true)))
+
+(defn fi-adapter-val
+  "Clojure's adapter of an argument to a functional interface parameter (Compiler's
+  FISupport.maybeEmitFIAdapter; :fi-adapter): an IFn that is not already an instance of the
+  interface becomes its adapter F_Fn (§7.11) calling FnInvokers' invoker, as the JVM's
+  LambdaMetafactory site does; anything else is cast."
+  [node]
+  (let [fi (t/desc->internal (:type node))
+        {:keys [ps r]} (sam-sig fi)
+        [ips ir] (t/parse-method-desc (:invoker-desc node))
+        fni (t/lang-class "FnInvokers")
+        x (expr-as (:expr node) "Ljava/lang/Object;")
+        psyms (vec (for [i (range (count ps))] (symbol (str "p" i))))
+        call (apply list (csym fni (str "_" (nm/method-base (:invoker node) (:invoker-desc node))))
+                    'f (map (fn [p sp ip] (convert-ref-or-prim p sp ip)) psyms ps (rest ips)))
+        fnf (list* 'fn (cond-> (vec (map (fn [s d] (tag s (gotype d))) psyms ps))
+                         (not= "V" r) (vary-meta assoc :tag (gotype r)))
+                   [(if (= "V" r) call (list 'return (convert-ref-or-prim call ir r)))])
+        ty (gotype (:type node))]
+    (v (list (list 'fn (with-meta [(tag 'x 'any)] {:tag ty})
+                   (list 'let [(list 'values 'f 'isfn) (list 'assert (csym (t/lang-class "IFn")) 'x)]
+                         (list 'when (list 'and 'isfn (list 'not (list (csym fi "_InstanceOf") 'x)))
+                               (list 'return (list 'addr (list 'lit (adapter-sym fi) :Fn fnf)))))
+                   (list (csym fi "_Cast") 'x))
+             x)
+       (:type node))))
 
 (defn method-ref-val [node]
   (let [fi (:fi node)
