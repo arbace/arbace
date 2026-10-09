@@ -1595,3 +1595,140 @@ with the Classpath Exception): `java/util/Calendar.java` (`selectFields`, the st
   of jdk26u's code under the GPL version 2 with the Classpath Exception (LICENSE.md now says so
   and holds the text); the alternative, the user's call, is to rewrite those parts from the
   documented behaviour alone, as the overlay's other files are.
+
+## The rest of part B: the JDK surface the REPL and Clojure's suite reach
+
+The other causes of EVAL-NOTES.md's "Failure causes" that are jrt's, and the blockers of
+Clojure's test suite on the Go build (EVAL-NOTES.md, "Phase 2C") that are jrt's surface. Per
+item, what was done; the oracle and suite results are in EVAL-NOTES.md, "Phase 2B".
+
+### The closure, grown again (`test/g2c/jrt_sources.clj`, `added-sources`)
+
+`bin/jrt-convert` now translates 340 files (was 223), all converted and compiled to javac's
+shapes but four of known kinds (below):
+
+| files | for |
+|---|---|
+| `java/util/SequencedCollection`, `SequencedSet`, `SequencedMap`, `ReverseOrderDequeView`, `ReverseOrderSortedSetView`, `ReverseOrderSortedMapView`, `jdk/internal/util/NullableKeyValueHolder` | JDK 21's sequenced collections: the closure's `List`, `Deque`, `SortedSet`, `LinkedHashSet` and `LinkedHashMap` implement them; `LinkedHashMap`'s views are `SequencedSet`s (`(seq (LinkedHashMap.))` threw) |
+| `java/lang/constant/Constable`, `ConstantDesc` | `supers`/`bases`/`ancestors` of `Long`, `String` (the wrappers and `String` implement them; their methods name `MethodHandles.Lookup`, outside the world: `resolveConstantDesc` does not exist in Go) |
+| `java/util/stream/*` (39 files), `java/util/function/*` (43), `Optional`, `OptionalInt`, `OptionalLong`, `OptionalDouble`, the three `*SummaryStatistics`, `StringJoiner`, `Spliterator`, `PrimitiveIterator`, `EnumSet`, `RegularEnumSet`, `JumboEnumSet`, `EnumMap`, `java/util/Tripwire`, `java/util/random/RandomGenerator`, `java/util/concurrent/CountedCompleter`, `ConcurrentMap` | streams: `String.lines`, `chars`, `codePoints`, `Collectors`, core's `stream-reduce!` and the like, `.stream`/`.parallelStream` of Clojure's collections; the functional interfaces (`IntSupplier`: the `atoms` tests); `EnumSet`/`EnumMap` (`Collectors`' characteristics, `StreamOpFlag`); `RandomGenerator` (`Collections.shuffle`) |
+| `java/net/URI`, `URISyntaxException` | `uri?` (the `predicates` tests) |
+| `java/util/concurrent/CyclicBarrier`, `BrokenBarrierException` | the `delays` tests (over jrt's `ReentrantLock`) |
+
+Decision (streams): **translated whole** rather than left cut (D6's default) or rewritten:
+java.util.stream is plain Java (28,700 lines), and with it come the REPL's interop over
+streams and four of the suite's namespaces. The cost: the executable grows from 38 to 58 MB
+(streams and the functional interfaces are most of it; the rest of the step is small), `bin/c2g
+--program` from about 45 to 55 s, the Go build by about a minute. Parallel streams run on jrt's
+fork-join pool (below). Left out by variants: `Stream.gather`'s evaluation (`GathererOp.evaluate`:
+local classes nested in local classes over captured variables, which c2g does not translate
+yet) and `Gatherers.mapConcurrent` (a local subclass of jrt's hand-written, leaf `FutureTask`);
+both throw `UnsupportedOperationException`.
+
+**Go-build variants** (`overlay/jdk/variants/`, new): `Random` (its static initializer took the
+offset of its private field `seed` through `getDeclaredField`, which jrt's tables of public
+members cannot answer, then `Unsafe.objectFieldOffset(Field)`; the variant asks
+`objectFieldOffset(Class, String)`: this blocked `clojure.data.generators`, so six of the
+suite's namespaces); `URI` (its static initializer's `SharedSecrets.setJavaNetUriAccess`, cut);
+`ReferencePipeline.toList` and `Collectors.toUnmodifiableList` (`SharedSecrets`'
+`JavaUtilCollectionAccess`, which `ImmutableCollections` would register: an unmodifiable list
+over the array, `List.copyOf`); `GathererOp`, `Gatherers` (above); `UUID.nameUUIDFromBytes`
+(MD5 from the host: Go's `crypto/md5`, a native `UUID.md5`).
+
+**`bin/jrt-convert`**: `J2C_PATCH_ALL` (j2c's `jdk` conversion, `arbace/j2c/main.clj`): each
+chunk of packages sees the other chunks' sources on its patch path, its own first. jrt's own
+Java in `jdk.internal.jrt` is used across packages (`java.io`), and with more files the chunks
+split them apart (javac: "package jdk.internal.jrt does not exist"). Opt-in, so
+`bin/j2c-check --jdk` is unchanged. And `known-differences`: files whose shapes differ from
+javac's in known ways count as converted (the exit status): a lambda constructing a local
+class passes the class's captured variables in capture order, javac in reverse
+(`Collectors`, `Gatherers`, `MatchOps`: the synthetic lambda method's parameter order), and an
+`InnerClasses` entry javac's stack map frames name (`Nodes`; CONVERTER-NOTES.md's kind).
+
+### jrt (hand-written)
+
+- **Charsets** (`charset.clj`, `codec.clj`): `UTF-16`, `UTF-16BE`, `UTF-16LE` (classes
+  `sun.nio.cs.UTF_16`, `UTF_16BE`, `UTF_16LE`, extending `Unicode`; JDK 26's names and aliases),
+  `StandardCharsets.UTF_16*`; coding as jdk26u's `sun.nio.cs.UnicodeDecoder`/`UnicodeEncoder`
+  with `String`'s REPLACE (a byte-order mark read by `UTF-16` at the start, big-endian
+  without one; written by `UTF-16`'s encoder before a non-empty string; an unpaired surrogate
+  as U+FFFD, both ways; the bytes left at the end one U+FFFD). Tested against the JVM
+  (`charsets.txt`: the encode and decode cases of the three new charsets, 15 more byte
+  sequences). The overlay's `InputStreamReader` and `OutputStreamWriter` still code UTF-8,
+  ISO-8859-1 and US-ASCII only and now refuse the others (`UnsupportedOperationException`)
+  instead of decoding them as UTF-8. (V9: jrt has six charsets.)
+- **`ForkJoinTask`, `ForkJoinPool`** (`forkjoin.clj`, rewritten; both now in the manifest, so
+  in the REPL's tables): a pool of parallelism P runs a task given from outside (`invoke`,
+  `execute`, `submit`) in a worker thread of its own, and a task forked in a worker in a new
+  worker thread (a jrt thread: a goroutine with its `Thread`, which knows its pool:
+  `inForkJoinPool`, `getPool`) while fewer than P − 1 forked tasks run, else in the forking
+  thread at once. A task runs once: whoever claims it first (`fork`'s worker, `join`,
+  `invoke`) runs it, the others wait on a channel closed at completion; a task whose `exec`
+  returns false (a `CountedCompleter`) is done when completed explicitly (`quietlyComplete`,
+  `trySetThrown`). `adapt` (Callable, Runnable, Runnable and result; the adapters' class names
+  are the JDK's), `invokeAll(t1, t2)`, `cancel`, `complete`, `completeExceptionally`, `get`'s
+  `ExecutionException`; `commonPool` (processors − 1). Not the JDK's work-stealing: no
+  `ForkJoinWorkerThread`, no `managedBlock`, `getException` gives the exception itself (the
+  JDK may rewrap it for the joining thread). Reducers' `fold` and parallel streams run
+  in parallel (`TestForkJoin`: a fold-shaped sum in a pool of 4 used 2 to 4 workers at once, never
+  more; `bin/jrt test --race` clean).
+- **`String`**: `indent`, `stripIndent`, `translateEscapes` (jdk26u's algorithms over lines
+  split as `lines()` splits them; tested against the JVM on 17 multi-line strings),
+  `contentEquals(StringBuffer)`, `String(byte[], int)`, and the interfaces `Constable`,
+  `ConstantDesc` (stand-ins, markers only, in jrt's own build). c2g writes the members that
+  name translated classes (`out.clj`, `support-forms`, as for `format`): `join(CharSequence,
+  Iterable)`, `formatted`, `lines` (over an `ArrayList`'s stream: sequential, not jdk26u's lazy
+  spliterator), `describeConstable`, and, for every hand-written leaf class implementing a
+  translated interface, forwarders to the default methods it does not define (`chars`,
+  `codePoints` of `CharSequence` on `String`, `StringBuilder`, `StringBuffer`).
+- **`StringBuilder`, `StringBuffer`**: `insert(int, double|float)`, `insert(int, CharSequence,
+  int, int)`, `insert(int, char[], int, int)` (with the JDK's checks); both now have all of
+  their JDK 26 public members.
+- **`Thread`**: `MIN_PRIORITY`, `NORM_PRIORITY`, `MAX_PRIORITY`, `dumpStack`,
+  `startVirtualThread`. Left: `getState` (`Thread.State` is outside the world),
+  `getThreadGroup`, `enumerate`, `activeCount`, `getAllStackTraces`, `sleep`/`join` of a
+  `Duration`, `ofPlatform`.
+- **Atomics**: the other memory orders (`getOpaque`, `setOpaque`, `getPlain`, `setPlain`,
+  `setRelease`, `weakCompareAndSet*`, `compareAndExchange*`; Go's atomics are sequentially
+  consistent, so all are the same operations). `AtomicInteger` and `AtomicLong` now embed
+  `Number` (amendment T12: `(pos? (AtomicInteger. 1))` casts to `Number`). Left: the
+  functional ones (`updateAndGet`, `accumulateAndGet` ...).
+- **`Class`**: `asSubclass`, `componentType`, `arrayType`, `descriptorString`,
+  `forPrimitiveName`, `getNestHost`, `newInstance` (the deprecated one), `isAnonymousClass`,
+  `isLocalClass`, `isHidden`, `isSealed` (false), `getEnclosingMethod`,
+  `getEnclosingConstructor` (null).
+- **c2g-written table entries** (`support-table-forms`): `Throwable.printStackTrace(PrintStream)`
+  and `(PrintWriter)` (the trace's text printed), `System.getenv()` (the host's environment,
+  unmodifiable).
+- `JavaLangAccess.getEnumConstantsShared` and `join` (`access.clj`; `EnumSet`, `StringJoiner`),
+  `Unsafe.weakCompareAndSetInt`.
+- `ClassLoader.getResourceAsStream` (c2g's entry) finds a resource in the directories of
+  `ARBACE_PATH` after the embedded ones (`host.clj`, `ResourceOrPath`), as `RT.load` does:
+  `repl/source-fn` of a namespace loaded from there.
+
+**Coverage of the hand-written classes' public members** (the JDK's, by reflection, against the
+manifest; `.tmp/missing.clj`-style count): `Math`, `StrictMath` 109 of 109, `StringBuilder` 42
+of 42, `StringBuffer` 57 of 57; `String` 84 of 104 in the manifest, and of the other 20 the
+REPL's tables have 14 through c2g's entries (`format`, `formatted`, `join(..., Iterable)`,
+`lines`, `describeConstable`, the regex methods, `CASE_INSENSITIVE_ORDER`) or the interface's
+(`chars`, `codePoints`); missing: `compareToFoldCase`, `equalsFoldCase`,
+`splitWithDelimiters`, `transform`, `resolveConstantDesc`, `UNICODE_CASEFOLD_ORDER`. `Thread`
+40 of 56 (left: above); `Class` 56 of 81 (left: annotations, modules, packages, nest members,
+record components, type parameters, signers, `getResource*`, `toGenericString`).
+
+### c2g and the class forms compiler (found on the way)
+
+- **Bridges with a source supertype** (`arbace/classes/analyze.clj`, `erased-params`): a
+  supertype method's class type variables are substituted by the subclass's view, so they are
+  bounded as the subclass bounds them. With `Map` from source (c2g's world), `Map.put(K, V)`'s
+  own scope bounded `K` by `Object` over `EnumMap`'s `K extends Enum<K>`, and `EnumMap` got no
+  bridge `put(Object, Object)`: `Map.put` on an `EnumMap` ran `AbstractMap.put` (it throws).
+  The class forms check compiles against the JDK's classes by reflection, which carry no such
+  scope, so the bug did not show there. `bin/gate` passes (the stages are unchanged).
+- **A bridge narrowing a generic return** casts (`decls.clj`, `derived-body`):
+  `Spliterators$EmptySpliterator$OfDouble.trySplit()` returns the `Spliterator` of its
+  superclass's erased `T_SPLITR` as a `Spliterator.OfDouble`.
+- `java.util.stream.Tripwire` is `Stream_Tripwire` in Go (the rename table; `java.util.Tripwire`
+  has the plain name).
+- `C2g_CastArray` throws `ClassCastException` with HotSpot's message (`jrt.ClassCast`), not
+  `Class.cast`'s (`(longs (int-array [1]))`).
