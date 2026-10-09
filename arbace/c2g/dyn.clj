@@ -17,7 +17,8 @@
             [arbace.classes.emit :as e]
             [arbace.c2g.model :as m]
             [arbace.c2g.code :as c]
-            [arbace.c2g.names :as nm])
+            [arbace.c2g.names :as nm]
+            [arbace.c2g.jrt :as jrt])
   (:import (arbace.asm Opcodes)))
 
 (def api-class "arbace/lang/Compiler$Dyn")
@@ -168,13 +169,15 @@
   answering SUPER, C's implementation. A class must be translated, non-final and not a leaf
   (its values are C_I, §5.3)."
   ["java/io/Writer" "java/io/Reader" "java/io/PushbackReader" "java/io/InputStream"
-   "java/io/OutputStream" "arbace/lang/APersistentMap"])
+   "java/io/OutputStream" "arbace/lang/APersistentMap"
+   ;; jrt's hand-written ThreadLocal (test.check's random, arbace.instant on the JVM)
+   "java/lang/ThreadLocal"])
 
 (defn proxy-classes
   "The classes of proxy-supers a proxy may extend in this world (translated)."
   [T]
-  (filter #(and (contains? T %) (not (m/interface? %)) (not (m/final? %)) (not (m/hand-written? %))
-                (not (m/leaf? %)))
+  (filter #(and (or (contains? T %) (m/hand-written? %)) (m/in-world? %)
+                (not (m/interface? %)) (not (m/final? %)) (not (m/leaf? %)))
           proxy-supers))
 
 (defn- sub-name [n] (str "DynSub_" (m/go-name n)))
@@ -184,7 +187,7 @@
   DynSub_C calls C's constructor bodies and implementations)."
   []
   (for [n proxy-supers
-        :when (a/decl n)
+        :when (and (a/decl n) (not (m/hand-written? n)))
         c (m/superclass-chain n)
         :when (and c (not= c "java/lang/Object") (a/decl c))
         mm (:methods (a/decl c))
@@ -233,9 +236,11 @@
       (list 'go/func (symbol (str "dynCtors_" g)) (with-meta [(tag 'dc '(* DynClass))] {:tag '(slice jrt/CtorInfo)})
             (list 'return
                   (apply list 'lit '(slice jrt/CtorInfo)
-                         (for [mm (:methods (a/decl n))
+                         (for [mm (if (m/hand-written? n) (m/methods-of n) (:methods (a/decl n)))
                                :when (and (= "<init>" (:name mm)) (not (m/private? mm)) (m/mdesc-in-world? (:desc mm)))
-                               :let [real (e/ctor-real-desc n mm)
+                               :when (or (not (m/hand-written? n))
+                                         (contains? (jrt/struct-methods (:jrt m/*w*) (m/go-name n)) (nm/ctor-base (:desc mm))))
+                               :let [real (if (m/hand-written? n) (:desc mm) (e/ctor-real-desc n mm))
                                      [ps _] (t/parse-method-desc (:desc mm))
                                      [rps _] (t/parse-method-desc real)]
                                :when (= (count ps) (count rps))]
@@ -244,7 +249,7 @@
                                  :Modifiers 'jrt/AccPublic
                                  :New (list* 'fn (with-meta [(tag 'args '(slice any))] {:tag 'any})
                                             (concat
-                                              (when-not (m/trivial-init? n) [(list (m/class-sym :lang n "_Init"))])
+                                              (when-not (or (m/hand-written? n) (m/trivial-init? n)) [(list (m/class-sym :lang n "_Init"))])
                                               [(list 'let ['t (list 'addr (list 'lit (symbol g) :D 'dc :F '(make (slice any) 1)))]
                                                      (apply list (symbol (str "." (nm/ctor-base real)))
                                                             (list (symbol (str ".-" (m/go-name n))) 't) 't
@@ -268,6 +273,8 @@
              (list 'struct (m/class-sym :lang n) (tag 'D '(* DynClass)) (tag 'F '(slice any))))
        (list 'go/var (tag slots '(map string int32))
              (apply list 'lit '(map string int32) (map-indexed (fn [i [nme desc]] [(str nme desc) i]) ks)))
+       (list 'go/var (tag (symbol (str "dynOwn_" g)) '(map string string))
+             (apply list 'lit '(map string string) (for [[nme desc] (sort (keys own))] [(str nme desc) nme])))
        (list 'go/method 'DynImplements (with-meta [(tag 't recv) (tag 'c '(* jrt/Class))] {:tag 'bool})
              '(aget (.-Ifaces (.-D t)) c))
        (list 'go/method 'DynClassOf (with-meta [(tag 't recv)] {:tag '(* DynClass)}) '(.-D t))
@@ -307,7 +314,7 @@ superinterfaces), and its methods by name and descriptor (all of them, for refle
 interfaces made at run time).\n"
           (struct ^{:tag (* jrt/Class)} Cls ^{:tag (slice IFn)} Slots
                   ^{:tag (map (* jrt/Class) bool)} Ifaces ^{:tag (map string IFn)} ByKey
-                  ^{:tag (map string int32)} SlotMap ^bool Proxy))
+                  ^{:tag (map string int32)} SlotMap ^bool Proxy ^{:tag (map string string)} Own))
        '(go/type dynObject
           "dynObject is an object of a class made at run time: a Dyn, or a DynSub_C (a proxy of class C).\n"
           (interface (DynClassOf ^{:tag (* DynClass)} []) (DynFields ^{:tag (* (slice any))} [])
@@ -549,17 +556,27 @@ arguments, boxed.\n"
               (panic (jrt/Thrown (jrt/IllegalArgumentException_New_String (jrt/Str "not an object of a class made at run time")))))
             d))
        ;; proxies (EVAL-NOTES.md, phase 2A)
+       (list 'go/func (symbol (native-name "fillProxySlots" "(Ljava/lang/Class;Larbace/lang/IFn;)V"))
+             "the methods of a proxy's superclass that reflection does not list (protected ones of jrt's
+classes) and that have no fn yet: the fn factory makes of their name.\n"
+             [(tag 'c '(* jrt/Class)) (tag 'factory 'IFn)]
+             '(let [dc (dynClassOf c)]
+                (range [k i (.-SlotMap dc)]
+                  (let [(values nme ok) (aget (.-Own dc) k)]
+                    (when (and ok (== (aget (.-Slots dc) i) nil))
+                      (aset (.-Slots dc) i (IFn_Cast (.Invoke_O__O factory (jrt/Str nme)))))))))
        (list 'go/func (symbol (native-name "superMarker" "()Ljava/lang/Object;"))
              (with-meta [] {:tag 'any})
              'dynSuper)
        (list 'go/func 'dynSubFor
              "dynSubFor: the slot table and constructors of the proxies of class c (nil: c has no DynSub type).\n"
-             [(tag 'c '(* jrt/Class))] :results '[(map string int32) (func [(* DynClass)] [(slice jrt/CtorInfo)])]
+             [(tag 'c '(* jrt/Class))] :results '[(map string int32) (func [(* DynClass)] [(slice jrt/CtorInfo)]) (map string string)]
              (apply list 'switch 'c
                     (for [p (proxy-classes T)]
                       (list 'case [(m/class-sym :lang p "_class")]
-                            (list 'return (symbol (str "dynSlots_" (sub-name p))) (symbol (str "dynCtors_" (sub-name p)))))))
-             '(return nil nil))
+                            (list 'return (symbol (str "dynSlots_" (sub-name p))) (symbol (str "dynCtors_" (sub-name p)))
+                                  (symbol (str "dynOwn_" (sub-name p)))))))
+             '(return nil nil nil))
        (list 'go/func (symbol (native-name "defineProxyClass" "(Ljava/lang/String;Ljava/lang/Class;[Ljava/lang/Class;)Ljava/lang/Class;"))
              (with-meta [(tag 'name '(* jrt/String)) (tag 'super '(* jrt/Class)) (tag 'interfaces '(* jrt/RefArray))]
                {:tag '(* jrt/Class)})
@@ -575,14 +592,14 @@ arguments, boxed.\n"
                                                          :New (fn ^any [^{:tag (slice any)} args]
                                                                 (addr (lit Dyn :D dc :F (make (slice any) 1)))))))
                          '(return c)))
-             '(let [(values slots ctors) (dynSubFor super)]
+             '(let [(values slots ctors own) (dynSubFor super)]
                 (when (== slots nil)
                   (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
                                        (jrt/Str (+ "proxy of " (.-Name (.Info super)) " is not in the Go build"))))))
                 (let [info (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name)) :Modifiers jrt/AccPublic
                                       :Kind jrt/KindClass :Super super :Interfaces (dynClassList interfaces)
                                       :Go "arbace/lang.DynSub (proxy)"))
-                      dc (addr (lit DynClass :Slots (make (slice IFn) (len slots)) :SlotMap slots :Proxy true
+                      dc (addr (lit DynClass :Slots (make (slice IFn) (len slots)) :SlotMap slots :Proxy true :Own own
                                     :Ifaces (make (map (* jrt/Class) bool)) :ByKey (make (map string IFn))))]
                   (range [_ i (.-Interfaces info)] (dynAddInterface dc i))
                   (let [s super]

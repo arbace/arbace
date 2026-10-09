@@ -147,6 +147,9 @@
       (let [f (proxy-method-fn (.getName m) false)]
         (vswap! fns assoc m f)
         (set-proxy-method c m f)))
+    ;; the superclass's methods reflection does not list (protected ones of jrt's classes)
+    (when-not (= super Object)
+      (Compiler$Dyn/fillProxySlots c (fn [n] (proxy-method-fn n true))))
     ;; a bridge answers as the method it bridges to
     (doseq [[^java.lang.reflect.Method dest bridges] mb
             ^java.lang.reflect.Method meth bridges]

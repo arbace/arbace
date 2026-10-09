@@ -199,7 +199,11 @@
       (method ^:public ^:static ^:native defineProxyClass ^Class [^String name ^Class super
                                                                   ^Class/1 interfaces])
 
-      (method ^:public ^:static ^:native superMarker [])))
+      (method ^:public ^:static ^:native superMarker [])
+
+      ;; a proxy's superclass methods that reflection does not list (the protected ones of
+      ;; jrt's classes: ThreadLocal.initialValue) and that have no fn: (factory name) is theirs
+      (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory])))
 
   (c2g/add
     (defclass ^:public ^:static Evaluator
