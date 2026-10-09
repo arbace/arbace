@@ -224,10 +224,10 @@ taken.
 
 ## The closure as grown (B1a step 4 phase 2C, step 5 phase 2B)
 
-The 184 files above are the measured closure. `bin/jrt-convert` now translates **340 files**
-(`sources.txt` lines as `MODULE KIND REL`): 317 of `src/java.base/share/classes` (KIND
-`share`), 8 generated (`gensrc`), 2 of another module (`share:java.sql`) and 13 of jrt's own
-Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
+The 184 files above are the measured closure. `bin/jrt-convert` now translates **375 files**
+(`sources.txt` lines as `MODULE KIND REL`): 340 of `src/java.base/share/classes` (KIND
+`share`), 19 generated (`gensrc`), 2 of another module (`share:java.sql`) and 14 of jrt's own
+Java (`overlay`); it was 340 files (317, 8, 2, 13) before the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.clj`):
 
 - `added-sources`: java.base files added, each with its reason there: phase 2C's 31 (the
   stand-ins jrt had without sources, the standard streams' `PrintStream` and interfaces,
@@ -243,6 +243,52 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   `share:MODULE`.
 - **jrt's own Java**, `overlay/jdk/MODULE/...` (KIND `overlay`, `overlay-sources`), replacing or
   adding to jdk26u's files (C2G-SPEC §4.1, K1).
+- **Generated files added** (`added-gensrc`, paths below `gensrc/java.base`; JRT-NOTES.md, "The
+  JDK's resource data", amendment Z4): java.nio's `ByteBuffer`, `CharBuffer`, `IntBuffer`, their
+  heap classes `HeapByteBuffer`, `HeapCharBuffer`, `HeapIntBuffer`, the views
+  `ByteBufferAsCharBufferB`/`L` and `ByteBufferAsIntBufferB`/`L`, and
+  `jdk.internal.misc.ScopedMemoryAccess`: KIND `gensrc`, made by the `generate` step below.
+
+## The JDK's resource data (2026-10-09)
+
+For the regex's `\N{name}` and `CANON_EQ` (JRT-NOTES.md, "The JDK's resource data"), from
+jdk26u at `baf63fb`:
+
+- **Sources added** (`added-sources`, 23 files): `java.text.Normalizer` and
+  `CharacterIterator`; `jdk.internal.icu`'s `NormalizerBase`, `UTF16`, `UCharacterIterator`,
+  `Replaceable`, `ReplaceableString`, `UCharacterProperty`, `CharacterIteratorWrapper`,
+  `ReplaceableUCharacterIterator`, `Trie2`, `Trie2_16`, `OutputInt` (the measured closure already
+  had `ICUBinary`, `Norm2AllModes`, `NormalizerImpl`, `Normalizer2`, `CodePointTrie`,
+  `CodePointMap`, `VersionInfo`, `UCharacter` and `sun.text.Normalizer`, through `Pattern`);
+  `java.nio`'s `Buffer`, `ByteOrder`, `StringCharBuffer` and its four exceptions;
+  `java.lang.foreign.MemorySegment` and `jdk.internal.foreign.MemorySessionImpl` (the types the
+  buffers' constructors and `ScopedMemoryAccess`'s accessors name; their code is not reached);
+  `java.util.zip.ZipException`. jrt's own `java.util.zip.InflaterInputStream` (overlay).
+- **Generated sources** (`generate`): the 10 buffer files as
+  `make/modules/java.base/gensrc/GensrcBuffer.gmk` makes them, with `build.tools.spp.Spp`
+  (`make/jdk/src/classes/build/tools/spp/`) on `src/java.base/share/classes/java/nio/`'s
+  templates `X-Buffer.java.template` (with `X-Buffer-bin.java.template`'s six snippets for
+  `ByteBuffer`, which replace the lines from `#BIN` on), `Heap-X-Buffer.java.template` and
+  `ByteBufferAs-X-Buffer.java.template`, the keys and replacements of
+  `make/common/modules/GensrcStreamPreProcessing.gmk`'s `Conv` (transcribed in bash; among them
+  the make file's `BYTES_PER_VALUE="(1 << )"` for the classes, whose log2 variable is empty
+  there); `ScopedMemoryAccess` as `GensrcScopedMemoryAccess.gmk` makes it (the template, then
+  `X-ScopedMemoryAccess-bin.java.template`'s snippets for `boolean byte short char int long
+  float double`, `-nel`, with that file's keys). **All 19 generated files are byte-identical to
+  the JDK build's** `support/gensrc` (`generated.edn`), with the same generator JDK as before.
+- **Data** (`generate`, into `$JRT_WORK/data`, which `bin/c2g --program` embeds):
+  `java/lang/uniName.dat` (177,389 bytes) made as `make/modules/java.base/Gendata.gmk` makes it,
+  `build.tools.generatecharacter.CharacterName` on
+  `src/java.base/share/data/unicodedata/UnicodeData.txt`; ICU's
+  `jdk/internal/icu/impl/data/icudata/nfc.nrm` (36,336) and `nfkc.nrm` (56,128) copied from
+  `src/java.base/share/classes` as the build copies resources. **All three are byte-identical to
+  the JDK build's module image** (`build/linux-x86_64-server-release/jdk/modules/java.base`;
+  `generated.edn`'s `:data`), the zlib stream of `uniName.dat` included (the tool's
+  `DeflaterOutputStream` on the generator JDK). `--twice` compares the data of both runs too.
+  Not embedded: `uprops.icu` and `ubidi.icu` (`UCharacterProperty`'s and `UBiDiProps`'s data,
+  which the normalizer does not load).
+- **Result**: 375 files convert and compile to javac's shapes (371 identical, the 4 known
+  differences), 1,249 classes; deterministic (`--twice`).
 
 Two options of the conversion (amendment S2):
 
