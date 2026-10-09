@@ -215,7 +215,8 @@
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
         cs (:compile-set world)]
     (w/with-world world
-      (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})}
+      (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
+                 :erased (:erased world)}
             t1 (now)
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
                                (when formatter?

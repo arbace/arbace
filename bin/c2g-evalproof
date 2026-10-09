@@ -1,0 +1,48 @@
+#!/bin/bash
+# The evaluator boundary's proof (doc/go/EVAL-PLAN.md, "The proof"; C2G-NOTES.md, phase 2B):
+# c2g translates Compiler (with its Go-build variant, arbace/lang/go/Compiler.clj), the reader
+# and RT, adds the Go program test/c2g/eval (forms read by the translated LispReader,
+# analyzed by the translated Compiler, their Expr trees shown from Go, evaluated by Expr.eval
+# and by Compiler.eval through the evaluator), builds it for each architecture of
+# $C2G_ARCH (default amd64,arm64; arm64 runs under qemu-aarch64) and compares its output with
+# test/c2g/eval/expected.txt.
+#
+# Usage: bin/c2g-evalproof [--record]
+#   --record  write the amd64 output to test/c2g/eval/expected.txt instead of comparing
+# Environment: C2G_ARCH, C2G_OUT (default .tmp/c2g/evalproof), C2G_JVM_OPTS (bin/c2g's).
+# Exit status 0 when every architecture's program builds and prints the expected output.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+record=
+case ${1:-} in
+  "") ;;
+  --record) record=1 ;;
+  *) echo "usage: bin/c2g-evalproof [--record]" >&2; exit 2 ;;
+esac
+out=${C2G_OUT:-$root/.tmp/c2g/evalproof}
+arches=${C2G_ARCH:-amd64,arm64}
+expected=test/c2g/eval/expected.txt
+bin/c2g --root arbace.lang.Compiler --root 'arbace.lang.Compiler$Evaluator' \
+  --root arbace.lang.LispReader --root arbace.lang.RT --root arbace.lang.Numbers \
+  --main test/c2g/eval --out "$out" 2>&1 | grep -v '^WARNING' || exit 1
+overlay=$(bin/jrt overlay) || exit 1
+status=0
+for arch in ${arches//,/ }; do
+  exe=$out/bin/$arch/evalproof
+  mkdir -p "$(dirname "$exe")"
+  if ! bin/g2c build --arch "$arch" --work "$out/work-$arch" -o "$exe" --overlay "$overlay" \
+         "$out/prog" > "$out/build-$arch.log" 2>&1; then
+    tail -30 "$out/build-$arch.log"; echo "c2g-evalproof: $arch: build failed"; status=1; continue
+  fi
+  if [ "$arch" = arm64 ]; then run=(/usr/bin/qemu-aarch64 "$exe"); else run=("$exe"); fi
+  "${run[@]}" > "$out/output-$arch.txt" 2>&1
+  if [ -n "$record" ] && [ "$arch" = amd64 ]; then
+    cp "$out/output-$arch.txt" "$expected"; echo "c2g-evalproof: recorded $expected"
+  elif diff -u "$expected" "$out/output-$arch.txt" > "$out/diff-$arch.txt"; then
+    echo "c2g-evalproof: $arch: as expected ($(grep -c '^form' "$expected") forms; $(stat -c %s "$exe") bytes)"
+  else
+    head -40 "$out/diff-$arch.txt"; echo "c2g-evalproof: $arch: differs from $expected"; status=1
+  fi
+done
+exit $status

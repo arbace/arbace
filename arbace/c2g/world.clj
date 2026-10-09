@@ -99,8 +99,12 @@
 
 (defn apply-variant
   "Class form cf with the variant's members applied: replaced, cut, added. Returns [cf'
-  counts]."
-  [cf vforms]
+  counts]. With variants-of (a function of a nested class's simple name, giving its variant
+  members or nil) and applied (an atom of {name counts}), the variants of nested classes
+  (c2g/variant Outer$Inner ...) are applied to the nested class forms too, recursively, and
+  recorded in applied under their names (proposed amendment B1)."
+  ([cf vforms] (apply-variant cf vforms nil nil nil))
+  ([cf vforms prefix variants-of applied]
   (let [[head members] (class-parts cf)
         ;; static initializers are told apart by their position in the class form
         members (let [n (atom -1)]
@@ -123,21 +127,39 @@
                         (when-not i (throw (ex-info (str "c2g: variant replaces no member: " (pr-str k)) {})))
                         (swap! counts update :replaced inc)
                         (assoc ms i vf))))
-                  members vforms)]
-    [(with-meta (apply list (concat head members)) (meta cf)) @counts]))
+                  members vforms)
+        ;; nested classes with variants of their own
+        members (if variants-of
+                  (mapv (fn [m]
+                          (if (= "defclass" (head-name m))
+                            (let [nn (str prefix "$" (name (second m)))
+                                  vfs (variants-of nn)
+                                  [m2 c] (apply-variant m (or vfs []) nn variants-of applied)]
+                              (when vfs (swap! applied assoc nn c))
+                              m2)
+                            m))
+                        members)
+                  members)]
+    [(with-meta (apply list (concat head members)) (meta cf)) @counts])))
 
 (defn read-variants
-  "{internal-name [member-form ...]} of the variant files."
+  "{internal-name [member-form ...]} of the variant files; a nested class's variant is named
+  by its binary name, (c2g/variant Compiler$ObjExpr ...). The prefixes of the packages a
+  variant file erases, (c2g/erase \"arbace/asm/\"), are under the key ::erase (proposed
+  amendment B2)."
   [files]
   (reduce (fn [acc f]
             (let [forms (read-forms f)
                   nsname (ns-of-forms forms)]
               (reduce (fn [acc fm]
-                        (if (and (seq? fm) (= "variant" (head-name fm)))
+                        (cond
+                          (and (seq? fm) (= "variant" (head-name fm)))
                           (let [[_ cls & members] fm
                                 n (str (str/replace (munge (name nsname)) "." "/") "/" (name cls))]
                             (update acc n (fnil into []) members))
-                          acc))
+                          (and (seq? fm) (= "erase" (head-name fm)))
+                          (update acc ::erase (fnil into #{}) (map str (rest fm)))
+                          :else acc))
                       acc forms)))
           {} files))
 
@@ -152,6 +174,8 @@
   msg]...] :variants {class counts}}. Run translation inside (with-world w ...)."
   [inputs & {:keys [variant-files]}]
   (let [variants (read-variants variant-files)
+        erased (get variants ::erase #{})
+        variants (dissoc variants ::erase)
         applied (atom {})
         files (vec (mapcat source-files inputs))
         parsed (vec (for [f files :let [forms (read-forms f)]]
@@ -174,11 +198,9 @@
             (doseq [cf (class-forms forms)]
               (try
                 (let [n (first (top-names ns [cf]))
-                      cf (if-let [vfs (get variants n)]
-                           (let [[cf2 counts] (apply-variant cf vfs)]
-                             (swap! applied assoc n counts)
-                             cf2)
-                           cf)
+                      vfs (get variants n)
+                      [cf counts] (apply-variant cf (or vfs []) n #(get variants %) applied)
+                      _ (when vfs (swap! applied assoc n counts))
                       pc (p/parse-class {:ns nsobj :nesting :top} (rest cf))]
                   (when-not (a/decl (a/top-name nsobj pc))
                     (a/declare-class! {:nesting :top} pc)))
@@ -203,7 +225,7 @@
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
     {:compile-set cs :unit unit :from-source from-source :files files :tops tops
-     :failed @failed :variants @applied}))
+     :failed @failed :variants @applied :erased erased}))
 
 (defmacro with-world
   "Runs body with the world's class environment bound (analyzer and env functions see it)."

@@ -76,6 +76,18 @@
   (let [[ps r] (t/parse-method-desc desc)]
     (mapcat desc-classes (cons r ps))))
 
+(defn erased-desc?
+  "Is d a class outside the world in a package a variant erases (c2g/erase), or an array of
+  one? Values of such types exist only to feed what the Go build cuts (the bytecode back end):
+  an operation producing one is the zero value (proposed amendment B2)."
+  [d]
+  (and (string? d)
+       (let [e (loop [d d] (if (t/array? d) (recur (t/elem-type d)) d))]
+         (and (t/class-desc? e)
+              (let [n (t/desc->internal e)]
+                (and (not (in-world? n))
+                     (some #(str/starts-with? n %) (:erased *w*))))))))
+
 (defn desc-in-world? [d] (every? in-world? (desc-classes d)))
 (defn mdesc-in-world? [desc] (every? in-world? (method-desc-classes desc)))
 

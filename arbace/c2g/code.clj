@@ -358,8 +358,11 @@
 ;; UnsupportedOperationException when reached (JRT-SOURCES.md, "Decided")
 
 (defn missing-expr [why d]
-  (list (list 'inst (jsym "C2g_Missing") (if (or (= d "V") (nil? d) (keyword? d)) 'bool (gotype d)))
-        (str why)))
+  (if (m/erased-desc? d)
+    ;; a value of an erased type (c2g/erase): nothing uses it but what the Go build cuts
+    (list 'conv (gotype d) nil)
+    (list (list 'inst (jsym "C2g_Missing") (if (or (= d "V") (nil? d) (keyword? d)) 'bool (gotype d)))
+          (str why))))
 
 (defn- class-missing [n]
   (when-not (m/in-world? n) (str "class " (str/replace n "/" ".") " is not in the closed world")))
@@ -555,7 +558,9 @@
   (let [node (acc/unaccess node)]
     (if-let [why (missing-reason node)]
       (let [d (vt node) d (if (keyword? d) "Ljava/lang/Object;" d)]
-        (v (missing-expr why d) d :missing why))
+        (if (m/erased-desc? d)
+          (v (missing-expr why d) d)
+          (v (missing-expr why d) d :missing why)))
       (cond
         (= ::go (:op node)) (v (:x node) (:t node) :nn (:nn node))
         (not (expressible? node)) (hoist node)
@@ -1003,9 +1008,13 @@
   type is outside it: serialization's serialPersistentFields): nothing can read the field,
   so the store goes."
   [node]
-  (and (:clinit *f*) (= :set-static (:op node))
-       (let [f (:field node) o (or (:declarer f) (:owner f))]
-         (and (= o (:class *f*)) (not (m/desc-in-world? (:desc f)))))))
+  (or (and (:clinit *f*) (= :set-static (:op node))
+           (let [f (:field node) o (or (:declarer f) (:owner f))]
+             (and (= o (:class *f*)) (not (m/desc-in-world? (:desc f))))))
+      ;; a store into a field of an erased type (c2g/erase, proposed amendment B2): the field
+      ;; does not exist in Go, and the value, being of an erased type, has no effects to keep
+      (and (#{:set-static :set-field} (:op node))
+           (m/erased-desc? (:desc (:field node))))))
 
 (defn stmt!
   "Translates node in statement context."
@@ -1030,18 +1039,21 @@
         :set-local (let [b (:b node)
                          x (expr-as (:val node) (:type b))]
                      (emit! (list 'set! (binding-sym b) x)))
-        :set-field (let [f (:field node)
+        :set-field (if (dropped-store? node) nil (let [f (:field node)
                          [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
                          place (field-place tv f)]
-                     (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv)))))
+                     (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv))))))
         :get-static (do (when (guarded-static? node) (emit! (class-init-call (or (:declarer (:field node)) (:owner (:field node))))))
                         nil)
-        :aset (let [[a i val] (operands [(:array node) (:index node) (:val node)]
+        :aset (if (m/erased-desc? (vt (:array node)))
+                ;; a store into an array of an erased type: the array is nil (c2g/erase)
+                nil
+                (let [[a i val] (operands [(:array node) (:index node) (:val node)]
                                         [nil "I" (let [et (t/elem-type (vt (:array node)))] (if (t/prim? et) et "Ljava/lang/Object;"))])
                     et (t/elem-type (:t a))]
                 (emit! (if (t/prim? et)
                          (list 'aset (list '.-A (:x a)) (:x i) (:x val))
-                         (list '.Store (:x a) (:x i) (:x val)))))
+                         (list '.Store (:x a) (:x i) (:x val))))))
         (:invoke :new :var-invoke) (let [x (expr-op node)] (emit! (:x x)))
         :throw (let [x (expr-as (:expr node) "Ljava/lang/Throwable;")]
                  (emit! (list 'panic (list (jsym "Thrown") x))))

@@ -51,3 +51,15 @@
                       "Sequentially read and evaluate the set of forms contained in the file."
                       arglistskw
                       (RT/list (RT/vector namesym)))))))))
+
+;; B1a step 5 (doc/go/EVAL-PLAN.md): there are no class loaders in the Go build (C2G-SPEC §10.3);
+;; Compiler.eval and Compiler.load bind *loader* to this, as on the JVM, and nothing reads it
+(c2g/variant RT
+  (method ^:public ^:static makeClassLoader ^ClassLoader [] nil)
+
+  (method ^:public ^:static baseLoader ^ClassLoader [] nil)
+
+  ;; classes by name: jrt's registry, the closed world and the classes the evaluator defines
+  ;; (C2G-SPEC §10.3); no DynamicClassLoader holds classes in memory
+  (method ^:public ^:static classForName ^Class [^String name ^boolean load ^ClassLoader loader]
+    (Class/forName name load loader)))
