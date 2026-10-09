@@ -793,6 +793,12 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   (Correction, 2026-10-08, to follow jrt: the hash comes from one global atomic sequence
   mixed by a 32-bit finalizer, 31 bits and never 0, not from a per-thread xorshift sequence
   as HotSpot's; V3 permits it, the values differing from the JVM's anyway.)
+  **A class's identity hash** (amendment U2, accepted 2026-10-09) is its name's
+  `String.hashCode`, 31 bits and never 0, set when the `Class` is made (`jrt.presetClassHash`:
+  `Define`, `DefineDynamic`, the primitive and array classes), so that classes hash alike in
+  every run of the program: the image of prepared namespaces (§10.3) keeps the layout of its
+  hashed collections keyed by classes, and orders over such collections are the same in every
+  run.
 - `wait`, `notify`, `notifyAll` are jrt functions on the header (§8.1); `finalize` is not used
   (V8).
 - **`new Object()`** (lock objects, sentinels) is `(jrt/Object_New)`, of Go type `any`: a
@@ -2034,6 +2040,26 @@ embedded sources, then in the directories of the environment variable `ARBACE_PA
 path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
 the same places. RT's initialization loads `arbace.core` when the program has its sources.
 
+**Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
+image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
+image holds replays it instead of reading and analyzing it (`Compiler$Image`, in the `Compiler`
+variant): for each *unit* (a top-level form, or each form of a top-level `do`, as
+`Compiler.eval` splits them) it decodes the `Expr` tree the analysis made, makes again the
+*events* of that analysis (deftype's stub and class, `gen-interface`'s interfaces and methods,
+`proxy`'s class, the boot `ns` macro's `*ns*`), and evaluates the tree as `Compiler.eval` does.
+Evaluation is unchanged; only the analysis is skipped, as for the JVM's AOT-compiled namespaces.
+The image is recorded by the program itself, run once with `ARBACE_PREPARE=FILE` requiring every
+embedded namespace (`bin/arbace-go --build`): `Compiler.load` hands each top-level form of an
+embedded source to `Compiler$Image.evalUnit`, which records the unit between its analysis and
+its evaluation, with the events gathered while the analysis runs (`genclass.clj` and
+`core_proxy.clj` report theirs, the `RT` variant's boot `ns` macro its own). Objects are encoded
+by Go's reflection over the program's struct types, by name (`Var`, `Keyword`, `Namespace`,
+`Class`, members), by value (strings, boxes, arrays, patterns) or as the canonical empty
+collections and `Compiler`'s constant nodes; the graph keeps its sharing and the objects their
+identity hashes; fields only the bytecode back end reads (`ObjExpr.src`, the clearing paths) are
+not encoded. A load from source (`ARBACE_PATH`, `load-file`, a program without an image,
+`ARBACE_NO_IMAGE`) is as before.
+
 **Namespace variants** (amendment M1, accepted 2026-10-09). The Go build's differences in the
 namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds the sources:
 `P.clj` replaces `arbace/P.clj`, `P.after.clj` is appended to it, and `P.subst.clj`, a vector of
@@ -2116,6 +2142,16 @@ JVM prints it, with class forms lines (§7.9.6), and the status is 1. Measured: 
 namespaces' sources (§10.3, amendment M5) and registers the classes they name outside the world
 (§4.1, M3), and the program loads `arbace.core` and runs `arbace.main` (`bin/arbace-go`;
 EVAL-NOTES.md).
+
+**The main package's files** (amendment U3, accepted 2026-10-09). Besides `main.go` and the
+embedded sources (`res/`), `--program` writes `image.go` (the image's encoding, hand-written Go
+forms `go/arbace/cmd/arbace/image.clj`, copied), `image_types.go` (generated: every exported,
+non-generic struct type of `arbace/lang` and `arbace/jrt`, registered by name for decoding) and an
+empty `image.bin`, embedded as a string (`//go:embed image.bin`), which `bin/arbace-go --build`
+replaces with the prepared image before linking the executables again. `main` installs the image
+(`setupImage`) before `Main.main` and writes it after, when preparing (`finishImage`); jrt reaches
+it through `jrt.ImageHooks` (`jrt.Image`), which `Compiler$Image`'s natives call. A variant of
+`Main` tells the image when `arbace.main` is loaded (`Compiler$Image.started`).
 
 **The REPL's world** (EVAL-PLAN Q2, decided 2026-10-09; amendment P2): what the REPL can name
 is the closed world, and it reaches members by reflection, which reachability does not follow
@@ -2391,7 +2427,11 @@ inlining across interface calls. The work planned, in jrt:
 - **arrays of references as one allocation** (the slots in the array's own object), or with
   8-byte slots (§13.2's thin pointers).
 
-Neither changes what c2g writes; step 7 decides them with its own measurements.
+Neither changes what c2g writes; step 7 decides them with its own measurements. **The start's
+collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the program starts, until
+`Main.main` has loaded `arbace.main`, the main package runs the collector at `GOGC=400` unless
+`GOGC` is set (0.32 s against 0.41 s to `-e nil` on amd64), then sets it back; the running
+program's setting stays step 7's.
 
 ### 13.5 Floating point
 
@@ -3335,6 +3375,14 @@ Y1 c2g names a jrt-provided class by jrt's registered Go name: §4.4. Y2 `Dyn` i
 hand-written interfaces with a cast function, with the nominal check: §5.12. Y3 `Semaphore`
 hand-written in jrt: §8.4, JAVA-SURFACE.md decision 4. Y4 the harvest keeps `java_interop`'s
 proxy assertions: ORACLE.md. Y2 narrows E4's "hand-written jrt interfaces are not covered".
+
+**Step 6** (EXEC-NOTES.md, the executable; accepted by the user 2026-10-09): U1 the image of
+prepared namespaces, replayed by `RT.load`: §10.3. U2 a class's identity hash is its name's:
+§5.8. U3 the main package's files and `jrt.ImageHooks`: §10.6. U4 the start's collector:
+§13.4's step 7 plan (D7). U5 the executable's smoke test in the essential `bin/gate`, on an
+executable cached by a hash of its inputs: B1-PLAN.md, "Checks". U1 refines M5's `RT.load`
+(an embedded source is replayed when the image holds it); U2 refines §5.8's identity hash for
+`Class` objects.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

@@ -191,6 +191,9 @@ run-time side the bytecode had.
   --program` embeds the namespaces' sources with the Go build's namespace variants applied
   (`arbace/lang/go/ns/`); `RT.load` reads them, then the directories of `ARBACE_PATH`; the
   classes the namespaces name outside the world are cut classes whose members throw.
+- **Since step 6** (amendment U1, accepted 2026-10-09; C2G-SPEC §10.3, EXEC-NOTES.md): the
+  embedded namespaces are analyzed at build time; `RT.load` replays them from the program's
+  image (the `Expr` trees and the events of their analysis), skipping reading and analysis.
 
 ### 2.8 Recursion depth and errors
 
