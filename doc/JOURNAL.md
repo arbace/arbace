@@ -747,3 +747,27 @@ decision (2026-10-08).
   agent's work on loading) and before the `arbace-for-golang` freeze. Constraint: the frozen seed
   only knows `.clj`, so `bin/build-arbace` gives it a `.clj` view of the sources for stage 1
   rather than moving the seed.
+
+## 2026-10-09: B1a step 5, phase 1: Arbace runs as a Go executable
+
+- Agent, branch `eval-core` (`43a59ff` .. `4b368a9`), merged: the evaluator in the Go build's
+  `Compiler` variant (each node kind evaluates itself, `evalIn(Frame)`, rather than one central
+  `Evaluator.eval`: one interface call per node; frames as slot arrays; one `EvalFn` over
+  `RestFn` per fn with a run-time class of the JVM's name, binding variadic arguments lazily;
+  boxed primitive fns, a depth counter at 10,000 frames, Clojure frames in stack traces, per
+  EVAL-PLAN's decisions; where `Expr.eval` differs from compiled code, the evaluator follows the
+  compiled code: no `CompilerException` wrapping, typed conversions, JVM checkcast messages);
+  deftype/reify/defrecord/definterface over `Dyn`. `bin/c2g --program` embeds 41 namespace
+  sources (825 KB, `//go:embed`; then `ARBACE_PATH`) and translates the whole REPL world (1,376
+  classes); namespace variants in `arbace/lang/go/ns/` (proxy expanding to a throw per D6,
+  `arbace.instant` over `Date`, the trimmed REPL start). `bin/arbace-go` runs, builds and
+  smoke-tests the executable like `bin/arbace`. Notes: `doc/go/EVAL-NOTES.md`; amendments
+  V1-V8 proposed.
+- Checked by the main session: `bin/arbace-go --build` gives static executables of 37.4 MB
+  (amd64) and 35.5 MB (arm64); `-e` and the smoke test pass on both (arm64 under qemu); a
+  launch takes about 4.2 s, core's load through the interpreter about 1.9 s of it (step 7's
+  work). The oracle's forms corpus on the amd64 executable: 9,364 of 9,652 (97.0%); the agent
+  reports all 9,002 class-script steps passing with core loaded on both architectures. The 288
+  failures: `arbace.math` (jrt's `Math` lacks the trigonometric functions) 145, the JVM's
+  helpful NPE messages (an accepted deviation) 52, `Calendar`/`Timestamp`/`Instant` 37, `proxy`
+  (cut by D6; pprint's `cl-format` needs it) 30, the rest small. `bin/gate` passed.
