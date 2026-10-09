@@ -66,7 +66,9 @@
   "The rename table (§4.4, Collisions): classes whose Go name would collide with another of the
   closed world's or with jrt's own names."
   {;; jrt's byte[] is ByteArray (§5.9)
-   "jdk/internal/util/ByteArray" "Jdk_ByteArray"})
+   "jdk/internal/util/ByteArray" "Jdk_ByteArray"
+   ;; jrt's java.util.Date is Date (JRT-NOTES.md, phase 2B "Dates")
+   "java/sql/Date" "Sql_Date"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

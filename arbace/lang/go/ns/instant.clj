@@ -8,17 +8,19 @@
 
 
 ;; The Go build's arbace/instant.clj (doc/go/EVAL-NOTES.md, "Namespace variants";
-;; JAVA-SURFACE.md decision 7): java.util.Date only, over its milliseconds, in UTC, with the
-;; calendar arithmetic written out as GregorianCalendar counts (H. Hinnant's civil-from-days
-;; and days-from-civil for the Gregorian calendar, the Julian before 1582-10-15), where
-;; arbace/instant.clj formats with SimpleDateFormat in a proxy'd ThreadLocal and constructs
-;; with GregorianCalendar, which the Go build has not. java.util.Calendar and
-;; java.sql.Timestamp instants are not available (read-instant-calendar and
-;; read-instant-timestamp throw). The parsing and validation (up to "print integration") are
-;; arbace/instant.clj's, unchanged (as of af29cc6).
+;; JAVA-SURFACE.md decision 7; JRT-NOTES.md, phase 2B "Dates"): java.util.Date read and printed
+;; over its milliseconds, in UTC, with the calendar arithmetic written out as GregorianCalendar
+;; counts (H. Hinnant's civil-from-days and days-from-civil for the Gregorian calendar, the
+;; Julian before 1582-10-15), where arbace/instant.clj formats with SimpleDateFormat in a
+;; proxy'd ThreadLocal, which the Go build has not. Calendar instants are arbace/instant.clj's
+;; (jrt's own GregorianCalendar and TimeZone, String.format's %t over them); Timestamp instants
+;; too (java.sql.Timestamp translated from jdk26u), printed with the Date arithmetic plus the
+;; nanoseconds. The parsing and validation (up to "print integration") are arbace/instant.clj's,
+;; unchanged (as of af29cc6).
 
 (ns arbace.instant
-  (:import [java.util Date]))
+  (:import [java.util Calendar Date GregorianCalendar TimeZone]
+           [java.sql Timestamp]))
 
 (set! *warn-on-reflection* true)
 
@@ -234,6 +236,50 @@ with invalid arguments."
   [^java.util.Date d, ^java.io.Writer w]
   (print-date d w))
 
+(defn- print-calendar
+  "Print a java.util.Calendar as RFC3339 timestamp, preserving timezone."
+  [^java.util.Calendar c, ^java.io.Writer w]
+  (let [calstr (format "%1$tFT%1$tT.%1$tL%1$tz" c)
+        offset-minutes (- (.length calstr) 2)]
+    ;; calstr is almost right, but is missing the colon in the offset
+    (.write w "#inst \"")
+    (.write w calstr 0 offset-minutes)
+    (.write w ":")
+    (.write w calstr offset-minutes 2)
+    (.write w "\"")))
+
+(defmethod print-method java.util.Calendar
+  [^java.util.Calendar c, ^java.io.Writer w]
+  (print-calendar c w))
+
+(defmethod print-dup java.util.Calendar
+  [^java.util.Calendar c, ^java.io.Writer w]
+  (print-calendar c w))
+
+(defn- print-timestamp
+  "Print a java.sql.Timestamp as RFC3339 timestamp, always in UTC."
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (let [ms (.getTime ts)
+        days (Math/floorDiv ms 86400000)
+        msd (Math/floorMod ms 86400000)
+        [y m dd] (days->civil days)]
+    (.write w "#inst \"")
+    (.write w (format "%04d-%02d-%02dT%02d:%02d:%02d"
+                      (if (<= y 0) (- 1 y) y) m dd (quot msd 3600000) (rem (quot msd 60000) 60)
+                      (rem (quot msd 1000) 60)))
+    ;; add on nanos and offset
+    ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
+    (.write w (format ".%09d-00:00" (.getNanos ts)))
+    (.write w "\"")))
+
+(defmethod print-method java.sql.Timestamp
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (print-timestamp ts w))
+
+(defmethod print-dup java.sql.Timestamp
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (print-timestamp ts w))
+
 ;;; ------------------------------------------------------------------------
 ;;; reader integration
 
@@ -254,12 +300,42 @@ to convert into UTC."
   [^CharSequence cs]
   (parse-timestamp (validated construct-date) cs))
 
+(defn- construct-calendar
+  "Construct a java.util.Calendar, preserving the timezone
+offset, but truncating the subsecond fraction to milliseconds."
+  ^GregorianCalendar
+  [years months days hours minutes seconds nanoseconds
+   offset-sign offset-hours offset-minutes]
+  (doto (GregorianCalendar. years (dec months) days hours minutes seconds)
+    (.set Calendar/MILLISECOND (quot nanoseconds 1000000))
+    (.setTimeZone (TimeZone/getTimeZone
+                   (format "GMT%s%02d:%02d"
+                           (if (neg? offset-sign) "-" "+")
+                           offset-hours offset-minutes)))))
+
+(defn- construct-timestamp
+  "Construct a java.sql.Timestamp, which has nanosecond precision."
+  [years months days hours minutes seconds nanoseconds
+   offset-sign offset-hours offset-minutes]
+  (doto (Timestamp.
+         (.getTimeInMillis
+          (construct-calendar years months days
+                              hours minutes seconds 0
+                              offset-sign offset-hours offset-minutes)))
+    ;; nanos must be set separately, pass 0 above for the base calendar
+    (.setNanos nanoseconds)))
+
 (defn read-instant-calendar
-  "Not in the Go build (java.util.Calendar)."
+  "To read an instant as a java.util.Calendar, bind *data-readers* to a map with
+this var as the value for the 'inst key.  Calendar preserves the timezone
+offset."
   [^CharSequence cs]
-  (throw (UnsupportedOperationException. "read-instant-calendar is not available in the Go build")))
+  (parse-timestamp (validated construct-calendar) cs))
 
 (defn read-instant-timestamp
-  "Not in the Go build (java.sql.Timestamp)."
+  "To read an instant as a java.sql.Timestamp, bind *data-readers* to a
+map with this var as the value for the 'inst key. Timestamp preserves
+fractional seconds with nanosecond precision. The timezone offset will
+be used to convert into UTC."
   [^CharSequence cs]
-  (throw (UnsupportedOperationException. "read-instant-timestamp is not available in the Go build")))
+  (parse-timestamp (validated construct-timestamp) cs))

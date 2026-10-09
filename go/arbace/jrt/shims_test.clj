@@ -211,4 +211,29 @@ milliseconds added.\n"
               (!= (.GetTime__J (assert (* Date) (.Clone__O a))) 5))
       (.Error t "equals, compareTo, before, clone")))
   (when (< (.GetTime__J (Date_New)) 1700000000000)
-    (.Error t "new Date() is now")))
+    (.Error t "new Date() is now"))
+  ;; a subclass, as c2g writes java.sql.Timestamp: Date's implementations call getTime()
+  ;; virtually (equals, hashCode, compareTo, before, after) and clone copies the whole object
+  (let [s (addr (lit testSubDate :extra 7))
+        d (Date_New_J 1007)]
+    (.Ctor_J (.-Date s) s 1000)
+    (when (or (!= (.GetTime__J s) 1007) (not (.Equals_O__Z s d)) (not (.Equals_O__Z d s))
+              (!= (.HashCode__I s) (.HashCode__I d)) (!= (.CompareTo_O__I d s) 0)
+              (.Before_Date__Z s d) (.After_Date__Z d s) (not (Date_InstanceOf s)))
+      (.Error t "a Date subclass: getTime is virtual"))
+    (let [c (assert (* testSubDate) (.Clone__O s))]
+      (when (or (== c s) (!= (.-extra c) 7) (!= (.GetTime__J c) 1007))
+        (.Error t "a Date subclass: clone")))))
+
+(go/type testSubDate "testSubDate is a Date subclass overriding getTime (the shape of c2g's Timestamp).\n"
+  (struct Date ^int64 extra))
+(go/method GetTime__J ^int64 [^{:tag (* testSubDate)} t] (+ (.Impl_GetTime__J (.-Date t) t) (.-extra t)))
+(go/method Equals_O__Z ^bool [^{:tag (* testSubDate)} t ^any o] (.Impl_Equals_O__Z (.-Date t) t o))
+(go/method HashCode__I ^int32 [^{:tag (* testSubDate)} t] (.Impl_HashCode__I (.-Date t) t))
+(go/method CompareTo_Date__I ^int32 [^{:tag (* testSubDate)} t ^Date_I o] (.Impl_CompareTo_Date__I (.-Date t) t o))
+(go/method CompareTo_O__I ^int32 [^{:tag (* testSubDate)} t ^any o] (.Impl_CompareTo_O__I (.-Date t) t o))
+(go/method Before_Date__Z ^bool [^{:tag (* testSubDate)} t ^Date_I o] (.Impl_Before_Date__Z (.-Date t) t o))
+(go/method After_Date__Z ^bool [^{:tag (* testSubDate)} t ^Date_I o] (.Impl_After_Date__Z (.-Date t) t o))
+(go/method Clone__O ^any [^{:tag (* testSubDate)} t] (.Impl_Clone__O (.-Date t) t))
+(go/method CloneShallow ^any [^{:tag (* testSubDate)} t] (let [c (arbace.core/deref t)] (.ClearHeader (addr c)) (addr c)))
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* testSubDate)} t] Date_class)

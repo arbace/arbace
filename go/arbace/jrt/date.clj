@@ -4,13 +4,40 @@
 ;; The calendar is Java's: Julian before the Gregorian cutover of 1582-10-15, Gregorian from it
 ;; (GregorianCalendar's default, which Date and the #inst printer's SimpleDateFormat share);
 ;; Date.UTC normalizes as jdk26u's Date.normalize does (the year 1582 as GregorianCalendar).
+;; Date is non-leaf since phase 2B ("Dates"): c2g translates java.sql.Timestamp, which extends
+;; it, so it has Date_I and Impl_ methods (C2G-SPEC §5.3, §5.4); toInstant and from(Instant)
+;; are c2g's table entries (they name the translated Instant).
 (in-ns 'go.arbace.jrt)
 
 (go/file "date.go"
   :imports [[strconv "strconv"] [time "time"]])
 
+(go/type Date_I
+  "Date_I is java.util.Date's class interface (a non-leaf class since java.sql.Timestamp, which
+c2g translates, extends it: Impl_ methods, C2G-SPEC §5.3, §5.4).\n"
+  (interface Object_I
+    (Self_Date ^{:tag (* Date)} [])
+    (Is_Serializable [])
+    (Is_Cloneable [])
+    (Is_Comparable [])
+    (GetTime__J ^int64 [])
+    (SetTime_J__V [^int64 ms])
+    (Before_Date__Z ^bool [^Date_I o])
+    (After_Date__Z ^bool [^Date_I o])
+    (CompareTo_Date__I ^int32 [^Date_I o])
+    (CompareTo_O__I ^int32 [^any o])
+    (GetYear__I ^int32 [])
+    (GetMonth__I ^int32 [])
+    (GetDate__I ^int32 [])
+    (GetDay__I ^int32 [])
+    (GetHours__I ^int32 [])
+    (GetMinutes__I ^int32 [])
+    (GetSeconds__I ^int32 [])
+    (GetTimezoneOffset__I ^int32 [])
+    (ToGMTString__String ^{:tag (* String)} [])))
+
 (go/type Date
-  "Date is java.util.Date (a leaf: *Date): milliseconds since the epoch.\n"
+  "Date is java.util.Date's struct: milliseconds since the epoch.\n"
   (struct Object ^int64 F_fastTime))
 
 (go/var Date_class
@@ -20,43 +47,87 @@
                      :Go "arbace/jrt.Date"))))
 
 (go/func Date_New "Date_New is new Date(): now, from Go's clock.\n" ^{:tag (* Date)} []
-  (addr (lit Date :F_fastTime (.UnixMilli (time/Now)))))
-(go/func Date_New_J ^{:tag (* Date)} [^int64 ms] (addr (lit Date :F_fastTime ms)))
+  (let [t (addr (lit Date))] (.Ctor t t) t))
+(go/func Date_New_J ^{:tag (* Date)} [^int64 ms] (let [t (addr (lit Date))] (.Ctor_J t t ms) t))
 (go/func Date_New_I_I_I
   "Date_New_I_I_I is the deprecated new Date(year - 1900, month, date), in GMT.\n"
   ^{:tag (* Date)} [^int32 y ^int32 m ^int32 d]
-  (Date_New_J (Date_UTC_I_I_I_I_I_I__J y m d 0 0 0)))
+  (let [t (addr (lit Date))] (.Ctor_I_I_I t t y m d) t))
 (go/func Date_New_I_I_I_I_I ^{:tag (* Date)} [^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi]
-  (Date_New_J (Date_UTC_I_I_I_I_I_I__J y m d h mi 0)))
+  (let [t (addr (lit Date))] (.Ctor_I_I_I_I_I t t y m d h mi) t))
 (go/func Date_New_I_I_I_I_I_I ^{:tag (* Date)} [^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi ^int32 s]
-  (Date_New_J (Date_UTC_I_I_I_I_I_I__J y m d h mi s)))
+  (let [t (addr (lit Date))] (.Ctor_I_I_I_I_I_I t t y m d h mi s) t))
 
-(go/method GetTime__J ^int64 [^{:tag (* Date)} t] (.-F_fastTime t))
-(go/method SetTime_J__V [^{:tag (* Date)} t ^int64 ms] (set! (.-F_fastTime t) ms))
-(go/method Before_Date__Z ^bool [^{:tag (* Date)} t ^{:tag (* Date)} o] (< (.-F_fastTime t) (.-F_fastTime (NN o))))
-(go/method After_Date__Z ^bool [^{:tag (* Date)} t ^{:tag (* Date)} o] (> (.-F_fastTime t) (.-F_fastTime (NN o))))
-(go/method Equals_O__Z ^bool [^{:tag (* Date)} t ^any o]
-  (let [(values x ok) (assert (* Date) o)]
-    (and ok (== (.-F_fastTime t) (.-F_fastTime x)))))
-(go/method HashCode__I "HashCode__I is Date.hashCode: (int) ht ^ (int) (ht >> 32).\n"
-  ^int32 [^{:tag (* Date)} t]
-  (let [ht (.-F_fastTime t)]
+(go/method Ctor "Ctor is Date(): now, from Go's clock.\n" [^{:tag (* Date)} t ^Date_I this]
+  (set! (.-F_fastTime t) (.UnixMilli (time/Now))))
+(go/method Ctor_J [^{:tag (* Date)} t ^Date_I this ^int64 ms] (set! (.-F_fastTime t) ms))
+(go/method Ctor_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d]
+  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d 0 0 0)))
+(go/method Ctor_I_I_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi]
+  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d h mi 0)))
+(go/method Ctor_I_I_I_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi ^int32 s]
+  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d h mi s)))
+
+;; the implementations: this is the whole object, called virtually where the JDK's Date calls
+;; getTime() (equals, hashCode, and getMillisOf's subclass case in compareTo, before, after)
+(go/method Impl_GetTime__J ^int64 [^{:tag (* Date)} t ^Date_I this] (.-F_fastTime t))
+(go/method Impl_SetTime_J__V [^{:tag (* Date)} t ^Date_I this ^int64 ms] (set! (.-F_fastTime t) ms))
+(go/method Impl_Before_Date__Z ^bool [^{:tag (* Date)} t ^Date_I this ^Date_I o]
+  (< (.GetTime__J this) (.GetTime__J o)))
+(go/method Impl_After_Date__Z ^bool [^{:tag (* Date)} t ^Date_I this ^Date_I o]
+  (> (.GetTime__J this) (.GetTime__J o)))
+(go/method Impl_Equals_O__Z ^bool [^{:tag (* Date)} t ^Date_I this ^any o]
+  (let [(values x ok) (assert Date_I o)]
+    (and ok (== (.GetTime__J this) (.GetTime__J x)))))
+(go/method Impl_HashCode__I "Impl_HashCode__I is Date.hashCode: (int) ht ^ (int) (ht >> 32), ht = getTime().\n"
+  ^int32 [^{:tag (* Date)} t ^Date_I this]
+  (let [ht (.GetTime__J this)]
     (bit-xor (conv int32 ht) (conv int32 (>> ht 32)))))
-(go/method CompareTo_Date__I ^int32 [^{:tag (* Date)} t ^{:tag (* Date)} o]
-  (let [a (.-F_fastTime t)
-        b (.-F_fastTime (NN o))]
+(go/method Impl_CompareTo_Date__I ^int32 [^{:tag (* Date)} t ^Date_I this ^Date_I o]
+  (let [a (.GetTime__J this)
+        b (.GetTime__J o)]
     (cond (< a b) (return -1) (== a b) (return 0) :else (return 1))))
-(go/method CompareTo_O__I ^int32 [^{:tag (* Date)} t ^any o] (.CompareTo_Date__I t (Date_Cast o)))
-(go/method Clone__O ^any [^{:tag (* Date)} t] (Date_New_J (.-F_fastTime t)))
+(go/method Impl_CompareTo_O__I ^int32 [^{:tag (* Date)} t ^Date_I this ^any o]
+  (.CompareTo_Date__I this (Date_Cast o)))
+(go/type dateCloner "dateCloner: a translated subclass's shallow copy (c2g's CloneShallow).\n"
+  (interface (CloneShallow ^any [])))
+(go/method Impl_Clone__O "Impl_Clone__O is Date.clone: a copy of the whole object.\n"
+  ^any [^{:tag (* Date)} t ^Date_I this]
+  (let [(values d ok) (assert (* Date) this)]
+    (when ok (return (Date_New_J (.-F_fastTime d)))))
+  (.CloneShallow (assert dateCloner this)))
+
+;; the dispatch methods of the concrete Date
+(go/method GetTime__J ^int64 [^{:tag (* Date)} t] (.Impl_GetTime__J t t))
+(go/method SetTime_J__V [^{:tag (* Date)} t ^int64 ms] (.Impl_SetTime_J__V t t ms))
+(go/method Before_Date__Z ^bool [^{:tag (* Date)} t ^Date_I o] (.Impl_Before_Date__Z t t o))
+(go/method After_Date__Z ^bool [^{:tag (* Date)} t ^Date_I o] (.Impl_After_Date__Z t t o))
+(go/method Equals_O__Z ^bool [^{:tag (* Date)} t ^any o] (.Impl_Equals_O__Z t t o))
+(go/method HashCode__I ^int32 [^{:tag (* Date)} t] (.Impl_HashCode__I t t))
+(go/method CompareTo_Date__I ^int32 [^{:tag (* Date)} t ^Date_I o] (.Impl_CompareTo_Date__I t t o))
+(go/method CompareTo_O__I ^int32 [^{:tag (* Date)} t ^any o] (.Impl_CompareTo_O__I t t o))
+(go/method Clone__O ^any [^{:tag (* Date)} t] (.Impl_Clone__O t t))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* Date)} t] (.Impl_ToString__String t t))
+(go/method ToGMTString__String ^{:tag (* String)} [^{:tag (* Date)} t] (.Impl_ToGMTString__String t t))
+(go/method GetYear__I ^int32 [^{:tag (* Date)} t] (.Impl_GetYear__I t t))
+(go/method GetMonth__I ^int32 [^{:tag (* Date)} t] (.Impl_GetMonth__I t t))
+(go/method GetDate__I ^int32 [^{:tag (* Date)} t] (.Impl_GetDate__I t t))
+(go/method GetDay__I ^int32 [^{:tag (* Date)} t] (.Impl_GetDay__I t t))
+(go/method GetHours__I ^int32 [^{:tag (* Date)} t] (.Impl_GetHours__I t t))
+(go/method GetMinutes__I ^int32 [^{:tag (* Date)} t] (.Impl_GetMinutes__I t t))
+(go/method GetSeconds__I ^int32 [^{:tag (* Date)} t] (.Impl_GetSeconds__I t t))
+(go/method GetTimezoneOffset__I ^int32 [^{:tag (* Date)} t] (.Impl_GetTimezoneOffset__I t t))
+
+(go/method Self_Date ^{:tag (* Date)} [^{:tag (* Date)} t] t)
 (go/method Ref ^any [^{:tag (* Date)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Date)} t] Date_class)
 (go/method Is_Serializable [^{:tag (* Date)} t])
 (go/method Is_Cloneable [^{:tag (* Date)} t])
 (go/method Is_Comparable [^{:tag (* Date)} t])
-(go/func Date_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Date) x)] ok))
-(go/func Date_Cast ^{:tag (* Date)} [^any x]
+(go/func Date_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Date_I x)] ok))
+(go/func Date_Cast ^Date_I [^any x]
   (when (== x nil) (return nil))
-  (let [(values v ok) (assert (* Date) x)]
+  (let [(values v ok) (assert Date_I x)]
     (when (not ok) (panic (ClassCast x Date_class)))
     v))
 
@@ -178,17 +249,17 @@ result falls on its side of the cutover; in 1582 GregorianCalendar's rule).\n"
             (return j))
           (return g))))))
 
-(go/method GetYear__I "GetYear__I is the deprecated getYear: the year minus 1900.\n"
-  ^int32 [^{:tag (* Date)} t]
+(go/method Impl_GetYear__I "Impl_GetYear__I is the deprecated getYear: the year minus 1900.\n"
+  ^int32 [^{:tag (* Date)} t ^Date_I this]
   (let [f (.fields t)]
     (conv int32 (- (.yearOfEra f) 1900))))
-(go/method GetMonth__I ^int32 [^{:tag (* Date)} t] (conv int32 (- (.-month (.fields t)) 1)))
-(go/method GetDate__I ^int32 [^{:tag (* Date)} t] (conv int32 (.-day (.fields t))))
-(go/method GetDay__I ^int32 [^{:tag (* Date)} t] (conv int32 (- (.-weekday (.fields t)) 1)))
-(go/method GetHours__I ^int32 [^{:tag (* Date)} t] (conv int32 (.-hour (.fields t))))
-(go/method GetMinutes__I ^int32 [^{:tag (* Date)} t] (conv int32 (.-minute (.fields t))))
-(go/method GetSeconds__I ^int32 [^{:tag (* Date)} t] (conv int32 (.-second (.fields t))))
-(go/method GetTimezoneOffset__I ^int32 [^{:tag (* Date)} t] 0)
+(go/method Impl_GetMonth__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (- (.-month (.fields t)) 1)))
+(go/method Impl_GetDate__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-day (.fields t))))
+(go/method Impl_GetDay__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (- (.-weekday (.fields t)) 1)))
+(go/method Impl_GetHours__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-hour (.fields t))))
+(go/method Impl_GetMinutes__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-minute (.fields t))))
+(go/method Impl_GetSeconds__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-second (.fields t))))
+(go/method Impl_GetTimezoneOffset__I ^int32 [^{:tag (* Date)} t ^Date_I this] 0)
 
 (go/var
   [^{:tag (slice string)} dayNames (lit (slice string) "" "Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat")]
@@ -208,17 +279,17 @@ result falls on its side of the cutover; in 1582 GregorianCalendar's rule).\n"
         (set! s (+ "-" s)))
       s)))
 
-(go/method ToString__String
-  "ToString__String is Date.toString in GMT: Thu Jan 01 00:00:00 GMT 1970.\n"
-  ^{:tag (* String)} [^{:tag (* Date)} t]
+(go/method Impl_ToString__String
+  "Impl_ToString__String is Date.toString in GMT: Thu Jan 01 00:00:00 GMT 1970.\n"
+  ^{:tag (* String)} [^{:tag (* Date)} t ^Date_I this]
   (let [f (.fields t)]
     (Str (+ (aget dayNames (.-weekday f)) " " (aget monthNames (.-month f)) " " (pad (.-day f) 2) " "
             (pad (.-hour f) 2) ":" (pad (.-minute f) 2) ":" (pad (.-second f) 2) " GMT "
             (strconv/FormatInt (.yearOfEra f) 10)))))
 
-(go/method ToGMTString__String
-  "ToGMTString__String is the deprecated Date.toGMTString: 1 Jan 1970 00:00:00 GMT.\n"
-  ^{:tag (* String)} [^{:tag (* Date)} t]
+(go/method Impl_ToGMTString__String
+  "Impl_ToGMTString__String is the deprecated Date.toGMTString: 1 Jan 1970 00:00:00 GMT.\n"
+  ^{:tag (* String)} [^{:tag (* Date)} t ^Date_I this]
   (let [f (.fields t)]
     (Str (+ (strconv/FormatInt (.-day f) 10) " " (aget monthNames (.-month f)) " "
             (strconv/FormatInt (.yearOfEra f) 10) " " (pad (.-hour f) 2) ":" (pad (.-minute f) 2) ":"

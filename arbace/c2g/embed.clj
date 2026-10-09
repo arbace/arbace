@@ -116,18 +116,12 @@
     (doseq [f (read-all text)] (walk f))
     (persistent! acc)))
 
-(def always-cut
-  "Names a `when-class` guard tests by a string: core.clj loads arbace/instant.clj (the Go
-  build's variant, over java.util.Date) when java.sql.Timestamp resolves, and its
-  default-data-readers name instant's read-instant-date."
-  #{"java.sql.Timestamp"})
-
 (defn cut-candidates
   "The classes the sources name that exist on this JVM, from the JDK or arbace.lang/arbace.asm
   (not the classes the namespaces define themselves: deftype, defrecord, definterface), as
   internal names."
   [srcs]
-  (set (for [n (concat always-cut (for [[_ text] srcs n (names text)] n))
+  (set (for [n (for [[_ text] srcs n (names text)] n)
              :when (and (or (re-find #"^(java|javax|jdk|sun)\." n)
                             (re-find #"^arbace\.(lang|asm)\." n))
                         (try (Class/forName n false (ClassLoader/getSystemClassLoader)) true
