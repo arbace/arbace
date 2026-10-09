@@ -1865,7 +1865,9 @@
         (lit MethodInfo :Name "putReferenceVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReferenceVolatile_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
         (lit MethodInfo :Name "storeFence" :Params nil :Return Prim_void :Modifiers 0x11
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.StoreFence__V (assert (* Unsafe) this)) nil))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.StoreFence__V (assert (* Unsafe) this)) nil))
+        (lit MethodInfo :Name "weakCompareAndSetInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int Prim_int) :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.WeakCompareAndSetInt_O_J_I_I__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2)) (assert int32 (aget args 3)))))))
   (set! (.-Fields (.Info Unsafe_class))
     (lit (slice FieldInfo)
         (lit FieldInfo :Name "ADDRESS_SIZE" :Type Prim_int :Modifiers 0x19
@@ -2376,6 +2378,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDone__Z (assert ForkJoinTask_I this))))
         (lit MethodInfo :Name "join" :Params nil :Return Object_class :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Join__O (assert ForkJoinTask_I this))))
+        (lit MethodInfo :Name "quietlyComplete" :Params nil :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.QuietlyComplete__V (assert ForkJoinTask_I this)) nil))
         (lit MethodInfo :Name "quietlyInvoke" :Params nil :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.QuietlyInvoke__V (assert ForkJoinTask_I this)) nil))
         (lit MethodInfo :Name "quietlyJoin" :Params nil :Return Prim_void :Modifiers 0x11

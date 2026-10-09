@@ -290,6 +290,8 @@
                    (= :jrt (m/pkg n)))
         :let [g (m/go-name n)
               have (jrt/struct-methods (:jrt m/*w*) g)]
+        ;; a class jrt declares without a Go type of its own (statics only) has no methods
+        :when (contains? (:types (:jrt m/*w*)) g)
         [[name desc :as k] _] (m/vmethods n)
         :let [impl (m/impl-of n k)
               base (nm/method-base name desc)]
@@ -757,7 +759,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                (sig "getResources" '[String_class] 'Enumeration_class 0x1
                                     '(Collections_EmptyEnumeration__Enumeration))
                                (sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
-                                    '(let [(values b ok) (.Resource (CurrentHost) (.String (NN ((inst As (* String)) (aget args 0)))))]
+                                    '(let [(values b ok) (ResourceOrPath (.String (NN ((inst As (* String)) (aget args 0)))))]
                                        (when (not ok) (return nil))
                                        (let [a (NewByteArray (conv int32 (len b)))]
                                          (range [i x b] (aset (.-A a) i (conv int8 x)))

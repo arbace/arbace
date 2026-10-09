@@ -6,7 +6,7 @@
 ;; The pool is not the JDK's work-stealing pool (JAVA-SURFACE.md: cut) but has its semantics: a
 ;; pool of parallelism P runs a task given to it from outside (invoke, execute, submit) in a
 ;; worker thread of its own, and a task forked in a worker in a new worker thread while fewer
-;; than P - 1 forked tasks run, else leaves it to the thread that joins it, which runs it then.
+;; than P - 1 forked tasks run, else runs it in the forking thread at once.
 ;; A task runs once: whoever claims it first (a worker, a joiner, invoke) runs it, the others
 ;; wait for it. Workers are jrt threads (goroutines) that know their pool, so inForkJoinPool and
 ;; getPool answer as in a ForkJoinWorkerThread.
@@ -31,7 +31,9 @@
     (QuietlyInvoke__V [])
     (Complete_O__V [^any v])
     (CompleteExceptionally_Throwable__V [^Throwable_I ex])
-    (TryUnfork__Z ^bool [])))
+    (TryUnfork__Z ^bool [])
+    (QuietlyComplete__V [])
+    (TrySetThrown_Throwable__Z ^bool [^Throwable_I ex])))
 
 (go/type ForkJoinTask
   "ForkJoinTask is java.util.concurrent.ForkJoinTask's struct: the task's state (fjNew, then
@@ -62,22 +64,29 @@ and the channel its waiters receive from (made by the first waiter, closed when 
 
 (go/method tryRun
   "tryRun runs the task (exec) when no one has claimed it yet, keeping its exception, and
-reports whether it did.\n"
+reports whether it did. A task whose exec returns false (a CountedCompleter) is done only when
+completed explicitly (quietlyComplete, tryComplete).\n"
   ^bool [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
   (when (not (.CompareAndSwap (.-state t) fjNew fjRunning))
     (return false))
-  (let [exc (runCatching (fn [] (.Exec__Z this)))]
-    (.finish t exc))
+  (let [^bool completed false
+        exc (runCatching (fn [] (set! completed (.Exec__Z this))))]
+    (when (or completed (!= exc nil))
+      (.finish t exc)))
   true)
 
-(go/method finish "finish completes the task with exc (nil: normally) and releases its waiters.\n"
-  [^{:tag (* ForkJoinTask)} t ^Throwable_I exc]
+(go/method finish "finish completes the task with exc (nil: normally) and releases its waiters;
+it reports false, doing nothing, when the task was done already.\n"
+  ^bool [^{:tag (* ForkJoinTask)} t ^Throwable_I exc]
   (.Lock (.-mu t))
+  (defer (.Unlock (.-mu t)))
+  (when (== (.Load (.-state t)) fjDone)
+    (return false))
   (set! (.-exc t) exc)
   (.Store (.-state t) fjDone)
   (when (!= (.-doneCh t) nil)
     (close (.-doneCh t)))
-  (.Unlock (.-mu t)))
+  true)
 
 (go/method await "await waits until the task is done (run by another thread).\n"
   [^{:tag (* ForkJoinTask)} t]
@@ -93,10 +102,22 @@ reports whether it did.\n"
     (.Unlock (.-mu t))
     (<! c)))
 
-(go/method complete "complete runs the task if no one has, else waits for it.\n"
+(go/method complete "complete runs the task if no one has, then waits until it is done.\n"
   [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
-  (when (not (.tryRun t this))
-    (.await t)))
+  (.tryRun t this)
+  (.await t))
+
+(go/method QuietlyComplete__V "QuietlyComplete__V is quietlyComplete: the task done normally,
+without setting a result (a CountedCompleter's completion).\n"
+  [^{:tag (* ForkJoinTask)} t]
+  (.CompareAndSwap (.-state t) fjNew fjRunning)
+  (.finish t nil))
+
+(go/method TrySetThrown_Throwable__Z "TrySetThrown_Throwable__Z is the package-private
+trySetThrown: the task done with ex unless it is done already.\n"
+  ^bool [^{:tag (* ForkJoinTask)} t ^Throwable_I ex]
+  (.CompareAndSwap (.-state t) fjNew fjRunning)
+  (.finish t ex))
 
 (go/method Impl_Fork__ForkJoinTask
   "Impl_Fork__ForkJoinTask is fork: the task goes to the current worker's pool, or the common
@@ -411,15 +432,19 @@ one, at least 1, as the JVM's common pool has it.\n"
     (.Start__V t)))
 
 (go/method spawn
-  "spawn is a forked task's start: a new worker when a slot is free, else nothing (the task
-runs when joined).\n"
+  "spawn is a forked task's start: a new worker when a slot is free, else the forking thread
+runs it at once.\n"
   [^{:tag (* ForkJoinPool)} p ^ForkJoinTask_I task]
   (when (== (.-slots p) nil)
+    (.tryRun (.Self_ForkJoinTask task) task)
     (return))
   (select
     (case (>! (.-slots p) (lit (struct)))
       (.startWorker p task (fn [] (<! (.-slots p)))))
-    (default)))
+    (default
+      ;; no worker free: the forking thread runs it now (a CountedCompleter's children are
+      ;; never joined, so leaving them to a joiner could leave them unrun)
+      (.tryRun (.Self_ForkJoinTask task) task))))
 
 (go/method checkOpen [^{:tag (* ForkJoinPool)} p ^ForkJoinTask_I task]
   (nnIface task)

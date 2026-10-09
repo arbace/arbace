@@ -98,7 +98,9 @@
             ;; Collectors' characteristics sets
             "java/util/EnumSet.java" "java/util/RegularEnumSet.java" "java/util/JumboEnumSet.java"
             ;; StreamOpFlag's flag maps; the spliterators' debugging trip wire
-            "java/util/EnumMap.java" "java/util/Tripwire.java"]
+            "java/util/EnumMap.java" "java/util/Tripwire.java"
+            ;; the interface Random implements (Collections.shuffle takes one)
+            "java/util/random/RandomGenerator.java"]
            ;; Clojure's test suite on the Go build (step 5 phase 2): uri? (java.net.URI's
            ;; parser), the delays' tests (CyclicBarrier, over jrt's ReentrantLock)
            ["java/net/URI.java" "java/net/URISyntaxException.java"

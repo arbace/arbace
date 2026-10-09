@@ -1,8 +1,9 @@
 ;; jrt: java.util.concurrent.atomic (C2G-SPEC §8.2; doc/go/JRT-NOTES.md, phase 2a):
 ;; AtomicInteger, AtomicLong, AtomicBoolean over sync/atomic, AtomicReference over a
 ;; Volatile (an atomic pointer to a boxed two-word reference) with an identity CAS.
-;; AtomicInteger and AtomicLong extend Number in Java; Number is translated, so until it
-;; joins they embed Object and have Number's methods themselves.
+;; AtomicInteger and AtomicLong extend Number in Java: they embed Number (translated, a
+;; stand-in in jrt's own build; amendment T12, done in step 5 phase 2B: (pos? (AtomicInteger.))
+;; casts to Number) and define Number's methods themselves.
 (in-ns 'go.arbace.jrt)
 
 (go/file "atomic.go"
@@ -69,11 +70,11 @@ reference) retries, so the operation is linearizable as Java's.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; AtomicInteger
 
-(go/type AtomicInteger (struct Object ^{:tag atomic/Int32} v))
+(go/type AtomicInteger (struct Number ^{:tag atomic/Int32} v))
 
 (go/var AtomicInteger_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.atomic.AtomicInteger" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class
+                     :Modifiers AccPublic :Super Number_class
                      :Interfaces (lit (slice (* Class)) Serializable_class)
                      :Go "arbace/jrt.AtomicInteger"))))
 
@@ -132,11 +133,11 @@ reference) retries, so the operation is linearizable as Java's.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; AtomicLong
 
-(go/type AtomicLong (struct Object ^{:tag atomic/Int64} v))
+(go/type AtomicLong (struct Number ^{:tag atomic/Int64} v))
 
 (go/var AtomicLong_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.atomic.AtomicLong" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class
+                     :Modifiers AccPublic :Super Number_class
                      :Interfaces (lit (slice (* Class)) Serializable_class)
                      :Go "arbace/jrt.AtomicLong"))))
 

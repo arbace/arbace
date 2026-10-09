@@ -378,6 +378,10 @@ its field (nil for an array element, an any slot).\n"
 ;; ---------------------------------------------------------------------------------------
 ;; The operations
 
+(go/method WeakCompareAndSetInt_O_J_I_I__Z "WeakCompareAndSetInt_O_J_I_I__Z: compareAndSetInt (Go's CAS does not fail spuriously).\n"
+  ^bool [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 e ^int32 x]
+  (.CompareAndSetInt_O_J_I_I__Z u o off e x))
+
 (go/method CompareAndSetInt_O_J_I_I__Z ^bool [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 e ^int32 x]
   (atomic/CompareAndSwapInt32 (intSlot o off) e x))
 

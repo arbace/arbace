@@ -5,7 +5,7 @@
 
 (go/file "host.go"
   :imports [[rand "crypto/rand"] [errors "errors"] [io "io"] [fs "io/fs"] [os "os"]
-            [runtime "runtime"] [sync "sync"] [time "time"]])
+            [runtime "runtime"] [strings "strings"] [sync "sync"] [time "time"]])
 
 (go/type Host
   "Host is the operating system as jrt uses it. Translated code never reaches it except
@@ -95,6 +95,28 @@ embedded resources.\n"
   (let [(values b err) (fs/ReadFile (.-Resources h) name)]
     (return b (== err nil))))
 (go/method Exit [^OSHost h ^int code] (os/Exit code))
+
+(go/func ResourceOrPath
+  "ResourceOrPath is a resource as the Go build's class path has it (ClassLoader's
+getResourceAsStream; RT.load's order): the program's embedded resource, else the file name in
+one of the directories of ARBACE_PATH (separated by :).\n"
+  ^{:tag (slice byte)} [^string name] :results [^{:tag (slice byte)} b ^bool ok]
+  (let [h (CurrentHost)
+        (values r found) (.Resource h name)]
+    (when found
+      (return r true))
+    (let [(values path set) (.Getenv h "ARBACE_PATH")]
+      (when (not set)
+        (return nil false))
+      (range [_ dir (strings/Split path ":")]
+        (when (!= dir "")
+          (let [(values f err) (.Open h (+ dir "/" name) os/O_RDONLY 0)]
+            (when (== err nil)
+              (let [(values data rerr) (io/ReadAll f)]
+                (.Close f)
+                (when (== rerr nil)
+                  (return data true))))))))
+    (return nil false)))
 
 (go/var ^{:tag Host} theHost (lit OSHost))
 (go/var ^{:tag sync/RWMutex} hostMu)
