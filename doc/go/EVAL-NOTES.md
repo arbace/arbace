@@ -882,6 +882,92 @@ transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B
   2026-10-09, folded into classes/SPEC.md §6 (the derived bridges; not §9) as
   COMPILER-NOTES.md's amendment 15, S8 in C2G-SPEC §16.*
 
+## Phase 2B follow-up: Semaphore, Dyn's jrt interfaces, the proxy harvest
+
+Branch `smalls` (2026-10-09), three small items left by phase 2B.
+
+**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why c2g left `AbstractQueuedSynchronizer$ConditionObject`
+untranslated (jrt registers that JDK name for `ReentrantLock`'s conditions under another Go
+name, and c2g named the type by the derived name: fixed in c2g, amendment Y1), and the decision
+for a hand-written `Semaphore` in jrt over the translated AQS (amendment Y3).
+
+**Dyn implements jrt's hand-written interfaces** (`arbace/c2g/dyn.clj`, `interfaces`). With
+`Semaphore` the pprint tests loaded but `(future-cancel f)` threw `ClassCastException`:
+`future-call` reifies `java.util.concurrent.Future`, an interface jrt hand-writes, and Dyn had
+the methods of the translated interfaces only, so a reify of `Future` was not a Go `jrt.Future`
+(`(instance? java.util.concurrent.Future (future 1))` was false on main). Dyn now also
+implements jrt's public hand-written interfaces that jrt can cast to (a `C_Cast` function: a
+slot fn's result is cast): `Future`, `ExecutorService` (with `Executor`), `Lock`, `Condition`
+(jrt gains `Condition_Cast`); not `ThreadFactory`, `Member`, `InvocationHandler`, which have
+none; 549 interfaces and 1,029 methods
+(were 542 and 996), the executable about 200 KB larger. The Go assertion to such an interface
+now succeeds for every Dyn, so jrt's `C_InstanceOf` and `C_Cast` of its hand-written interfaces
+make the nominal check c2g's make for the translated ones (`jrt.dynNominal`: a Dyn's class
+must implement the interface). Amendment Y2.
+
+**The oracle's harvest takes the forms naming `proxy`** (ORACLE.md, "Exclusions"): the suite's
+proxy tests are in `java_interop.clj`, a namespace the harvest leaves out whole; it now keeps
+that namespace's assertions naming the proxy functions: `forms/harvest/java_interop.clj`, 3
+forms after its preamble (the rest use the tests' locals or `proxy.examples`). Recorded alone
+(`bin/oracle record harvest/java_interop`; the other harvest files unchanged: a full harvest
+only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendment Y4.
+
+### Results
+
+- **The pprint namespace loads** on the Go build: 58 tests, 474 assertions, 470 pass, 4 errors:
+  the four `flush-underlying` tests make a proxy of `java.io.BufferedWriter`, which is not one
+  of c2g's proxy superclasses (`dyn/proxy-supers`): a proxy superclass must not be a leaf
+  (§5.3), and `BufferedWriter` is one in the closed world (no subclass); adding it means making
+  it a non-leaf class (its values `BufferedWriter_I`), not done. **Clojure's suite** (amd64):
+  646 tests, 19,280 assertions, 19,251 pass, 19 fail, 10 errors (were 588, 18,806, 18,781, 19,
+  6); 62 of 64 namespaces load (were 61). `test/arbace-go-results.edn` is updated; with it,
+  `bin/clojure-tests` reports no regression. (In one full run `math` was killed by the kernel's
+  OOM killer while other agents' builds ran; alone it passes as recorded.)
+- **The oracle**: `bin/oracle check jvm` 20,263 of 20,263. The Go build (amd64): 20,230 of
+  20,263 (was 20,221 of 20,253): the 10 new cases, 9 matching; the new mismatch serializes a
+  proxy (`java.io.ObjectOutputStream`, D6). The other 32 are unchanged.
+- **Checks**: `bin/gate` passes; `bin/jrt test` on amd64 (and `--race` for the locks and
+  `Semaphore`) and arm64.
+
+### The regex cases that need the JDK's data (not done)
+
+29 of the oracle's regex cases fail on the Go build for want of JDK resource data:
+
+- **5 cases, `\N{name}`** (`basics.clj` 45-47, `errors.clj` 108-109): `Character.codePointOf`
+  reads `java/lang/uniName.dat` (177 KB, zlib-compressed) through
+  `java.util.zip.InflaterInputStream`, which is not in the closed world (its `Inflater` is
+  native zlib). Needed: the file embedded among the executable's resources (they hold text
+  only: `embed/sources`), and a Go-build variant of `CharacterName`'s constructor reading it
+  through a native inflate over Go's `compress/zlib` (as `UUID.md5` is native). About a day's
+  small work; it also gives the REPL `Character/getName` and `Character/codePointOf`. Worth it.
+- **24 cases, `CANON_EQ`** (`unicode.clj` 161-195): `Pattern` normalizes with
+  `java.text.Normalizer` (NFD), not in the world. Tried: with `java/text/Normalizer` and
+  `jdk/internal/icu/text/NormalizerBase` in the closure, c2g finds the ICU loader
+  (`ICUBinary`, `NormalizerImpl.load`, `CodePointTrie.fromBinary`) needing `java.nio.ByteBuffer`,
+  `IntBuffer` and `Buffer` (the JDK generates them from templates; none is in the world),
+  `UCharacterIterator`, `UTF16`, `UCharacterProperty`, `java.text.CharacterIterator`, and
+  `Normalizer`'s Go name collides with another class (a rename entry); then `nfc.nrm` (36 KB)
+  embedded as a resource. java.nio's buffers are the large part. Alternatives: a Go-build
+  variant of `NormalizerImpl.load` over a `byte[]`, or a hand-written NFD over Go's tables
+  (Go's std has none exported: `golang.org/x/text/unicode/norm` is vendored inside std, and
+  its Unicode version, 15.0, is older than JDK 26's). Several days for one flag Clojure code
+  rarely uses: not worth it now; to report to the user.
+
+### Proposed amendments (for the user's review)
+
+- **Y1 (C2G-SPEC §4.4, Names)** c2g names a class jrt provides, and does not translate, by the
+  Go name jrt registers for it (the class variable's name less `_class`), which may differ from
+  the name derived from the Java name (`ReentrantLock_ConditionObject` for
+  `AbstractQueuedSynchronizer$ConditionObject`).
+- **Y2 (C2G-SPEC §5.12, Dynamic objects)** Dyn implements, besides the translated public
+  interfaces, jrt's public hand-written interfaces that have a cast function; jrt's instance
+  checks and casts of its hand-written interfaces make the nominal check (`jrt.dynNominal`).
+- **Y3 (C2G-SPEC §8.4; JAVA-SURFACE.md decision 4)** `java.util.concurrent.Semaphore` is
+  hand-written in jrt, as the locks are, not `AbstractQueuedSynchronizer` translated (which needs
+  `Unsafe` additions and has a two-word race on `Node.waiter`); fairness is not kept.
+- **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
+  name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`

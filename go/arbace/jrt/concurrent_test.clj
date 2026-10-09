@@ -443,6 +443,60 @@ unaligned reads of ArraysSupport.mismatch and the writes of DecimalDigits.\n"
     (when (!= (res (fn ^string [] (CountDownLatch_New_I -1) "x")) "!java.lang.IllegalArgumentException: count < 0")
       (.Error t "a negative count"))))
 
+(go/func TestSemaphore [^{:tag (* testing/T)} t]
+  (let [s (Semaphore_New_I 2)]
+    (when (or (not (.TryAcquire__Z s)) (not (.TryAcquire__Z s)) (.TryAcquire__Z s) (!= (.AvailablePermits__I s) 0))
+      (.Error t "tryAcquire"))
+    (.Release_I__V s 2)
+    (when (not (strings/HasSuffix (.String (.ToString__String s)) "[Permits = 2]"))
+      (.Error t "toString"))
+    (when (.TryAcquire_I_J_TimeUnit__Z s 3 5 TimeUnit_MILLISECONDS)
+      (.Error t "a timed tryAcquire"))
+    (when (!= (res (fn ^string [] (.Acquire_I__V s -1) "x")) "!java.lang.IllegalArgumentException")
+      (.Error t "a negative count"))
+    (when (!= (res (fn ^string [] (.Release_I__V s 2147483647) "x")) "!java.lang.Error: Maximum permit count exceeded")
+      (.Error t "overflow")))
+  ;; a negative start, drained to zero
+  (let [s (Semaphore_New_I_Z -1 true)]
+    (when (or (not (.IsFair__Z s)) (!= (.DrainPermits__I s) -1) (!= (.AvailablePermits__I s) 0))
+      (.Error t "drainPermits")))
+  ;; mutual exclusion over one permit: a plain counter (the race detector checks it)
+  (let [s (Semaphore_New_I 0)
+        n 0
+        ths (make (slice (* Thread)) 0)]
+    (for [i 0] (< i 8) (inc! i)
+      (set! ths (append ths (Go "sem" (fn []
+                                        (for [j 0] (< j 1000) (inc! j)
+                                          (.Acquire__V s)
+                                          (inc! n)
+                                          (.Release__V s)))))))
+    (time/Sleep (* 5 time/Millisecond))
+    (when (== (.GetQueueLength__I s) 0)
+      (.Error t "no thread waiting"))
+    (.Release__V s)
+    (range [_ th ths] (.Join__V th))
+    (when (or (!= n 8000) (!= (.AvailablePermits__I s) 1) (.HasQueuedThreads__Z s))
+      (.Errorf t "the counter: %d" n)))
+  ;; an interrupt ends acquire (the status consumed); acquireUninterruptibly keeps waiting
+  (let [s (Semaphore_New_I 0)
+        out (make (chan string 1))
+        th (Go "interrupted" (fn [] (>! out (res (fn ^string [] (.Acquire__V s) "acquired")))))]
+    (time/Sleep (* 5 time/Millisecond))
+    (.Interrupt__V th)
+    (when (!= (<! out) "!java.lang.InterruptedException")
+      (.Error t "an interrupted acquire"))
+    (.Join__V th))
+  (let [s (Semaphore_New_I 0)
+        out (make (chan bool 1))
+        th (Go "uninterruptible" (fn [] (.AcquireUninterruptibly__V s) (>! out (.IsInterrupted__Z (Thread_CurrentThread__Thread)))))]
+    (time/Sleep (* 5 time/Millisecond))
+    (.Interrupt__V th)
+    (time/Sleep (* 5 time/Millisecond))
+    (.Release__V s)
+    (when (not (<! out))
+      (.Error t "acquireUninterruptibly: the interrupt status"))
+    (.Join__V th)))
+
 ;; ---------------------------------------------------------------------------------------
 ;; Measurements
 
@@ -451,6 +505,12 @@ unaligned reads of ArraysSupport.mismatch and the writes of DecimalDigits.\n"
     (for [i 0] (< i (.-N b)) (inc! i)
       (.Lock__V l)
       (.Unlock__V l))))
+
+(go/func BenchmarkSemaphore "Semaphore acquire and release, uncontended\n" [^{:tag (* testing/B)} b]
+  (let [s (Semaphore_New_I 1)]
+    (for [i 0] (< i (.-N b)) (inc! i)
+      (.Acquire__V s)
+      (.Release__V s))))
 
 (go/func BenchmarkAtomicIntegerIncrement [^{:tag (* testing/B)} b]
   (let [a (AtomicInteger_New)]

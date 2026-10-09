@@ -177,6 +177,8 @@
    ["java.util.concurrent.ForkJoinTask" ["java.util.concurrent.Future" "java.io.Serializable"] true]
    ["java.util.concurrent.ForkJoinPool" [] false]
    ["java.util.concurrent.CountDownLatch" [] false]
+   ;; Clojure's pprint tests (a future blocked in acquire)
+   ["java.util.concurrent.Semaphore" ["java.io.Serializable"] false]
    ["java.util.concurrent.ThreadLocalRandom" [] false]])
 
 (def promotable

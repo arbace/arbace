@@ -13,7 +13,7 @@ Under `test/oracle/`:
 | part | sources | what | size |
 |---|---|---|---|
 | forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 6,898 forms, 14 files |
-| forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,179 forms, 28 files |
+| forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,189 forms, 29 files |
 | classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
 
@@ -65,7 +65,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   (`bin/arbace -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
 - `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for
-  `bin/arbace -`, and `bin/oracle check jvm` passes (20,253 of 20,253 cases). It prints a line per file, the
+  `bin/arbace -`, and `bin/oracle check jvm` passes (20,263 of 20,263 cases). It prints a line per file, the
   first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
   is 0 when every case matches.
 - `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
@@ -278,12 +278,22 @@ Everything recorded is deterministic; left out:
   covered (amendment X4, accepted 2026-10-09; C2G-SPEC §16): the Go build has it since the
   user's decision reversing D6 for it (C2G-SPEC §10.4), and `forms/types.clj` checks it (proxies
   of `Object`, of interfaces, of `Writer`, `PushbackReader`, `InputStream` and `OutputStream`,
-  `proxy-super`, `update-proxy`, `bean`, pprint's writers). The harvest still leaves out the
-  suite's `proxy` namespace and every form naming `proxy` (`harvest.clj`'s `excluded` and
-  `unsafe`, from when D6 cut it).
+  `proxy-super`, `update-proxy`, `bean`, pprint's writers). The harvest takes the forms naming
+  `proxy` too (since 2026-10-09; before, `harvest.clj`'s `excluded` and `unsafe` left them out,
+  from when D6 cut it): the suite's proxy tests are in `java_interop.clj` (its `proxy`
+  directory only defines the AOT-compiled classes they use), a namespace left out whole, of
+  which the harvest keeps the assertions naming `proxy`, `proxy-super`, `update-proxy`,
+  `get-proxy-class`, `construct-proxy`, `init-proxy`, `proxy-mappings` or
+  `proxy-call-with-super` (`harvest.clj`, `proxy-forms`): `forms/harvest/java_interop.clj`,
+  3 forms after the 7 of its preamble (the others use the test's locals or its `proxy.examples` namespace, and do not stand
+  alone). On the Go build 2 of the 3 pass; the third serializes a proxy
+  (`java.io.ObjectOutputStream`, cut by D6). `protocols.clj`'s one proxy form needs the test's
+  own protocol and is not kept; pprint's proxies are in `pprint/`, which the harvest does not
+  read (it takes the top-level test files).
 - In the harvest, whole test namespaces: `agents`, `annotations`, `clearing`, `compilation`,
-  `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop`, `main`,
-  `method_thunks`, `ns_libs`, `parallel`, `param_tags`, `proxy`, `reflect`, `refs`, `repl`, `rt`,
+  `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop` (but for its
+  proxy forms, above), `main`,
+  `method_thunks`, `ns_libs`, `parallel`, `param_tags`, `reflect`, `refs`, `repl`, `rt`,
   `run_single_test`, `serialization`, `server`, `streams`, `tap`, `test`, `test_fixtures`
   (`harvest.clj`, `excluded`); and any form mentioning time, randomness, threads, files,
   loading, `gensym`, `promise`, `locking` and the like (`unsafe`).
