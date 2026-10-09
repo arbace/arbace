@@ -1026,3 +1026,15 @@ decision (2026-10-08).
 - The user's decisions: amendments U1-U5 accepted (to fold); the smoke test joins the
   essential `bin/gate` with the executable cached by a hash of its inputs (rebuilt only when
   they change). Step 7b (the evaluator's closure compilation) can start.
+
+## 2026-10-09: a proxy of BufferedWriter; pprint passes on Go
+
+- Agent, branch `pprint-bw` (`38cd59a`, `88aaca9`), merged: c2g's proxy list moves to
+  `arbace.c2g.model` and gains `java/io/BufferedWriter`; a translated non-final class on it is
+  not a leaf (its `DynSub_C` extends it), while hand-written classes keep jrt's leafness. 13 new
+  forms at the end of `test/oracle/forms/types.clj` (proxy-super, buffering, prn, pprint and
+  cl-format through a proxied BufferedWriter, a write after close). The suite's pprint namespace
+  passes 474 of 474; the suite on Go 19,255 of 19,280. Executable +981 KB. Amendment Z1
+  proposed (EVAL-NOTES.md).
+- Main session on the merge (over step 6): Go build, `--smoke`, the Go oracle's forms 10,097 of
+  10,100 as recorded, Clojure's suite on Go with no regressions.
