@@ -723,6 +723,110 @@ trips; arm64 (qemu) stays out of the gate (the smoke test there takes minutes, t
 The essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
 change is what the Go checks guard (as `--full` is run for compiler, j2c and g2c changes).
 
+## Phase 2B: jrt's surface for the REPL
+
+Part B of the split (branch `eval-2b`, 2026-10-09; three branches in all: `eval-2b-math`,
+`eval-2b-time` merged into it): the jrt and JDK gaps the oracle's forms corpus and Clojure's
+suite found. What jrt and the closure gained is in JRT-NOTES.md, "Phase 2B (step 5)" (Math and
+StrictMath; dates; the rest); here the evaluator's share, and the results.
+
+### The evaluator's share (`arbace/lang/go/Compiler.clj`, `RT.clj`)
+
+- **A primitive local is boxed anew at each use** (`LocalBindingExpr.evalIn`, its primitive type
+  cached): the bytecode boxes a `long` or `double` local where an `Object` is wanted
+  (`Long.valueOf` with its cache, `Double.valueOf`), so `(let [x ##NaN] (identical? x x))` is
+  false, as on the JVM. A fn's `^double` parameter is not a primitive local in the evaluator
+  (Q1: no primitive fns), so the same test on one stays true.
+- **A fn passed for an interface that is not functional is a checkcast** (`typedArgs`: the
+  adaptation is left to `Reflector` only when `FISupport.maybeFIMethod` finds the interface
+  functional): `(re-matches #"x" [1])` throws HotSpot's `ClassCastException` message, not
+  `Class.cast`'s.
+- **`:arglists` of the embedded namespaces' vars** (decided: mirror). The JVM loads core
+  AOT-compiled: a def's constant metadata is rebuilt by the class's static initializer
+  (`emitValue`: a seq is a `PersistentList`), where `DefExpr.eval` keeps the macro's seq (a
+  `ChunkedSeq` from `defn`'s `sigs`). The JVM's own REPL and `load` of a source keep `eval`'s,
+  so only the embedded namespaces (`Evaluator.EMBEDDED_LOAD`, phase 2C's flag) build a top-level
+  def's constant value and metadata as the compiled class would (`Evaluator.constant`).
+- **`RT.baseLoader`** is the application loader when `Compiler/LOADER` is bound to nil (the Go
+  build binds no `DynamicClassLoader`): `repl/source-fn`'s `NullPointerException`. With phase
+  2A's `proxy` and jrt's resources from `ARBACE_PATH` (JRT-NOTES.md), the suite's `repl` tests
+  pass.
+
+### Results
+
+**The oracle's forms corpus** (amd64), the causes of "Failure causes (the forms corpus)" that
+were part B's:
+
+| cause | cases before | after |
+|---|---:|---:|
+| `arbace.math` (jrt's `Math`) | 145 | 0 |
+| `Calendar`, `GregorianCalendar`, `Timestamp`, `Instant` | 37 | 0 |
+| streams, sequenced collections, `UTF-16BE` | 5 | 0 |
+| reducers (`ForkJoinPool`) | 4 | 0 (the corpus's `(reduce + 0 (r/map identity (range 1.0E8)))` takes 280 s of the 300 s a run may take: speed, part 4) |
+| `supers`/`bases`/`ancestors` lacking `Constable`, `ConstantDesc` | 4 | 0 |
+| `:arglists` | 3 | 0 |
+| message formats (array cast, `#inst [2020]`'s cast) | 2 | 0 |
+| identity: boxed NaN; a `StringBuilder`'s identity hash | 2 | 1 (`(hash (StringBuilder. "x"))`: the JVM records HotSpot's identity hash, a per-thread xorshift sequence; not reproducible, as decided for `#object` printing) |
+| `String/join` of an `Iterable`, `.formatted` | 2 | 0 |
+| `UUID/nameUUIDFromBytes` (MD5) | 1 | 0 |
+
+With phases 2A and 2C merged (main at `29e73d6`), the forms corpus passes **10,075 of 10,077**
+(the two: `deftype Foo/2`'s error source, part A's, and the identity hash); the whole oracle
+**20,221 of 20,253** (forms; the class scripts 8,942 of 8,943, `(Util/equiv ##NaN ##NaN)`, the
+JVM's recorded `dcmpg` bug, C2G-NOTES.md; regex 1,204 of 1,233, the 29 that need the JDK's
+resource data). linux/arm64 under `qemu-aarch64`: the forms corpus the same, 10,075 of 10,077, the same two (with `--timeout 5000`: the reducers file takes about 70 minutes there).
+
+**Clojure's suite on the Go build** (`CLOJURE_TESTS_GO`, amd64, against main's reference after
+phases 2A and 2C: 1,874 assertions passing): **18,781 of 18,806 assertions pass** (588 tests;
+19 failures, 6 errors), 61 of 64 namespaces load. Unblocked by part B: `api`'s neighbours
+`data-structures`, `edn`, `generators`, `numbers`, `reader` (`clojure.data.generators`:
+`java.util.Random`), `vectors` (`Collectors`, parallel streams), `predicates` (`URI`), `math`,
+`parse`, `data-structures-interop` and `sequences` (`Math/exp` in `test.check`), `atoms`
+(`IntSupplier`), `delays` (`CyclicBarrier`), `streams`, `repl` (`source`), `reducers` (no longer
+skipped). Left: `clearing` (19 failures, part 4), `java.io.File` (cut by D6: 3 errors in
+`method-thunks`, 2 in `reader`'s `temp-file`, 1 in `sequences`' `test-iteration`; `java.io`
+does not load: `ServerSocket`, D6), `pprint` (`Semaphore`: `AbstractQueuedSynchronizer` was tried
+and left out, c2g leaves its inner class `ConditionObject` untranslated while emitting the
+members that name it), `api` (`arbace.java.api.Clojure`, a class of the JVM build), and
+`transducers` now loads but its `seq-and-transducer` (200,000 `test.check` trials) runs out of
+the 900 s a namespace may take: it is skipped in the reference with that reason (part 4). The
+reference, `test/arbace-go-results.edn`, is updated.
+
+**Checks**: `bin/gate` passes (the class forms compiler's bridge fix leaves the stages
+unchanged); `bin/jrt test` on amd64 (and `--race` for the pool) and arm64; `bin/c2g-check --
+--program` 9,010 of 9,010 steps (amd64).
+
+**Costs**: the executable is 58 MB on amd64 (was 38: streams and the functional interfaces most
+of it), 56 MB on arm64; `bin/c2g --program` about 55 s; `bin/jrt-convert` 340 files in about
+85 s; start-up unchanged.
+
+### Proposed amendments (for the user's review)
+
+- **B1 (C2G-SPEC §4.4, Collisions)** the rename table: `java/sql/Date` → `Sql_Date`,
+  `java/util/stream/Tripwire` → `Stream_Tripwire`.
+- **B2 (JRT-SOURCES.md, the tool)** other modules' files (`added-module-sources`, KIND
+  `share:MODULE`: `java.sql.Timestamp`, `Date`); `J2C_PATCH_ALL` (each chunk sees the others'
+  sources); `known-differences` (shape differences of known kinds count as converted).
+- **B3 (C2G-SPEC §5.3; the manifest)** `java.util.Date` and `ForkJoinTask` are non-leaf
+  hand-written classes; `AtomicInteger` and `AtomicLong` embed the translated `Number` (T12
+  done); `String` implements `Constable` and `ConstantDesc`.
+- **B4 (C2G-SPEC §11, c2g's support)** c2g writes, into jrt's package, the members of
+  hand-written classes that name translated classes (`String.join(CharSequence, Iterable)`,
+  `formatted`, `lines`, `describeConstable`; `Date.toInstant`, `from`;
+  `Throwable.printStackTrace(PrintStream|PrintWriter)`; `System.getenv()`) and forwarders on
+  hand-written leaf classes to the translated interfaces' default methods they lack (§5.4).
+- **B5 (C2G-SPEC §8.2) the fork-join pool**: jrt's `ForkJoinPool` runs tasks on worker threads
+  (goroutines), the claim/await protocol above, a fork without a free worker running in the
+  forking thread; reducers' `fold` and parallel streams are parallel (JAVA-SURFACE.md decision
+  6 had cut the pool).
+- **B6 (JRT-NOTES V9)** jrt has six charsets (`UTF-16`, `UTF-16BE`, `UTF-16LE` added); the
+  stream readers and writers keep three.
+- **B7 (LICENSE.md)** jrt's own Java for `Calendar`, `GregorianCalendar`, `TimeZone` and
+  `TimeText` transcribes parts of jdk26u (GPL version 2 with the Classpath Exception), or those
+  parts are rewritten from the documented behaviour: the user's call (JRT-NOTES.md, "Dates").
+- **B8 (the class forms compiler, classes/SPEC.md §9's bridges)** a supertype method's class type
+  variables are bounded as the subclass bounds them when bridges are computed.
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`
