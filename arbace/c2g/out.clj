@@ -449,6 +449,33 @@ translated java.util.Formatter).\n"
                                                                           (str (java-name n) "." (:name mm) (:desc mm)
                                                                                " is not in the Go build"))))))))))
           methods (concat methods absent)
+          ;; a name's overloads in the order the JVM's getDeclaredMethods gives them (when the
+          ;; class is on this JVM), which Reflector's choice among applicable overloads follows
+          mms (concat (for [mm (d/class-methods n) :when (and (public? mm) (not= "<init>" (:name mm)))] mm)
+                      (when *absent-members*
+                        (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
+                          (for [mm (:methods (a/decl n))
+                                :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
+                                           (not (present [(:name mm) (:desc mm)])))]
+                            mm))))
+          methods (let [^Class jc (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
+                                       (catch Throwable _ nil))
+                        order (when jc
+                                (into {} (map-indexed (fn [i ^java.lang.reflect.Method x]
+                                                        [[(.getName x) (vec (map #(.getName ^Class %) (.getParameterTypes x)))] i])
+                                                      (.getDeclaredMethods jc))))
+                        jname (fn [d] (cond (t/prim? d) (t/prim-desc->name d)
+                                            (t/array? d) (str/replace d "/" ".")
+                                            :else (str/replace (t/desc->internal d) "/" ".")))]
+                    (if (and order (= (count mms) (count methods)))
+                      (map (fn [[_ i]] (nth (vec methods) i))
+                           (sort-by (fn [[mm i]]
+                                             [(:name mm)
+                                              (get order [(:name mm) (vec (map jname (first (t/parse-method-desc (:desc mm)))))]
+                                                   Integer/MAX_VALUE)
+                                              i])
+                                    (map vector mms (range))))
+                      methods))
           absent-ctors (when (and *absent-members* (not abstract) (not iface))
                          (let [present (set (map :desc (filter #(= "<init>" (:name %)) (d/class-methods n))))]
                            (for [mm (:methods (a/decl n))
@@ -597,10 +624,16 @@ translated java.util.Formatter).\n"
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
-        loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))]
-    (when (or (seq str-ms) streams? loaders?)
+        loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
+        ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")]
+    (when (or (seq str-ms) streams? loaders? ci?)
       [(apply list 'go/func 'init []
               (concat
+                (when ci?
+                  ['(set! (.-Fields (.Info String_class))
+                          (append (.-Fields (.Info String_class))
+                                  (lit FieldInfo :Name "CASE_INSENSITIVE_ORDER" :Type Comparator_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] String_CASE_INSENSITIVE_ORDER))))])
                 (when loaders?
                   [(list 'set! '(.-Methods (.Info Thread_class))
                          (list 'append '(.-Methods (.Info Thread_class))

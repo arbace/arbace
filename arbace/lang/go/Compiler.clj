@@ -206,6 +206,10 @@
 
       (method ^:public ^:static ^:native monitorEnter ^void [o])
 
+      ;; checkcast to a class known at run time: o, or ClassCastException with the JVM's
+      ;; message (jrt.ClassCast)
+      (method ^:public ^:static ^:native checkCast [^Class c o])
+
       (method ^:public ^:static ^:native monitorExit ^void [o])
 
       (method ^:public ^:static state ^EvalState []
@@ -373,7 +377,7 @@
                                       (identical? p Byte/TYPE) (Byte/valueOf (RT/byteCast n))
                                       :else n)))))
                 (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))) nil
-                :else (.cast p v)))
+                :else (Evaluator/checkCast p v)))
             (recur (unchecked-inc-int i))))
         vs)
 
@@ -917,7 +921,7 @@
             (let [^:mutable ms evalMethods]
               ;; the compiled call's checkcast to the method's class (ClassCastException, not
               ;; Method.invoke's IllegalArgumentException)
-              (.cast (.getDeclaringClass method) t)
+              (Compiler$Evaluator/checkCast (.getDeclaringClass method) t)
               (when (nil? ms)
                 (set! ms (LinkedList.))
                 (.add ms method)
@@ -977,6 +981,12 @@
                 (catch Exception e
                   (throw (Util/sneakyThrow (Compiler$Evaluator/unwrap e))))))
             (Reflector/invokeConstructor dc vs))))))
+
+(c2g/variant Compiler$ImportExpr
+  (c2g/add
+    ;; the class, as the compiled import* leaves it (ImportExpr.emit; its eval gives nil)
+    (method ^:public evalIn [this ^Compiler$Frame f]
+      (.importClass (cast Namespace (.deref RT/CURRENT_NS)) (RT/classForNameNonLoading c)))))
 
 (c2g/variant Compiler$ConstantExpr
   (c2g/add (field ^Object evalValue))

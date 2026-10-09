@@ -73,3 +73,11 @@ embedded resource name (the host's Resource: RT.load's sources), or null.\n"
     (.RandomBytes (CurrentHost) bs)
     (range [i x bs]
       (aset (.-A b) i (conv int8 x)))))
+
+(go/func Compiler_Evaluator_CheckCast_Class_O__O_native
+  "Compiler_Evaluator_CheckCast_Class_O__O_native is the evaluator's checkcast of o to c (null
+passes), with the JVM's ClassCastException message.\n"
+  ^any [^{:tag (* Class)} c ^any o]
+  (when (and (!= o nil) (not (.IsInstance_O__Z c o)))
+    (panic (ClassCast o c)))
+  o)

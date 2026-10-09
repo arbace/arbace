@@ -9,7 +9,8 @@
 
 ;; The Go build's arbace/instant.clj (doc/go/EVAL-NOTES.md, "Namespace variants";
 ;; JAVA-SURFACE.md decision 7): java.util.Date only, over its milliseconds, in UTC, with the
-;; calendar arithmetic written out (H. Hinnant's civil-from-days and days-from-civil), where
+;; calendar arithmetic written out as GregorianCalendar counts (H. Hinnant's civil-from-days
+;; and days-from-civil for the Gregorian calendar, the Julian before 1582-10-15), where
 ;; arbace/instant.clj formats with SimpleDateFormat in a proxy'd ThreadLocal and constructs
 ;; with GregorianCalendar, which the Go build has not. java.util.Calendar and
 ;; java.sql.Timestamp instants are not available (read-instant-calendar and
@@ -167,29 +168,50 @@ with invalid arguments."
 ;;; ------------------------------------------------------------------------
 ;;; print integration (the Go build: UTC arithmetic on the milliseconds)
 
+(def ^:private gregorian-cutover-day
+  "The first day of the Gregorian calendar, 1582-10-15, in days since 1970-01-01, as
+  java.util.GregorianCalendar's default cutover (the Julian calendar before it)."
+  -141427)
+
 (defn- days->civil
-  "[year month day] of a count of days since 1970-01-01."
+  "[year month day] of a count of days since 1970-01-01: the Gregorian calendar from its
+  cutover, the Julian before (GregorianCalendar's); the year astronomical (0 is 1 BC)."
   [z]
-  (let [z (+ z 719468)
-        era (quot (if (>= z 0) z (- z 146096)) 146097)
-        doe (- z (* era 146097))
-        yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
-        y (+ yoe (* era 400))
-        doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
-        mp (quot (+ (* 5 doy) 2) 153)
-        d (inc (- doy (quot (+ (* 153 mp) 2) 5)))
-        m (if (< mp 10) (+ mp 3) (- mp 9))]
-    [(if (<= m 2) (inc y) y) m d]))
+  (if (>= z gregorian-cutover-day)
+    (let [z (+ z 719468)
+          era (quot (if (>= z 0) z (- z 146096)) 146097)
+          doe (- z (* era 146097))
+          yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
+          y (+ yoe (* era 400))
+          doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
+          mp (quot (+ (* 5 doy) 2) 153)
+          d (inc (- doy (quot (+ (* 153 mp) 2) 5)))
+          m (if (< mp 10) (+ mp 3) (- mp 9))]
+      [(if (<= m 2) (inc y) y) m d])
+    (let [c (+ z 2440588 32082)
+          d (Math/floorDiv (long (+ (* 4 c) 3)) 1461)
+          e (- c (Math/floorDiv (long (* 1461 d)) 4))
+          m (quot (+ (* 5 e) 2) 153)]
+      [(+ (- d 4800) (quot m 10))
+       (- (+ m 3) (* 12 (quot m 10)))
+       (inc (- e (quot (+ (* 153 m) 2) 5)))])))
 
 (defn- civil->days
-  "The count of days since 1970-01-01 of a year, month, day."
+  "The count of days since 1970-01-01 of a (astronomical) year, month, day, as
+  GregorianCalendar counts it: Gregorian from the cutover, Julian before."
   [y m d]
-  (let [y (if (<= m 2) (dec y) y)
-        era (quot (if (>= y 0) y (- y 399)) 400)
-        yoe (- y (* era 400))
-        doy (+ (quot (+ (* 153 (if (> m 2) (- m 3) (+ m 9))) 2) 5) (dec d))
-        doe (- (+ (* yoe 365) (quot yoe 4) doy) (quot yoe 100))]
-    (+ (* era 146097) doe -719468)))
+  (let [g (let [y (if (<= m 2) (dec y) y)
+                era (quot (if (>= y 0) y (- y 399)) 400)
+                yoe (- y (* era 400))
+                doy (+ (quot (+ (* 153 (if (> m 2) (- m 3) (+ m 9))) 2) 5) (dec d))
+                doe (- (+ (* yoe 365) (quot yoe 4) doy) (quot yoe 100))]
+            (+ (* era 146097) doe -719468))]
+    (if (>= g gregorian-cutover-day)
+      g
+      (let [a (quot (- 14 m) 12)
+            yy (- (+ y 4800) a)
+            mm (- (+ m (* 12 a)) 3)]
+        (- (+ d (quot (+ (* 153 mm) 2) 5) (* 365 yy) (Math/floorDiv (long yy) 4) -32083) 2440588)))))
 
 (defn- print-date
   "Print a java.util.Date as RFC3339 timestamp, always in UTC."
@@ -200,7 +222,7 @@ with invalid arguments."
         [y m dd] (days->civil days)]
     (.write w "#inst \"")
     (.write w (format "%04d-%02d-%02dT%02d:%02d:%02d.%03d-00:00"
-                      y m dd (quot msd 3600000) (rem (quot msd 60000) 60)
+                      (if (<= y 0) (- 1 y) y) m dd (quot msd 3600000) (rem (quot msd 60000) 60)
                       (rem (quot msd 1000) 60) (rem msd 1000)))
     (.write w "\"")))
 
