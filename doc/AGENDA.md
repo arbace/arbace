@@ -5,9 +5,9 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- `clojure/` holds the frozen reference baseline: upstream Clojure (`98d735f`) with spec stubbed
-  out, plus ASM repackaged as `clojure.asm`. It compiles with `javac -g` and is stage 0 of the
-  bootstrap. The seed script is kept only in git history (commit `d21dc91`).
+- Stage 0 of the bootstrap is the binary seed `seed/arbace-seed.jar` (below). The frozen
+  reference baseline `clojure/` (upstream Clojure `98d735f` plus ASM as `clojure.asm`) is on the
+  branch `arbace-for-java-26`.
 - `LICENSE.md` holds all licenses and which files each covers: Arbace is EPL-1.0, like Clojure;
   ASM is BSD-3-Clause, Guava's Murmur3 Apache-2.0.
 - javalisp, the pathfinder (an exact Java ↔ s-expression transcription), was dropped once the
@@ -103,7 +103,8 @@ fallbacks of `arbace/core_classes.clj` are gone.
     export and code levels; std with its tests too, but for 9 known differences (tests that
     embed their own sources). It exits non-zero on a regression against the references
     `test/g2c/roundtrip-*.edn`; about 40 s per architecture. One `$GOROOT/test` selection
-    for the helper and the oracle (`gocmp tests`). Not in `bin/gate` (to decide).
+    for the helper and the oracle (`gocmp tests`). In `bin/gate --full` for amd64 (tamago and
+    linux).
   - Open: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s directory
     tests.
 
@@ -120,13 +121,21 @@ fallbacks of `arbace/core_classes.clj` are gone.
   jrt's JDK sources through j2c (`bin/jrt-convert`, 184 files shape-identical; unreached
   methods to be stubbed by c2g) and the JVM oracle (`bin/oracle`, 15,854 cases). Step 3 done: jrt
   hand-written (core, reflection, threads and the host). Step 4 done: c2g translates the runtime
-  and the JDK closure (8,955 of 9,002 oracle steps; 47 need `arbace.core`). Next: step 5, the
-  evaluator ([go/EVAL-PLAN.md](go/EVAL-PLAN.md)).
+  and the JDK closure (8,955 of 9,002 oracle steps; 47 need `arbace.core`). Step 5 done
+  (2026-10-09): the evaluator ([go/EVAL-PLAN.md](go/EVAL-PLAN.md),
+  [go/EVAL-NOTES.md](go/EVAL-NOTES.md)), `proxy` over `Dyn`, jrt's surface for the REPL;
+  `bin/arbace-go` builds static executables (58 MB amd64, 56 MB arm64). On amd64 the oracle
+  passes 20,221 of 20,253 (the forms 10,075 of 10,077), Clojure's suite 18,781 of 18,806
+  assertions (61 of 64 namespaces load).
+  - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
+    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`, and the
+    determinism issue at `polymorphism.clj:176` (identity-hash order).
+  - Then: the `.ae` rename; step 6 (the executables), step 7 (speed, D7), step 8 (the freeze).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`
-  considered and not taken: hard to type and script). One self-contained change right after step
-  5 phase 1 merges and before the `arbace-for-golang` freeze: loaders (`RT.load`, the compiler:
+  considered and not taken: hard to type and script). One self-contained change after step 5
+  (phase 2, the user's timing) and before the `arbace-for-golang` freeze: loaders (`RT.load`, the compiler:
   `.ae` first, then `.clj`), the tools and their outputs (class forms build, j2c, g2c, c2g), `bin/`,
   `go/`, tests, the oracle, the docs; `bin/build-arbace` gives the frozen seed a `.clj` view of
   the sources for stage 1 (the seed stays as it is).
@@ -142,4 +151,4 @@ fallbacks of `arbace/core_classes.clj` are gone.
 - g2c (Go as Arbace forms): survey and plan in [G2C-SURVEY.md](G2C-SURVEY.md). The open
   questions are decided (journal, 2026-10-07): front end, spec and round trip (G0-G2), then the
   box via gc + TamaGo (B1). No Go libraries on the JVM. Target `GOOS=tamago` amd64/arm64,
-  go1.27.1, with the helper under `tools/`. Not started: the JVM work comes first.
+  go1.27.1, with the helper under `tools/`. G0-G2 are done (Next, above); the box is B1b.

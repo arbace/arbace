@@ -819,3 +819,50 @@ decision (2026-10-08).
 - A determinism issue to fix: `polymorphism.clj:176` names two ambiguous interfaces in an order
   that comes from identity hashes of `Class` objects; classes made while `core_proxy` loads
   shift them. Proposed amendments A1-A4 (EVAL-NOTES).
+
+## 2026-10-09: B1a step 5, phase 2B: jrt's surface for the REPL; step 5 done
+
+- Agent, `b686c4a` .. `8bad4b7` (two forks merged into it: `eval-2b-math`, `eval-2b-time`),
+  merged as a fast-forward:
+  - `Math` and `StrictMath` complete in jrt (109 public members each; the rest of jdk26u's
+    FdLibm ported, `go/arbace/jrt/fdlibm.clj`). jrt's `Math` is `StrictMath`, bit for bit with
+    the JVM's `StrictMath` on amd64 and arm64; HotSpot's `Math` on amd64 uses Intel libm stubs
+    that differ in the last bit for 1.8-19% of arguments (measured), so tests allow 1 ulp (2 for
+    sinh, cosh, tanh).
+  - Dates: `Instant`, `java.sql.Timestamp` and `java.sql.Date` (Go name `Sql_Date`) translated
+    from jdk26u; `Calendar`, `GregorianCalendar`, `TimeZone`, `ZoneInfo` as jrt's own Java (about
+    2,300 lines, fixed-offset zones only; translating the JDK's, about 14,000 lines plus tzdb.dat
+    and locale providers, was rejected); jrt's `Date` non-leaf.
+  - `java.util.stream` translated, parallel streams on a real `ForkJoinPool` in jrt (goroutine
+    workers; a fork without a free worker runs in the forking thread); `Stream.gather` and
+    `Gatherers.mapConcurrent` left out (they throw). `URI`, `CyclicBarrier`, `EnumSet`/`EnumMap`,
+    `Random` (a variant for its initialization), `RandomGenerator`, sequenced collections,
+    `Constable`, UTF-16 charsets, `AtomicInteger`/`AtomicLong` as `Number`s, resources from
+    `ARBACE_PATH`, `RT.baseLoader` (so `source` works).
+  - Evaluator: primitive locals boxed at each use (NaN identity); `:arglists` and constant
+    metadata of the embedded namespaces' top-level defs rebuilt as their compiled classes build
+    them (the JVM loads those namespaces AOT-compiled).
+  - Outside jrt: the class forms compiler gives an erased supertype method's type variables the
+    subclass's bounds (`EnumMap` lacked its `put(Object, Object)` bridge in c2g's world; stages
+    unchanged); c2g: casting bridges for narrowed generic returns, HotSpot's array cast message,
+    default-method forwarders on jrt's hand-written classes, jrt members naming translated
+    classes; j2c/`bin/jrt-convert`: `J2C_PATCH_ALL` (chunks see each other's sources) and
+    `known-differences` (four files whose shapes differ from javac's in known ways: captured
+    variable order in `Collectors`, `Gatherers`, `MatchOps`; an `InnerClasses` entry in `Nodes`).
+  - Not done: `Semaphore` (c2g leaves `AbstractQueuedSynchronizer$ConditionObject` untranslated
+    while writing members that name it; pprint's suite namespace does not load), `java.io.File`
+    (D6). `transducers` loads but times out (evaluator speed, step 7); skipped with that reason.
+  - Proposed amendments B1-B8 (EVAL-NOTES), among them B7, the user's call: the overlay's
+    `Calendar`, `GregorianCalendar`, `TimeZone` and `TimeText` transcribe parts of jdk26u (GPL v2
+    with the Classpath Exception; LICENSE.md says so), against rewriting them from documented
+    behaviour.
+- Checked by the main session on the merged main: `bin/jrt-convert`, `bin/gate` (3m47s) and
+  `bin/oracle check jvm` (20,253 of 20,253) pass; `bin/arbace-go --build` gives 58.4 MB (amd64)
+  and 55.8 MB (arm64) executables (from 41.6 MB: streams and the functional interfaces); the
+  smoke test passes; the oracle on the amd64 executable 20,221 of 20,253 (the forms 10,075 of
+  10,077; the rest the NaN `equiv` class script and 29 regex cases needing JDK resource data,
+  e.g. `java.text.Normalizer`). Agent's figures: Clojure's suite on Go 18,781 of 18,806
+  assertions (from 1,874; 61 of 64 namespaces load; `test/arbace-go-results.edn`),
+  `bin/c2g-check -- --program` 9,010 of 9,010, `bin/jrt test` on amd64, arm64 and `--race`.
+- Step 5 is done. Open before the `.ae` rename: the amendments (A1-A4, B1-B8; V1-V8 to fold),
+  the Go checks in `bin/gate --full`, and the `polymorphism.clj:176` determinism issue.
