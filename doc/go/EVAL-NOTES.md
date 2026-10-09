@@ -382,6 +382,173 @@ can; the shared files are `arbace/lang/go/Compiler.clj`, `arbace/c2g/out.clj` an
   world are dropped; `identical?` of two interface types compares as `any`; volatile fields have
   setters in member tables; a superinterface outside the world stands for its superinterfaces.
 
+## Phase 2C: Clojure's test suite on the Go build, and the oracle's NPE rule
+
+Branch `eval-2c` (2026-10-09), part 3 of the split above plus V11's acceptance in the oracle.
+
+### The oracle's rule for helpful NullPointerException messages (V11)
+
+By the user's decision (2026-10-09) a `NullPointerException` whose JVM message is one of
+HotSpot's helpful ones (`Cannot invoke "Object.getClass()" because "<parameter1>" is null`) is
+compared by class only. `test/oracle/runner.clj` marks such chain entries when it records (and
+when it reads what the implementation printed): `[class message :helpful-npe]`, helpful meaning
+that the whole message matches the grammar of HotSpot's `print_NPE_failed_action` and
+`print_NPE_cause` (`helpful-npe-re`); `check` then compares a marked entry by class only, and
+counts the cases that match only so (`N by V11` per file and in the summary). Explicit
+`NullPointerException`s (a message the code chose, or none) are compared as before.
+[ORACLE.md](ORACLE.md), "Helpful NullPointerException messages", has the details. Re-recorded:
+12 expected files, 54 entries marked (52 forms, 2 class script steps), nothing else changed.
+
+Results: `bin/oracle check jvm` 19,828 of 19,828 (none by V11). On the Go build (amd64) the 52
+forms all pass now: the forms corpus 9,416 of 9,652 (9,364 before), the whole oracle 19,562 of
+19,828 (19,508 before; 54 by V11): class scripts 8,942 of 8,943 (the boxed NaN's identity
+remains), regex 1,204 of 1,233 (unchanged).
+
+### The runner
+
+`bin/clojure-tests` runs the suite on the Go build with `CLOJURE_TESTS_GO`, the command running
+it:
+
+    CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace bin/clojure-tests -j 16
+
+It implies rename mode: the suite and the test libraries renamed as for the JVM (the same
+`arbace.j2c.rename`, on the JVM), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default
+`go`). Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`);
+each test namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the
+renamed libraries then the suite's `test/`), which, as upstream's JVM does, requires every test
+namespace first. The fixtures step is skipped: the Go build loads no class files, so the AOT
+fixtures load from source and the Java fixtures do not exist. The reference is
+`test/arbace-go-results.edn` (the default `CLOJURE_TESTS_EXPECTED` in this mode), in the shape
+of `test/arbace-results.edn`, with a comment per namespace that fails saying why. Exit status as
+for the JVM: 0 when nothing differs from the reference (the counts of tests are compared
+exactly, so an improvement is reported too, and the reference is then rewritten from
+`.tmp/clojure-tests/go/results.edn`).
+
+`test/run_clojure_tests.clj` reads and writes its files through `FileInputStream` and
+`FileOutputStream` (the Go build has no `java.io.File`; `slurp` of a path string goes through
+`io/as-url`, cut); its `generative` mode takes the namespaces from a file when given one
+(`tools.namespace` searches directories with `File`).
+
+**Exclusions** (`:skipped`, 19 besides upstream's two fixtures), the namespaces that cannot load
+in the Go build by design:
+
+| namespace | why |
+|---|---|
+| `compilation` | Java fixtures `compilation.TestDispatch`, `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`; `compile` writes class files |
+| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `generated-functional-adapters-in-def-requiring-reflection` | Java fixture `arbace.test.AdapterExerciser` |
+| `java-interop` | Java fixtures `FIConstructor`, `FIStatic`, `FunctionalTester`, `AdapterExerciser`; `arbace.inspector` |
+| `param-tags` | Java fixtures `SwissArmy`, `ConcreteClass` |
+| `reflect` | Java fixture `reflector.IBar` |
+| `try-catch` | Java fixture `ReflectorTryCatchFixture` |
+| `genclass`, `genclass.examples` | `gen-class` (stays out) and its AOT-compiled examples |
+| `java.javadoc`, `java.process`, `java.shell`, `repl.deps`, `server`, `clojure-xml` | the namespace under test is not in the Go build (D6) |
+| `metadata` | lists the public vars of `arbace.inspector` (D6, Swing) |
+| `serialization` | Java serialization (`ObjectOutputStream`, D6) |
+| `reducers` | `arbace.core.reducers` needs `ForkJoinPool` (D6) |
+
+On the JVM these hold 138 tests and 1,148 assertions. The other namespaces run, and their load
+errors are recorded, so that the work of parts 1 and 2 shows in the reference.
+
+**test.generative** does not run on the Go build (the runner's `--generative` forces it): its
+runner requires `clojure.data.generators` (`java.util.Random`, below) and
+`clojure.tools.namespace.find`, which imports `java.util.jar.JarFile` (cut, D6).
+
+### Results
+
+`bin/clojure-tests` with `CLOJURE_TESTS_GO` on linux/amd64 (not run under qemu: a namespace's
+process takes about a minute on amd64, about ten under `qemu-aarch64`):
+
+| | JVM (`test/arbace-results.edn`) | Go build |
+|---|---:|---:|
+| namespaces run | 83 | 64 (21 skipped) |
+| namespaces loading | 83 | 46 |
+| tests | 809 | 289 |
+| assertions | 20,750 | 1,906 |
+| passing | 20,750 | 1,852 (20 fail, 34 errors) |
+| namespaces passing as on the JVM | 83 | 40 (1,557 assertions) |
+
+Per namespace (tests and assertions on the JVM, then on the Go build):
+
+| namespace | JVM | Go | cause (part) |
+|---|---|---|---|
+| `agents`, `array-symbols`, `clojure-set`, `clojure-walk`, `control`, `data`, `def`, `errors`, `evaluation`, `fn`, `for`, `keywords`, `logic`, `macros`, `main`, `multimethods`, `ns-libs`, `other-functions`, `parallel`, `protocols.hash-collisions`, `rt`, `run-single-test`, `special`, `string`, `tap`, `test`, `test-fixtures`, `transients`, `vars`, `volatiles` (and 10 namespaces without tests) | 234 / 1,557 | 234 / 1,557, all pass | |
+| `clearing` | 3 / 31 | 12 pass, 19 fail | part 4: an evaluated fn has no fields for its closed-over locals (the test reads them by reflection), and `^:once` fns do not clear them |
+| `method-thunks` | 4 / 20 | 17 pass, 3 errors | B: `java.io.File`'s constructor |
+| `printer` | 13 / 74 | 61 pass, 13 errors | A: pprint's writers are proxies |
+| `protocols` | 23 / 196 | 23 / 189: 187 pass, 1 fail, 1 error | A: `proxy`; a `reify` defining a method twice is not an error |
+| `repl` | 7 / 22 | 18 pass, 4 errors | B: `source-fn`'s `NullPointerException` |
+| `streams` | 5 / 30 | 5 / 13, 13 errors | B: `java.util.stream` (cut) |
+| `api`, `data-structures`, `edn`, `generators`, `numbers`, `reader` | 130 / 12,786 | load errors | B: `clojure.data.generators` needs `java.util.Random`, whose class initialization fails (`Unsafe.objectFieldOffset`, which jrt lacks) |
+| `data-structures-interop`, `parse`, `sequences`, `transducers` | 107 / 1,319 | load errors | A: `clojure.test.check.random` makes a `proxy` (of `ThreadLocal`) |
+| `vectors` | 17 / 1,583 | load error | B: `java.util.stream.Collectors` (cut) |
+| `predicates` | 4 / 1,085 | load error | B: `java.net.URI`'s constructor (cut) |
+| `pprint` | 58 / 474 | load error | B: `java.util.concurrent.Semaphore`; A: pprint's writers |
+| `math` | 41 / 262 | load error | B: jrt's `Math` (`sin` and the rest of `arbace.math`) |
+| `java.io` | 15 / 115 | load error | D6: `java.net.ServerSocket`; B: `java.io.File` |
+| `atoms` | 5 / 23 | load error | B: `java.util.function.IntSupplier` is not in the world |
+| `delays` | 5 / 25 | load error | B: `java.util.concurrent.CyclicBarrier` is not in the world |
+| `proxy.examples` | 0 / 0 | load error | A: `proxy` |
+
+So by part: **B** (jrt's surface) blocks the most: `java.util.Random` alone holds back 12,786
+assertions; then `Collectors`, `URI`, `Math`, `File`, `IntSupplier`, `CyclicBarrier`,
+`Semaphore`, streams, `source-fn`. **A** (proxy) blocks `test.check` (4 namespaces, 1,319
+assertions), pprint and two tests of `protocols`, and `reify`'s duplicate method check.
+**Part 4** (the evaluator's fns and locals clearing): `clearing`.
+
+**Fixed here, the evaluator's own** (`arbace/lang/go/Compiler.clj`, `arbace/lang/go/RT.clj`):
+
+1. *Method values in the namespace they were analyzed in.* A `Class/method` value is a fn that
+   `QualifiedMethodExpr` builds and analyzes (`buildThunk`): the JVM does it when it emits the
+   enclosing code, in the namespace being compiled; the evaluator did it each time the value was
+   evaluated, in the current namespace, where the class's short name may not resolve
+   (`method-thunks`: `Tuple/create` evaluated during `run-tests` in `user`). The variant records
+   the namespace at analysis (its constructor) and builds the thunk once, there.
+2. *`def` of an existing dynamic var.* `DefExpr.eval` sets the var's dynamic flag to the def's,
+   `DefExpr.emit` only sets it when the def says `^:dynamic`. The JVM runs `arbace.core`
+   AOT-compiled, so `core_print`'s `(def print-initialized true)` leaves core's dynamic var
+   dynamic there, and not in the evaluator (`rt`: binding it threw, and the unbalanced
+   `pop-thread-bindings` ended the process). Now a top-level def in a source embedded in the
+   program (`RT.load` binds `Evaluator.EMBEDDED_LOAD` while it loads one) keeps the flag, as the
+   emitted code does, and a def inside a fn (`evalIn`) runs as `emit` compiles it (dynamic flag
+   only when set; meta, then the root). Top-level defs elsewhere keep `eval`'s semantics, as the
+   JVM's REPL and `load` have them.
+3. *`case`'s performance warning.* "case has int tests, but tested expression is not primitive"
+   is printed by `CaseExpr.emitExprForInts`, which the Go build never runs: the variant's
+   constructor (a copy of `CaseExpr`'s) prints it at analysis (`control`).
+4. *`*unchecked-math* :warn-on-boxed`.* `StaticMethodExpr.isBoxedMath` reads `Numbers`' methods'
+   `WarnBoxedMath` annotations, which jrt's reflection does not have (`test.check` sets the
+   option, and every boxed call failed to analyze): the variant knows the 24 annotated names
+   (each name's overloads are all annotated `false`), and warns as the JVM does.
+
+### Times and resources
+
+On this machine (64 cores, shared with two other agents' work): the suite takes **4 min 36 s**
+with `-j 16` (102 CPU-minutes); the JVM's, in the gate, 3 min 15 s with `-j 24` (renaming and fixtures included). A namespace's process takes 58 to 102 s,
+almost all of it requiring the test namespaces (and their libraries) through the evaluator.
+`GOGC` matters here: one process with the default `GOGC=100` takes 63 s and 203 s of CPU (289
+MB resident), with `GOGC=400` 56 s and 89 s of CPU (650 MB), with `GOMAXPROCS=4` 88 s (339 MB).
+The runner sets `GOGC=400` for its processes unless `GOGC` is set: 16 processes need about 10
+GB. Start-up work (part 4: pre-read or pre-analyzed namespaces) would shorten every process.
+
+### For the gate (proposal; `bin/gate` unchanged)
+
+`bin/gate --full`, concurrently with its other checks (they take about 6.5 minutes), one chain:
+
+1. `bin/jrt-convert` (about 70 s), then `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`
+   (c2g and the Go build: a few minutes, the Go cache warm);
+2. then concurrently: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` (seconds);
+   `CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12` against
+   `test/arbace-go-results.edn` (about 5 minutes, about 8 GB); and the oracle on the Go build
+   (`bin/oracle check 'target/arbace-go/amd64/arbace -'`, about 1 minute), once its known
+   mismatches are recorded in a reference as the suite's are (today `check` fails on any
+   mismatch: 266 on the Go build; a `--expected FILE` option comparing the set of mismatching
+   cases would make it a gate check).
+
+That makes `--full` about 11 to 12 minutes and adds about 20 GB at its peak beside the g2c round
+trips; arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours).
+The essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
+change is what the Go checks guard (as `--full` is run for compiler, j2c and g2c changes).
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`

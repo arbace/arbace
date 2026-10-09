@@ -41,6 +41,56 @@
 (defn normalize [x]
   (walk/postwalk (fn [y] (if (string? y) (normalize-str y) y)) x))
 
+;; ----- helpful NullPointerException messages (V11, the user's decision of 2026-10-09)
+;;
+;; HotSpot describes the null of an implicit NullPointerException (JEP 358: "Cannot invoke
+;; \"String.length()\" because \"s\" is null"); the Go build's implicit ones have a null
+;; message. A chain entry of a NullPointerException whose message is such a description is
+;; recorded with a third element, :helpful-npe, and check compares it by class only.
+
+(def ^:private helpful-npe-re
+  ;; the failed actions of HotSpot's NullPointerExceptions (bytecodeUtils.cpp,
+  ;; print_NPE_failed_action), then the optional description of the null (print_NPE_cause)
+  #"Cannot (invoke \"[^\"]+\"|read field \"[^\"]+\"|assign field \"[^\"]+\"|load from \w+ array|store to \w+ array|read the array length|throw exception|enter synchronized block|exit synchronized block)( because .+ is null)?")
+
+(defn helpful-npe?
+  "Whether the chain entry [class message] is a NullPointerException with a helpful message."
+  [entry]
+  (and (vector? entry) (= 2 (count entry))
+       (= "java.lang.NullPointerException" (first entry))
+       (string? (second entry))
+       (boolean (re-matches helpful-npe-re (second entry)))))
+
+(def ^:private chain-keys [:ex :print-ex :throws :error])
+
+(defn mark-helpful-npes
+  "The record with each helpful NullPointerException entry of its exception chains marked
+  [class message :helpful-npe]."
+  [r]
+  (reduce (fn [r k]
+            (if (vector? (get r k))
+              (update r k (fn [chain] (mapv #(if (helpful-npe? %) (conj % :helpful-npe) %) chain)))
+              r))
+          r chain-keys))
+
+(defn accept-helpful-npes
+  "[a' n]: the actual record a with each chain entry replaced by the expected record e's where
+  e's entry is a marked helpful NullPointerException and a's has the same class (compared by
+  class only, whatever a's message), and n the number of entries so replaced. Chains of
+  different lengths are left as they are."
+  [e a]
+  (reduce (fn [[a n] k]
+            (let [ec (get e k) ac (get a k)]
+              (if (and (vector? ec) (vector? ac) (= (count ec) (count ac)))
+                (let [pairs (map (fn [x y]
+                                   (if (and (= :helpful-npe (get x 2)) (vector? y) (= (first x) (first y)))
+                                     [x (if (= x y) 0 1)] [y 0]))
+                                 ec ac)
+                      m (reduce + (map second pairs))]
+                  (if (pos? m) [(assoc a k (mapv first pairs)) (+ n m)] [a n]))
+                [a n])))
+          [a 0] chain-keys))
+
 ;; ----- reading the sources
 
 (defn- skip-blank
@@ -265,7 +315,7 @@
         by (into {} (map (fn [r] [(get r k) r]) recs))]
     (mapv (fn [c]
             (if-let [r (by (get c k))]
-              (merge c (select-keys (normalize r) (result-keys part)))
+              (merge c (mark-helpful-npes (select-keys (normalize r) (result-keys part))))
               (assoc c :missing true)))
           cases)))
 
@@ -370,17 +420,24 @@
                               (assoc r :expected (:cases e) :ms (quot (- (System/nanoTime) t0) 1000000))))
                      work)
         report (StringBuilder.)
-        total (atom 0) bad (atom 0) incomplete (atom 0)]
+        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0)]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]
       (let [ks (conj (result-keys part) :missing)
             ;; compared as printed, so that -0.0 differs from 0.0 and ##NaN equals itself
             canon (fn [x] (emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))
-            mism (keep (fn [[e a]] (when (not= (canon (select-keys e ks)) (canon (select-keys a ks))) [e a]))
-                       (map vector expected cases))
+            accepted (atom 0)
+            mism (doall
+                   (keep (fn [[e a]]
+                           (let [[a n] (accept-helpful-npes e a)]
+                             (if (not= (canon (select-keys e ks)) (canon (select-keys a ks)))
+                               [e a]
+                               (do (when (pos? n) (swap! accepted inc)) nil))))
+                         (map vector expected cases)))
             line (format "%-40s %5d/%5d ok %6d ms%s" (rel src) (- (count expected) (count mism)) (count expected) ms
-                         (str (when-not done (str ", incomplete (exit " exit ")"))
+                         (str (when (pos? @accepted) (str ", " @accepted " by V11"))
+                              (when-not done (str ", incomplete (exit " exit ")"))
                               (when (seq noise) (str ", " (count noise) " other stdout lines"))))]
-        (swap! total + (count expected)) (swap! bad + (count mism))
+        (swap! total + (count expected)) (swap! bad + (count mism)) (swap! v11 + @accepted)
         (when-not done (swap! incomplete inc))
         (println line)
         (.append report (str "== " line "\n"))
@@ -395,8 +452,8 @@
             (when (< i 5) (print what))))))
     (.mkdirs (io/file root ".tmp/oracle"))
     (spit (io/file root ".tmp/oracle/check.txt") (str report))
-    (println (format "== %d of %d cases match, %d mismatches (all in .tmp/oracle/check.txt)%s"
-                     (- @total @bad) @total @bad
+    (println (format "== %d of %d cases match (%d by V11: helpful NullPointerException messages compared by class only), %d mismatches (all in .tmp/oracle/check.txt)%s"
+                     (- @total @bad) @total @v11 @bad
                      (if (pos? @incomplete) (str "; " @incomplete " runs incomplete") "")))
     (and (zero? @bad) (zero? @incomplete))))
 
