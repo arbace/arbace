@@ -28,3 +28,56 @@ adapter.\n"
       (panic (Thrown (UnsupportedOperationException_New_String
                        (Str (+ "no functional interface adapter for " (.-Name (.Info c))))))))
     a))
+
+;; ---------------------------------------------------------------------------------------
+;; arbace.lang.Compiler$Evaluator (variant; doc/go/EVAL-NOTES.md)
+
+(go/func Compiler_Evaluator_SetTraceHook_Supplier__V_native
+  "Compiler_Evaluator_SetTraceHook_Supplier__V_native sets EvalTrace, the evaluated frames of
+stack traces (C2G-SPEC §10.7).\n"
+  [^Supplier s]
+  (set! EvalTrace s))
+
+(go/func Compiler_Evaluator_MonitorEnter_O__V_native
+  "Compiler_Evaluator_MonitorEnter_O__V_native is the evaluator's monitor-enter.\n"
+  [^any o]
+  (MonitorEnter o))
+
+(go/func Compiler_Evaluator_MonitorExit_O__V_native
+  "Compiler_Evaluator_MonitorExit_O__V_native is the evaluator's monitor-exit.\n"
+  [^any o]
+  (MonitorExit o))
+
+;; ---------------------------------------------------------------------------------------
+;; arbace.lang.RT (variant; doc/go/EVAL-NOTES.md): the program's embedded sources
+
+(go/func RT_HostResource_String__B1_native
+  "RT_HostResource_String__B1_native is the Go build's RT.hostResource: the bytes of the
+embedded resource name (the host's Resource: RT.load's sources), or null.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* String)} name]
+  (let [(values b ok) (.Resource (CurrentHost) (.String (NN name)))]
+    (when (not ok)
+      (return nil))
+    (let [a (NewByteArray (conv int32 (len b)))]
+      (range [i x b]
+        (aset (.-A a) i (conv int8 x)))
+      a)))
+
+;; ---------------------------------------------------------------------------------------
+;; java.util.UUID (variant, overlay/jdk/variants/UUID.clj)
+
+(go/func UUID_HostRandomBytes_B1__V_native
+  "UUID_HostRandomBytes_B1__V_native fills b from the host's random source (randomUUID).\n"
+  [^{:tag (* ByteArray)} b]
+  (let [bs (make (slice byte) (len (.-A b)))]
+    (.RandomBytes (CurrentHost) bs)
+    (range [i x bs]
+      (aset (.-A b) i (conv int8 x)))))
+
+(go/func Compiler_Evaluator_CheckCast_Class_O__O_native
+  "Compiler_Evaluator_CheckCast_Class_O__O_native is the evaluator's checkcast of o to c (null
+passes), with the JVM's ClassCastException message.\n"
+  ^any [^{:tag (* Class)} c ^any o]
+  (when (and (!= o nil) (not (.IsInstance_O__Z c o)))
+    (panic (ClassCast o c)))
+  o)

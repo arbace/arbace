@@ -115,7 +115,12 @@
         ms (filter #(and (:ok %) (Modifier/isPublic (.getModifiers ^java.lang.reflect.Member (:member %))))
                    (m/members cname non-leaf? defs))
         by (fn [k] (map :member (filter #(instance? k (:member %)) ms)))
-        meths (keep #(method-entry defs c %) (sort-by (fn [^Method x] [(.getName x) (m/descriptor (.getParameterTypes x) (.getReturnType x))]) (by Method)))
+        ;; by name; a name's overloads in the order the JVM's getMethods gives them, which
+        ;; Reflector's choice among applicable overloads follows (EVAL-NOTES.md)
+        jvm-order (into {} (map-indexed (fn [i ^Method x] [x i]) (.getMethods c)))
+        meths (keep #(method-entry defs c %) (sort-by (fn [^Method x] [(.getName x) (get jvm-order x Integer/MAX_VALUE)
+                                                                         (m/descriptor (.getParameterTypes x) (.getReturnType x))])
+                                                       (by Method)))
         ctors (keep #(ctor-entry defs c %) (sort-by (fn [^Constructor x] (m/descriptor (.getParameterTypes x) nil)) (by Constructor)))
         fields (keep #(field-entry defs c %) (sort-by (fn [^Field x] (.getName x)) (by Field)))
         info (str "(.Info " (m/go-type-name cname) "_class)")

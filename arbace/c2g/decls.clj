@@ -213,6 +213,11 @@
           thisx (if leaf 't 'this)
           kind (:kind node)]
       (cond
+        ;; a constructor whose parameters name a class outside the world does not exist in Go
+        (some #(not (m/in-world? %)) (m/method-desc-classes (:desc (:ctor node))))
+        (c/emit! (c/missing-expr (str "constructor " (or (:class node) n) (:desc (:ctor node))
+                                      " is not in the closed world")
+                                 "V"))
         (= kind :this)
         (let [real (ctor-desc n (:ctor node))
               base (nm/ctor-base real)
@@ -557,7 +562,14 @@
         cloneable (env/assignable? (str "L" n ";") "Ljava/lang/Cloneable;")]
     (remove nil?
             [(list 'go/method 'Ref (with-meta [recv] {:tag 'any}) (list 'when (list '== 't nil) (list 'return nil)) 't)
-             (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str g "_class")))
+             ;; a class with an instance field c2g$class (the evaluator's fns: one run-time class
+             ;; per fn, EVAL-NOTES.md) answers that class when it is set
+             (if-let [f (first (filter #(and (= "c2g$class" (:name %)) (not (m/static? %))) (class-fields n)))]
+               (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))})
+                     (list 'when (list '!= (list (symbol (str ".-" (nm/field-name (:name f)))) 't) nil)
+                           (list 'return (list (symbol (str ".-" (nm/field-name (:name f)))) 't)))
+                     (symbol (str g "_class")))
+               (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str g "_class"))))
              (when (= :object (:kind ts))
                (list 'go/method 'ToString__String (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "String"))})
                      (list (m/jrt-sym pkg "Object_toString") 't)))

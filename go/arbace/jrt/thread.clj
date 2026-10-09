@@ -347,7 +347,7 @@ frames (Java's frames, as an exception's); another thread's stack cannot be read
 empty array.\n"
   ^{:tag (* RefArray)} [^{:tag (* Thread)} t ^Thread_I this]
   (when (== (CurrentThread) t)
-    (return (javaFrames (callers 2))))
+    (return (javaFrames (callers 2) (evalTrace))))
   (NewRefArray StackTraceElement_class 0))
 
 (go/method Impl_ToString__String

@@ -57,7 +57,108 @@
                       DOC_KEY
                       "Sequentially read and evaluate the set of forms contained in the file."
                       arglistskw
-                      (RT/list (RT/vector namesym)))))))))
+                      (RT/list (RT/vector namesym))))
+          ;; arbace.core, as the JVM's RT loads it: from the program's embedded sources (B1a step
+          ;; 5; doc/go/EVAL-NOTES.md). A program without them (c2g's check programs, the
+          ;; evaluator's proof) runs without arbace.core, as before step 5
+          (when (some? (RT/resourceAsStream nil "arbace/core.clj"))
+            (try (RT/load "arbace/core") (catch Exception e (throw (Util/sneakyThrow e))))
+            (set! CHECK_SPECS RT/instrumentMacros)))))))
+
+;; B1a step 5 (doc/go/EVAL-NOTES.md): sources by name. The Go build has no class files and no
+;; URLs: RT.load reads a namespace's .clj (or .cljc) from the program's embedded sources (jrt's
+;; host resources, C2G-SPEC §10.3), else from the directories of ARBACE_PATH (separated by :),
+;; and evaluates it; RT's initialization loads arbace.core so, and RT.doInit has no socket
+;; server (arbace.core.server is not in the Go build: JAVA-SURFACE.md decision 6)
+(c2g/variant RT
+  (method ^:public ^:static resourceAsStream ^InputStream [^ClassLoader loader ^String name]
+    (let [b (RT/hostResource name)]
+      (if (some? b)
+          (java.io.ByteArrayInputStream. b)
+          (RT/pathResource name))))
+
+  (c2g/add
+    (method ^:static ^:native hostResource ^byte/1 [^String name]))
+
+  (c2g/add
+    (method ^:static pathResource ^InputStream [^String name]
+      (let [path (System/getenv "ARBACE_PATH")]
+        (when (some? path)
+          (loop [^int start 0]
+            (when (<= start (.length path))
+              (let [colon (.indexOf path ":" start)
+                    end (if (< colon 0) (.length path) colon)
+                    dir (.substring path start end)]
+                (when (> (.length dir) 0)
+                  (let [ins (RT/openFile (java-str dir "/" name))]
+                    (when (some? ins) (return ins))))
+                (recur (unchecked-inc-int end))))))
+        nil)))
+
+  (c2g/add
+    (method ^:static openFile ^InputStream [^String file]
+      (try
+        (java.io.FileInputStream. file)
+        (catch FileNotFoundException e nil))))
+
+  (method ^:public ^:static load :throws [IOException ClassNotFoundException] ^void [^String scriptbase
+                                                                                     ^boolean failIfNotFound]
+    (let [classfile (java-str scriptbase LOADER_SUFFIX ".class")
+          cljfile (java-str scriptbase ".clj")
+          cljcfile (java-str scriptbase ".cljc")
+          ^:mutable scriptfile cljfile
+          ^:mutable ins (RT/resourceAsStream nil cljfile)]
+      (when (nil? ins)
+        (set! scriptfile cljcfile)
+        (set! ins (RT/resourceAsStream nil cljcfile)))
+      (cond
+        (some? ins)
+          (let [slash (.lastIndexOf scriptfile \/)
+                file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
+            (let [t0 (System/nanoTime)]
+              (try
+                (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
+                (finally
+                  (.close ins)
+                  ;; ARBACE_LOAD_TIMES: each source's load time on stderr (EVAL-NOTES.md)
+                  (when (some? (System/getenv "ARBACE_LOAD_TIMES"))
+                    (.println (RT/errPrintWriter)
+                              (java-str "load " scriptfile " "
+                                        (quot (- (System/nanoTime) t0) 1000000) " ms")))))))
+        failIfNotFound
+          (throw
+            (FileNotFoundException.
+              (String/format
+                "Could not locate %s, %s or %s on classpath.%s"
+                (new
+                  Object/1
+                  [classfile
+                   cljfile
+                   cljcfile
+                   (if (.contains scriptbase "_")
+                       " Please check that namespaces with dashes use underscores in the Clojure file name."
+                       "")])))))))
+
+  (method ^:private ^:static ^:synchronized doInit ^void []
+    (when-not INIT
+      (set! INIT true)
+      (Var/pushThreadBindings
+        (^[Object/1] RT/mapUniqueKeys CURRENT_NS
+                                      (.deref CURRENT_NS)
+                                      WARN_ON_REFLECTION
+                                      (.deref WARN_ON_REFLECTION)
+                                      RT/UNCHECKED_MATH
+                                      (.deref RT/UNCHECKED_MATH)))
+      (try
+        (let [USER (Symbol/intern "user")
+              CLOJURE (Symbol/intern "arbace.core")
+              in_ns (RT/var "arbace.core" "in-ns")
+              refer (RT/var "arbace.core" "refer")]
+          (.invoke in_ns USER)
+          (.invoke refer CLOJURE)
+          (RT/maybeLoadResourceScript "user.clj"))
+        (catch Exception e (throw (Util/sneakyThrow e)))
+        (finally (Var/popThreadBindings))))))
 
 ;; B1a step 5 (doc/go/EVAL-PLAN.md): there are no class loaders in the Go build (C2G-SPEC §10.3);
 ;; Compiler.eval and Compiler.load bind *loader* to this, as on the JVM, and nothing reads it

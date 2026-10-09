@@ -69,12 +69,20 @@
     (case h
       ("method" "c2g-cut-method")
       (let [[_ nm & more] f
+            ;; the parameters: the first vector that is not the :throws list
+            more (loop [xs more acc []]
+                   (cond (empty? xs) acc
+                         (= :throws (first xs)) (recur (drop 2 xs) acc)
+                         :else (recur (rest xs) (conj acc (first xs)))))
             params (first (filter vector? more))
             static (boolean (:static (meta nm)))
             ps (if static params (rest params))]
         [:method (name nm) static (mapv #(some-> (:tag (meta %)) str) ps)])
       "constructor"
-      (let [params (first (filter vector? (rest f)))]
+      (let [params (first (filter vector? (loop [xs (rest f) acc []]
+                                            (cond (empty? xs) acc
+                                                  (= :throws (first xs)) (recur (drop 2 xs) acc)
+                                                  :else (recur (rest xs) (conj acc (first xs)))))))]
         [:ctor (mapv #(some-> (:tag (meta %)) str) (rest params))])
       "field" (let [nm (first (filter symbol? (rest f)))] [:field (name nm)])
       "static-initializer" [:static-initializer (or (:c2g/nth (meta f)) 0)]

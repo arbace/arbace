@@ -644,8 +644,10 @@
                              (nil? (:x a)) (list '== (:x b) nil)
                              (nil? (:x b)) (list '== (:x a) nil)
                              (= (gotype (:t a)) (gotype (:t b))) (list '== (:x a) (:x b))
-                             :else (list '== (coerce (:x a) (:t a) "Ljava/lang/Object;" (:nn a))
-                                         (coerce (:x b) (:t b) "Ljava/lang/Object;" (:nn b))))
+                             ;; as any: Go compares two interface values only of types one of
+                             ;; which is assignable to the other
+                             :else (list '== (list 'conv 'any (coerce (:x a) (:t a) "Ljava/lang/Object;" (:nn a)))
+                                         (list 'conv 'any (coerce (:x b) (:t b) "Ljava/lang/Object;" (:nn b)))))
                            "Z"))
           :bool= (let [[a b] (operands (:args node) ["Z" "Z"])] (v (list '== (:x a) (:x b)) "Z"))
           :aget (let [[a i] (operands [(:array node) (:index node)] [nil "I"])
@@ -1610,6 +1612,11 @@
 ;; ---------------------------------------------------------------------------------------
 ;; try, catch, finally (§7.9), monitors (§8.1)
 
+(defn- live-catches
+  "The catch clauses of a try node that can catch something: those naming a class of the world."
+  [node]
+  (filter (fn [c] (some #(or (= % "java/lang/Throwable") (m/in-world? %)) (:classes c))) (:catches node)))
+
 (defn- try-literal
   "Runs body-fn as the body of a Go function literal called in place, with control codes for
   the jumps out of it. Returns {:call form :codes [...] :has-exc bool :rv? bool} and the
@@ -1695,7 +1702,9 @@
                   (when nfin
                     (let [nf (with-block #(stmt! nfin))]
                       (emit! (apply list 'when (list '== exc nil) nf))))
-                  (when (seq (:catches node))
+                  ;; a clause catching only classes outside the world catches nothing (no
+                  ;; object of them exists)
+                  (when (seq (live-catches node))
                     (let [clauses (mapcat
                                     (fn [c]
                                       (let [b (:b c)
@@ -1715,11 +1724,11 @@
                                                        (decl! s (gotype (:type b)) cast)
                                                        (translate-ctx (:body c) ctx))))]
                                         [test (cons 'do body)]))
-                                    (:catches node))
+                                    (live-catches node))
                           has-all (some #(= true %) (take-nth 2 clauses))]
                       (emit! (list 'when (list '!= exc nil)
                                    (apply list 'cond (concat clauses (when-not has-all [:else (list 'panic exc)])))))))
-                  (when (empty? (:catches node))
+                  (when (empty? (live-catches node))
                     (emit! (list 'when (list '!= exc nil) (list 'panic exc))))
                   (when (:ctl? lit) (dispatch-codes! ctl rv (:codes lit)))))]
     (if fin

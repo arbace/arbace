@@ -140,6 +140,14 @@ that enqueues it.\n"
 (go/func WeakReference_New_O_ReferenceQueue ^{:tag (* WeakReference)} [^any o ^{:tag (* ReferenceQueue)} q]
   (let [r (addr (lit WeakReference))] (.initWeak (.-Reference r) r o q) r))
 
+(go/method Ctor_O
+  "Ctor_O is WeakReference(referent) as a translated subclass's constructor calls it (the
+JDK's ArrayBlockingQueue.Itrs.Node).\n"
+  [^{:tag (* WeakReference)} r ^Reference_I this ^any o]
+  (.initWeak (.-Reference r) this o nil))
+(go/method Ctor_O_ReferenceQueue
+  [^{:tag (* WeakReference)} r ^Reference_I this ^any o ^{:tag (* ReferenceQueue)} q]
+  (.initWeak (.-Reference r) this o q))
 (go/method Get__O ^any [^{:tag (* WeakReference)} r] (.Impl_Get__O r r))
 (go/method Clear__V [^{:tag (* WeakReference)} r] (.Impl_Clear__V r r))
 (go/method Enqueue__Z ^bool [^{:tag (* WeakReference)} r] (.Impl_Enqueue__Z r r))

@@ -44,9 +44,19 @@
 ;; ---------------------------------------------------------------------------------------
 ;; The program: its packages
 
+(defn- data-dir?
+  "Whether f is under a directory of data, not forms: one holding a file .g2c-data (a
+  package's embedded files, such as c2g --program's sources, doc/go/EVAL-NOTES.md)."
+  [^File dir ^File f]
+  (loop [d (.getParentFile f)]
+    (cond (or (nil? d) (= (.getAbsoluteFile d) (.getAbsoluteFile dir))) false
+          (.isFile (File. d ".g2c-data")) true
+          :else (recur (.getParentFile d)))))
+
 (defn- clj-files [^File dir]
   (->> (file-seq dir)
-       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".clj")))
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".clj")
+                     (not (data-dir? dir %))))
        (sort-by #(.getPath ^File %))))
 
 (defn- package-file?

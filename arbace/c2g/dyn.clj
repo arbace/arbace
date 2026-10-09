@@ -104,6 +104,25 @@
              'f 't args)
       (list '.ApplyTo_ISeq__O 'f (list 'RT_Seq_O__ISeq (apply list 'jrt/RefArrayOf 'jrt/Object_class 't args))))))
 
+(defn- java-type-name
+  "The Java name of descriptor d (int, java.lang.Object, byte[])."
+  [d]
+  (cond (t/array? d) (str (java-type-name (t/elem-type d)) "[]")
+        (= 1 (count d)) ({"Z" "boolean" "B" "byte" "C" "char" "S" "short" "I" "int" "J" "long"
+                          "F" "float" "D" "double" "V" "void"} d)
+        :else (str/replace (t/desc->internal d) "/" ".")))
+
+(defn- abstract-text
+  "HotSpot's text of an unimplemented interface method, after the receiver class: the resolved
+  method's signature and its interface (the first of ifaces declaring it)."
+  [ifaces [name desc :as k]]
+  (let [[ps r] (t/parse-method-desc desc)
+        declares? (fn [j] (some #(and (= name (:name %)) (= desc (:desc %))) (:methods (a/decl j))))
+        j (or (first (filter declares? ifaces))
+              (first (filter #(some (fn [[kk _]] (= kk k)) (m/vmethods %)) ifaces)))]
+    (str "'abstract " (java-type-name r) " " name "(" (str/join ", " (map java-type-name ps)) ")'"
+         (when j (str " of interface " (str/replace j "/" "."))) ".")))
+
 (defn- method-form [ifaces i [name desc :as k]]
   (let [[ps r] (t/parse-method-desc desc)
         pn (vec (for [j (range (count ps))] (symbol (str "p" j))))
@@ -115,7 +134,7 @@
                (for [[j fsym] (defaults-for ifaces k)]
                  (list 'when (list '.DynImplements 't (m/class-sym :lang j "_class"))
                        (if (= "V" r) (list 'do (apply list fsym 't pn) '(return)) (list 'return (apply list fsym 't pn)))))
-               [(list 'panic (list 'dynAbstract 't (str name desc)))])]
+               [(list 'panic (list 'dynAbstract 't (abstract-text ifaces k)))])]
     (list 'go/method (symbol base) params
           (list 'let ['f (list 'aget (list '.-Slots (list '.-D 't)) i)]
                 (apply list 'when (list '== 'f nil) dflt)
@@ -168,7 +187,9 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                        '(case ["V"] (return nil))]))
              'r)
        '(go/func dynAbstract ^any [^{:tag (* Dyn)} t ^string m]
-          (jrt/Thrown (jrt/AbstractMethodError_New_String (jrt/Str (+ (.-Name (.Info (.-Cls (.-D t)))) "." m)))))
+          (jrt/Thrown (jrt/AbstractMethodError_New_String
+                        (jrt/Str (+ "Receiver class " (.-Name (.Info (.-Cls (.-D t))))
+                                    " does not define or inherit an implementation of the resolved method " m)))))
        '(go/method DynImplements ^bool [^{:tag (* Dyn)} t ^{:tag (* jrt/Class)} c]
           (aget (.-Ifaces (.-D t)) c))
        '(go/method Ref ^any [^{:tag (* Dyn)} t] (when (== t nil) (return nil)) t)
@@ -251,6 +272,98 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                                                  (range [_ x args] (set! a (append a (jrt/Box x))))
                                                  (let [r (.ApplyTo_ISeq__O impl (RT_Seq_O__ISeq (jrt/RefArrayOf jrt/Object_class (spread a))))]
                                                    (dynConvert ret r))))))))))
+       (list 'go/func (symbol (native-name "setStaticMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;Ljava/lang/Class;Larbace/lang/IFn;)V"))
+             [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'params '(* jrt/RefArray)) (tag 'ret '(* jrt/Class)) (tag 'impl 'IFn)]
+             '(let [info (.Info c)]
+                (set! (.-Methods info)
+                      (append (.-Methods info)
+                              (lit jrt/MethodInfo :Name (.String (jrt/NN name)) :Params (dynClassList params) :Return ret
+                                   :Modifiers (bit-or jrt/AccPublic jrt/AccStatic)
+                                   :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                             (dynConvert ret (dynCall impl nil args))))))))
+       (list 'go/func (symbol (native-name "defineCtor" "(Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)V"))
+             [(tag 'c '(* jrt/Class)) (tag 'params '(* jrt/RefArray)) (tag 'tail '(* jrt/RefArray))]
+             '(let [dc (dynClassOf c)
+                    info (.Info c)
+                    ^{:tag (slice any)} tl nil]
+                (when (!= tail nil)
+                  (set! tl (append tl (spread (.-A tail)))))
+                (set! (.-Ctors info)
+                      (append (.-Ctors info)
+                              (lit jrt/CtorInfo :Params (dynClassList params) :Modifiers jrt/AccPublic
+                                   :New (fn ^any [^{:tag (slice any)} args]
+                                          (let [f (make (slice any) 0 (+ (len args) (len tl)))]
+                                            (range [_ x args] (set! f (append f (jrt/Box x))))
+                                            (set! f (append f (spread tl)))
+                                            (addr (lit Dyn :D dc :F f)))))))))
+       (list 'go/func (symbol (native-name "defineInterface" "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/Class;"))
+             (with-meta [(tag 'name '(* jrt/String)) (tag 'extends '(* jrt/RefArray))] {:tag '(* jrt/Class)})
+             '(let [info (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name))
+                                    :Modifiers (bit-or jrt/AccPublic jrt/AccInterface jrt/AccAbstract)
+                                    :Kind jrt/KindInterface :Interfaces (dynClassList extends)
+                                    :Go "arbace/lang.Dyn (interface)"))
+                    c (jrt/DefineDynamic info)]
+                (set! (.-IsInstance info)
+                      (fn ^bool [^any x]
+                        (let [(values d ok) (assert (* Dyn) x)]
+                          (and ok (aget (.-Ifaces (.-D d)) c)))))
+                c))
+       (list 'go/func (symbol (native-name "addInterfaceMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Class;Ljava/lang/Class;)V"))
+             [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'params '(* jrt/RefArray)) (tag 'ret '(* jrt/Class))]
+             '(let [info (.Info c)
+                    ps (dynClassList params)
+                    key (+ (.String (jrt/NN name)) "(")]
+                (range [_ p ps] (set! key (+ key (.Descriptor p))))
+                (set! key (+ key ")" (.Descriptor (jrt/NN ret))))
+                (set! (.-Methods info)
+                      (append (.-Methods info)
+                              (lit jrt/MethodInfo :Name (.String name) :Params ps :Return ret
+                                   :Modifiers (bit-or jrt/AccPublic jrt/AccAbstract)
+                                   :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
+                                             (let [d (dynOf this)
+                                                   impl (aget (.-ByKey (.-D d)) key)]
+                                               (when (== impl nil)
+                                                 (panic (dynAbstract d (dynAbstractText c name ps ret))))
+                                               (dynConvert ret (dynCall impl d args)))))))))
+       (list 'go/func (symbol (native-name "defineFnClass" "(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Class;"))
+             (with-meta [(tag 'name '(* jrt/String)) (tag 'super '(* jrt/Class))] {:tag '(* jrt/Class)})
+             '(jrt/DefineDynamic (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name))
+                                            :Modifiers (bit-or jrt/AccPublic jrt/AccFinal)
+                                            :Kind jrt/KindClass :Super super
+                                            :Go "arbace/lang.Compiler_EvalFn (fn)"))))
+       '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
+          (when (.IsArray__Z c)
+            (return (+ (dynTypeName (.GetComponentType__Class c)) "[]")))
+          (.String (.GetName__String c)))
+       '(go/func dynAbstractText
+          "dynAbstractText: HotSpot's text of an unimplemented method of an interface made at run time."
+          ^string [^{:tag (* jrt/Class)} c ^{:tag (* jrt/String)} name ^{:tag (slice (* jrt/Class))} ps ^{:tag (* jrt/Class)} ret]
+          (let [s (+ "'abstract " (dynTypeName ret) " " (.String name) "(")]
+            (range [i p ps]
+              (when (> i 0) (set! s (+ s ", ")))
+              (set! s (+ s (dynTypeName p))))
+            (+ s ")' of interface " (.-Name (.Info c)) ".")))
+       (list 'go/func (symbol (native-name "hideField" "(Ljava/lang/Class;I)V"))
+             [(tag 'c '(* jrt/Class)) (tag 'i 'int32)]
+             '(let [info (.Info c)]
+                (set! (.-Modifiers (aget (.-Fields info) i)) jrt/AccPrivate)))
+       '(go/func dynClassList
+          "dynClassList: the classes of a Class[] (nil for null)."
+          ^{:tag (slice (* jrt/Class))} [^{:tag (* jrt/RefArray)} a]
+          (let [^{:tag (slice (* jrt/Class))} ps nil]
+            (when (!= a nil)
+              (range [_ x (.-A a)]
+                (set! ps (append ps (assert (* jrt/Class) x)))))
+            ps))
+       '(go/func dynCall
+          "dynCall calls a method's fn with the object (none for a static method) and the
+arguments, boxed.\n"
+          ^any [^IFn impl ^any this ^{:tag (slice any)} args]
+          (let [^{:tag (slice any)} a nil]
+            (when (!= this nil)
+              (set! a (append a this)))
+            (range [_ x args] (set! a (append a (jrt/Box x))))
+            (.ApplyTo_ISeq__O impl (RT_Seq_O__ISeq (jrt/RefArrayOf jrt/Object_class (spread a))))))
        (list 'go/func (symbol (native-name "newInstance" "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;"))
              (with-meta [(tag 'c '(* jrt/Class)) (tag 'fieldValues '(* jrt/RefArray))] {:tag 'any})
              '(let [d (addr (lit Dyn :D (dynClassOf c)))]

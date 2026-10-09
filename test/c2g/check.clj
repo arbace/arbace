@@ -402,16 +402,26 @@
    ["arbace/lang/Namespace" "findOrCreate" "(Larbace/lang/Symbol;)Larbace/lang/Namespace;"]
    ["arbace/lang/Symbol" "intern" "(Ljava/lang/String;)Larbace/lang/Symbol;"]])
 
+(def ^:dynamic *core*
+  "Whether the program loads arbace.core (bin/c2g-check -- --program: the namespaces' sources
+  embedded, RT's initialization loads arbace.core, B1a step 5; EVAL-NOTES.md)."
+  false)
+
 (defn- context-forms
   "The oracle's context, as far as it needs no arbace.core (doc/go/ORACLE.md: the driver runs
   as arbace.main - runs a script, then in the namespace user): *ns* bound to user. Nothing
   when RT or the members are not translated."
   []
   (when (every? (fn [[c n d]] (and (m/translated? c) (contains? arbace.c2g.decls/*reached* [c n d]))) context-members)
-    '[(lang/Var_PushThreadBindings_Associative__V
-        (lang/RT_MapUniqueKeys_O1__IPersistentMap
-          (jrt/RefArrayOf jrt/Object_class (.Ref (ctxCurrentNs))
-                          (.Ref (lang/Namespace_FindOrCreate_Symbol__Namespace (lang/Symbol_Intern_String__Symbol (jrt/Str "user")))))))]))
+    [(list 'lang/Var_PushThreadBindings_Associative__V
+           (list 'lang/RT_MapUniqueKeys_O1__IPersistentMap
+                 (apply list 'jrt/RefArrayOf 'jrt/Object_class '(.Ref (ctxCurrentNs))
+                        '(.Ref (lang/Namespace_FindOrCreate_Symbol__Namespace (lang/Symbol_Intern_String__Symbol (jrt/Str "user"))))
+                        ;; with arbace.core: the binding of arbace.main's with-bindings the
+                        ;; class scripts' printed results depend on
+                        (when *core*
+                          ['(.Ref (lang/RT_Var_String_String__Var (jrt/Str "arbace.core") (jrt/Str "*print-namespace-maps*")))
+                           '(.Ref (jrt/Boolean_ValueOf_Z__Boolean true))]))))]))
 
 (defn program-forms
   "The main package's file: one function per step, main running them in order. A step using
@@ -436,8 +446,16 @@
          (apply list 'go/func 'context [] (context-forms))])
       (for [st steps :when (= :ok (:k st))]
         (apply list 'go/func (symbol (str "step" (:i st))) [] (:body st)))
+      (when *core*
+        ['(go/var ^{:go/embed ["res"] :tag embed/FS} resources)])
       [(apply list 'go/func 'main []
               (concat
+                ;; the embedded sources, which RT.load reads (RT's initialization loads
+                ;; arbace.core from them)
+                (when *core*
+                  ['(let [(values sub err) (fs/Sub resources "res")]
+                      (when (== err nil)
+                        (jrt/SetHost (lit jrt/OSHost :Resources sub))))])
                 ;; as a step 0 (no expected record): a failure is reported, not fatal
                 (when (seq (context-forms)) ['(runStep 0 "" context)])
                 (for [st steps]
@@ -445,18 +463,35 @@
                     (list 'runStep (:i st) (:bind st) (symbol (str "step" (:i st))))
                     (list 'fmt/Printf "@@c2g %d U %s\n" (:i st) (str/replace (str (:body st)) "\n" " "))))))])))
 
+(declare sh)
+
 (defn write-program! [prog-dir cases]
-  (let [dir (str prog-dir "/go/arbace/cmd")]
+  (let [dir (str prog-dir "/go/arbace/cmd")
+        ;; --program: the main package c2g wrote is replaced by the check's, which embeds its
+        ;; sources
+        res (io/file dir "arbace" "res")
+        embedded (when (and *core* (.isDirectory res))
+                   (sort (for [^java.io.File f (file-seq res)
+                               :when (and (.isFile f) (str/ends-with? (.getName f) ".clj"))]
+                           (str "res/" (.relativize (.toPath res) (.toPath f))))))]
     (io/make-parents (io/file dir "x"))
+    (when (.isDirectory res)
+      (sh "rm" "-rf" (str dir "/c2gcheck"))
+      (sh "mkdir" "-p" (str dir "/c2gcheck"))
+      (sh "mv" (str res) (str dir "/c2gcheck/res"))
+      (sh "rm" "-rf" (str dir "/arbace") (str dir "/arbace.clj")))
     (spit (str dir "/c2gcheck.clj")
           (str (out/form-text '(ns go.arbace.cmd.c2gcheck (:require [arbace.go :as go]))) "\n"
-               (out/form-text '(go/package main :path "arbace/cmd/c2gcheck" :files ["main.go"])) "\n"
+               (out/form-text (list 'go/package 'main :path "arbace/cmd/c2gcheck" :files ["main.go"]
+                                    :embed-files (vec (for [e embedded] [e nil])))) "\n"
                (out/form-text '(load "c2gcheck/main")) "\n"))
     (io/make-parents (io/file dir "c2gcheck" "x"))
     (spit (str dir "/c2gcheck/main.clj")
           (str "(in-ns 'go.arbace.cmd.c2gcheck)\n"
-               (out/form-text '(go/file "main.go" :imports [[fmt "fmt"] [math "math"] [reflect "reflect"] [strconv "strconv"]
-                                                            [strings "strings"] [jrt "arbace/jrt"] [lang "arbace/lang"]]))
+               (out/form-text (list 'go/file "main.go"
+                                    :imports (vec (concat (when *core* '[[embed "embed"] [fs "io/fs"]])
+                                                          '[[fmt "fmt"] [math "math"] [reflect "reflect"] [strconv "strconv"]
+                                                            [strings "strings"] [jrt "arbace/jrt"] [lang "arbace/lang"]]))))
                "\n"
                (str/join "\n" (map out/form-text (program-forms cases)))
                "\n"))))
@@ -672,7 +707,8 @@
                                (let [dir (str prog-dir "-" f)]
                                  (sh "rm" "-rf" dir)
                                  (sh "cp" "-r" prog-dir dir)
-                                 (write-program! dir (:cases x)))))))
+                                 (binding [*core* (boolean (:program opts))]
+                                   (write-program! dir (:cases x))))))))
     (let [core (needs-core)
           ;; the overlay file is the last line (a first run also reports its making)
           overlay (str/trim (last (str/split-lines (second (sh "bin/jrt" "overlay")))))

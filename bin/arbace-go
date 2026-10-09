@@ -1,0 +1,92 @@
+#!/bin/bash
+# Arbace as a static Go executable (B1a; doc/go/EVAL-NOTES.md): run it as bin/arbace runs the
+# JVM Arbace (any arbace.main option: -e, -m, a script, - for stdin, none for the REPL), build
+# it, or smoke-test it.
+#
+# Usage: bin/arbace-go [ARG...]        run target/arbace-go/<arch>/arbace (built first when
+#                                      missing); arm64 runs under qemu-aarch64
+#        bin/arbace-go --build         translate (bin/c2g --program) and build the executables
+#                                      of $ARBACE_GO_ARCHES into target/arbace-go/<arch>/arbace
+#        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
+#                                      error's exit status, for each of $ARBACE_GO_ARCHES
+# Environment:
+#   ARBACE_GO_ARCH    the architecture run (default amd64)
+#   ARBACE_GO_ARCHES  the architectures built and smoke-tested (default amd64,arm64)
+#   ARBACE_PATH       directories (separated by :) where RT.load finds namespaces after the
+#                     sources embedded in the executable (the JVM's class path)
+#   C2G_JVM_OPTS      bin/c2g's JVM options
+# The build needs bin/build-arbace and bin/jrt-convert first (bin/c2g). Exit status: the
+# program's; for --build and --smoke 0 when all went well.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+dir=$root/target/arbace-go
+arch=${ARBACE_GO_ARCH:-amd64}
+arches=${ARBACE_GO_ARCHES:-amd64,arm64}
+
+build() {
+  mkdir -p "$dir"
+  echo "== bin/c2g --program" >&2
+  (cd "$root" && bin/c2g --program --out "$dir/c2g") > "$dir/c2g.log" 2>&1 \
+    || { tail -20 "$dir/c2g.log" >&2; echo "arbace-go: c2g failed ($dir/c2g.log)" >&2; return 1; }
+  local overlay
+  overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  for a in ${arches//,/ }; do
+    echo "== bin/g2c build $a" >&2
+    mkdir -p "$dir/$a"
+    (cd "$root" && bin/g2c build --line-file --arch "$a" --work "$dir/work-$a" -o "$dir/$a/arbace" \
+       --overlay "$overlay" "$dir/c2g/prog") > "$dir/build-$a.log" 2>&1 \
+      || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
+    echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes)" >&2
+  done
+}
+
+run() { # run ARCH ARG...
+  local a=$1; shift
+  if [ "$a" = arm64 ]; then
+    exec_cmd=(/usr/bin/qemu-aarch64 "$dir/$a/arbace")
+  else
+    exec_cmd=("$dir/$a/arbace")
+  fi
+  "${exec_cmd[@]}" "$@"
+}
+
+smoke() {
+  local status=0 t
+  t=$(mktemp -d "$root/.tmp/arbace-go-smoke.XXXXXX")
+  cat > "$t/script.clj" <<'EOF'
+(ns smoke.script (:require [arbace.string :as str]))
+(defprotocol Shape (area [s]))
+(defrecord Rect [w h] Shape (area [_] (* w h)))
+(deftype Circle [r] Shape (area [_] (* 3 r r)))
+(defn total [shapes] (reduce + (map area shapes)))
+(println (total [(->Rect 2 3) (Circle. 2)]) (str/join "," (map inc [1 2 3])))
+(println (try (throw (ex-info "boom" {:a 1})) (catch Exception e [(ex-message e) (ex-data e)])))
+(println (loop [i 0 acc []] (if (< i 5) (recur (inc i) (conj acc (* i i))) acc)))
+EOF
+  for a in ${arches//,/ }; do
+    local fails=0
+    check() { # check NAME EXPECTED ACTUAL
+      if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1"; echo "    expected: $2"; echo "    got:      $3"; fails=$((fails+1)); fi
+    }
+    echo "== $a"
+    check "-e (+ 1 2)" "3" "$(run "$a" -e '(+ 1 2)' 2>&1)"
+    check "a script" "$(printf '18 2,3,4\n[boom {:a 1}]\n[0 1 4 9 16]')" "$(run "$a" "$t/script.clj" 2>&1)"
+    check "the REPL on stdin" "$(printf 'user=> 3\nuser=> #'"'"'user/sq\nuser=> 49\nuser=> ')" \
+      "$(printf '(+ 1 2)\n(defn sq [x] (* x x))\n(sq 7)\n' | run "$a" 2>&1 | tail -n +2)"
+    run "$a" -e '(/ 1 0)' > "$t/err.txt" 2>&1; local st=$?
+    check "an error's exit status" "1" "$st"
+    check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"
+    check "stdin as a script (-)" "6" "$(echo '(println (* 2 3))' | run "$a" - 2>&1)"
+    [ $fails -eq 0 ] || status=1
+  done
+  rm -rf "$t"
+  return $status
+}
+
+case ${1:-} in
+  --build) build ;;
+  --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
+  *)
+    if [ ! -x "$dir/$arch/arbace" ]; then arches=$arch build || exit 1; fi
+    run "$arch" "$@" ;;
+esac
