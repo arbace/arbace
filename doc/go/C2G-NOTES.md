@@ -417,25 +417,34 @@ quieter moment):
 
 ### Proposed amendments (phase 2D)
 
+D1-D6 accepted 2026-10-09 and folded into C2G-SPEC, renamed W1-W6 there (C2G-SPEC §16); D7
+deferred by the user to plan step 7, recorded in C2G-SPEC §13.4 as planned work.
+
 - **D1 (§4.3, §7.9.6) Positions.** The analyzer keeps each form's line on its node and each
   member's line; c2g puts it on the statements and declarations it writes and lays the forms
   out on those lines (explicit `^{:line n}` where the text has passed them; declarations by
   line); an `arbace/lang` Go file is named after its class forms file; builds use
-  `--line-file`. The frame table stays as J4 says (names only): lines come from gc.
+  `--line-file`. The frame table stays as J4 says (names only): lines come from gc. *Accepted
+  2026-10-09, folded into C2G-SPEC §4.3 and §7.9.6 as W1.*
 - **D2 (§7.8) Pattern switches** are an `if` chain in a labeled block left by each matching
   arm; derived record accessors are field reads; a declared accessor's exception is wrapped
   in `MatchException` (a jrt stand-in until the closure has `java.lang.MatchException`).
+  *Accepted 2026-10-09, folded into C2G-SPEC §7.8 as W2.*
 - **D3 (§6.2, §13.4) Benign initialization.** A static method needs no entry guard when its
   class's initialization is benign (defined above) and it reads none of its class's or
-  superclasses' statics.
+  superclasses' statics. *Accepted 2026-10-09, folded into C2G-SPEC §6.2 (and §13.4) as W3.*
 - **D4 (§4.4) Checks.** The collision check covers generated and hand-written names; the
-  package-private check compares Java packages, not Go packages; both are errors.
+  package-private check compares Java packages, not Go packages; both are errors. *Accepted
+  2026-10-09, folded into C2G-SPEC §4.4 as W4.*
 - **D5 (§8.3) Race report.** `report.edn` `:race-candidates`, and `bin/c2g-race`
-  (`-race` needs cgo, which the race build alone turns on).
-- **D6 (§10.6) `--program`** writes `arbace/cmd/arbace` as above.
+  (`-race` needs cgo, which the race build alone turns on). *Accepted 2026-10-09, folded into
+  C2G-SPEC §8.3 as W5.*
+- **D6 (§10.6) `--program`** writes `arbace/cmd/arbace` as above. *Accepted 2026-10-09,
+  folded into C2G-SPEC §10.6 as W6.*
 - **D7 (§13.4, for jrt)** `GOGC` set by jrt at start (400 measured here), and arrays of
   references as one allocation (or 8-byte slots, §13.2's thin pointers) are where the factor
-  lies, not c2g's code.
+  lies, not c2g's code. *Deferred by the user 2026-10-09 to plan step 7; recorded in C2G-SPEC
+  §13.4 as planned work, not normative (no W number).*
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
@@ -786,16 +795,22 @@ The same on both architectures. All 29 failing cases need JDK resource data: 24 
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
+All accepted 2026-10-09 and folded into C2G-SPEC, renamed K1-K3 there (C2G-SPEC §16); P2C-2
+supersedes P2A-4's (P4's) interim streams.
+
 - **P2C-1 (§4.1, §4.3) jrt's own Java and the JDK's variants.** The JDK input is the translated
   closure plus `overlay/jdk/java.base` (jrt's Java, replacing or adding to jdk26u's files);
   Go-build variants of JDK classes live in `overlay/jdk/variants`. A class of jrt's Java may be
-  registered under the JDK name it stands for (`java-names`).
+  registered under the JDK name it stands for (`java-names`). *Accepted 2026-10-09, folded into
+  C2G-SPEC §4.1 (and §4.3, §4.6, §9.1, §11) as K1.*
 - **P2C-2 (§11, A5) c2g-written jrt members.** Beyond `String.format`: `System.in`/`out`/`err` and
   their setters, `String.CASE_INSENSITIVE_ORDER`, `String.split`/`replaceAll`/`replaceFirst`/
   `matches`, written by c2g when their classes are translated; `printStackTrace()` and uncaught
-  exceptions print through `System.err`.
+  exceptions print through `System.err`. *Accepted 2026-10-09, folded into C2G-SPEC §11 (and
+  §7.9.6, §9.1, §9.4) as K2.*
 - **P2C-3 (J9) The stand-ins.** All 64 are translated classes in a c2g program; the stand-in
-  files remain only for jrt's own build.
+  files remain only for jrt's own build. *Accepted 2026-10-09, folded into C2G-SPEC §4.3 as
+  K3.*
 
 ## Sources (phase 2C)
 
