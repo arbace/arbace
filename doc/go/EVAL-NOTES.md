@@ -968,6 +968,9 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 - **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
   name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
 
+Accepted by the user (2026-10-09) and folded: Y1 C2G-SPEC §4.4, Y2 §5.12, Y3 §8.4 and
+JAVA-SURFACE.md decision 4, Y4 ORACLE.md (Exclusions); listed in C2G-SPEC §16.
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`
