@@ -980,3 +980,14 @@ decision (2026-10-08).
 - The user's decisions: do both regex groups, `\N{name}` and `CANON_EQ` (agent, branch
   `regex-res`), and pprint's 4 errors, a proxy of `BufferedWriter` (agent, branch `pprint-bw`).
   `bin/gate` passed on the merge (3m55s).
+
+## 2026-10-09: feature completion of the Go build; the gate until the freeze
+
+- The user's decisions: until the `arbace-for-golang` freeze, `bin/gate --full` is not run (it
+  runs at the freeze); changes are checked by short targeted tests, the essential `bin/gate` when
+  the bootstrapped sources change. The work focuses on the Go build's features and speed, with
+  more agents. Started alongside step 6, step 7a, the regex resources and pprint's proxy:
+  class forms in the Go build's REPL (B1-PLAN had a first REPL without them); `java.io.File` and
+  the file system, and sockets with the socket REPL (`arbace.core.server`), both reversing parts
+  of D6; the suite's last failures (`clearing`, `api`, `transducers`' time) with periodic arm64
+  checks.
