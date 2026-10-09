@@ -109,8 +109,14 @@ on Object-typed values are hot in translated code), the failures out of line.\n"
   ^{:tag (* String)} [^any x]
   (.ToString__String (asObject x)))
 
-(go/func GetClass "GetClass is x.getClass() on an Object.\n"
+(go/func GetClass "GetClass is x.getClass() on an Object. The most frequent classes (boxed
+numbers and strings, Numbers.ops and Util.hasheq ask for them) are found by a type switch on the
+dynamic type, without the assertion to Object_I and the interface call.\n"
   ^{:tag (* Class)} [^any x]
+  (type-switch x
+    (case [(* Long)] (return Long_class))
+    (case [(* Double)] (return Double_class))
+    (case [(* String)] (return String_class)))
   (.GetClass__Class (asObject x)))
 
 (go/func Object_toString

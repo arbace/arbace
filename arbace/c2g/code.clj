@@ -1690,6 +1690,10 @@
                             [{:k :assign :var s :desc d} s])))
                       [ctx nil])
         rv-desc (:method-ret *f*)
+        ;; nothing to catch (no clause catching a class of the world, no normal-completion
+        ;; code): the body runs in place, inside the finally's literal when there is one
+        ;; (SPEED-NOTES.md: a try literal costs a closure, a defer and a recover)
+        bare? (and (empty? (live-catches node)) (nil? nfin))
         inner (fn []
                 ;; the body and its handlers
                 (let [lit (try-literal #(translate-ctx (:body node) ctx) {:catch? true})
@@ -1731,8 +1735,10 @@
                   (when (empty? (live-catches node))
                     (emit! (list 'when (list '!= exc nil) (list 'panic exc))))
                   (when (:ctl? lit) (dispatch-codes! ctl rv (:codes lit)))))]
-    (if fin
-      (let [lit (try-literal inner {:catch? true})
+    (cond
+      (and bare? (not fin)) (translate-ctx (:body node) ctx)
+      fin
+      (let [lit (try-literal (if bare? #(translate-ctx (:body node) ctx) inner) {:catch? true})
             call (literal-form lit true rv-desc)
             ctl (when (:ctl? lit) (tmp)) rv (when (:ctl? lit) (tmp)) exc (tmp)]
         (if (:ctl? lit)
@@ -1742,7 +1748,7 @@
         (stmt! fin)
         (emit! (list 'when (list '!= exc nil) (list 'panic exc)))
         (when (:ctl? lit) (dispatch-codes! ctl rv (:codes lit))))
-      (inner))
+      :else (inner))
     (when after (method-return! after))))
 
 (defn translate-monitor [node ctx]

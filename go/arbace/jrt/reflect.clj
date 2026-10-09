@@ -5,7 +5,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "reflect.go"
-  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"]])
+  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The value convention of the member tables (JRT-NOTES.md, "The member tables")
@@ -119,7 +119,8 @@ an instance check for references): IllegalArgumentException as the JVM's accesso
       (return x))))
 
 (go/func convertArgs
-  "convertArgs checks the argument count and converts each argument (convertArg).\n"
+  "convertArgs checks the argument count and converts each argument (convertArg); the result
+is the arguments' slice itself when no argument is primitive.\n"
   ^{:tag (slice any)} [^{:tag (slice (* Class))} params ^{:tag (* RefArray)} args]
   (let [n 0]
     (when (!= args nil)
@@ -127,10 +128,21 @@ an instance check for references): IllegalArgumentException as the JVM's accesso
     (when (!= n (len params))
       (panic (IllegalArgumentException_New_String
                (Str (+ "wrong number of arguments: " (strconv/Itoa n) " expected: " (strconv/Itoa (len params)))))))
-    (let [out (make (slice any) n)]
+    ;; references are passed as they are: the arguments' own slice serves unless a primitive
+    ;; parameter converts one (the invokers only read it)
+    (let [^{:tag (slice any)} out nil]
       (range [i p params]
-        (aset out i (convertArg p (aget (.-A args) i))))
-      out)))
+        (let [c (convertArg p (aget (.-A args) i))]
+          (when (and (== out nil) (.IsPrimitive__Z p))
+            (set! out (make (slice any) n))
+            (copy out (.-A args)))
+          (when (!= out nil)
+            (aset out i c))))
+      (when (!= out nil)
+        (return out))
+      (when (== args nil)
+        (return nil))
+      (.-A args))))
 
 (go/func callWrapping
   "callWrapping runs f and wraps a Java exception it throws (a Go run-time error mapped first,
@@ -209,7 +221,8 @@ declaring class, the parameter classes and the modifiers of a member table entry
   (struct AccessibleObject
           ^{:tag (* Class)} clazz
           ^{:tag (slice (* Class))} params
-          ^int32 mods))
+          ^int32 mods
+          ^{:tag (atomic/Pointer RefArray)} paramArray))
 
 (go/var Executable_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Executable" :Kind KindClass
@@ -225,8 +238,18 @@ declaring class, the parameter classes and the modifiers of a member table entry
 bridge, varargs and synthetic bits among them (toString masks them out).\n"
   ^int32 [^{:tag (* Executable)} e]
   (bit-and (.-mods e) 0x1DFF))
-(go/method GetParameterTypes__Class1 ^{:tag (* RefArray)} [^{:tag (* Executable)} e]
-  (classArray (.-params e)))
+(go/method GetParameterTypes__Class1
+  "GetParameterTypes__Class1 is getParameterTypes: one array per Method or Constructor, made
+on first use and shared by later calls (proposed deviation V14, SPEED-NOTES.md: Java returns a
+fresh copy each time; the runtime and the evaluator only read it, and asked for it on every
+reflective call it cost two copies per call).\n"
+  ^{:tag (* RefArray)} [^{:tag (* Executable)} e]
+  (let [a (.Load (.-paramArray e))]
+    (when (!= a nil)
+      (return a)))
+  (let [a (classArray (.-params e))]
+    (.Store (.-paramArray e) a)
+    a))
 (go/method GetParameterCount__I ^int32 [^{:tag (* Executable)} e] (conv int32 (len (.-params e))))
 (go/method GetExceptionTypes__Class1
   "GetExceptionTypes__Class1: empty, the tables keep no throws clauses (JRT-NOTES.md).\n"

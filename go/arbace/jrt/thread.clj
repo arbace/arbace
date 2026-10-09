@@ -558,6 +558,7 @@ thread main (#1 when called first, non-daemon); an uncaught exception goes to th
 (Exception in thread \"main\" ...) and makes the status 1; then it waits for the non-daemon
 threads and returns the exit status (System.exit ends the process before).\n"
   ^int [^{:tag (func [])} run]
+  (StartRuntime)
   (let [^{:tag (* Thread)} t nil]
     (if (== (getLocal) nil)
       (set! t (adopt (Str "main")))
@@ -571,6 +572,7 @@ threads and returns the exit status (System.exit ends the process before).\n"
         (.dispatchUncaught t exc)
         (set! status 1))
       (WaitNonDaemon)
+      (StopProfile)
       status)))
 
 (go/func Go
