@@ -284,6 +284,10 @@
                formatter? (update-in [:methods "String"] (fnil conj #{}) "Formatted_O1__String")
                (contains? @(:compile-set world) "java/lang/Iterable")
                (update :funcs conj "String_Join_CharSequence_Iterable__String")
+               (contains? @(:compile-set world) "java/util/Optional")
+               (update-in [:methods "String"] (fnil conj #{}) "DescribeConstable__Optional")
+               (contains? @(:compile-set world) "java/util/stream/Stream")
+               (update-in [:methods "String"] (fnil conj #{}) "Lines__Stream")
                streams? (update :vars into ["System_in" "System_out" "System_err"])
                streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
                ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
@@ -315,6 +319,12 @@
                                (when ci-order?
                                  [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
                                ;; c2g's support for the REPL's reflection (out/support-forms)
+                               (when (contains? @(:compile-set world) "java/util/Optional")
+                                 [["java/util/Optional" "of" "(Ljava/lang/Object;)Ljava/util/Optional;"]])
+                               (when (contains? @(:compile-set world) "java/util/stream/Stream")
+                                 [["java/util/ArrayList" "<init>" "()V"]
+                                  ["java/util/ArrayList" "add" "(Ljava/lang/Object;)Z"]
+                                  ["java/util/Collection" "stream" "()Ljava/util/stream/Stream;"]])
                                (when (contains? @(:compile-set world) "java/io/PrintWriter")
                                  [["java/io/PrintWriter" "print" "(Ljava/lang/String;)V"]])
                                (when (contains? @(:compile-set world) "java/io/PrintStream")

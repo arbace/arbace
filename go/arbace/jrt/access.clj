@@ -14,7 +14,8 @@
     (UncheckedGetUTF16Char_B1_I__C ^uint16 [^{:tag (* ByteArray)} v ^int32 index])
     (UncheckedPutCharUTF16_B1_I_I__V [^{:tag (* ByteArray)} v ^int32 index ^int32 c])
     (InflateBytesToChars_B1_I_C1_I_I__V [^{:tag (* ByteArray)} src ^int32 srcOff ^{:tag (* CharArray)} dst ^int32 dstOff ^int32 n])
-    (CurrentCarrierThread__Thread ^Thread_I [])))
+    (CurrentCarrierThread__Thread ^Thread_I [])
+    (GetEnumConstantsShared_Class__O1 ^{:tag (* RefArray)} [^{:tag (* Class)} c])))
 
 (go/var JavaLangAccess_class
   (Define (addr (lit ClassInfo :Name "jdk.internal.access.JavaLangAccess" :Kind KindInterface
@@ -55,6 +56,12 @@
 
 (go/method CurrentCarrierThread__Thread ^Thread_I [^{:tag (* javaLangAccess)} t]
   (Thread_CurrentThread__Thread))
+
+(go/method GetEnumConstantsShared_Class__O1
+  "GetEnumConstantsShared_Class__O1 is getEnumConstantsShared (EnumSet): the enum's constants,
+null for a class that is not an enum.\n"
+  ^{:tag (* RefArray)} [^{:tag (* javaLangAccess)} t ^{:tag (* Class)} c]
+  (.GetEnumConstants__O1 (NN c)))
 
 (go/method Ref ^any [^{:tag (* javaLangAccess)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* javaLangAccess)} t] JavaLangAccess_class)

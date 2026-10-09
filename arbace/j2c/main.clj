@@ -219,24 +219,37 @@
         work (map-indexed vector (chunks others 150))
         pool (java.util.concurrent.Executors/newFixedThreadPool
               (Integer/parseInt (or (System/getenv "J2C_THREADS") "12")))
+        patch-of (fn [i] (io/file ".tmp/j2c-patch" (str module "-" i)))
+        ;; the chunks' copies, made before any chunk is attributed
+        copies-of (into {} (for [[i fs] work]
+                             (let [patch (patch-of i)]
+                               (when (.exists patch)
+                                 (doseq [^File f (reverse (file-seq patch))] (.delete f)))
+                               [i (vec (for [f fs]
+                                         (let [rel (subs f (inc (count src)))
+                                               c (io/file patch rel)]
+                                           (io/make-parents c)
+                                           (io/copy (io/file f) c)
+                                           (.getPath c))))])))
+        ;; J2C_PATCH_ALL: each chunk sees the other chunks' sources too (its own first), for
+        ;; sources whose packages the running JDK lacks (bin/jrt-convert's jrt Java, used
+        ;; across packages)
+        all? (some? (System/getenv "J2C_PATCH_ALL"))
         task (fn [[i fs]]
-               (let [patch (io/file ".tmp/j2c-patch" (str module "-" i))]
-                 (when (.exists patch)
-                   (doseq [^File f (reverse (file-seq patch))] (.delete f)))
-                 (let [copies (vec (for [f fs]
-                                     (let [rel (subs f (inc (count src)))
-                                           c (io/file patch rel)]
-                                       (io/make-parents c)
-                                       (io/copy (io/file f) c)
-                                       (.getPath c))))]
-                   (try
-                    (convert-units copies
-                                  (into ["--patch-module" (str module "=" (.getCanonicalPath patch))
+               (let [patch (patch-of i)
+                     ppath (str/join File/pathSeparator
+                                     (cons (.getCanonicalPath patch)
+                                           (when all?
+                                             (for [[j _] work :when (not= j i)] (.getCanonicalPath (patch-of j))))))
+                     copies (get copies-of i)]
+                 (try
+                   (convert-units copies
+                                  (into ["--patch-module" (str module "=" ppath)
                                          "-implicit:none" "--enable-preview" "-source" "26"]
                                         javac-opts)
                                   (:rename opts))
-                    (catch Throwable e
-                      {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)})))))
+                   (catch Throwable e
+                     {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)}))))
         futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
         results (mapv deref futures)
         _ (.shutdown pool)

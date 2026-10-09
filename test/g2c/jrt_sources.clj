@@ -64,7 +64,45 @@
            ;; the constant API's two interfaces, which String and the wrapper classes implement
            ;; (supers, bases and ancestors list them); their methods name classes outside the
            ;; world (Optional, MethodHandles.Lookup) and do not exist in Go
-           (map #(str "java/lang/constant/" % ".java") ["Constable" "ConstantDesc"])))))
+           (map #(str "java/lang/constant/" % ".java") ["Constable" "ConstantDesc"])
+           ;; streams (String's lines, chars, codePoints; Collectors; core's stream-reduce!
+           ;; and the like): java.util.stream whole, the functional interfaces, Optional and
+           ;; its primitive kin, the summary statistics, StringJoiner, Spliterator,
+           ;; PrimitiveIterator, and CountedCompleter, the parallel tasks' superclass (whose
+           ;; ForkJoinTask internals are jrt's: parallel streams are left out)
+           (map #(str "java/util/stream/" % ".java")
+                ["AbstractPipeline" "AbstractShortCircuitTask" "AbstractSpinedBuffer" "AbstractTask"
+                 "BaseStream" "Collector" "Collectors" "DistinctOps" "DoublePipeline" "DoubleStream"
+                 "FindOps" "ForEachOps" "Gatherer" "GathererOp" "Gatherers" "IntPipeline" "IntStream"
+                 "LongPipeline" "LongStream" "MatchOps" "Node" "Nodes" "PipelineHelper" "ReduceOps"
+                 "ReferencePipeline" "Sink" "SliceOps" "SortedOps" "SpinedBuffer" "Stream"
+                 "StreamOpFlag" "StreamShape" "StreamSpliterators" "StreamSupport" "Streams"
+                 "TerminalOp" "TerminalSink" "Tripwire" "WhileOps"])
+           (map #(str "java/util/function/" % ".java")
+                ["BiConsumer" "BiFunction" "BiPredicate" "BinaryOperator" "BooleanSupplier" "Consumer"
+                 "DoubleBinaryOperator" "DoubleConsumer" "DoubleFunction" "DoublePredicate"
+                 "DoubleSupplier" "DoubleToIntFunction" "DoubleToLongFunction" "DoubleUnaryOperator"
+                 "Function" "IntBinaryOperator" "IntConsumer" "IntFunction" "IntPredicate" "IntSupplier"
+                 "IntToDoubleFunction" "IntToLongFunction" "IntUnaryOperator" "LongBinaryOperator"
+                 "LongConsumer" "LongFunction" "LongPredicate" "LongSupplier" "LongToDoubleFunction"
+                 "LongToIntFunction" "LongUnaryOperator" "ObjDoubleConsumer" "ObjIntConsumer"
+                 "ObjLongConsumer" "Predicate" "Supplier" "ToDoubleBiFunction" "ToDoubleFunction"
+                 "ToIntBiFunction" "ToIntFunction" "ToLongBiFunction" "ToLongFunction" "UnaryOperator"])
+           (map #(str "java/util/" % ".java")
+                ["Optional" "OptionalInt" "OptionalLong" "OptionalDouble" "IntSummaryStatistics"
+                 "LongSummaryStatistics" "DoubleSummaryStatistics" "StringJoiner" "Spliterator"
+                 "PrimitiveIterator"])
+           ["java/util/concurrent/CountedCompleter.java"
+            ;; Collectors' concurrent collectors cast to it
+            "java/util/concurrent/ConcurrentMap.java"
+            ;; Collectors' characteristics sets
+            "java/util/EnumSet.java" "java/util/RegularEnumSet.java" "java/util/JumboEnumSet.java"
+            ;; StreamOpFlag's flag maps; the spliterators' debugging trip wire
+            "java/util/EnumMap.java" "java/util/Tripwire.java"]
+           ;; Clojure's test suite on the Go build (step 5 phase 2): uri? (java.net.URI's
+           ;; parser), the delays' tests (CyclicBarrier, over jrt's ReentrantLock)
+           ["java/net/URI.java" "java/net/URISyntaxException.java"
+            "java/util/concurrent/CyclicBarrier.java" "java/util/concurrent/BrokenBarrierException.java"]))))
 
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
@@ -271,6 +309,22 @@
 ;; ---------------------------------------------------------------------------------------
 ;; the report
 
+(def known-differences
+  "Converted files whose classes differ from javac's in known, harmless ways (the class forms
+  compiler's, doc/classes/CONVERTER-NOTES.md, \"The converted JDK\"), by file: the kind and the
+  number of differences. Counted as converted to javac's shapes; any other difference fails."
+  {;; a lambda that constructs a local class passes the class's captured variables in their
+   ;; order of capture, javac in the reverse order (the synthetic lambda method's parameters)
+   "java/util/stream/Collectors.clj" [:local-class-capture-order 3]
+   "java/util/stream/Gatherers.clj" [:local-class-capture-order 9]
+   "java/util/stream/MatchOps.clj" [:local-class-capture-order 12]
+   ;; InnerClasses: a nested class javac's stack map frames name (Spliterator$OfPrimitive)
+   "java/util/stream/Nodes.clj" [:inner-classes-of-frames 2]})
+
+(defn known-difference? [r]
+  (when-let [[_ n] (known-differences (:file r))]
+    (= n (:ndiffs r))))
+
 (defn- fmt [n] (let [s (str n)] (if (> (count s) 3) (str (subs s 0 (- (count s) 3)) "," (subs s (- (count s) 3))) s)))
 
 (defn- row [& cells] (str "| " (str/join " | " cells) " |"))
@@ -300,6 +354,7 @@
      :generated gen
      :checked-files (count rs)
      :identical-files (count (filter :ok rs))
+     :known-differing-files (count (filter known-difference? rs))
      :differing-files (count (filter #(pos? (:ndiffs % 0)) rs))
      :error-files (count (filter :error rs))
      :classes-compiled (reduce + (keep :classes rs))
@@ -375,7 +430,8 @@
               (row "conversion failures / javac errors / unreadable" (str (:convert-failures s) " / " (:javac-errors s) " / " (:unreadable s)))
               (row "files compiled by the class forms compiler" (:checked-files s))
               (row "of which all classes shape-identical to javac's" (:identical-files s))
-              (row "differing / errors" (str (:differing-files s) " / " (:error-files s)))
+              (row "differing (of them known, `known-differences`) / errors"
+                   (str (:differing-files s) " (" (:known-differing-files s) ") / " (:error-files s)))
               (row "classes compiled from the forms" (fmt (:classes-compiled s)))
               (row "javac's classes of the same files" (fmt (:javac-classes s)))
               (row "classes not compared (javac's two runs differ)" (count (:nondet s)))
@@ -397,9 +453,9 @@
                                (:edge-members e2) " members, " (:translated-classes e2) " classes).")))])))]
     (spit (io/file work "report.edn") (with-out-str (pp/pprint (assoc s :edge (some-> e (dissoc :members :class-uses :type-uses :array-members :natives :intrinsics))))))
     (spit (io/file work "report.md") (str md "\n"))
-    (println (format "%d Java files (%d generated), %d converted, %d compiled, %d identical, %d differing, %d errors; %d classes from the forms, %d javac classes%s"
+    (println (format "%d Java files (%d generated), %d converted, %d compiled, %d identical, %d differing (%d known), %d errors; %d classes from the forms, %d javac classes%s"
                      (:java-files s) (count (:files (:generated s))) (:converted s) (:checked-files s)
-                     (:identical-files s) (:differing-files s) (:error-files s)
+                     (:identical-files s) (:differing-files s) (:known-differing-files s) (:error-files s)
                      (:classes-compiled s) (:javac-classes s)
                      (if e (format "; edge %d classes, %d members" (:edge-classes e) (:edge-members e)) "")))
     s))

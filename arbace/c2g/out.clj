@@ -279,6 +279,29 @@
 
 (defn java-name [n] (or (java-names n) (str/replace n "/" ".")))
 
+(defn jrt-default-forwarders
+  "Forwarders on jrt's hand-written leaf classes to the default methods of translated
+  interfaces they implement and do not define themselves (CharSequence's chars and
+  codePoints on String, StringBuilder and StringBuffer once streams are in the world): Go's
+  interface satisfaction needs the methods, which jrt's own build cannot name (§5.4)."
+  []
+  (for [n (sort (keys (:jrt-classes m/*w*)))
+        :when (and (m/hand-written? n) (not (m/interface? n)) (not (m/abstract? n)) (m/leaf? n)
+                   (= :jrt (m/pkg n)))
+        :let [g (m/go-name n)
+              have (jrt/struct-methods (:jrt m/*w*) g)]
+        [[name desc :as k] _] (m/vmethods n)
+        :let [impl (m/impl-of n k)
+              base (nm/method-base name desc)]
+        :when (and impl (= :default (:kind impl)) (not (contains? have base)))
+        :let [[mps mr] (t/parse-method-desc desc)
+              mpn (vec (for [i (range (count mps))] (symbol (str "p" i))))
+              call (apply list (m/class-sym :jrt (:owner impl) (str "_" base)) 't mpn)]]
+    (list 'go/method (symbol base)
+          (cond-> (vec (cons (tag 't (list '* (symbol g))) (map #(tag %1 (m/go-type :jrt %2)) mpn mps)))
+            (not= "V" mr) (vary-meta assoc :tag (m/go-type :jrt mr)))
+          (if (= "V" mr) call (list 'return call)))))
+
 (defn support-forms
   "c2g's helpers in package jrt (c2g_support): what translated code calls besides jrt's API."
   []
@@ -287,6 +310,21 @@
     (concat
      ;; String's regex methods
      (when (m/translated? "java/util/regex/Pattern") (map second string-regex-methods))
+     (jrt-default-forwarders)
+     ;; String's members over translated classes (jrt's String cannot name them): Constable's
+     ;; describeConstable once Optional is in the world, and lines() once streams are
+     (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))
+       ['(go/method DescribeConstable__Optional "DescribeConstable__Optional is String.describeConstable: Optional.of(this).\n"
+          ^{:tag (* Optional)} [^{:tag (* String)} t]
+          (Optional_Of_O__Optional t))])
+     (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
+       ['(go/method Lines__Stream "Lines__Stream is String.lines: the lines (split at \\n, \\r, \\r\\n) as a
+sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
+          ^Stream [^{:tag (* String)} t]
+          (let [l (ArrayList_New)]
+            (range [_ x (splitLines (.-value t))]
+              (.Add_O__Z l (NewStringUTF16 x)))
+            (.Stream__Stream l)))])
      (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
@@ -652,6 +690,10 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                '((inst As (* RefArray)) (aget args 2))))
                     (sig "formatted" '[(.ArrayClass Object_class)] 'String_class 0x81
                          (list '.Formatted_O1__String '((inst As (* String)) this) '((inst As (* RefArray)) (aget args 0))))])
+                 (when (and (m/translated? "java/util/stream/Stream") (m/translated? "java/util/ArrayList"))
+                   [(sig "lines" [] 'Stream_class 0x1 '(.Lines__Stream ((inst As (* String)) this)))])
+                 (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))
+                   [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* String)) this)))])
                  (when (and (m/translated? "java/lang/Iterable") (m/translated? "java/lang/CharSequence"))
                    [(sig "join" '[CharSequence_class Iterable_class] 'String_class 0x9
                          (list 'String_Join_CharSequence_Iterable__String '((inst As CharSequence) (aget args 0))

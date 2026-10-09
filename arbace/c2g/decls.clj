@@ -434,7 +434,12 @@
                    (apply list (symbol (str "." tbase)) this args))]
         (if (= "V" br)
           [call]
-          [(list 'return (c/coerce call tr br false))]))
+          [(list 'return
+                 (if (and (t/ref? tr) (t/ref? br) (not= tr br) (not (env/assignable? tr br)))
+                   ;; a bridge narrowing a generic return (Spliterators' EmptySpliterator.OfDouble's
+                   ;; trySplit): javac's checkcast
+                   (:x (c/cast-val {:class br :expr {:op :arbace.c2g.code/go :x (c/coerce call tr "Ljava/lang/Object;" false) :t "Ljava/lang/Object;"}}))
+                   (c/coerce call tr br false)))]))
       :record-accessor (let [cm (:component mm)]
                          [(list 'return (list (symbol (str ".-" (nm/field-name (:name cm)))) 't))])
       :record-object-method (record-object-body pkg n mm ps)
