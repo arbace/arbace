@@ -14,14 +14,17 @@
 #             files added to it, g2c.jrt-sources/added-sources) copied from $JDK, and jrt's
 #             own Java (overlay/jdk/java.base, replacing or adding to jdk26u's files), into
 #             $JRT_WORK/src/java.base (the tree j2c and javac read); sources.txt lists them
-#   generate  the 8 files the JDK build generates (CharacterData*, CaseFolding,
-#             IndicConjunctBreak) made as make/modules/java.base/gensrc/GensrcCharacterData.gmk
-#             and GensrcRegex.gmk make them: the build tools of make/jdk/src/classes/build/tools/
-#             {generatecharacter,generateextraproperties} compiled with $GEN_JDK's javac and run
+#   generate  the files the JDK build generates (CharacterData*, CaseFolding,
+#             IndicConjunctBreak; java.nio's heap buffers, ScopedMemoryAccess) made as
+#             make/modules/java.base/gensrc/GensrcCharacterData.gmk, GensrcRegex.gmk,
+#             GensrcBuffer.gmk and GensrcScopedMemoryAccess.gmk make them: the build tools of
+#             make/jdk/src/classes/build/tools/{generatecharacter,generateextraproperties,spp} compiled with $GEN_JDK's javac and run
 #             on $GEN_JDK's java (the build runs them on its boot JDK; CaseFolding's output
 #             depends on the running JDK's Unicode version) over src/java.base/share/data/
 #             unicodedata, into src/java.base; compared byte for byte with the JDK build's
-#             support/gensrc when $JDK/build has one (generated.edn)
+#             support/gensrc when $JDK/build has one (generated.edn); and the resource data
+#             the program embeds (uniName.dat as Gendata.gmk makes it, ICU's nfc.nrm and
+#             nfkc.nrm) into $JRT_WORK/data, compared with the build's jdk/modules
 #   convert   bin/j2c ... jdk --check: the tree into class forms, $JRT_WORK/conv (java.base,
 #             attributed with --patch-module against the running JDK, built from the same sources)
 #   javac     the tree compiled twice by javac (ref1, ref2) with java.base's build options
@@ -97,7 +100,8 @@ generate() {
   out=$tree/java.base
   rm -rf "$tools"
   "$GEN_JDK/bin/javac" -nowarn -d "$tools" \
-    "$t"/build/tools/generatecharacter/*.java "$t"/build/tools/generateextraproperties/*.java || return 1
+    "$t"/build/tools/generatecharacter/*.java "$t"/build/tools/generateextraproperties/*.java \
+    "$t"/build/tools/spp/*.java || return 1
   # the build's JAVA_SMALL flags (spec.gmk: JAVA_FLAGS, JAVA_FLAGS_SMALL)
   local java=("$GEN_JDK/bin/java" -Duser.language=en -Duser.country=US -XX:+UseSerialGC -Xms32M -Xmx512M
               -XX:TieredStopAtLevel=1 -cp "$tools")
@@ -124,6 +128,90 @@ generate() {
     "$c/jdk/internal/util/regex/IndicConjunctBreak.java.template" "$u/DerivedCoreProperties.txt" \
     "$out/jdk/internal/util/regex/IndicConjunctBreak.java" InCB=Linker InCB=Extend InCB=Consonant ||
     return 1
+  # GensrcBuffer.gmk (SetupGenBuffer) and GensrcScopedMemoryAccess.gmk: build.tools.spp.Spp on
+  # java.nio's and jdk.internal.misc's templates, with the keys and replacements of
+  # make/common/modules/GensrcStreamPreProcessing.gmk's Conv
+  local n=$c/java/nio m=$c/jdk/internal/misc
+  mkdir -p "$out/java/nio" "$out/jdk/internal/misc"
+  spp() { "${java[@]}" build.tools.spp.Spp "$@"; }
+  title() { echo "${1^}"; }
+  lbpv() { case $1 in byte) echo 0;; char|short) echo 1;; int|float) echo 2;; long|double) echo 3;; esac; }
+  fulltype() { case $1 in char) echo character;; int) echo integer;; *) echo "$1";; esac; }
+  memtype() { case $1 in float) echo int;; double) echo long;; *) echo "$1";; esac; }
+  art() { [ "$1" = int ] && echo an || echo a; }
+  frombits() { # TYPE BO
+    case $1 in float|double) [ "$2" = U ] || echo "$(title "$1").$(memtype "$1")BitsTo$(title "$1")";; esac; }
+  tobits() {
+    case $1 in float|double) [ "$2" = U ] || echo "$(title "$1").$1ToRaw$(title "$(memtype "$1")")Bits";; esac; }
+  nbytes() { case $(lbpv "$1") in 0) echo one;; 1) echo two;; 2) echo four;; 3) echo eight;; esac; }
+  nbytes1() { case $(lbpv "$1") in 0) echo zero;; 1) echo one;; 2) echo three;; 3) echo seven;; esac; }
+  # SetupGenBuffer NAME TEMPLATE TYPE BYTE_ORDER (read-write; BYTES_PER_VALUE as the make file
+  # passes it, with an empty log2: "(1 << )")
+  genbuffer() {
+    local name=$1 tpl=$2 ty=$3 bo=$4 o=$out/java/nio/$1.java swaptype
+    local keys=(-K"$ty" -Krw -Kbo"$bo")
+    case $ty in float|double) keys+=(-KfloatingPointType);; *) keys+=(-KintegralType);; esac
+    [ "$ty" = char ] && keys+=(-KstreamableType)
+    if [ "$bo" = U ]; then swaptype=$(title "$ty"); else swaptype=$(title "$(memtype "$ty")"); fi
+    [ "$name" = ByteBuffer ] && o=$o.bin-snippet.tmp
+    spp "${keys[@]}" -Dtype="$ty" -DBO="$bo" -DRW= -DLG_BYTES_PER_VALUE="$(lbpv "$ty")" \
+      -DBYTES_PER_VALUE="(1 << )" -Da="$(art "$ty")" -DA="$(title "$(art "$ty")")" \
+      -Dfulltype="$(fulltype "$ty")" -DFulltype="$(title "$(fulltype "$ty")")" \
+      -Dmemtype="$(memtype "$ty")" -DMemtype="$(title "$(memtype "$ty")")" \
+      -Dstreamtype="$([ "$ty" = char ] && echo int)" -DStreamtype="$([ "$ty" = char ] && echo Int)" \
+      -DType="$(title "$ty")" -Dx="${ty:0:1}" -DfromBits="$(frombits "$ty" "$bo")" \
+      -DtoBits="$(tobits "$ty" "$bo")" -Dswap="$([ "$bo" = S ] && echo Bits.swap)" \
+      -DSwaptype="$swaptype" -i"$n/$tpl.java.template" -o"$o" || return 1
+    if [ "$name" = ByteBuffer ]; then
+      # GENERATE_BIN: a snippet per non-byte type replaces the lines from #BIN on
+      local snippets=() s
+      for s in char short int long float double; do
+        spp -be -Krw -Dtype="$s" -DRW= -DLG_BYTES_PER_VALUE="$(lbpv "$s")" \
+          -DBYTES_PER_VALUE="(1 << $(lbpv "$s"))" -Da="$(art "$s")" -Dfulltype="$(fulltype "$s")" \
+          -Dmemtype="$(memtype "$s")" -DMemtype="$(title "$(memtype "$s")")" -Dnbytes="$(nbytes "$s")" \
+          -DnbytesButOne="$(nbytes1 "$s")" -DType="$(title "$s")" -DfromBits="$(frombits "$s" "$bo")" \
+          -DtoBits="$(tobits "$s" "$bo")" -i"$n/X-Buffer-bin.java.template" -o"$o.$s" || return 1
+        snippets+=("$o.$s")
+      done
+      { sed -e '/#BIN/,$d' < "$o"; cat "${snippets[@]}"; echo "}"; } > "$out/java/nio/$name.java"
+      rm -f "$o" "${snippets[@]}"
+    fi
+  }
+  genbuffer ByteBuffer X-Buffer byte "" && genbuffer CharBuffer X-Buffer char "" &&
+  genbuffer IntBuffer X-Buffer int "" &&
+  genbuffer HeapByteBuffer Heap-X-Buffer byte "" && genbuffer HeapCharBuffer Heap-X-Buffer char "" &&
+  genbuffer HeapIntBuffer Heap-X-Buffer int "" &&
+  genbuffer ByteBufferAsCharBufferB ByteBufferAs-X-Buffer char B &&
+  genbuffer ByteBufferAsCharBufferL ByteBufferAs-X-Buffer char L &&
+  genbuffer ByteBufferAsIntBufferB ByteBufferAs-X-Buffer int B &&
+  genbuffer ByteBufferAsIntBufferL ByteBufferAs-X-Buffer int L || return 1
+  # GensrcScopedMemoryAccess.gmk: the template, then a snippet per type (SCOPED_TYPES' order)
+  local smasnips=() ty k sma=$out/jdk/internal/misc/ScopedMemoryAccess.java
+  for ty in boolean byte short char int long float double; do
+    k=(-K"$ty" -KCAS)
+    [ "$ty" = byte ] && k+=(-Kbyte)
+    case $ty in float|double) k+=(-KfloatingPoint);; esac
+    case $ty in char|short|int|long) k+=(-KUnaligned);; esac
+    case $ty in boolean|byte|char|short) k+=(-KShorterThanInt);; esac
+    [ "$ty" = boolean ] || k+=(-KAtomicAdd)
+    case $ty in float|double) ;; *) k+=(-KBitwise);; esac
+    spp -nel "${k[@]}" -Dtype="$ty" -DType="$(title "$ty")" \
+      -i"$m/X-ScopedMemoryAccess-bin.java.template" -o"$sma.snippet.$ty" || return 1
+    smasnips+=("$sma.snippet.$ty")
+  done
+  { cat "$m/X-ScopedMemoryAccess.java.template"; cat "${smasnips[@]}"; echo "}"; } > "$sma"
+  rm -f "${smasnips[@]}"
+  # the resource data the closure reads (JRT-NOTES.md, "The JDK's resource data"), into
+  # $tree/../data, which bin/c2g --program embeds: uniName.dat as make/modules/java.base/
+  # Gendata.gmk makes it (TOOL_CHARACTERNAME on UnicodeData.txt), ICU's normalization data as
+  # the build copies it (a resource of src/java.base/share/classes)
+  local data
+  data=$(dirname "$tree")/data
+  rm -rf "$data"
+  mkdir -p "$data/java/lang" "$data/jdk/internal/icu/impl/data/icudata"
+  "${java[@]}" build.tools.generatecharacter.CharacterName "$u/UnicodeData.txt" "$data/java/lang/uniName.dat" &&
+  cp "$c/jdk/internal/icu/impl/data/icudata/nfc.nrm" "$c/jdk/internal/icu/impl/data/icudata/nfkc.nrm" \
+    "$data/jdk/internal/icu/impl/data/icudata/" || return 1
   # every gensrc file of the closure is made
   while read -r _ kind rel; do
     [ "$kind" = gensrc ] && [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; }
@@ -162,9 +250,21 @@ if has generate; then
       else v=:different; status=1; fi
       echo "  \"$rel\" $v"
     done < "$work/sources.txt"
+    echo " }"
+    # the resource data, against the JDK build's module image (jdk/modules/java.base)
+    modules_ref=${conf:+$(dirname "$conf")/jdk/modules/java.base}
+    echo " :data {"
+    (cd "$work/data" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
+      if [ -z "$modules_ref" ] || [ ! -f "$modules_ref/$rel" ]; then v=:no-reference
+      elif cmp -s "$work/data/$rel" "$modules_ref/$rel"; then v=:same
+      else v=:different; fi
+      echo "  \"$rel\" $v"
+    done
     echo "}}"
   } > "$work/generated.edn"
-  echo "$(grep -c ':same' "$work/generated.edn") of 8 equal to $gensrc_ref ($(( $(date +%s) - t0 )) s)"
+  grep -q ':different' "$work/generated.edn" && status=1
+  nsame=$(grep -c '\.java" :same' "$work/generated.edn"); dsame=$(grep -c '" :same' "$work/generated.edn")
+  echo "$nsame of $(grep -c ' gensrc ' "$work/sources.txt") generated sources equal to $gensrc_ref, $((dsame - nsame)) of $(find "$work/data" -type f | wc -l) data files to the build's jdk/modules ($(( $(date +%s) - t0 )) s)"
 fi
 
 if has convert; then
@@ -236,6 +336,7 @@ if [ $twice = 1 ]; then
   make_sources "$work/again/src" && generate "$work/again/src" "$work/again/gen-tools" > "$work/log/generate-again.log" 2>&1 \
     && convert "$work/again/src" "$work/again/conv" "$work/log/convert-again.log" || status=1
   if diff -r "$work/src" "$work/again/src" > "$work/log/again-src.diff" &&
+     diff -r "$work/data" "$work/again/data" > "$work/log/again-data.diff" &&
      diff -r "$work/conv" "$work/again/conv" > "$work/log/again-conv.diff"; then
     echo "deterministic: $(find "$work/again/src" -type f | wc -l) sources and $(find "$work/again/conv" -type f | wc -l) converted files identical ($(( $(date +%s) - t0 )) s)"
   else

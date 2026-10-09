@@ -109,7 +109,37 @@
            ;; \"Dates\"): Instant and the exception it throws; the rest of java.time stays
            ;; outside the world (its uses in Instant are operation-level stubs, toString a
            ;; variant)
-           ["java/time/Instant.java" "java/time/DateTimeException.java"]))))
+           ["java/time/Instant.java" "java/time/DateTimeException.java"]
+           ;; the regex flag CANON_EQ (JRT-NOTES.md, "The JDK's resource data"): java.text's
+           ;; Normalizer over jdk.internal.icu's normalizer, whose loader reads ICU's nfc.nrm and
+           ;; nfkc.nrm through java.nio's heap buffers (the buffers' generated files are
+           ;; added-gensrc's); ScopedMemoryAccess's heap paths and the two foreign memory types
+           ;; the buffers' constructors and accessors name
+           (map #(str "java/text/" % ".java") ["Normalizer" "CharacterIterator"])
+           (map #(str "jdk/internal/icu/" % ".java")
+                ["text/NormalizerBase" "text/UTF16" "text/UCharacterIterator" "text/Replaceable"
+                 "text/ReplaceableString" "impl/UCharacterProperty" "impl/CharacterIteratorWrapper"
+                 "impl/ReplaceableUCharacterIterator" "impl/Trie2" "impl/Trie2_16"
+                 "util/OutputInt"])
+           (map #(str "java/nio/" % ".java")
+                ["Buffer" "ByteOrder" "StringCharBuffer" "BufferUnderflowException" "BufferOverflowException"
+                 "ReadOnlyBufferException" "InvalidMarkException"])
+           ["java/lang/foreign/MemorySegment.java" "jdk/internal/foreign/MemorySessionImpl.java"]
+           ;; \N{name} (CharacterName's uniName.dat is zlib-compressed: the overlay's
+           ;; InflaterInputStream throws ZipException)
+           ["java/util/zip/ZipException.java"]))))
+
+(def added-gensrc
+  "Files the JDK build generates (make/modules/java.base/gensrc/GensrcBuffer.gmk,
+  GensrcScopedMemoryAccess.gmk) added to the closure, as paths below gensrc/java.base: the heap
+  byte, char and int buffers and their views of a byte buffer in either byte order (ICU's data
+  loader: JRT-NOTES.md, \"The JDK's resource data\"), and ScopedMemoryAccess, through which the
+  buffers reach Unsafe. bin/jrt-convert generates them as the JDK build does."
+  (vec (concat (map #(str "java/nio/" % ".java")
+                    ["ByteBuffer" "CharBuffer" "IntBuffer" "HeapByteBuffer" "HeapCharBuffer"
+                     "HeapIntBuffer" "ByteBufferAsCharBufferB" "ByteBufferAsCharBufferL"
+                     "ByteBufferAsIntBufferB" "ByteBufferAsIntBufferL"])
+               ["jdk/internal/misc/ScopedMemoryAccess.java"])))
 
 (def added-module-sources
   "Files of other modules' src/MODULE/share/classes added to the closure (paths relative to
@@ -156,6 +186,13 @@
       (if-let [[_ m rel] (re-find #"^build/[^/]+/support/gensrc/([^/]+)/(.*)$" s)]
         (println m "gensrc" rel)
         (throw (ex-info (str "unexpected source path " s) {:source s})))))
+  ;; generated files added to the closure (added-gensrc), unless the measured closure has them
+  (let [measured (set (for [s (sources f)
+                            :let [[_ rel] (re-find #"^build/[^/]+/support/gensrc/java\.base/(.*)$" s)]
+                            :when rel]
+                        rel))]
+    (doseq [rel added-gensrc :when (not (measured rel))]
+      (println "java.base gensrc" rel)))
   ;; KIND overlay: overlay/jdk/MODULE/REL, jrt's own (replacing jdk26u's file of that path)
   (doseq [s (overlay-sources)
           :let [[_ m rel] (re-find #"^([^/]+)/(.*)$" s)]]

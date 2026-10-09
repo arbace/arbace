@@ -70,7 +70,10 @@
    ;; jrt's java.util.Date is Date (JRT-NOTES.md, phase 2B "Dates")
    "java/sql/Date" "Sql_Date"
    ;; java.util.Tripwire's twin in java.util.stream (step 5 phase 2B, streams)
-   "java/util/stream/Tripwire" "Stream_Tripwire"})
+   "java/util/stream/Tripwire" "Stream_Tripwire"
+   ;; java.text.Normalizer's internal twin, which Pattern calls for combining classes
+   ;; (JRT-NOTES.md, "The JDK's resource data")
+   "sun/text/Normalizer" "Sun_Normalizer"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

@@ -6,7 +6,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "natives.go"
-  :imports [[md5 "crypto/md5"]])
+  :imports [[bytes "bytes"] [zlib "compress/zlib"] [md5 "crypto/md5"] [errors "errors"] [io "io"]])
 
 (go/func NullPointerException_GetExtendedNPEMessage__String_native
   "NullPointerException_GetExtendedNPEMessage__String_native is the native
@@ -95,3 +95,30 @@ passes), with the JVM's ClassCastException message.\n"
   (when (and (!= o nil) (not (.IsInstance_O__Z c o)))
     (panic (ClassCast o c)))
   o)
+
+;; ---------------------------------------------------------------------------------------
+;; java.util.zip.InflaterInputStream (jrt's own Java, overlay/jdk; JRT-NOTES.md, "The JDK's
+;; resource data")
+
+(go/func InflaterInputStream_Inflate0_B1_String1__B1_native
+  "InflaterInputStream_Inflate0_B1_String1__B1_native is the data of the zlib stream input
+(RFC 1950, as the JDK's default Inflater reads it), over Go's compress/zlib; or null with the
+reason in error[0]: zlib's \"Unexpected end of ZLIB input stream\" (the JDK's message for a
+truncated stream), else Go's description of the malformed data.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* ByteArray)} input ^{:tag (* RefArray)} error]
+  (let [in (make (slice byte) (len (.-A (NN input))))]
+    (range [i x (.-A input)]
+      (aset in i (conv byte x)))
+    (let [(values r err) (zlib/NewReader (bytes/NewReader in))
+          ^{:tag (slice byte)} out nil]
+      (when (== err nil)
+        (set! (values out err) (io/ReadAll r)))
+      (when (!= err nil)
+        (if (or (errors/Is err io/ErrUnexpectedEOF) (errors/Is err io/EOF))
+          (aset (.-A error) 0 (Str "Unexpected end of ZLIB input stream"))
+          (aset (.-A error) 0 (Str (.Error err))))
+        (return nil))
+      (let [a (NewByteArray (conv int32 (len out)))]
+        (range [i x out]
+          (aset (.-A a) i (conv int8 x)))
+        a))))

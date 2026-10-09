@@ -150,3 +150,18 @@
                               (not (in-world? tn)))]
                tn)]
     (sort (distinct (concat cands more)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The JDK's resource data
+
+(defn data
+  "The resource data the executable embeds besides the sources (JRT-NOTES.md, \"The JDK's
+  resource data\"): the files under dir (bin/jrt-convert's .tmp/jrt/data: uniName.dat, ICU's
+  normalization data), {resource-path File}, sorted; empty when dir does not exist."
+  [dir]
+  (let [base (io/file dir)]
+    (into (sorted-map)
+          (when (.isDirectory base)
+            (for [^File f (file-seq base)
+                  :when (.isFile f)]
+              [(str/replace (str (.relativize (.toPath base) (.toPath f))) File/separator "/") f])))))

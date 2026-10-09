@@ -453,11 +453,12 @@
     (letfn [(w [x]
               (when-not @hit
                 (cond
-                  (map? x) (when (:op x)
-                             (when (and (#{:get-static :set-static :var-deref :var-invoke} (:op x))
-                                        (contains? classes (or (:declarer (:field x)) (:owner (:field x)))))
-                               (vreset! hit true))
-                             (run! w (vals x)))
+                  ;; every map, not only nodes: a switch's cases are a map of bodies
+                  (map? x) (do (when (and (:op x)
+                                          (#{:get-static :set-static :var-deref :var-invoke} (:op x))
+                                          (contains? classes (or (:declarer (:field x)) (:owner (:field x)))))
+                                 (vreset! hit true))
+                               (run! w (vals x)))
                   (or (vector? x) (seq? x)) (run! w x)
                   :else nil)))]
       (w (:body ab)))
