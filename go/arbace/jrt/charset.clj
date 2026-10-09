@@ -1,5 +1,5 @@
-;; jrt: java.nio.charset.Charset with jrt's three charsets, sun.nio.cs.UTF_8, ISO_8859_1 and
-;; US_ASCII (their names and aliases as JDK 26's), java.nio.charset.StandardCharsets, and
+;; jrt: java.nio.charset.Charset with jrt's charsets, sun.nio.cs.UTF_8, ISO_8859_1, US_ASCII,
+;; and (step 5 phase 2B) UTF_16, UTF_16BE, UTF_16LE (their names and aliases as JDK 26's), java.nio.charset.StandardCharsets, and
 ;; String's Charset overloads (JRT-SOURCES.md, the shim edge; doc/go/JRT-NOTES.md, "Phase 2b").
 ;; The coding itself is phase 1's (codec.clj: DecodeUTF8, EncodeUTF8, DecodeBytes,
 ;; EncodeBytes). Encoders, decoders and buffers (java.nio) are cut.
@@ -43,11 +43,12 @@ csASCII).\n"
 (go/method IsRegistered__Z ^bool [^{:tag (* Charset)} t] true)
 (go/method CanEncode__Z ^bool [^{:tag (* Charset)} t] true)
 (go/method Contains_Charset__Z
-  "Contains_Charset__Z is Charset.contains: UTF-8 contains all three, ISO-8859-1 itself and
-US-ASCII, US-ASCII itself.\n"
+  "Contains_Charset__Z is Charset.contains: the Unicode charsets (sun.nio.cs.Unicode) contain
+all of jrt's, ISO-8859-1 itself and US-ASCII, US-ASCII itself.\n"
   ^bool [^{:tag (* Charset)} t ^Charset_I cs]
-  (let [o (.-kind (.Self_Charset cs))]
-    (or (== (.-kind t) csUTF8) (== o csASCII) (== o (.-kind t)))))
+  (let [o (.-kind (.Self_Charset cs))
+        k (.-kind t)]
+    (or (== k csUTF8) (== k csUTF16) (== k csUTF16BE) (== k csUTF16LE) (== o csASCII) (== o k))))
 (go/method ToString__String "ToString__String is Charset.toString: the canonical name.\n"
   ^{:tag (* String)} [^{:tag (* Charset)} t] (.-name t))
 (go/method Equals_O__Z "Equals_O__Z is Charset.equals: the same canonical name.\n"
@@ -85,6 +86,9 @@ US-ASCII, US-ASCII itself.\n"
 (go/type UTF_8 "UTF_8 is sun.nio.cs.UTF_8.\n" (struct Unicode))
 (go/type ISO_8859_1 "ISO_8859_1 is sun.nio.cs.ISO_8859_1.\n" (struct Charset))
 (go/type US_ASCII "US_ASCII is sun.nio.cs.US_ASCII.\n" (struct Charset))
+(go/type UTF_16 "UTF_16 is sun.nio.cs.UTF_16 (step 5 phase 2B).\n" (struct Unicode))
+(go/type UTF_16BE "UTF_16BE is sun.nio.cs.UTF_16BE.\n" (struct Unicode))
+(go/type UTF_16LE "UTF_16LE is sun.nio.cs.UTF_16LE.\n" (struct Unicode))
 
 (go/var
   [UTF_8_class
@@ -95,7 +99,16 @@ US-ASCII, US-ASCII itself.\n"
                       :Modifiers (bit-or AccPublic AccFinal) :Super Charset_class :Go "arbace/jrt.ISO_8859_1")))]
   [US_ASCII_class
    (Define (addr (lit ClassInfo :Name "sun.nio.cs.US_ASCII" :Kind KindClass
-                      :Modifiers (bit-or AccPublic AccFinal) :Super Charset_class :Go "arbace/jrt.US_ASCII")))])
+                      :Modifiers (bit-or AccPublic AccFinal) :Super Charset_class :Go "arbace/jrt.US_ASCII")))]
+  [UTF_16_class
+   (Define (addr (lit ClassInfo :Name "sun.nio.cs.UTF_16" :Kind KindClass
+                      :Modifiers AccPublic :Super Unicode_class :Go "arbace/jrt.UTF_16")))]
+  [UTF_16BE_class
+   (Define (addr (lit ClassInfo :Name "sun.nio.cs.UTF_16BE" :Kind KindClass
+                      :Modifiers AccPublic :Super Unicode_class :Go "arbace/jrt.UTF_16BE")))]
+  [UTF_16LE_class
+   (Define (addr (lit ClassInfo :Name "sun.nio.cs.UTF_16LE" :Kind KindClass
+                      :Modifiers AccPublic :Super Unicode_class :Go "arbace/jrt.UTF_16LE")))])
 
 (go/var
   [^{:tag (* UTF_8) :doc "UTF_8_INSTANCE is sun.nio.cs.UTF_8.INSTANCE.\n"} UTF_8_INSTANCE
@@ -110,7 +123,16 @@ US-ASCII, US-ASCII itself.\n"
    (addr (lit US_ASCII :Charset (lit Charset :name (Intern "US-ASCII") :kind csASCII
                                      :aliases (lit (slice string) "646" "ANSI_X3.4-1968" "ANSI_X3.4-1986" "ASCII"
                                                    "IBM367" "ISO646-US" "ISO_646.irv:1991" "ascii7" "cp367"
-                                                   "csASCII" "iso-ir-6" "iso_646.irv:1983" "us"))))])
+                                                   "csASCII" "iso-ir-6" "iso_646.irv:1983" "us"))))]
+  [^{:tag (* UTF_16)} UTF_16_INSTANCE
+   (addr (lit UTF_16 :Unicode (lit Unicode :Charset (lit Charset :name (Intern "UTF-16") :kind csUTF16
+                                                         :aliases (lit (slice string) "UTF_16" "UnicodeBig" "unicode" "utf16")))))]
+  [^{:tag (* UTF_16BE)} UTF_16BE_INSTANCE
+   (addr (lit UTF_16BE :Unicode (lit Unicode :Charset (lit Charset :name (Intern "UTF-16BE") :kind csUTF16BE
+                                                           :aliases (lit (slice string) "ISO-10646-UCS-2" "UTF_16BE" "UnicodeBigUnmarked" "X-UTF-16BE")))))]
+  [^{:tag (* UTF_16LE)} UTF_16LE_INSTANCE
+   (addr (lit UTF_16LE :Unicode (lit Unicode :Charset (lit Charset :name (Intern "UTF-16LE") :kind csUTF16LE
+                                                           :aliases (lit (slice string) "UTF_16LE" "UnicodeLittleUnmarked" "X-UTF-16LE")))))])
 
 (go/method Ref ^any [^{:tag (* UTF_8)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* UTF_8)} t] UTF_8_class)
@@ -122,12 +144,23 @@ US-ASCII, US-ASCII itself.\n"
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* US_ASCII)} t] US_ASCII_class)
 (go/method Clone__O ^any [^{:tag (* US_ASCII)} t] (panic (CloneNotSupported t)))
 
+(go/method Ref ^any [^{:tag (* UTF_16)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* UTF_16)} t] UTF_16_class)
+(go/method Clone__O ^any [^{:tag (* UTF_16)} t] (panic (CloneNotSupported t)))
+(go/method Ref ^any [^{:tag (* UTF_16BE)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* UTF_16BE)} t] UTF_16BE_class)
+(go/method Clone__O ^any [^{:tag (* UTF_16BE)} t] (panic (CloneNotSupported t)))
+(go/method Ref ^any [^{:tag (* UTF_16LE)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* UTF_16LE)} t] UTF_16LE_class)
+(go/method Clone__O ^any [^{:tag (* UTF_16LE)} t] (panic (CloneNotSupported t)))
+
 (go/func UTF_8_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* UTF_8) x)] ok))
 (go/func ISO_8859_1_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ISO_8859_1) x)] ok))
 (go/func US_ASCII_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* US_ASCII) x)] ok))
 
 (go/var ^{:tag (slice Charset_I)} allCharsets
-  (lit (slice Charset_I) UTF_8_INSTANCE ISO_8859_1_INSTANCE US_ASCII_INSTANCE))
+  (lit (slice Charset_I) UTF_8_INSTANCE ISO_8859_1_INSTANCE US_ASCII_INSTANCE UTF_16_INSTANCE UTF_16BE_INSTANCE
+       UTF_16LE_INSTANCE))
 
 ;; ---- lookup by name
 
@@ -173,7 +206,8 @@ name\") for null, IllegalCharsetNameException for an illegal name.\n"
 
 (go/func Charset_ForName_String__Charset
   "Charset_ForName_String__Charset is Charset.forName: UnsupportedCharsetException for a legal
-name jrt does not have (V9: UTF-8, ISO-8859-1 and US-ASCII only).\n"
+name jrt does not have (V9: UTF-8, ISO-8859-1 and US-ASCII; since step 5 phase 2B also UTF-16,
+UTF-16BE and UTF-16LE).\n"
   ^Charset_I [^{:tag (* String)} name]
   (let [cs (checkedLookup name)]
     (when (== cs nil)
@@ -205,7 +239,10 @@ name jrt does not have (V9: UTF-8, ISO-8859-1 and US-ASCII only).\n"
                       :Go "arbace/jrt.StandardCharsets")))]
   [^{:tag Charset_I :doc "StandardCharsets_UTF_8 is StandardCharsets.UTF_8.\n"} StandardCharsets_UTF_8 UTF_8_INSTANCE]
   [^Charset_I StandardCharsets_ISO_8859_1 ISO_8859_1_INSTANCE]
-  [^Charset_I StandardCharsets_US_ASCII US_ASCII_INSTANCE])
+  [^Charset_I StandardCharsets_US_ASCII US_ASCII_INSTANCE]
+  [^Charset_I StandardCharsets_UTF_16 UTF_16_INSTANCE]
+  [^Charset_I StandardCharsets_UTF_16BE UTF_16BE_INSTANCE]
+  [^Charset_I StandardCharsets_UTF_16LE UTF_16LE_INSTANCE])
 
 ;; ---- String's Charset overloads
 

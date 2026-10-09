@@ -15,10 +15,13 @@
   ;; class loader the Go build has; no DynamicClassLoader (not translated: no classes are
   ;; defined at run time) and no thread context loader to consult (*use-context-classloader*
   ;; is kept, but every loader is the same)
+  ;; Compiler/LOADER is bound to nil in the Go build (no DynamicClassLoader: makeClassLoader),
+  ;; so the base loader is the application loader then (repl/source-fn's resources)
   (method ^:public ^:static baseLoader ^ClassLoader []
-    (if (.isBound arbace.lang.Compiler/LOADER)
-        (cast ClassLoader (.deref arbace.lang.Compiler/LOADER))
-        (.getClassLoader arbace.lang.Compiler)))
+    (let [l (when (.isBound arbace.lang.Compiler/LOADER) (.deref arbace.lang.Compiler/LOADER))]
+      (if (some? l)
+          (cast ClassLoader l)
+          (.getClassLoader arbace.lang.Compiler))))
 
   (method ^:public ^:static classForName ^Class [^String name ^boolean load ^ClassLoader loader]
     (Class/forName name load loader))
@@ -115,10 +118,15 @@
         (some? ins)
           (let [slash (.lastIndexOf scriptfile \/)
                 file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
-            (let [t0 (System/nanoTime)]
+            (let [t0 (System/nanoTime)
+                  st (arbace.lang.Compiler$Evaluator/state)
+                  aot (.-aot st)]
+              ;; an embedded namespace is one the JVM build loads AOT-compiled (DefExpr.eval)
+              (set! (.-aot st) (instance? java.io.ByteArrayInputStream ins))
               (try
                 (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
                 (finally
+                  (set! (.-aot st) aot)
                   (.close ins)
                   ;; ARBACE_LOAD_TIMES: each source's load time on stderr (EVAL-NOTES.md)
                   (when (some? (System/getenv "ARBACE_LOAD_TIMES"))

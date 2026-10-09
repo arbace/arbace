@@ -96,7 +96,11 @@
    ;; phase 2a: the functional interfaces jrt's threads and executors take
    ["Runnable" "java.lang" [] ["(Run__V [])"] []]
    ["Callable" "java.util.concurrent" [] ["(Call__O ^any [])"] []]
-   ["Supplier" "java.util.function" [] ["(Get__O ^any [])"] []]])
+   ["Supplier" "java.util.function" [] ["(Get__O ^any [])"] []]
+   ;; step 5 phase 2B: the constant API's interfaces String implements (their methods name
+   ;; classes outside the world: markers only, as c2g translates them)
+   ["Constable" "java.lang.constant" [] [] []]
+   ["ConstantDesc" "java.lang.constant" [] [] []]])
 
 (defn- simple [n] (last (str/split n #"\.")))
 (defn- qualified [n] (if (str/includes? n ".") n (str "java.lang." n)))

@@ -125,7 +125,8 @@ LockSupport's permit.\n"
           ^{:tag (map (* ThreadLocal) any) :doc "thread locals, used by the thread itself only\n"} locals
           ^{:tag (map (* ThreadLocal) any)} inheritable
           ^int32 probe
-          ^int64 seed))
+          ^int64 seed
+          ^{:tag (* ForkJoinPool) :doc "the pool whose worker the thread is (forkjoin.clj)\n"} fjPool))
 
 (go/var Thread_class
   (Define (addr (lit ClassInfo :Name "java.lang.Thread" :Kind KindClass :Modifiers AccPublic
@@ -486,6 +487,22 @@ interrupted before or during the sleep (the status cleared).\n"
   (when (or (< nanos 0) (> nanos 999999))
     (panic (IllegalArgumentException_New_String (Str "nanosecond timeout value out of range"))))
   (sleepFor (durationOf millis nanos)))
+
+(go/const
+  [^{:tag int32 :val 1 :doc "Thread_MIN_PRIORITY is Thread.MIN_PRIORITY.\n"} Thread_MIN_PRIORITY 1]
+  [^{:tag int32 :val 5} Thread_NORM_PRIORITY 5]
+  [^{:tag int32 :val 10} Thread_MAX_PRIORITY 10])
+
+(go/func Thread_DumpStack__V "Thread_DumpStack__V is Thread.dumpStack(): a stack trace on the standard error.\n" []
+  (.PrintStackTrace__V (Exception_New_String (Str "Stack trace"))))
+
+(go/func Thread_StartVirtualThread_Runnable__Thread
+  "Thread_StartVirtualThread_Runnable__Thread is Thread.startVirtualThread: an unnamed virtual
+thread, started.\n"
+  ^Thread_I [^Runnable task]
+  (let [t (newVirtualThread (Intern "") (nnIface task))]
+    (.Start__V t)
+    t))
 
 (go/func Thread_Yield__V "Thread_Yield__V is Thread.yield(): runtime.Gosched.\n" []
   (runtime/Gosched))

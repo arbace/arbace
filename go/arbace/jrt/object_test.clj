@@ -115,7 +115,7 @@
     (.Error t "getSimpleName"))
   (when (!= (.GetName__String String_class) (.GetName__String String_class))
     (.Error t "getName: one String per class"))
-  (when (!= (len (.-A (.GetInterfaces__Class1 String_class))) 3)
+  (when (!= (len (.-A (.GetInterfaces__Class1 String_class))) 5)
     (.Error t "getInterfaces"))
   (when (!= (GetClass (Str "x")) String_class)
     (.Error t "getClass"))

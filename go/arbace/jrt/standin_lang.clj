@@ -132,6 +132,34 @@
     (when (not ok) (panic (ClassCast x Supplier_class)))
     v))
 
+;; ---- java.lang.constant.Constable
+
+(go/type Constable
+  (interface Object_I (Is_Constable [])))
+(go/var Constable_class
+  (Define (addr (lit ClassInfo :Name "java.lang.constant.Constable" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Constable"))))
+(go/func Constable_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Constable x)] ok))
+(go/func Constable_Cast ^Constable [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Constable x)]
+    (when (not ok) (panic (ClassCast x Constable_class)))
+    v))
+
+;; ---- java.lang.constant.ConstantDesc
+
+(go/type ConstantDesc
+  (interface Object_I (Is_ConstantDesc [])))
+(go/var ConstantDesc_class
+  (Define (addr (lit ClassInfo :Name "java.lang.constant.ConstantDesc" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.ConstantDesc"))))
+(go/func ConstantDesc_InstanceOf ^bool [^any x] (let [(values _ ok) (assert ConstantDesc x)] ok))
+(go/func ConstantDesc_Cast ^ConstantDesc [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert ConstantDesc x)]
+    (when (not ok) (panic (ClassCast x ConstantDesc_class)))
+    v))
+
 ;; ---- java.lang.Exception
 
 (go/type Exception (struct Throwable))
@@ -1836,6 +1864,8 @@
   (set! (.-IsInstance (.Info Runnable_class)) Runnable_InstanceOf)
   (set! (.-IsInstance (.Info Callable_class)) Callable_InstanceOf)
   (set! (.-IsInstance (.Info Supplier_class)) Supplier_InstanceOf)
+  (set! (.-IsInstance (.Info Constable_class)) Constable_InstanceOf)
+  (set! (.-IsInstance (.Info ConstantDesc_class)) ConstantDesc_InstanceOf)
   (set! (.-IsInstance (.Info Exception_class)) Exception_InstanceOf)
   (set! (.-IsInstance (.Info RuntimeException_class)) RuntimeException_InstanceOf)
   (set! (.-IsInstance (.Info Error_class)) Error_InstanceOf)

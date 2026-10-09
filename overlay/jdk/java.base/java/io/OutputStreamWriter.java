@@ -72,7 +72,10 @@ public class OutputStreamWriter extends Writer {
             return LATIN1;
         if (n.equals("US-ASCII"))
             return ASCII;
-        return UTF8;
+        if (n.equals("UTF-8"))
+            return UTF8;
+        // jrt's other charsets (UTF-16, UTF-16BE, UTF-16LE) code strings, not streams
+        throw new UnsupportedOperationException("jrt: no stream coding for " + n);
     }
 
     /** The charset's historical name, or null when the writer is closed. */

@@ -302,8 +302,9 @@
                      (list 'return (list '!= 'x (list 'conv 'any 'Boolean_FALSE)))]))
      (list 'go/func 'C2g_CastArray :type-params ['T] (with-meta [(tag 'x 'any) (tag 'cls '(* Class))] {:tag 'T})
            (list 'when (list '== 'x nil) (list 'let [(tag 'z 'T) (list 'zero 'T)] (list 'return 'z)))
-           (list 'let ['y (list '.Cast_O__O 'cls 'x)]
-                 (list 'assert 'T 'y)))
+           ;; checkcast's ClassCastException, with HotSpot's message (jrt.ClassCast)
+           (list 'when (list 'not (list '.IsInstance_O__Z 'cls 'x)) (list 'panic (list 'ClassCast 'x 'cls)))
+           (list 'assert 'T 'x))
      (list 'go/func 'C2g_Discard (with-meta [(tag 'x 'any)] {:tag 'bool}) false)
      '(go/func C2g_RefP "C2g_RefP is a pointer as an any, nil-preserving (§5.6).\n"
         :type-params [T] ^any [^{:tag (* T)} p]
@@ -317,10 +318,50 @@ translated java.util.Formatter).\n"
           ^{:tag (* String)} [^{:tag (* String)} format ^{:tag (* RefArray)} args]
           (.ToString__String (.Format_String_O1__Formatter (Formatter_New) format args))))
      (when (m/translated? "java/util/Formatter")
+       '(go/method Formatted_O1__String
+          "Formatted_O1__String is String.formatted: String.format(this, args).\n"
+          ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* RefArray)} args]
+          (.ToString__String (.Format_String_O1__Formatter (Formatter_New) t args))))
+     ;; String.join over an Iterable (jrt's String cannot name the translated Iterable)
+     (when (and (m/translated? "java/lang/Iterable") (m/translated? "java/lang/CharSequence"))
+       '(go/func String_Join_CharSequence_Iterable__String
+          "String_Join_CharSequence_Iterable__String is String.join(CharSequence, Iterable): each
+element cast to CharSequence (the for loop's checkcast), then joined as the array overload joins.\n"
+          ^{:tag (* String)} [^CharSequence sep ^Iterable elements]
+          (when (== sep nil) (panic (NPE)))
+          (when (== elements nil) (panic (NPE)))
+          (let [^{:tag (slice any)} es nil
+                it (.Iterator__Iterator elements)]
+            (while (.HasNext__Z it)
+              (set! es (append es (CharSequence_Cast (.Next__O it)))))
+            (String_Join_CharSequence_CharSequence1__String sep (RefArrayOf CharSequence_class (spread es))))))
+     (when (m/translated? "java/util/Formatter")
        '(go/func String_Format_Locale_String_O1__String
           "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
           ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
           (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
+     ;; Throwable.printStackTrace(PrintStream|PrintWriter) and System.getenv() for the REPL's
+     ;; reflection (step 5 phase 2B): jrt cannot name the translated classes
+     (when (m/translated? "java/io/PrintWriter")
+       (list 'go/func 'C2g_PrintStackTraceWriter
+             "C2g_PrintStackTraceWriter is Throwable.printStackTrace(PrintWriter): the trace's text printed.\n"
+             [(tag 't 'Throwable_I) (tag 'w (m/go-type :jrt "Ljava/io/PrintWriter;"))]
+             '(.Print_String__V (NN w) (StackTraceString t))))
+     (when (m/translated? "java/io/PrintStream")
+       (list 'go/func 'C2g_PrintStackTraceStream
+             "C2g_PrintStackTraceStream is Throwable.printStackTrace(PrintStream).\n"
+             [(tag 't 'Throwable_I) (tag 's (m/go-type :jrt "Ljava/io/PrintStream;"))]
+             '(.Print_String__V (NN s) (StackTraceString t))))
+     (when (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
+       (list 'go/func 'C2g_SystemGetenv
+             "C2g_SystemGetenv is System.getenv(): the host's environment as an unmodifiable map.\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Map;")})
+             '(let [m (HashMap_New)]
+                (range [_ kv (.Environ (CurrentHost))]
+                  (let [i (strings/IndexByte kv \=)]
+                    (when (> i 0)
+                      (.Put_O_O__O m (Str (subslice kv _ i)) (Str (subslice kv (+ i 1)))))))
+                (Collections_UnmodifiableMap_Map__Map m))))
      ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -608,7 +649,13 @@ translated java.util.Formatter).\n"
                          (list 'String_Format_String_O1__String s0 '((inst As (* RefArray)) (aget args 1))))
                     (sig "format" '[Locale_class String_class (.ArrayClass Object_class)] 'String_class 0x89
                          (list 'String_Format_Locale_String_O1__String '((inst As (* Locale)) (aget args 0)) s1
-                               '((inst As (* RefArray)) (aget args 2))))])
+                               '((inst As (* RefArray)) (aget args 2))))
+                    (sig "formatted" '[(.ArrayClass Object_class)] 'String_class 0x81
+                         (list '.Formatted_O1__String '((inst As (* String)) this) '((inst As (* RefArray)) (aget args 0))))])
+                 (when (and (m/translated? "java/lang/Iterable") (m/translated? "java/lang/CharSequence"))
+                   [(sig "join" '[CharSequence_class Iterable_class] 'String_class 0x9
+                         (list 'String_Join_CharSequence_Iterable__String '((inst As CharSequence) (aget args 0))
+                               '((inst As Iterable) (aget args 1))))])
                  (when (m/translated? "java/util/regex/Pattern")
                    [(sig "matches" '[String_class] 'Prim_boolean 0x1
                          (list '.Matches_String__Z '((inst As (* String)) this) s0))
@@ -621,14 +668,34 @@ translated java.util.Formatter).\n"
                     (sig "split" '[String_class Prim_int] '(.ArrayClass String_class) 0x1
                          (list '.Split_String_I__String1 '((inst As (* String)) this) s0 '(assert int32 (aget args 1))))]))
         streams? (m/translated? "jdk/internal/jrt/StandardStreams")
+        pst-w? (m/translated? "java/io/PrintWriter")
+        pst-s? (m/translated? "java/io/PrintStream")
+        getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
         loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
         ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")]
-    (when (or (seq str-ms) streams? loaders? ci?)
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv?)
       [(apply list 'go/func 'init []
               (concat
+                (when (or pst-w? pst-s?)
+                  [(apply list 'set! '(.-Methods (.Info Throwable_class))
+                          [(apply list 'append '(.-Methods (.Info Throwable_class))
+                                  (concat
+                                    (when pst-s?
+                                      [(sig "printStackTrace" '[PrintStream_class] 'Prim_void 0x1
+                                            '(do (C2g_PrintStackTraceStream (assert Throwable_I this) (PrintStream_Cast (aget args 0)))
+                                                 (return nil)))])
+                                    (when pst-w?
+                                      [(sig "printStackTrace" '[PrintWriter_class] 'Prim_void 0x1
+                                            '(do (C2g_PrintStackTraceWriter (assert Throwable_I this) (PrintWriter_Cast (aget args 0)))
+                                                 (return nil)))])))])])
+                (when getenv?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetenv)))))])
                 (when ci?
                   ['(set! (.-Fields (.Info String_class))
                           (append (.-Fields (.Info String_class))

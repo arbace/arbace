@@ -131,7 +131,10 @@ subsequence, as JDK 26 consumes them), surrogates encoded in 3 bytes too.\n"
   [^{:tag int :val 0} csUnknown iota]
   [^{:val 1} csUTF8]
   [^{:val 2} csLatin1]
-  [^{:val 3} csASCII])
+  [^{:val 3} csASCII]
+  [^{:val 4} csUTF16]
+  [^{:val 5} csUTF16BE]
+  [^{:val 6} csUTF16LE])
 
 (go/func charsetOf "charsetOf: jrt's charsets by Java's names and aliases (case-insensitive; charset.clj).\n"
   ^int [^{:tag (* String)} name]
@@ -142,7 +145,7 @@ subsequence, as JDK 26 consumes them), surrogates encoded in 3 bytes too.\n"
 
 (go/func DecodeBytes
   "DecodeBytes decodes with the named charset (UTF-8, ISO-8859-1, US-ASCII: bytes above 0x7F
-become U+FFFD); UnsupportedEncodingException for others.\n"
+become U+FFFD; UTF-16, UTF-16BE, UTF-16LE); UnsupportedEncodingException for others.\n"
   ^{:tag (slice uint16)} [^{:tag (slice int8)} b ^{:tag (* String)} name]
   (switch (charsetOf name)
     (case [csUTF8] (return (DecodeUTF8 b)))
@@ -156,8 +159,77 @@ become U+FFFD); UnsupportedEncodingException for others.\n"
           (if (< c 0)
             (aset v i 0xFFFD)
             (aset v i (conv uint16 c))))
-        (return v))))
+        (return v)))
+    (case [csUTF16] (return (decodeUTF16 b 0)))
+    (case [csUTF16BE] (return (decodeUTF16 b 1)))
+    (case [csUTF16LE] (return (decodeUTF16 b 2))))
   (panic (UnsupportedEncodingException_New_String name)))
+
+(go/func decodeUTF16
+  "decodeUTF16 is jdk26u's sun.nio.cs.UnicodeDecoder with String's REPLACE: order 0 (UTF-16)
+reads a byte-order mark at the start (big-endian without one), 1 big-endian, 2 little-endian;
+an unpaired low surrogate is malformed (2 bytes), a high one not followed by a low (4 bytes),
+the bytes left at the end (fewer than 2, or a high surrogate's 2 or 3) one malformed input:
+each becomes U+FFFD.\n"
+  ^{:tag (slice uint16)} [^{:tag (slice int8)} b ^int order]
+  (let [v (make (slice uint16) 0 (/ (len b) 2))
+        i 0
+        n (len b)
+        get (fn ^uint16 [^int j]
+              (let [b1 (conv uint16 (conv uint8 (aget b j)))
+                    b2 (conv uint16 (conv uint8 (aget b (+ j 1))))]
+                (when (== order 2)
+                  (return (bit-or (<< b2 8) b1)))
+                (bit-or (<< b1 8) b2)))]
+    (when (and (== order 0) (>= n 2))
+      (let [c (bit-or (<< (conv uint16 (conv uint8 (aget b 0))) 8) (conv uint16 (conv uint8 (aget b 1))))]
+        (cond
+          (== c 0xFEFF) (do (set! order 1) (set! i 2))
+          (== c 0xFFFE) (do (set! order 2) (set! i 2))
+          :else (set! order 1))))
+    (while (> (- n i) 1)
+      (let [c (get i)]
+        (cond
+          (isHighSurrogate c)
+          (do
+            (when (< (- n i) 4)
+              (break))
+            (let [c2 (get (+ i 2))]
+              (if (isLowSurrogate c2)
+                (set! v (append v c c2))
+                (set! v (append v 0xFFFD))))
+            (set! i (+ i 4)))
+          (isLowSurrogate c)
+          (do (set! v (append v 0xFFFD)) (set! i (+ i 2)))
+          :else
+          (do (set! v (append v c)) (set! i (+ i 2))))))
+    (when (< i n)
+      (set! v (append v 0xFFFD)))
+    v))
+
+(go/func encodeUTF16
+  "encodeUTF16 is jdk26u's sun.nio.cs.UnicodeEncoder with String's REPLACE: order 0 (UTF-16)
+writes a byte-order mark first (big-endian; none for an empty string), 1 big-endian, 2
+little-endian; an unpaired surrogate becomes the replacement U+FFFD.\n"
+  ^{:tag (slice int8)} [^{:tag (slice uint16)} v ^int order]
+  (let [dst (make (slice int8) 0 (+ (* 2 (len v)) 2))
+        put (fn [^uint16 c]
+              (if (== order 2)
+                (set! dst (append dst (conv int8 (conv uint8 c)) (conv int8 (conv uint8 (>> c 8)))))
+                (set! dst (append dst (conv int8 (conv uint8 (>> c 8))) (conv int8 (conv uint8 c))))))]
+    (when (== (len v) 0)
+      (return dst))
+    (when (== order 0)
+      (put 0xFEFF)
+      (set! order 1))
+    (for [i 0] (< i (len v)) (inc! i)
+      (let [c (aget v i)]
+        (cond
+          (and (isHighSurrogate c) (< (+ i 1) (len v)) (isLowSurrogate (aget v (+ i 1))))
+          (do (put c) (put (aget v (+ i 1))) (inc! i))
+          (isSurrogate c) (put 0xFFFD)
+          :else (put c))))
+    dst))
 
 (go/func EncodeBytes
   "EncodeBytes encodes with the named charset; unmappable characters become '?' (a surrogate
@@ -167,6 +239,9 @@ pair one '?').\n"
         limit (conv rune 0xff)]
     (switch cs
       (case [csUTF8] (return (EncodeUTF8 v)))
+      (case [csUTF16] (return (encodeUTF16 v 0)))
+      (case [csUTF16BE] (return (encodeUTF16 v 1)))
+      (case [csUTF16LE] (return (encodeUTF16 v 2)))
       (case [csASCII] (set! limit 0x7f))
       (case [csLatin1])
       (default (panic (UnsupportedEncodingException_New_String name))))

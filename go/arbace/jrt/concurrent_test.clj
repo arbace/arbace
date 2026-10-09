@@ -484,3 +484,68 @@ unaligned reads of ArraysSupport.mismatch and the writes of DecimalDigits.\n"
         c (addr (lit testCell))]
     (for [i 0] (< i (.-N b)) (inc! i)
       (.CompareAndSetInt_O_J_I_I__Z u c off (conv int32 i) (conv int32 (+ i 1))))))
+
+(go/func fjSum
+  "fjSum sums lo..hi-1 as reducers' fold does: halves forked and joined below a threshold,
+recording the workers it ran in and how many ran at once.\n"
+  ^int64 [^int64 lo ^int64 hi ^{:tag (* sync/Map)} workers ^{:tag (* atomic/Int32)} running ^{:tag (* atomic/Int32)} most]
+  (when (<= (- hi lo) 1000)
+    (let [n (.Add running 1)]
+      (when (> n (.Load most)) (.Store most n))
+      (.Store workers (.String (.GetName__String (Thread_CurrentThread__Thread))) true)
+      (time/Sleep time/Millisecond)
+      (.Add running -1))
+    (let [s (conv int64 0)]
+      (for [i lo] (< i hi) (inc! i) (set! s (+ s i)))
+      (return s)))
+  (let [mid (+ lo (/ (- hi lo) 2))
+        right (ForkJoinTask_Adapt_Callable__ForkJoinTask
+                (callableOf (fn ^any [] (Long_ValueOf_J__Long (fjSum mid hi workers running most)))))]
+    (.Fork__ForkJoinTask right)
+    (let [l (fjSum lo mid workers running most)]
+      (+ l (.LongValue__J (assert (* Long) (.Join__O right)))))))
+
+(go/func TestForkJoin [^{:tag (* testing/T)} t]
+  ;; reducers' fold: a task invoked from outside runs in a worker, forks run in parallel
+  (let [p (ForkJoinPool_New_I 4)
+        ^sync/Map workers (zero sync/Map)
+        ^atomic/Int32 running (zero atomic/Int32)
+        ^atomic/Int32 most (zero atomic/Int32)
+        ^bool inPool false
+        root (ForkJoinTask_Adapt_Callable__ForkJoinTask
+               (callableOf (fn ^any []
+                             (set! inPool (and (ForkJoinTask_InForkJoinPool__Z) (== (ForkJoinTask_GetPool__ForkJoinPool) p)))
+                             (Long_ValueOf_J__Long (fjSum 0 100000 (addr workers) (addr running) (addr most))))))
+        r (.Invoke_ForkJoinTask__O p root)
+        n 0]
+    (.Range workers (fn ^bool [^any k ^any v] (inc! n) true))
+    (when (!= (.LongValue__J (assert (* Long) r)) 4999950000)
+      (.Errorf t "sum %v" r))
+    (when (or (not inPool) (ForkJoinTask_InForkJoinPool__Z))
+      (.Error t "inForkJoinPool"))
+    (when (or (< n 2) (> (.Load most) 4) (< (.Load most) 2))
+      (.Errorf t "parallelism: %d workers, %d at once" n (.Load most)))
+    (when (or (not (.IsDone__Z root)) (not (.IsCompletedNormally__Z root)))
+      (.Error t "root done")))
+  ;; exceptions: join rethrows, get wraps; a checked exception of a Callable is wrapped
+  (let [p (ForkJoinPool_New_I 2)
+        bad (ForkJoinTask_Adapt_Callable__ForkJoinTask (callableOf (fn ^any [] (panic (Thrown (IllegalStateException_New_String (Str "bad")))))))
+        checked (ForkJoinTask_Adapt_Callable__ForkJoinTask (callableOf (fn ^any [] (panic (Thrown (InterruptedException_New_String (Str "chk")))))))]
+    (when (!= (res (fn ^string [] (.Invoke_ForkJoinTask__O p bad) "x")) "!java.lang.IllegalStateException: bad")
+      (.Error t "invoke of a failing task"))
+    (when (!= (res (fn ^string [] (.Get__O bad) "x")) "!java.util.concurrent.ExecutionException: java.lang.IllegalStateException: bad")
+      (.Error t "get of a failing task"))
+    (when (!= (res (fn ^string [] (.Join__O checked) "x")) "!java.lang.RuntimeException: java.lang.InterruptedException: chk")
+      (.Errorf t "a checked exception: %s" (res (fn ^string [] (.Join__O checked) "x"))))
+    (when (not (.IsCompletedAbnormally__Z bad))
+      (.Error t "completed abnormally")))
+  ;; cancel before it runs; a forked task outside a pool goes to the common pool
+  (let [c (ForkJoinTask_Adapt_Callable__ForkJoinTask (callableOf (fn ^any [] (Str "never"))))]
+    (when (or (not (.Cancel_Z__Z c false)) (not (.IsCancelled__Z c)) (not (.IsDone__Z c)))
+      (.Error t "cancel"))
+    (when (!= (res (fn ^string [] (.Join__O c) "x")) "!java.util.concurrent.CancellationException")
+      (.Error t "join of a cancelled task")))
+  (let [f (ForkJoinTask_Adapt_Callable__ForkJoinTask (callableOf (fn ^any [] (Str "forked"))))]
+    (.Fork__ForkJoinTask f)
+    (when (!= (.String (StrOfObj (.Join__O f))) "forked")
+      (.Error t "fork outside a pool"))))

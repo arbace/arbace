@@ -138,7 +138,11 @@
     (defclass ^:public ^:static EvalState
       ;; one thread's evaluator: the innermost frame and the depth (C2G-SPEC §10.5, §10.7)
       (field ^:public ^Frame top)
-      (field ^:public ^int depth)))
+      (field ^:public ^int depth)
+      ;; loading one of the program's embedded namespaces, which the JVM build loads
+      ;; AOT-compiled: a top-level def's constant metadata and value are made as the compiled
+      ;; namespace's class makes them (EVAL-NOTES.md, phase 2B: :arglists)
+      (field ^:public ^boolean aot)))
 
   (c2g/add
     (defclass ^:public ^:static Dyn
@@ -387,7 +391,11 @@
                                       (identical? p Short/TYPE) (Short/valueOf (RT/shortCast n))
                                       (identical? p Byte/TYPE) (Byte/valueOf (RT/byteCast n))
                                       :else n)))))
-                (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))) nil
+                ;; a fn for a functional interface (FISupport's test, as the compiled call
+                ;; adapts it); another interface is a checkcast
+                (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))
+                     (some? (Compiler$FISupport/maybeFIMethod p)))
+                  nil
                 :else (Evaluator/checkCast p v)))
             (recur (unchecked-inc-int i))))
         vs)
@@ -802,14 +810,31 @@
     ;; where the local is (Evaluator.where's encoding; 0: not known yet)
     (field ^int evalWhere))
   (c2g/add
+    ;; the local's primitive type (0: not known yet, 1: none, 2: long, 3: double)
+    (field ^int evalPrim))
+  (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (let [k evalWhere]
         (cond
-          (> k 0) (aget (.-slots f) (unchecked-dec-int k))
-          (< k 0) (.closed f (unchecked-subtract-int -1 k))
+          (> k 0) (.evalBox this (aget (.-slots f) (unchecked-dec-int k)))
+          (< k 0) (.evalBox this (.closed f (unchecked-subtract-int -1 k)))
           :else (do
                   (set! evalWhere (Compiler$Evaluator/where b f))
                   (.evalIn this f))))))
+  (c2g/add
+    ;; a primitive local's value boxed anew at each use, as the bytecode boxes it where an
+    ;; Object is wanted (LocalBindingExpr.emit: Double.valueOf, Long.valueOf with its cache), so
+    ;; that (let [x ##NaN] (identical? x x)) is false as on the JVM
+    (method evalBox [this v]
+      (let [^:mutable p evalPrim]
+        (when (== p 0)
+          (let [c (.getPrimitiveType b)]
+            (set! p (cond (identical? c Long/TYPE) 2 (identical? c Double/TYPE) 3 :else 1))
+            (set! evalPrim p)))
+        (cond
+          (or (== p 1) (nil? v)) v
+          (== p 2) (Long/valueOf (.longValue (cast Number v)))
+          :else (Double/valueOf (.doubleValue (cast Number v)))))))
   (c2g/add
     ;; set! of a local: a deftype's mutable field, in a method of the deftype
     (method ^:public assignIn [this ^Compiler$Frame f v]
@@ -1056,6 +1081,24 @@
         :else (.evalAssign target val)))))
 
 (c2g/variant Compiler$DefExpr
+  ;; DefExpr.eval, the top-level def; while an embedded namespace loads (EvalState.aot), a
+  ;; constant value or metadata is the AOT-compiled namespace's (emitValue: a seq built by a
+  ;; macro, such as defn's :arglists, is a PersistentList), as the JVM build loads core
+  (method ^:public eval [this]
+    (try
+      (let [aot (.-aot (Compiler$Evaluator/state))]
+        (when initProvided
+          (.bindRoot var (if (and aot (instance? Compiler$ConstantExpr init)) (.evalIn init nil) (.eval init))))
+        (when (some? meta)
+          (.setMeta var (cast IPersistentMap (if (and aot (instance? Compiler$ConstantExpr meta))
+                                                 (.evalIn meta nil)
+                                                 (.eval meta)))))
+        (.setDynamic var isDynamic))
+      (catch Throwable e
+        (if (not (instance? Compiler$CompilerException e))
+            (throw (Compiler$CompilerException. source line column arbace.lang.Compiler/DEF
+                                                Compiler$CompilerException/PHASE_EXECUTION e))
+            (throw (cast Compiler$CompilerException e))))))
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (when initProvided (.bindRoot var (.evalIn init f)))

@@ -281,6 +281,9 @@
         regex? (jrt-java? "java/util/regex/Pattern")
         scan (cond-> scan
                formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
+               formatter? (update-in [:methods "String"] (fnil conj #{}) "Formatted_O1__String")
+               (contains? @(:compile-set world) "java/lang/Iterable")
+               (update :funcs conj "String_Join_CharSequence_Iterable__String")
                streams? (update :vars into ["System_in" "System_out" "System_err"])
                streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
                ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
@@ -311,6 +314,16 @@
                                   ["java/util/regex/Matcher" "replaceFirst" "(Ljava/lang/String;)Ljava/lang/String;"]])
                                (when ci-order?
                                  [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
+                               ;; c2g's support for the REPL's reflection (out/support-forms)
+                               (when (contains? @(:compile-set world) "java/io/PrintWriter")
+                                 [["java/io/PrintWriter" "print" "(Ljava/lang/String;)V"]])
+                               (when (contains? @(:compile-set world) "java/io/PrintStream")
+                                 [["java/io/PrintStream" "print" "(Ljava/lang/String;)V"]])
+                               (when (and (contains? @(:compile-set world) "java/util/HashMap")
+                                          (contains? @(:compile-set world) "java/util/Collections"))
+                                 [["java/util/HashMap" "<init>" "()V"]
+                                  ["java/util/HashMap" "put" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"]
+                                  ["java/util/Collections" "unmodifiableMap" "(Ljava/util/Map;)Ljava/util/Map;"]])
                                (when formatter?
                                  [["java/util/Formatter" "<init>" "()V"]
                                   ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]

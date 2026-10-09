@@ -856,6 +856,87 @@ C.<init>(T1,T2) when no public constructor takes those classes.\n"
 
 (go/method IsMemberClass__Z ^bool [^{:tag (* Class)} c] (!= (.-Declaring (.-info c)) nil))
 
+;; ---- step 5 phase 2B: more of Class's members for the REPL (jdk26u's Class.java)
+
+(go/method AsSubclass_Class__Class "AsSubclass_Class__Class is Class.asSubclass: this, or
+ClassCastException with this class's toString.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c ^{:tag (* Class)} sup]
+  (when (.IsAssignableFrom_Class__Z (NN sup) c)
+    (return c))
+  (panic (ClassCastException_New_String (.ToString__String c))))
+
+(go/method ComponentType__Class "ComponentType__Class is Class.componentType: an array's
+component type, else null.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (.-comp c))
+
+(go/method ArrayType__Class "ArrayType__Class is Class.arrayType: the class of arrays of c;
+UnsupportedOperationException for void.\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (when (== c Prim_void)
+    (panic (UnsupportedOperationException_New)))
+  (.ArrayClass c))
+
+(go/func descriptorOf ^string [^{:tag (* Class)} c]
+  (cond
+    (.IsArray__Z c) (return (+ "[" (descriptorOf (.-comp c))))
+    (.IsPrimitive__Z c)
+    (switch (.-Name (.-info c))
+      (case ["boolean"] (return "Z")) (case ["byte"] (return "B")) (case ["char"] (return "C"))
+      (case ["short"] (return "S")) (case ["int"] (return "I")) (case ["long"] (return "J"))
+      (case ["float"] (return "F")) (case ["double"] (return "D")) (default (return "V"))))
+  (let [b (conv (slice byte) (.-Name (.-info c)))]
+    (range [i x b]
+      (when (== x \.)
+        (aset b i \/)))
+    (+ "L" (conv string b) ";")))
+
+(go/method DescriptorString__String "DescriptorString__String is Class.descriptorString (I,
+[Ljava/lang/String;).\n"
+  ^{:tag (* String)} [^{:tag (* Class)} c]
+  (Str (descriptorOf c)))
+
+(go/method IsAnonymousClass__Z "IsAnonymousClass__Z: false; the closed world's classes are named
+(an anonymous class's ClassInfo says nothing of it).\n"
+  ^bool [^{:tag (* Class)} c] false)
+(go/method IsLocalClass__Z ^bool [^{:tag (* Class)} c] false)
+(go/method IsHidden__Z ^bool [^{:tag (* Class)} c] false)
+(go/method IsSealed__Z ^bool [^{:tag (* Class)} c] false)
+(go/method GetEnclosingMethod__Method ^{:tag (* Method)} [^{:tag (* Class)} c] nil)
+(go/method GetEnclosingConstructor__Constructor ^{:tag (* Constructor)} [^{:tag (* Class)} c] nil)
+
+(go/method GetNestHost__Class "GetNestHost__Class is Class.getNestHost: the outermost enclosing
+class (arrays and primitives: themselves).\n"
+  ^{:tag (* Class)} [^{:tag (* Class)} c]
+  (let [h c]
+    (while (!= (.-Declaring (.-info h)) nil)
+      (set! h (.-Declaring (.-info h))))
+    h))
+
+(go/func Class_ForPrimitiveName_String__Class "Class_ForPrimitiveName_String__Class is
+Class.forPrimitiveName: the primitive class of that name (void included), else null.\n"
+  ^{:tag (* Class)} [^{:tag (* String)} name]
+  (Class_GetPrimitiveClass_String__Class name))
+
+(go/method NewInstance__O "NewInstance__O is the deprecated Class.newInstance: the nullary
+constructor's newInstance, with InstantiationException when there is none and the
+constructor's exception rethrown as is.\n"
+  ^any [^{:tag (* Class)} c]
+  (let [^{:tag (* Constructor)} k nil
+        exc (runCatching (fn [] (set! k (.findCtor c (NewRefArray Class_class 0) false))))]
+    (when (!= exc nil)
+      (let [ie (InstantiationException_New_String (.GetName__String c))]
+        (.InitCause_Throwable__Throwable ie exc)
+        (panic ie)))
+    (let [^any r nil
+          exc2 (runCatching (fn [] (set! r (.NewInstance_O1__O k (NewRefArray Object_class 0)))))]
+      (when (!= exc2 nil)
+        (let [(values ite ok) (assert (* InvocationTargetException) exc2)]
+          (when ok
+            (panic (.GetTargetException__Throwable ite))))
+        (panic exc2))
+      r)))
+
 (go/method GetPackageName__String
   "GetPackageName__String is Class.getPackageName: java.lang for int and int[] as for
 Object.\n"

@@ -52,7 +52,19 @@
                 ["io/PrintStream" "io/Closeable" "io/Flushable" "lang/AutoCloseable"])
            ;; BigInteger's modInverse and modPow with a negative exponent (the oracle's
            ;; BigNumbers script)
-           ["java/math/SignedMutableBigInteger.java"]))))
+           ["java/math/SignedMutableBigInteger.java"]
+           ;; B1a step 5, phase 2B (EVAL-NOTES.md): JDK 21's sequenced collections, which the
+           ;; closure's List, Deque, SortedSet, SortedMap, LinkedHashSet and LinkedHashMap
+           ;; implement (LinkedHashMap's views are SequencedSets), their reverse-order views and
+           ;; SequencedMap's entry holder
+           (map #(str "java/util/" % ".java")
+                ["SequencedCollection" "SequencedSet" "SequencedMap" "ReverseOrderDequeView"
+                 "ReverseOrderSortedSetView" "ReverseOrderSortedMapView"])
+           ["jdk/internal/util/NullableKeyValueHolder.java"]
+           ;; the constant API's two interfaces, which String and the wrapper classes implement
+           ;; (supers, bases and ancestors list them); their methods name classes outside the
+           ;; world (Optional, MethodHandles.Lookup) and do not exist in Go
+           (map #(str "java/lang/constant/" % ".java") ["Constable" "ConstantDesc"])))))
 
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes

@@ -114,6 +114,14 @@ reference) retries, so the operation is linearizable as Java's.\n"
 (go/method Ref ^any [^{:tag (* AtomicInteger)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* AtomicInteger)} t] AtomicInteger_class)
 (go/method Clone__O ^any [^{:tag (* AtomicInteger)} t] (panic (CloneNotSupported t)))
+;; step 5 phase 2B: the other memory orders (all sequentially consistent in Go)
+(go/method GetOpaque__I ^int32 [^{:tag (* AtomicInteger)} a] (.Load (.-v a)))
+(go/method SetOpaque_I__V [^{:tag (* AtomicInteger)} a ^int32 x] (.Store (.-v a) x))
+(go/method WeakCompareAndSet_I_I__Z ^bool [^{:tag (* AtomicInteger)} a ^int32 e ^int32 x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetAcquire_I_I__Z ^bool [^{:tag (* AtomicInteger)} a ^int32 e ^int32 x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetRelease_I_I__Z ^bool [^{:tag (* AtomicInteger)} a ^int32 e ^int32 x] (.CompareAndSwap (.-v a) e x))
+(go/method CompareAndExchangeAcquire_I_I__I ^int32 [^{:tag (* AtomicInteger)} a ^int32 e ^int32 x] (.CompareAndExchange_I_I__I a e x))
+(go/method CompareAndExchangeRelease_I_I__I ^int32 [^{:tag (* AtomicInteger)} a ^int32 e ^int32 x] (.CompareAndExchange_I_I__I a e x))
 (go/func AtomicInteger_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* AtomicInteger) x)] ok))
 (go/func AtomicInteger_Cast ^{:tag (* AtomicInteger)} [^any x]
   (when (== x nil) (return nil))
@@ -164,6 +172,19 @@ reference) retries, so the operation is linearizable as Java's.\n"
 (go/method Ref ^any [^{:tag (* AtomicLong)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* AtomicLong)} t] AtomicLong_class)
 (go/method Clone__O ^any [^{:tag (* AtomicLong)} t] (panic (CloneNotSupported t)))
+;; step 5 phase 2B: the other memory orders (all sequentially consistent in Go)
+(go/method GetOpaque__J ^int64 [^{:tag (* AtomicLong)} a] (.Load (.-v a)))
+(go/method SetOpaque_J__V [^{:tag (* AtomicLong)} a ^int64 x] (.Store (.-v a) x))
+(go/method WeakCompareAndSet_J_J__Z ^bool [^{:tag (* AtomicLong)} a ^int64 e ^int64 x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetAcquire_J_J__Z ^bool [^{:tag (* AtomicLong)} a ^int64 e ^int64 x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetRelease_J_J__Z ^bool [^{:tag (* AtomicLong)} a ^int64 e ^int64 x] (.CompareAndSwap (.-v a) e x))
+(go/method CompareAndExchangeAcquire_J_J__J ^int64 [^{:tag (* AtomicLong)} a ^int64 e ^int64 x] (.CompareAndExchange_J_J__J a e x))
+(go/method CompareAndExchangeRelease_J_J__J ^int64 [^{:tag (* AtomicLong)} a ^int64 e ^int64 x] (.CompareAndExchange_J_J__J a e x))
+(go/method CompareAndExchange_J_J__J ^int64 [^{:tag (* AtomicLong)} a ^int64 e ^int64 x]
+  (while true
+    (let [c (.Load (.-v a))]
+      (when (or (!= c e) (.CompareAndSwap (.-v a) c x))
+        (return c)))))
 (go/func AtomicLong_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* AtomicLong) x)] ok))
 (go/func AtomicLong_Cast ^{:tag (* AtomicLong)} [^any x]
   (when (== x nil) (return nil))
@@ -197,6 +218,24 @@ reference) retries, so the operation is linearizable as Java's.\n"
 (go/method Ref ^any [^{:tag (* AtomicBoolean)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* AtomicBoolean)} t] AtomicBoolean_class)
 (go/method Clone__O ^any [^{:tag (* AtomicBoolean)} t] (panic (CloneNotSupported t)))
+;; step 5 phase 2B: the other memory orders (all sequentially consistent in Go)
+(go/method GetPlain__Z ^bool [^{:tag (* AtomicBoolean)} a] (.Load (.-v a)))
+(go/method GetOpaque__Z ^bool [^{:tag (* AtomicBoolean)} a] (.Load (.-v a)))
+(go/method GetAcquire__Z ^bool [^{:tag (* AtomicBoolean)} a] (.Load (.-v a)))
+(go/method SetPlain_Z__V [^{:tag (* AtomicBoolean)} a ^bool x] (.Store (.-v a) x))
+(go/method SetOpaque_Z__V [^{:tag (* AtomicBoolean)} a ^bool x] (.Store (.-v a) x))
+(go/method SetRelease_Z__V [^{:tag (* AtomicBoolean)} a ^bool x] (.Store (.-v a) x))
+(go/method WeakCompareAndSet_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetPlain_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetAcquire_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndSwap (.-v a) e x))
+(go/method WeakCompareAndSetRelease_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndSwap (.-v a) e x))
+(go/method CompareAndExchange_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x]
+  (while true
+    (let [c (.Load (.-v a))]
+      (when (or (!= c e) (.CompareAndSwap (.-v a) c x))
+        (return c)))))
+(go/method CompareAndExchangeAcquire_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndExchange_Z_Z__Z a e x))
+(go/method CompareAndExchangeRelease_Z_Z__Z ^bool [^{:tag (* AtomicBoolean)} a ^bool e ^bool x] (.CompareAndExchange_Z_Z__Z a e x))
 (go/func AtomicBoolean_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* AtomicBoolean) x)] ok))
 
 ;; ---------------------------------------------------------------------------------------
@@ -226,6 +265,22 @@ reference) retries, so the operation is linearizable as Java's.\n"
 (go/method WeakCompareAndSetPlain_O_O__Z ^bool [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndSet (.-v a) e x))
 (go/method WeakCompareAndSetVolatile_O_O__Z ^bool [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndSet (.-v a) e x))
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* AtomicReference)} a] (StrOfObj (.Load (.-v a))))
+;; step 5 phase 2B: the other memory orders (all sequentially consistent in Go)
+(go/method GetOpaque__O ^any [^{:tag (* AtomicReference)} a] (.Load (.-v a)))
+(go/method SetOpaque_O__V [^{:tag (* AtomicReference)} a ^any x] (.Store (.-v a) x))
+(go/method WeakCompareAndSet_O_O__Z ^bool [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndSet (.-v a) e x))
+(go/method WeakCompareAndSetAcquire_O_O__Z ^bool [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndSet (.-v a) e x))
+(go/method WeakCompareAndSetRelease_O_O__Z ^bool [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndSet (.-v a) e x))
+(go/method CompareAndExchange_O_O__O "CompareAndExchange_O_O__O is compareAndExchange: the witness value.\n"
+  ^any [^{:tag (* AtomicReference)} a ^any e ^any x]
+  (while true
+    (let [c (.Load (.-v a))]
+      (when (!= c e)
+        (return c))
+      (when (.CompareAndSet (.-v a) e x)
+        (return e)))))
+(go/method CompareAndExchangeAcquire_O_O__O ^any [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndExchange_O_O__O a e x))
+(go/method CompareAndExchangeRelease_O_O__O ^any [^{:tag (* AtomicReference)} a ^any e ^any x] (.CompareAndExchange_O_O__O a e x))
 (go/method Is_Serializable [^{:tag (* AtomicReference)} a])
 (go/method Ref ^any [^{:tag (* AtomicReference)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* AtomicReference)} t] AtomicReference_class)

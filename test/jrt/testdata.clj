@@ -32,6 +32,14 @@
 
 (def needles ["" "a" "b" "c" "abc" "bc" "ABC" "ß" "SS" "Σ" "😀" "\ud800" "x" "aa"])
 
+(def text-corpus
+  "Multi-line strings for indent, stripIndent and translateEscapes (step 5 phase 2B): line
+  terminators \\n, \\r, \\r\\n, blank and whitespace-only lines, a last line with or without its
+  terminator, escape sequences valid and not."
+  ["" "a" "   a\n     b\n   c\n" "   a\n     b\n   c" "  x\r\n    y\r  z\n  " "\n\n" "  \n  \n"
+   "\ta\n\t\tb" "  only\u2003em" "a\\nb" "\\t\\b\\f\\r\\s\\'\\\"\\\\" "\\0\\12\\377\\400\\7z"
+   "line\\\ncont" "line\\\r\ncont" "bad \\q" "end \\" "😀\n  😀 x  \n"])
+
 (defn string-lines []
   (concat
     (for [s corpus
@@ -69,6 +77,13 @@
                   ["codePointCount2" #(.codePointCount ^String %1 (int %2) (int %3))]
                   ["indexOfCharRange" #(.indexOf ^String %1 (int 97) (int %2) (int %3))]]]
       (line op (esc s) (str a) (str b) (result (f s a b))))
+    (for [s text-corpus
+          [op f] [["stripIndent" #(.stripIndent ^String %)]
+                  ["translateEscapes" #(.translateEscapes ^String %)]]]
+      (line op (esc s) (result (f s))))
+    (for [s text-corpus
+          i [-2147483648 -3 -1 0 2]]
+      (line "indent" (esc s) (str i) (result (.indent ^String s (int i)))))
     (for [s corpus
           n needles
           [op f] [["equals" #(.equals ^String %1 %2)]

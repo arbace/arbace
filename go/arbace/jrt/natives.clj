@@ -5,7 +5,8 @@
 ;; functions.
 (in-ns 'go.arbace.jrt)
 
-(go/file "natives.go")
+(go/file "natives.go"
+  :imports [[md5 "crypto/md5"]])
 
 (go/func NullPointerException_GetExtendedNPEMessage__String_native
   "NullPointerException_GetExtendedNPEMessage__String_native is the native
@@ -73,6 +74,19 @@ embedded resource name (the host's Resource: RT.load's sources), or null.\n"
     (.RandomBytes (CurrentHost) bs)
     (range [i x bs]
       (aset (.-A b) i (conv int8 x)))))
+
+(go/func UUID_Md5_B1__B1_native
+  "UUID_Md5_B1__B1_native is MessageDigest.getInstance(\"MD5\").digest(b) (nameUUIDFromBytes),
+over Go's crypto/md5.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* ByteArray)} b]
+  (let [bs (make (slice byte) (len (.-A (NN b))))]
+    (range [i x (.-A b)]
+      (aset bs i (conv byte x)))
+    (let [sum (md5/Sum bs)
+          a (NewByteArray (conv int32 (len sum)))]
+      (range [i x sum]
+        (aset (.-A a) i (conv int8 x)))
+      a)))
 
 (go/func Compiler_Evaluator_CheckCast_Class_O__O_native
   "Compiler_Evaluator_CheckCast_Class_O__O_native is the evaluator's checkcast of o to c (null

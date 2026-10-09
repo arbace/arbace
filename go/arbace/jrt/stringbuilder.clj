@@ -80,6 +80,31 @@ StringBuffer.\n"
                        ") out of bounds for length " (strconv/Itoa l))))))
     (.appendUnits b (subslice (.-A a) offset end))))
 
+(go/method insertCSRange
+  "insertCSRange is AbstractStringBuilder.insert(dstOffset, s, start, end): null as \"null\",
+the offset checked, then the range (IndexOutOfBoundsException).\n"
+  [^{:tag (* sbuf)} b ^int32 o ^CharSequence s ^int32 start ^int32 end]
+  (when (== s nil)
+    (set! s litNull))
+  (checkFromTo o (conv int32 (len (.-value b))) (len (.-value b)))
+  (let [n (.Length__I s)]
+    (when (or (< start 0) (> start end) (> end n))
+      (panic (IndexOutOfBoundsException_New_String
+               (Str (+ "Range [" (strconv/Itoa (conv int start)) ", " (strconv/Itoa (conv int end))
+                       ") out of bounds for length " (strconv/Itoa (conv int n))))))))
+  (let [u (make (slice uint16) 0 (- end start))]
+    (for [i start] (< i end) (inc! i)
+      (set! u (append u (.CharAt_I__C s i))))
+    (.insertUnits b o u)))
+
+(go/method insertChars
+  "insertChars is AbstractStringBuilder.insert(index, char[], offset, len): the index checked,
+then the range (StringIndexOutOfBoundsException).\n"
+  [^{:tag (* sbuf)} b ^int32 o ^{:tag (* CharArray)} a ^int32 offset ^int32 n]
+  (checkFromTo o (conv int32 (len (.-value b))) (len (.-value b)))
+  (checkFromTo offset (+ offset n) (len (.-A (NN a))))
+  (.insertUnits b o (subslice (.-A a) offset (+ offset n))))
+
 (go/method appendCodePoint [^{:tag (* sbuf)} b ^int32 cp]
   (when (or (< cp 0) (> cp 0x10FFFF))
     (panic (IllegalArgumentException_New_String
@@ -340,6 +365,20 @@ StringBuffer.\n"
 (go/method Insert_I_CharSequence__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int32 o ^CharSequence s]
   (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfObj s)))
   t)
+(go/method Insert_I_D__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int32 o ^float64 d]
+  (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfDouble d)))
+  t)
+(go/method Insert_I_F__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int32 o ^float32 f]
+  (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfFloat f)))
+  t)
+(go/method Insert_I_CharSequence_I_I__StringBuilder ^{:tag (* StringBuilder)}
+  [^{:tag (* StringBuilder)} t ^int32 o ^CharSequence s ^int32 start ^int32 end]
+  (.insertCSRange (addr (.-sbuf t)) o s start end)
+  t)
+(go/method Insert_I_C1_I_I__StringBuilder ^{:tag (* StringBuilder)}
+  [^{:tag (* StringBuilder)} t ^int32 o ^{:tag (* CharArray)} a ^int32 offset ^int32 n]
+  (.insertChars (addr (.-sbuf t)) o a offset n)
+  t)
 (go/method Replace_I_I_String__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int32 start ^int32 end ^{:tag (* String)} s]
   (.replaceRange (addr (.-sbuf t)) start end s)
   t)
@@ -571,6 +610,28 @@ StringBuffer.\n"
   (.monitorEnter (addr (.-Object t)))
   (defer (.monitorExit (addr (.-Object t))))
   (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfObj s)))
+  t)
+(go/method Insert_I_D__StringBuffer ^{:tag (* StringBuffer)} [^{:tag (* StringBuffer)} t ^int32 o ^float64 d]
+  (.monitorEnter (addr (.-Object t)))
+  (defer (.monitorExit (addr (.-Object t))))
+  (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfDouble d)))
+  t)
+(go/method Insert_I_F__StringBuffer ^{:tag (* StringBuffer)} [^{:tag (* StringBuffer)} t ^int32 o ^float32 f]
+  (.monitorEnter (addr (.-Object t)))
+  (defer (.monitorExit (addr (.-Object t))))
+  (.insertUnits (addr (.-sbuf t)) o (.-value (StrOfFloat f)))
+  t)
+(go/method Insert_I_CharSequence_I_I__StringBuffer ^{:tag (* StringBuffer)}
+  [^{:tag (* StringBuffer)} t ^int32 o ^CharSequence s ^int32 start ^int32 end]
+  (.monitorEnter (addr (.-Object t)))
+  (defer (.monitorExit (addr (.-Object t))))
+  (.insertCSRange (addr (.-sbuf t)) o s start end)
+  t)
+(go/method Insert_I_C1_I_I__StringBuffer ^{:tag (* StringBuffer)}
+  [^{:tag (* StringBuffer)} t ^int32 o ^{:tag (* CharArray)} a ^int32 offset ^int32 n]
+  (.monitorEnter (addr (.-Object t)))
+  (defer (.monitorExit (addr (.-Object t))))
+  (.insertChars (addr (.-sbuf t)) o a offset n)
   t)
 (go/method Replace_I_I_String__StringBuffer ^{:tag (* StringBuffer)} [^{:tag (* StringBuffer)} t ^int32 start ^int32 end ^{:tag (* String)} s]
   (.monitorEnter (addr (.-Object t)))

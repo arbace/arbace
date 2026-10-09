@@ -351,7 +351,18 @@
 
 (def charset-names
   ["UTF-8" "utf8" "UTF8" "unicode-1-1-utf-8" "ISO-8859-1" "latin1" "L1" "iso-ir-100" "cp819" "8859_1"
-   "US-ASCII" "ascii" "us" "646" "iso_646.irv:1983" "default" "UTF-16" "EBCDIC" "" "-utf8" "utf 8" "a.b:c+d_e"])
+   "US-ASCII" "ascii" "us" "646" "iso_646.irv:1983" "default" "UTF-16" "EBCDIC" "" "-utf8" "utf 8" "a.b:c+d_e"
+   ;; step 5 phase 2B
+   "UTF-16BE" "UTF-16LE" "utf16" "UnicodeBigUnmarked" "X-UTF-16LE" "unicode"])
+
+(def charsets
+  "jrt's charsets, by canonical name."
+  ["UTF-8" "ISO-8859-1" "US-ASCII" "UTF-16" "UTF-16BE" "UTF-16LE"])
+
+(def utf16-byte-cases
+  [[0xFE 0xFF 0 0x61] [0xFF 0xFE 0x61 0] [0 0x61 0] [0xD8 0 0 0x61] [0xDC 0 0 0x61] [0xFF 0xFE] [0x61]
+   [0xD8 0x3D 0xDE 0] [0xFF 0xFE 0xFF 0xFE] [0 0x61 0xFE 0xFF] [0 0x61 0xFF 0xFE] [0xD8 0x3D] [0xD8 0x3D 0xDE]
+   [0xDE 0 0xD8 0x3D] [0 0x61 0xD8 0x3D 0xDE 0 0 0x62]])
 
 (def byte-cases
   [[] [0x41 0x42] [0xC3 0xA9] [0xE2 0x82 0xAC] [0xF0 0x9F 0x98 0x80] [0xFF] [0x80 0x41] [0xC3]
@@ -363,22 +374,23 @@
           [op f] [["forName" #(.name (Charset/forName n))] ["isSupported" #(Charset/isSupported n)]]]
       (line op (esc n) (outcome f)))
     (line "forNameNull" (outcome #(Charset/forName nil)))
-    (for [n ["UTF-8" "ISO-8859-1" "US-ASCII"]
+    (for [n charsets
           :let [cs (Charset/forName n)]
           [op f] [["toString" #(str cs)] ["hashCode" #(.hashCode cs)] ["aliases" #(str/join "," (sort (.aliases cs)))]
                   ["canEncode" #(.canEncode cs)] ["isRegistered" #(.isRegistered cs)]
                   ["containsUTF8" #(.contains cs (Charset/forName "UTF-8"))]
                   ["containsASCII" #(.contains cs (Charset/forName "US-ASCII"))]
                   ["containsLatin1" #(.contains cs (Charset/forName "ISO-8859-1"))]
+                  ["containsUTF16" #(.contains cs (Charset/forName "UTF-16"))]
                   ["compareToUTF8" #(.compareTo cs (Charset/forName "UTF-8"))]
                   ["equalsUTF8" #(.equals cs (Charset/forName "UTF8"))]
                   ["class" #(.getName (class cs))]]]
       (line op n (outcome f)))
-    (for [n ["UTF-8" "ISO-8859-1" "US-ASCII"]
-          s ["" "abc" "café" "€uro" "😀" "lone \ud800 x" "\udc00" "ÿĀ" "x\u0000y"]]
+    (for [n charsets
+          s ["" "abc" "café" "€uro" "😀" "lone \ud800 x" "\udc00" "ÿĀ" "x\u0000y" "\ud800\ud800" "a\udc00b" "\ud800"]]
       (line "encode" n (esc s) (outcome #(str/join "," (map (fn [b] (bit-and b 0xff)) (.getBytes ^String s (Charset/forName n)))))))
-    (for [n ["UTF-8" "ISO-8859-1" "US-ASCII"]
-          bs byte-cases]
+    (for [n charsets
+          bs (concat byte-cases utf16-byte-cases)]
       (line "decode" n (str/join "," bs) (outcome #(String. (byte-array (map unchecked-byte bs)) (Charset/forName n)))))
     (for [n ["UTF-8" "ISO-8859-1"]]
       (line "decodeRange" n (outcome #(String. (byte-array (map unchecked-byte [0x61 0xC3 0xA9 0x62])) 1 2 (Charset/forName n)))))

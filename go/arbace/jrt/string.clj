@@ -12,7 +12,8 @@ cached as Java's (computed on first use; 0 recomputed).\n"
 (go/var String_class
   (Define (addr (lit ClassInfo :Name "java.lang.String" :Kind KindClass
                      :Modifiers (bit-or AccPublic AccFinal) :Super Object_class
-                     :Interfaces (lit (slice (* Class)) Serializable_class Comparable_class CharSequence_class)
+                     :Interfaces (lit (slice (* Class)) Serializable_class Comparable_class CharSequence_class
+                                       Constable_class ConstantDesc_class)
                      :Go "arbace/jrt.String"))))
 
 (go/const ^{:tag bool :val true
@@ -285,6 +286,11 @@ int count).\n"
       (aset v i (bit-or hi (conv uint16 (conv uint8 c)))))
     (newString v)))
 
+(go/func String_New_B1_I
+  "String_New_B1_I is the deprecated new String(byte[] ascii, int hibyte).\n"
+  ^{:tag (* String)} [^{:tag (* ByteArray)} b ^int32 hibyte]
+  (String_New_B1_I_I_I b hibyte 0 (conv int32 (len (.-A (NN b))))))
+
 (go/func String_New_B1_I_I_String
   "String_New_B1_I_I_String is new String(byte[], offset, length, String charsetName), for
 the charsets jrt knows (DecodeBytes).\n"
@@ -346,6 +352,8 @@ writes them on amd64 and arm64), index and len counted in code units.\n"
 (go/method Is_Serializable [^{:tag (* String)} t])
 (go/method Is_Comparable [^{:tag (* String)} t])
 (go/method Is_CharSequence [^{:tag (* String)} t])
+(go/method Is_Constable [^{:tag (* String)} t])
+(go/method Is_ConstantDesc [^{:tag (* String)} t])
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* String)} t] t)
 
 (go/method HashCode__I "HashCode__I is s[0]*31^(n-1) + ... + s[n-1], cached.\n"
@@ -858,6 +866,146 @@ dereference, which Catch maps too; csNN makes it explicit).\n"
 (go/method IsBlank__Z ^bool [^{:tag (* String)} t]
   (let [(values a b) (stripBounds (.-value t) true false)]
     (== a b)))
+
+;; ---- step 5 phase 2B: indent, stripIndent, translateEscapes (jdk26u's String, over lines
+;; split as String.lines splits them: at \n, \r and \r\n, no empty last line)
+
+(go/func splitLines ^{:tag (slice (slice uint16))} [^{:tag (slice uint16)} v]
+  (let [^{:tag (slice (slice uint16))} ls nil
+        start 0
+        i 0]
+    (while (< i (len v))
+      (let [c (aget v i)]
+        (cond
+          (== c \newline)
+          (do (set! ls (append ls (subslice v start i))) (inc! i) (set! start i))
+          (== c \return)
+          (do (set! ls (append ls (subslice v start i)))
+              (inc! i)
+              (when (and (< i (len v)) (== (aget v i) \newline))
+                (inc! i))
+              (set! start i))
+          :else (inc! i))))
+    (when (< start (len v))
+      (set! ls (append ls (subslice v start))))
+    ls))
+
+(go/func joinLines "joinLines joins ls with \\n, then suffix.\n"
+  ^{:tag (* String)} [^{:tag (slice (slice uint16))} ls ^string suffix]
+  (let [^{:tag (slice uint16)} v nil]
+    (range [i l ls]
+      (when (> i 0)
+        (set! v (append v \newline)))
+      (set! v (append v (spread l))))
+    (range [_ c suffix]
+      (set! v (append v (conv uint16 c))))
+    (newString v)))
+
+(go/method Indent_I__String "Indent_I__String is String.indent.\n"
+  ^{:tag (* String)} [^{:tag (* String)} t ^int32 n]
+  (when (== (len (.-value t)) 0)
+    (return (Intern "")))
+  (let [ls (splitLines (.-value t))]
+    (range [i l ls]
+      (cond
+        (> n 0)
+        (let [u (make (slice uint16) 0 (+ (len l) (conv int n)))]
+          (for [k (conv int32 0)] (< k n) (inc! k)
+            (set! u (append u \space)))
+          (aset ls i (append u (spread l))))
+        (== n -2147483648)
+        (let [(values a _) (stripBounds l true false)]
+          (aset ls i (subslice l a)))
+        (< n 0)
+        (let [(values a _) (stripBounds l true false)]
+          (aset ls i (subslice l (min (conv int (- n)) a))))))
+    (joinLines ls "\n")))
+
+(go/method StripIndent__String "StripIndent__String is String.stripIndent.\n"
+  ^{:tag (* String)} [^{:tag (* String)} t]
+  (let [v (.-value t)
+        n (len v)]
+    (when (== n 0)
+      (return (Intern "")))
+    (let [last (aget v (- n 1))
+          optOut (or (== last \newline) (== last \return))
+          ls (splitLines v)
+          outdent 0]
+      (when (not optOut)
+        (set! outdent 2147483647)
+        (range [_ l ls]
+          (let [(values a _) (stripBounds l true false)]
+            (when (!= a (len l))
+              (set! outdent (min outdent a)))))
+        (let [ll (aget ls (- (len ls) 1))
+              (values a _) (stripBounds ll true false)]
+          (when (== a (len ll))
+            (set! outdent (min outdent (len ll))))))
+      (range [i l ls]
+        (let [(values first _) (stripBounds l true false)
+              (values _ lastNW) (stripBounds l false true)]
+          (if (> first lastNW)
+            (aset ls i nil)
+            (aset ls i (subslice l (min outdent first) lastNW)))))
+      (when optOut
+        (return (joinLines ls "\n")))
+      (joinLines ls ""))))
+
+(go/method TranslateEscapes__String "TranslateEscapes__String is String.translateEscapes.\n"
+  ^{:tag (* String)} [^{:tag (* String)} t]
+  (let [cs (.-value t)
+        n (len cs)
+        out (make (slice uint16) 0 n)
+        from 0]
+    (when (== n 0)
+      (return (Intern "")))
+    (while (< from n)
+      (let [ch (aget cs from)]
+        (inc! from)
+        (when (== ch \\)
+          (if (< from n)
+            (do (set! ch (aget cs from)) (inc! from))
+            (set! ch 0))
+          (switch ch
+            (case [\b] (set! ch 8))
+            (case [\f] (set! ch 12))
+            (case [\n] (set! ch \newline))
+            (case [\r] (set! ch \return))
+            (case [\s] (set! ch \space))
+            (case [\t] (set! ch \tab))
+            (case [\' \" \\])
+            (case [\0 \1 \2 \3 \4 \5 \6 \7]
+              (let [k 1
+                    code (conv int32 (- ch \0))]
+                (when (<= ch \3)
+                  (set! k 2))
+                (let [limit (min (+ from k) n)]
+                (while (< from limit)
+                  (let [c (aget cs from)]
+                    (when (or (< c \0) (< \7 c))
+                      (break))
+                    (inc! from)
+                    (set! code (bit-or (<< code 3) (conv int32 (- c \0)))))))
+                (set! ch (conv uint16 code))))
+            (case [\newline] (continue))
+            (case [\return]
+              (when (and (< from n) (== (aget cs from) \newline))
+                (inc! from))
+              (continue))
+            (default
+              (let [h (hexUpper (conv uint32 ch))]
+                (while (< (len h) 4) (set! h (+ "0" h)))
+                (panic (IllegalArgumentException_New_String
+                         (Concat (Str "Invalid escape sequence: \\") (NewStringUTF16 (lit (slice uint16) ch))
+                                 (Str (+ " \\\\u" h)))))))))
+        (set! out (append out ch))))
+    (newString out)))
+
+(go/method ContentEquals_StringBuffer__Z "ContentEquals_StringBuffer__Z is contentEquals(StringBuffer).\n"
+  ^bool [^{:tag (* String)} t ^{:tag (* StringBuffer)} sb]
+  (when (== sb nil)
+    (panic (NPE)))
+  (.ContentEquals_CharSequence__Z t sb))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Case mapping (StringUTF16.toLowerCase/toUpperCase for the root locale; the Locale

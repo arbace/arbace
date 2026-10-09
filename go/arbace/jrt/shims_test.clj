@@ -23,9 +23,6 @@
 
 (go/func TestCharsetsAgainstJVM [^{:tag (* testing/T)} t]
   (range [_ c (readCases t "charsets.txt")]
-    ;; jrt has UTF-8, ISO-8859-1 and US-ASCII only (V9)
-    (when (and (> (len c) 2) (== (aget c 1) "UTF-16"))
-      (continue))
     (let [want (aget c (- (len c) 1))
           got ""]
       (switch (aget c 0)
@@ -55,6 +52,7 @@
                                    (case ["containsUTF8"] (return (Box (.Contains_Charset__Z cs (charsetOf3 "UTF-8")))))
                                    (case ["containsASCII"] (return (Box (.Contains_Charset__Z cs (charsetOf3 "US-ASCII")))))
                                    (case ["containsLatin1"] (return (Box (.Contains_Charset__Z cs (charsetOf3 "ISO-8859-1")))))
+                                   (case ["containsUTF16"] (return (Box (.Contains_Charset__Z cs (charsetOf3 "UTF-16")))))
                                    (case ["compareToUTF8"] (return (Box (.CompareTo_Charset__I cs (charsetOf3 "UTF-8")))))
                                    (case ["equalsUTF8"] (return (Box (.Equals_O__Z cs (charsetOf3 "UTF8")))))
                                    (case ["class"] (return (.GetName__String (GetClass cs)))))

@@ -100,7 +100,8 @@
   "jrt's hand-written classes (the shim edge that phase 1 implements): the Java class, the
   interfaces jrt's implementation has, and whether the class is non-leaf (Impl_ methods,
   §5.4). Object is the object model's own (§5.8): its members are not listed by Go name."
-  [["java.lang.String" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence"] false]
+  [["java.lang.String" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence"
+                        "java.lang.constant.Constable" "java.lang.constant.ConstantDesc"] false]
    ["java.lang.StringBuilder" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.Appendable"] false]
    ["java.lang.StringBuffer" ["java.io.Serializable" "java.lang.Comparable" "java.lang.CharSequence" "java.lang.Appendable"] false]
    ["java.lang.Class" ["java.io.Serializable" "java.lang.reflect.Type"] false]
@@ -130,6 +131,10 @@
    ["sun.nio.cs.UTF_8" [] false]
    ["sun.nio.cs.ISO_8859_1" [] false]
    ["sun.nio.cs.US_ASCII" [] false]
+   ;; step 5 phase 2B
+   ["sun.nio.cs.UTF_16" [] false]
+   ["sun.nio.cs.UTF_16BE" [] false]
+   ["sun.nio.cs.UTF_16LE" [] false]
    ["java.nio.charset.StandardCharsets" [] false]
    ["java.util.Locale" ["java.lang.Cloneable" "java.io.Serializable"] false]
    ["java.util.Locale$Category" [] false]
@@ -168,6 +173,9 @@
    ["java.util.concurrent.Executors" [] false]
    ["java.util.concurrent.Future" [] false]
    ["java.util.concurrent.FutureTask" ["java.lang.Runnable" "java.util.concurrent.Future"] false]
+   ;; step 5 phase 2B: the fork-join pool (reducers' fold)
+   ["java.util.concurrent.ForkJoinTask" ["java.util.concurrent.Future" "java.io.Serializable"] true]
+   ["java.util.concurrent.ForkJoinPool" [] false]
    ["java.util.concurrent.CountDownLatch" [] false]
    ["java.util.concurrent.ThreadLocalRandom" [] false]])
 
