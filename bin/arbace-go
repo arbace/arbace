@@ -7,6 +7,9 @@
 #                                      missing); arm64 runs under qemu-aarch64
 #        bin/arbace-go --build         translate (bin/c2g --program) and build the executables
 #                                      of $ARBACE_GO_ARCHES into target/arbace-go/<arch>/arbace
+#        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
+#                                      forms, doc/go/EXEC-NOTES.md) with the built executables
+#                                      and link them again with it
 #        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
 #                                      error's exit status, for each of $ARBACE_GO_ARCHES
 # Environment:
@@ -23,21 +26,76 @@ dir=$root/target/arbace-go
 arch=${ARBACE_GO_ARCH:-amd64}
 arches=${ARBACE_GO_ARCHES:-amd64,arm64}
 
+# the build's environment for go build, as bin/g2c build sets it (arbace.g2c.build/go-env)
+go_env() { # go_env ARCH
+  local a=$1 goroot=${G2C_GOROOT:-/root/tamago-go}
+  echo GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
+    GOEXPERIMENT= CGO_ENABLED=0 GOOS=linux GOARCH="$a" \
+    "$( [ "$a" = amd64 ] && echo GOAMD64=v1 || echo GOARM64=v8.0 )"
+}
+
 build() {
   mkdir -p "$dir"
   echo "== bin/c2g --program" >&2
   (cd "$root" && bin/c2g --program --out "$dir/c2g") > "$dir/c2g.log" 2>&1 \
     || { tail -20 "$dir/c2g.log" >&2; echo "arbace-go: c2g failed ($dir/c2g.log)" >&2; return 1; }
-  local overlay
+  local overlay host
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
-  for a in ${arches//,/ }; do
+  host=$(host_arch)
+  for a in $(build_order); do
     echo "== bin/g2c build $a" >&2
     mkdir -p "$dir/$a"
     (cd "$root" && bin/g2c build --line-file --arch "$a" --work "$dir/work-$a" -o "$dir/$a/arbace" \
        --overlay "$overlay" "$dir/c2g/prog") > "$dir/build-$a.log" 2>&1 \
       || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
+  done
+  image
+}
+
+host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; }
+
+# the host's architecture first: its executable prepares the namespaces
+build_order() {
+  local host order
+  host=$(host_arch); order=$host
+  for a in ${arches//,/ }; do [ "$a" = "$host" ] || order="$order $a"; done
+  echo $order
+}
+
+# image: prepare the namespaces with the host's executable (built without an image or with
+# a previous one, which preparing ignores), then link each architecture's executable again
+# with the image, the main package's embedded file (the other packages are in go build's
+# cache: only the main package changes)
+image() {
+  local overlay main=$dir/c2g/prog/go/arbace/cmd/arbace a
+  overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  prepare "$dir/$(host_arch)/arbace" "$main/image.bin" || return 1
+  for a in $(build_order); do
+    [ -d "$dir/work-$a/mod" ] || { echo "arbace-go: $a: not built" >&2; return 1; }
+    cp "$main/image.bin" "$dir/work-$a/mod/cmd/arbace/image.bin"
+    (cd "$dir/work-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+       -buildvcs=false -overlay "$overlay" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
+      || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
     echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes)" >&2
   done
+}
+
+# prepare EXE IMAGE: run the executable once with ARBACE_PREPARE, requiring every namespace
+# embedded in it (the sources whose first form is ns), and write the image of their analyzed
+# forms (Compiler$Image)
+prepare() {
+  local exe=$1 image=$2 res=$dir/c2g/prog/go/arbace/cmd/arbace/res nss
+  echo "== prepare the namespaces (the image)" >&2
+  nss=$(cd "$res" && grep -lE '^\(ns( |$)' $(find arbace -name '*.clj' | sort) \
+          | sed -e 's/\.clj$//' -e 's|/|.|g' -e 's/_/-/g' | tr '\n' ' ')
+  rm -f "$image"
+  printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
+    > "$dir/prepare.clj"
+  GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare.clj" > "$dir/prepare.log" 2>&1 \
+    || { tail -20 "$dir/prepare.log" >&2; echo "arbace-go: prepare failed ($dir/prepare.log)" >&2; return 1; }
+  [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare.log)" >&2; return 1; }
+  grep '^image:' "$dir/prepare.log" >&2
+  echo "arbace-go: image $(stat -c %s "$image") bytes" >&2
 }
 
 run() { # run ARCH ARG...
@@ -63,6 +121,27 @@ smoke() {
 (println (try (throw (ex-info "boom" {:a 1})) (catch Exception e [(ex-message e) (ex-data e)])))
 (println (loop [i 0 acc []] (if (< i 5) (recur (inc i) (conj acc (* i i))) acc)))
 EOF
+  printf '(+ 1 2)\n(* *1 10)\n(defn twice\n  "Doubles x."\n  [x]\n  (* 2 x))\n(twice 21)\n(doc twice)\n(/ 1 0)\n(class *e)\n(ex-message *e)\n[*1 *2 *3]\n"multi\nline"\n' \
+    > "$t/repl.in"
+  cat > "$t/repl.expected" <<'EOF'
+Clojure 1.13.0-master-SNAPSHOT
+user=> 3
+user=> 30
+user=> #'user/twice
+user=> 42
+user=> -------------------------
+user/twice
+([x])
+  Doubles x.
+nil
+user=> Execution error (ArithmeticException) at user/evalN (REPL:1).
+Divide by zero
+user=> java.lang.ArithmeticException
+user=> "Divide by zero"
+user=> ["Divide by zero" java.lang.ArithmeticException nil]
+user=> "multi\nline"
+user=> 
+EOF
   for a in ${arches//,/ }; do
     local fails=0
     check() { # check NAME EXPECTED ACTUAL
@@ -73,6 +152,12 @@ EOF
     check "a script" "$(printf '18 2,3,4\n[boom {:a 1}]\n[0 1 4 9 16]')" "$(run "$a" "$t/script.clj" 2>&1)"
     check "the REPL on stdin" "$(printf 'user=> 3\nuser=> #'"'"'user/sq\nuser=> 49\nuser=> ')" \
       "$(printf '(+ 1 2)\n(defn sq [x] (* x x))\n(sq 7)\n' | run "$a" 2>&1 | tail -n +2)"
+    # the REPL as a user process: multi-line input, doc, an error and the REPL going on, *1
+    # *2 *3 and *e, end of input ending it with status 0 (the transcript is the JVM's,
+    # bin/arbace's, but for the eval class's number)
+    run "$a" < "$t/repl.in" > "$t/repl.out" 2>&1; st=$?
+    check "a REPL session" "$(cat "$t/repl.expected")" "$(sed -e 's/user\/eval[0-9]*/user\/evalN/' "$t/repl.out")"
+    check "the REPL's exit status at end of input" "0" "$st"
     run "$a" -e '(/ 1 0)' > "$t/err.txt" 2>&1; local st=$?
     check "an error's exit status" "1" "$st"
     check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"
@@ -85,6 +170,7 @@ EOF
 
 case ${1:-} in
   --build) build ;;
+  --image) image ;;
   --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
   *)
     if [ ! -x "$dir/$arch/arbace" ]; then arches=$arch build || exit 1; fi

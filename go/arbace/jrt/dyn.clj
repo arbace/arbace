@@ -24,6 +24,7 @@ Class object. Unlike Define, it may replace a class DefineDynamic made before un
 name (deftype evaluated again at the REPL); a class of the closed world cannot be replaced.\n"
   ^{:tag (* Class)} [^{:tag (* ClassInfo)} info]
   (let [c (addr (lit Class :info info))]
+    (presetClassHash c (.-Name info))
     (.Lock registryMu)
     (let [old (aget registry (.-Name info))]
       (when (and (!= old nil) (not (aget dynamicClasses old)))

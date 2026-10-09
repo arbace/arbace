@@ -124,7 +124,12 @@
                 (^[Object/1] RT/map Compiler$Evaluator/EMBEDDED_LOAD
                                     (Boolean/valueOf (instance? java.io.ByteArrayInputStream ins))))
               (try
-                (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
+                ;; an embedded source: replayed from the program's image of prepared
+                ;; namespaces when it holds it, recorded when the program prepares them
+                ;; (Compiler$Image, doc/go/EXEC-NOTES.md)
+                (if (instance? java.io.ByteArrayInputStream ins)
+                    (Compiler$Image/load (InputStreamReader. ins UTF8) scriptfile file)
+                    (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file))
                 (finally
                   (Var/popThreadBindings)
                   (.close ins)
