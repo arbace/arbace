@@ -593,148 +593,218 @@
   ;; java.lang.Math
   (set! (.-Methods (.Info Math_class))
     (lit (slice MethodInfo)
-        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_I__I (assert int32 (aget args 0)))))
-        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "IEEEremainder" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_IEEEremainder_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_I__I (assert int32 (aget args 0)))))
         (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Abs_J__J (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "absExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_AbsExact_J__J (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "absExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_AbsExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "acos" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Acos_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "addExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_AddExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "addExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_AddExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "asin" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Asin_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "atan" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Atan_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "atan2" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Atan2_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "cbrt" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Cbrt_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "ceil" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Ceil_D__D (assert float64 (aget args 0)))))
-        (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDiv_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDiv_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDiv_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDiv_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDivExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDivExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDivExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilDivExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilMod_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilMod_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilMod_J_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
-        (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CeilMod_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
-        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_float Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Clamp_F_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)) (assert float32 (aget args 2)))))
         (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_long Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Clamp_J_I_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)) (assert int32 (aget args 2)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_double Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Clamp_D_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)) (assert float64 (aget args 2)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_float Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Clamp_F_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)) (assert float32 (aget args 2)))))
         (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_long Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Clamp_J_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)) (assert int64 (aget args 2)))))
         (lit MethodInfo :Name "copySign" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CopySign_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
         (lit MethodInfo :Name "copySign" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_CopySign_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "cos" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Cos_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "cosh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Cosh_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "decrementExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_DecrementExact_J__J (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "decrementExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_DecrementExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "divideExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_DivideExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "divideExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_DivideExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "exp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Exp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "expm1" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Expm1_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "floor" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Floor_D__D (assert float64 (aget args 0)))))
-        (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDiv_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDiv_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDiv_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDiv_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorDivExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDivExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorDivExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorDivExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorMod_J_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorMod_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorMod_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
-        (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_int :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_FloorMod_J_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
-        (lit MethodInfo :Name "fma" :Params (lit (slice (* Class)) Prim_double Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Fma_D_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)) (assert float64 (aget args 2)))))
         (lit MethodInfo :Name "fma" :Params (lit (slice (* Class)) Prim_float Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Fma_F_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)) (assert float32 (aget args 2)))))
-        (lit MethodInfo :Name "getExponent" :Params (lit (slice (* Class)) Prim_double) :Return Prim_int :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_GetExponent_D__I (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "fma" :Params (lit (slice (* Class)) Prim_double Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Fma_D_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)) (assert float64 (aget args 2)))))
         (lit MethodInfo :Name "getExponent" :Params (lit (slice (* Class)) Prim_float) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_GetExponent_F__I (assert float32 (aget args 0)))))
-        (lit MethodInfo :Name "incrementExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_IncrementExact_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "getExponent" :Params (lit (slice (* Class)) Prim_double) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_GetExponent_D__I (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "hypot" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Hypot_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "incrementExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_IncrementExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "incrementExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_IncrementExact_J__J (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "log" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Log_D__D (assert float64 (aget args 0)))))
-        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Max_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "log10" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Log10_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "log1p" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Log1p_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Max_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Max_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Max_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Max_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
-        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
-        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
-        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
         (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
-        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
-        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Min_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyFull" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyFull_I_I__J (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "multiplyHigh" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_MultiplyHigh_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "negateExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NegateExact_J__J (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "negateExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NegateExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "nextAfter" :Params (lit (slice (* Class)) Prim_float Prim_double) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextAfter_F_D__F (assert float32 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "nextAfter" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextAfter_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "nextDown" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextDown_D__D (assert float64 (aget args 0)))))
-        (lit MethodInfo :Name "nextUp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextUp_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "nextDown" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextDown_F__F (assert float32 (aget args 0)))))
         (lit MethodInfo :Name "nextUp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextUp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "nextUp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_NextUp_F__F (assert float32 (aget args 0)))))
         (lit MethodInfo :Name "pow" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Pow_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "powExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_PowExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "powExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_PowExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "random" :Params nil :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Random__D)))
         (lit MethodInfo :Name "rint" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Rint_D__D (assert float64 (aget args 0)))))
-        (lit MethodInfo :Name "round" :Params (lit (slice (* Class)) Prim_double) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Round_D__J (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "round" :Params (lit (slice (* Class)) Prim_float) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Round_F__I (assert float32 (aget args 0)))))
-        (lit MethodInfo :Name "scalb" :Params (lit (slice (* Class)) Prim_float Prim_int) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Scalb_F_I__F (assert float32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "round" :Params (lit (slice (* Class)) Prim_double) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Round_D__J (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "scalb" :Params (lit (slice (* Class)) Prim_double Prim_int) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Scalb_D_I__D (assert float64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "scalb" :Params (lit (slice (* Class)) Prim_float Prim_int) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Scalb_F_I__F (assert float32 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "signum" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Signum_F__F (assert float32 (aget args 0)))))
         (lit MethodInfo :Name "signum" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Signum_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "sin" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Sin_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "sinh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Sinh_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "sqrt" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Sqrt_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "subtractExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_SubtractExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "subtractExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_SubtractExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "tan" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Tan_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "tanh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Tanh_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "toDegrees" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_ToDegrees_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "toIntExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_int :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_ToIntExact_J__I (assert int64 (aget args 0)))))
-        (lit MethodInfo :Name "ulp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Ulp_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "toRadians" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_ToRadians_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "ulp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Ulp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "ulp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_Ulp_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedMultiplyExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedMultiplyExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedMultiplyExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "unsignedMultiplyHigh" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedMultiplyHigh_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedMultiplyHigh_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedPowExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedPowExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedPowExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Math_UnsignedPowExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))))
   (set! (.-Fields (.Info Math_class))
     (lit (slice FieldInfo)
         (lit FieldInfo :Name "E" :Type Prim_double :Modifiers 0x19
@@ -746,16 +816,218 @@
   ;; java.lang.StrictMath
   (set! (.-Methods (.Info StrictMath_class))
     (lit (slice MethodInfo)
+        (lit MethodInfo :Name "IEEEremainder" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_IEEEremainder_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Abs_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Abs_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Abs_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "abs" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Abs_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "absExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_AbsExact_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "absExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_AbsExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "acos" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Acos_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "addExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_AddExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "addExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_AddExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "asin" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Asin_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "atan" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Atan_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "atan2" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Atan2_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
         (lit MethodInfo :Name "cbrt" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Cbrt_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "ceil" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Ceil_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilDiv_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilDiv_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDiv" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilDiv_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDivExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilDivExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "ceilDivExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilDivExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilMod_J_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilMod_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "ceilMod" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CeilMod_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_double Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Clamp_D_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)) (assert float64 (aget args 2)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_long Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Clamp_J_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)) (assert int64 (aget args 2)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_long Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Clamp_J_I_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)) (assert int32 (aget args 2)))))
+        (lit MethodInfo :Name "clamp" :Params (lit (slice (* Class)) Prim_float Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Clamp_F_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)) (assert float32 (aget args 2)))))
+        (lit MethodInfo :Name "copySign" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CopySign_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
+        (lit MethodInfo :Name "copySign" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_CopySign_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "cos" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Cos_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "cosh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Cosh_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "decrementExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_DecrementExact_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "decrementExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_DecrementExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "divideExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_DivideExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "divideExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_DivideExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "exp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Exp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "expm1" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Expm1_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "floor" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Floor_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorDiv_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorDiv_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorDiv" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorDiv_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "floorDivExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorDivExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "floorDivExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorDivExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorMod_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorMod_J_I__I (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "floorMod" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_FloorMod_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "fma" :Params (lit (slice (* Class)) Prim_float Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Fma_F_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)) (assert float32 (aget args 2)))))
+        (lit MethodInfo :Name "fma" :Params (lit (slice (* Class)) Prim_double Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Fma_D_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)) (assert float64 (aget args 2)))))
+        (lit MethodInfo :Name "getExponent" :Params (lit (slice (* Class)) Prim_float) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_GetExponent_F__I (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "getExponent" :Params (lit (slice (* Class)) Prim_double) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_GetExponent_D__I (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "hypot" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Hypot_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "incrementExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_IncrementExact_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "incrementExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_IncrementExact_I__I (assert int32 (aget args 0)))))
         (lit MethodInfo :Name "log" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Log_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "log10" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Log10_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "log1p" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Log1p_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Max_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
+        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Max_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Max_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "max" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Max_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Min_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_float Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Min_F_F__F (assert float32 (aget args 0)) (assert float32 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Min_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "min" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Min_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_MultiplyExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_MultiplyExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_MultiplyExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyFull" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_MultiplyFull_I_I__J (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "multiplyHigh" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_MultiplyHigh_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "negateExact" :Params (lit (slice (* Class)) Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NegateExact_I__I (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "negateExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NegateExact_J__J (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "nextAfter" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextAfter_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "nextAfter" :Params (lit (slice (* Class)) Prim_float Prim_double) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextAfter_F_D__F (assert float32 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "nextDown" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextDown_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "nextDown" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextDown_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "nextUp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextUp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "nextUp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_NextUp_F__F (assert float32 (aget args 0)))))
         (lit MethodInfo :Name "pow" :Params (lit (slice (* Class)) Prim_double Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Pow_D_D__D (assert float64 (aget args 0)) (assert float64 (aget args 1)))))
+        (lit MethodInfo :Name "powExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_PowExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "powExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_PowExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "random" :Params nil :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Random__D)))
         (lit MethodInfo :Name "rint" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Rint_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "round" :Params (lit (slice (* Class)) Prim_double) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Round_D__J (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "round" :Params (lit (slice (* Class)) Prim_float) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Round_F__I (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "scalb" :Params (lit (slice (* Class)) Prim_double Prim_int) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Scalb_D_I__D (assert float64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "scalb" :Params (lit (slice (* Class)) Prim_float Prim_int) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Scalb_F_I__F (assert float32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "signum" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Signum_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "signum" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Signum_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "sin" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Sin_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "sinh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Sinh_D__D (assert float64 (aget args 0)))))
         (lit MethodInfo :Name "sqrt" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Sqrt_D__D (assert float64 (aget args 0)))))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Sqrt_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "subtractExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_SubtractExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "subtractExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_SubtractExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "tan" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Tan_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "tanh" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Tanh_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "toDegrees" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_ToDegrees_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "toIntExact" :Params (lit (slice (* Class)) Prim_long) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_ToIntExact_J__I (assert int64 (aget args 0)))))
+        (lit MethodInfo :Name "toRadians" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_ToRadians_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "ulp" :Params (lit (slice (* Class)) Prim_float) :Return Prim_float :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Ulp_F__F (assert float32 (aget args 0)))))
+        (lit MethodInfo :Name "ulp" :Params (lit (slice (* Class)) Prim_double) :Return Prim_double :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_Ulp_D__D (assert float64 (aget args 0)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedMultiplyExact_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedMultiplyExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedMultiplyExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedMultiplyExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedMultiplyHigh" :Params (lit (slice (* Class)) Prim_long Prim_long) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedMultiplyHigh_J_J__J (assert int64 (aget args 0)) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedPowExact" :Params (lit (slice (* Class)) Prim_long Prim_int) :Return Prim_long :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedPowExact_J_I__J (assert int64 (aget args 0)) (assert int32 (aget args 1)))))
+        (lit MethodInfo :Name "unsignedPowExact" :Params (lit (slice (* Class)) Prim_int Prim_int) :Return Prim_int :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (StrictMath_UnsignedPowExact_I_I__I (assert int32 (aget args 0)) (assert int32 (aget args 1)))))))
   (set! (.-Fields (.Info StrictMath_class))
     (lit (slice FieldInfo)
         (lit FieldInfo :Name "E" :Type Prim_double :Modifiers 0x19
@@ -814,10 +1086,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_GetLong_O_I__J (aget args 0) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "getShort" :Params (lit (slice (* Class)) Object_class Prim_int) :Return Prim_short :Modifiers 0x109
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_GetShort_O_I__S (aget args 0) (assert int32 (aget args 1)))))
-        (lit MethodInfo :Name "newInstance" :Params (lit (slice (* Class)) Class_class Prim_int) :Return Object_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_NewInstance_Class_I__O ((inst As (* Class)) (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "newInstance" :Params (lit (slice (* Class)) Class_class (.ArrayClass Prim_int)) :Return Object_class :Modifiers 0x89
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_NewInstance_Class_I1__O ((inst As (* Class)) (aget args 0)) ((inst As (* IntArray)) (aget args 1)))))
+        (lit MethodInfo :Name "newInstance" :Params (lit (slice (* Class)) Class_class Prim_int) :Return Object_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_NewInstance_Class_I__O ((inst As (* Class)) (aget args 0)) (assert int32 (aget args 1)))))
         (lit MethodInfo :Name "set" :Params (lit (slice (* Class)) Object_class Prim_int Object_class) :Return Prim_void :Modifiers 0x109
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Array_Set_O_I_O__V (aget args 0) (assert int32 (aget args 1)) (aget args 2)) nil))
         (lit MethodInfo :Name "setBoolean" :Params (lit (slice (* Class)) Object_class Prim_int Prim_boolean) :Return Prim_void :Modifiers 0x109
@@ -1083,10 +1355,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Equals_O__Z (assert (* Locale) this) (aget args 0))))
         (lit MethodInfo :Name "getCountry" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCountry__String (assert (* Locale) this))))
-        (lit MethodInfo :Name "getDefault" :Params (lit (slice (* Class)) Locale_Category_class) :Return Locale_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_GetDefault_Locale_Category__Locale ((inst As (* Locale_Category)) (aget args 0)))))
         (lit MethodInfo :Name "getDefault" :Params nil :Return Locale_class :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_GetDefault__Locale)))
+        (lit MethodInfo :Name "getDefault" :Params (lit (slice (* Class)) Locale_Category_class) :Return Locale_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_GetDefault_Locale_Category__Locale ((inst As (* Locale_Category)) (aget args 0)))))
         (lit MethodInfo :Name "getLanguage" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLanguage__String (assert (* Locale) this))))
         (lit MethodInfo :Name "getScript" :Params nil :Return String_class :Modifiers 0x1
@@ -1095,12 +1367,12 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetVariant__String (assert (* Locale) this))))
         (lit MethodInfo :Name "hashCode" :Params nil :Return Prim_int :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HashCode__I (assert (* Locale) this))))
-        (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class String_class) :Return Locale_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String_String__Locale ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)))))
-        (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class String_class String_class) :Return Locale_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String_String_String__Locale ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)) ((inst As (* String)) (aget args 2)))))
         (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class) :Return Locale_class :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String__Locale ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class String_class String_class) :Return Locale_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String_String_String__Locale ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)) ((inst As (* String)) (aget args 2)))))
+        (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class String_class) :Return Locale_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String_String__Locale ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)))))
         (lit MethodInfo :Name "toLanguageTag" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToLanguageTag__String (assert (* Locale) this))))
         (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x11
@@ -1722,19 +1994,19 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.LockInterruptibly__V (assert Lock this)) nil))
         (lit MethodInfo :Name "newCondition" :Params nil :Return Condition_class :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert Lock this))))
-        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert Lock this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert Lock this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert Lock this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert Lock this)) nil))))
   ;; java.util.concurrent.locks.Condition
   (set! (.-Methods (.Info Condition_class))
     (lit (slice MethodInfo)
-        (lit MethodInfo :Name "await" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await_J_TimeUnit__Z (assert Condition this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "await" :Params nil :Return Prim_void :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await__V (assert Condition this)) nil))
+        (lit MethodInfo :Name "await" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Await_J_TimeUnit__Z (assert Condition this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "awaitNanos" :Params (lit (slice (* Class)) Prim_long) :Return Prim_long :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AwaitNanos_J__J (assert Condition this) (assert int64 (aget args 0)))))
         (lit MethodInfo :Name "awaitUninterruptibly" :Params nil :Return Prim_void :Modifiers 0x401
@@ -1766,10 +2038,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert (* ReentrantLock) this))))
         (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantLock) this))))
-        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert (* ReentrantLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert (* ReentrantLock) this)) nil))))
   (set! (.-Ctors (.Info ReentrantLock_class))
@@ -1814,10 +2086,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.NewCondition__Condition (assert (* ReentrantReadWriteLock_ReadLock) this))))
         (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* ReentrantReadWriteLock_ReadLock) this))))
-        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantReadWriteLock_ReadLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "tryLock" :Params nil :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock__Z (assert (* ReentrantReadWriteLock_ReadLock) this))))
+        (lit MethodInfo :Name "tryLock" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryLock_J_TimeUnit__Z (assert (* ReentrantReadWriteLock_ReadLock) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "unlock" :Params nil :Return Prim_void :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Unlock__V (assert (* ReentrantReadWriteLock_ReadLock) this)) nil))))
   ;; java.util.concurrent.locks.ReentrantReadWriteLock$WriteLock
@@ -1875,10 +2147,10 @@
     (lit (slice MethodInfo)
         (lit MethodInfo :Name "cancel" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Cancel_Z__Z (assert Future this) (assert bool (aget args 0)))))
-        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x401
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert Future this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert Future this))))
+        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x401
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert Future this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "isCancelled" :Params nil :Return Prim_boolean :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsCancelled__Z (assert Future this))))
         (lit MethodInfo :Name "isDone" :Params nil :Return Prim_boolean :Modifiers 0x401
@@ -1888,10 +2160,10 @@
     (lit (slice MethodInfo)
         (lit MethodInfo :Name "cancel" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Cancel_Z__Z (assert (* FutureTask) this) (assert bool (aget args 0)))))
-        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert (* FutureTask) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get__O (assert (* FutureTask) this))))
+        (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert (* FutureTask) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "isCancelled" :Params nil :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsCancelled__Z (assert (* FutureTask) this))))
         (lit MethodInfo :Name "isDone" :Params nil :Return Prim_boolean :Modifiers 0x1

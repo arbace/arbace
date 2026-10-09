@@ -631,3 +631,264 @@ the last bit), which then rounds to float exactly as one rounding would.\n"
     (when (and (>= (bit-xor x y) 0) (!= r 0)) (return (- r y)))
     r))
 (go/func Math_CeilMod_J_I__I ^int32 [^int64 x ^int32 y] (conv int32 (Math_CeilMod_J_J__J x (conv int64 y))))
+
+;; ---------------------------------------------------------------------------------------
+;; Math: the functions of FdLibm (fdlibm.clj). Java's Math delegates them to StrictMath; HotSpot
+;; may replace some by intrinsics that differ in the last bit (JRT-NOTES.md, phase 2B): jrt's
+;; Math is StrictMath, the same on every architecture.
+
+(go/func Math_Sin_D__D ^float64 [^float64 a] (fdSin a))
+(go/func Math_Cos_D__D ^float64 [^float64 a] (fdCos a))
+(go/func Math_Tan_D__D ^float64 [^float64 a] (fdTan a))
+(go/func Math_Asin_D__D ^float64 [^float64 a] (fdAsin a))
+(go/func Math_Acos_D__D ^float64 [^float64 a] (fdAcos a))
+(go/func Math_Atan_D__D ^float64 [^float64 a] (fdAtan a))
+(go/func Math_Atan2_D_D__D ^float64 [^float64 y ^float64 x] (fdAtan2 y x))
+(go/func Math_Exp_D__D ^float64 [^float64 a] (fdExp a))
+(go/func Math_Log10_D__D ^float64 [^float64 a] (fdLog10 a))
+(go/func Math_Log1p_D__D ^float64 [^float64 a] (fdLog1p a))
+(go/func Math_Expm1_D__D ^float64 [^float64 a] (fdExpm1 a))
+(go/func Math_Sinh_D__D ^float64 [^float64 a] (fdSinh a))
+(go/func Math_Cosh_D__D ^float64 [^float64 a] (fdCosh a))
+(go/func Math_Tanh_D__D ^float64 [^float64 a] (fdTanh a))
+(go/func Math_Hypot_D_D__D ^float64 [^float64 x ^float64 y] (fdHypot x y))
+(go/func Math_IEEEremainder_D_D__D ^float64 [^float64 x ^float64 y] (fdIEEEremainder x y))
+(go/func Math_ToRadians_D__D "Math_ToRadians_D__D is Math.toRadians: one product with DEGREES_TO_RADIANS.\n"
+  ^float64 [^float64 a] (fmul a 0.017453292519943295))
+(go/func Math_ToDegrees_D__D "Math_ToDegrees_D__D is Math.toDegrees: one product with RADIANS_TO_DEGREES.\n"
+  ^float64 [^float64 a] (fmul a 57.29577951308232))
+
+(go/func Math_Clamp_D_D_D__D ^float64 [^float64 v ^float64 lo ^float64 hi]
+  (when (not (< lo hi))
+    (when (!= lo lo) (panic (IllegalArgumentException_New_String (Str "min is NaN"))))
+    (when (!= hi hi) (panic (IllegalArgumentException_New_String (Str "max is NaN"))))
+    (when (or (> lo hi) (and (== lo hi) (== (math/Float64bits lo) 0) (== (math/Float64bits hi) 0x8000000000000000)))
+      (panic (IllegalArgumentException_New_String (Concat (StrOfDouble lo) (Str " > ") (StrOfDouble hi))))))
+  (Math_Min_D_D__D hi (Math_Max_D_D__D v lo)))
+
+(go/func Math_NextAfter_F_D__F ^float32 [^float32 start ^float64 dir]
+  (cond
+    (> (conv float64 start) dir)
+    (do
+      (when (== start 0.0) (return (- (math/Float32frombits 1))))
+      (let [tr (conv int32 (math/Float32bits start))]
+        (when (> tr 0) (return (math/Float32frombits (conv uint32 (- tr 1)))))
+        (return (math/Float32frombits (conv uint32 (+ tr 1))))))
+    (< (conv float64 start) dir)
+    (let [tr (conv int32 (math/Float32bits (+ start 0.0)))]
+      (when (>= tr 0) (return (math/Float32frombits (conv uint32 (+ tr 1)))))
+      (return (math/Float32frombits (conv uint32 (- tr 1)))))
+    (== (conv float64 start) dir) (return (conv float32 dir)))
+  (+ start (conv float32 dir)))
+(go/func Math_NextDown_F__F ^float32 [^float32 f]
+  (when (or (!= f f) (== f NegInf32))
+    (return f))
+  (when (== f 0.0)
+    (return (- (math/Float32frombits 1))))
+  (let [b (conv int32 (math/Float32bits f))]
+    (when (> f 0.0) (return (math/Float32frombits (conv uint32 (- b 1)))))
+    (math/Float32frombits (conv uint32 (+ b 1)))))
+
+(go/func Math_DivideExact_I_I__I ^int32 [^int32 x ^int32 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0) (return q))
+    (panic (overflow "integer overflow"))))
+(go/func Math_DivideExact_J_J__J ^int64 [^int64 x ^int64 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0) (return q))
+    (panic (overflow "long overflow"))))
+(go/func Math_FloorDivExact_I_I__I ^int32 [^int32 x ^int32 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0)
+      (when (and (< (bit-xor x y) 0) (!= (* q y) x)) (return (- q 1)))
+      (return q))
+    (panic (overflow "integer overflow"))))
+(go/func Math_FloorDivExact_J_J__J ^int64 [^int64 x ^int64 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0)
+      (when (and (< (bit-xor x y) 0) (!= (* q y) x)) (return (- q 1)))
+      (return q))
+    (panic (overflow "long overflow"))))
+(go/func Math_CeilDivExact_I_I__I ^int32 [^int32 x ^int32 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0)
+      (when (and (>= (bit-xor x y) 0) (!= (* q y) x)) (return (+ q 1)))
+      (return q))
+    (panic (overflow "integer overflow"))))
+(go/func Math_CeilDivExact_J_J__J ^int64 [^int64 x ^int64 y]
+  (let [q (/ x y)]
+    (when (>= (bit-and x y q) 0)
+      (when (and (>= (bit-xor x y) 0) (!= (* q y) x)) (return (+ q 1)))
+      (return q))
+    (panic (overflow "long overflow"))))
+(go/func Math_MultiplyFull_I_I__J ^int64 [^int32 x ^int32 y] (* (conv int64 x) (conv int64 y)))
+
+(go/func Math_UnsignedMultiplyExact_I_I__I ^int32 [^int32 x ^int32 y]
+  (let [r (* (conv uint64 (conv uint32 x)) (conv uint64 (conv uint32 y)))]
+    (when (!= (>> r 32) 0) (panic (overflow "unsigned integer overflow")))
+    (conv int32 r)))
+(go/func Math_UnsignedMultiplyExact_J_J__J ^int64 [^int64 x ^int64 y]
+  (let [(values hi lo) (bits/Mul64 (conv uint64 x) (conv uint64 y))]
+    (when (== hi 0) (return (conv int64 lo)))
+    (panic (overflow "unsigned long overflow"))))
+(go/func Math_UnsignedMultiplyExact_J_I__J ^int64 [^int64 x ^int32 y]
+  (Math_UnsignedMultiplyExact_J_J__J x (conv int64 (conv uint32 y))))
+
+(go/func Math_PowExact_I_I__I ^int32 [^int32 x ^int32 n]
+  (when (< n 0) (panic (overflow "negative exponent")))
+  (when (== n 0) (return 1))
+  (when (or (== x 0) (== x 1)) (return x))
+  (when (== x -1)
+    (when (== (bit-and n 1) 0) (return 1))
+    (return -1))
+  (let [p (conv int32 1)]
+    (while (> n 1)
+      (when (!= (bit-and n 1) 0) (set! p (* p x)))
+      (set! x (Math_MultiplyExact_I_I__I x x))
+      (set! n (fdUshr n 1)))
+    (Math_MultiplyExact_I_I__I p x)))
+(go/func Math_PowExact_J_I__J ^int64 [^int64 x ^int32 n]
+  (when (< n 0) (panic (overflow "negative exponent")))
+  (when (== n 0) (return 1))
+  (when (or (== x 0) (== x 1)) (return x))
+  (when (== x -1)
+    (when (!= (bit-and n 1) 0) (return -1))
+    (return 1))
+  (let [p (conv int64 1)]
+    (while (> n 1)
+      (when (!= (bit-and n 1) 0) (set! p (* p x)))
+      (set! x (Math_MultiplyExact_J_J__J x x))
+      (set! n (fdUshr n 1)))
+    (Math_MultiplyExact_J_J__J p x)))
+(go/func Math_UnsignedPowExact_I_I__I ^int32 [^int32 x ^int32 n]
+  (when (< n 0) (panic (overflow "negative exponent")))
+  (when (== n 0) (return 1))
+  (when (or (== x 0) (== x 1)) (return x))
+  (let [p (conv int32 1)]
+    (while (> n 1)
+      (when (!= (bit-and n 1) 0) (set! p (* p x)))
+      (set! x (Math_UnsignedMultiplyExact_I_I__I x x))
+      (set! n (fdUshr n 1)))
+    (Math_UnsignedMultiplyExact_I_I__I p x)))
+(go/func Math_UnsignedPowExact_J_I__J ^int64 [^int64 x ^int32 n]
+  (when (< n 0) (panic (overflow "negative exponent")))
+  (when (== n 0) (return 1))
+  (when (or (== x 0) (== x 1)) (return x))
+  (let [p (conv int64 1)]
+    (while (> n 1)
+      (when (!= (bit-and n 1) 0) (set! p (* p x)))
+      (set! x (Math_UnsignedMultiplyExact_J_J__J x x))
+      (set! n (fdUshr n 1)))
+    (Math_UnsignedMultiplyExact_J_J__J p x)))
+
+;; ---------------------------------------------------------------------------------------
+;; StrictMath: FdLibm's functions, the rest delegating to Math as StrictMath.java does
+;; (ceil, floor and rint are StrictMath's own Java code there, with the same results as
+;; Math's: they are exact)
+
+(go/func StrictMath_Sin_D__D ^float64 [^float64 a] (fdSin a))
+(go/func StrictMath_Cos_D__D ^float64 [^float64 a] (fdCos a))
+(go/func StrictMath_Tan_D__D ^float64 [^float64 a] (fdTan a))
+(go/func StrictMath_Asin_D__D ^float64 [^float64 a] (fdAsin a))
+(go/func StrictMath_Acos_D__D ^float64 [^float64 a] (fdAcos a))
+(go/func StrictMath_Atan_D__D ^float64 [^float64 a] (fdAtan a))
+(go/func StrictMath_Atan2_D_D__D ^float64 [^float64 y ^float64 x] (fdAtan2 y x))
+(go/func StrictMath_Exp_D__D ^float64 [^float64 a] (fdExp a))
+(go/func StrictMath_Log10_D__D ^float64 [^float64 a] (fdLog10 a))
+(go/func StrictMath_Log1p_D__D ^float64 [^float64 a] (fdLog1p a))
+(go/func StrictMath_Expm1_D__D ^float64 [^float64 a] (fdExpm1 a))
+(go/func StrictMath_Sinh_D__D ^float64 [^float64 a] (fdSinh a))
+(go/func StrictMath_Cosh_D__D ^float64 [^float64 a] (fdCosh a))
+(go/func StrictMath_Tanh_D__D ^float64 [^float64 a] (fdTanh a))
+(go/func StrictMath_Hypot_D_D__D ^float64 [^float64 x ^float64 y] (fdHypot x y))
+(go/func StrictMath_IEEEremainder_D_D__D ^float64 [^float64 x ^float64 y] (fdIEEEremainder x y))
+(go/func StrictMath_ToRadians_D__D ^float64 [^float64 a] (Math_ToRadians_D__D a))
+(go/func StrictMath_ToDegrees_D__D ^float64 [^float64 a] (Math_ToDegrees_D__D a))
+(go/func StrictMath_Ceil_D__D ^float64 [^float64 a] (math/Ceil a))
+(go/func StrictMath_Floor_D__D ^float64 [^float64 a] (math/Floor a))
+(go/func StrictMath_Round_F__I ^int32 [^float32 a] (Math_Round_F__I a))
+(go/func StrictMath_Round_D__J ^int64 [^float64 a] (Math_Round_D__J a))
+(go/func StrictMath_Random__D "StrictMath_Random__D is StrictMath.random: Go's generator, as Math.random.\n" ^float64 [] (rand/Float64))
+(go/func StrictMath_AddExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_AddExact_I_I__I x y))
+(go/func StrictMath_AddExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_AddExact_J_J__J x y))
+(go/func StrictMath_SubtractExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_SubtractExact_I_I__I x y))
+(go/func StrictMath_SubtractExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_SubtractExact_J_J__J x y))
+(go/func StrictMath_MultiplyExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_MultiplyExact_I_I__I x y))
+(go/func StrictMath_MultiplyExact_J_I__J ^int64 [^int64 x ^int32 y] (Math_MultiplyExact_J_I__J x y))
+(go/func StrictMath_MultiplyExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_MultiplyExact_J_J__J x y))
+(go/func StrictMath_DivideExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_DivideExact_I_I__I x y))
+(go/func StrictMath_DivideExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_DivideExact_J_J__J x y))
+(go/func StrictMath_FloorDivExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_FloorDivExact_I_I__I x y))
+(go/func StrictMath_FloorDivExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_FloorDivExact_J_J__J x y))
+(go/func StrictMath_CeilDivExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_CeilDivExact_I_I__I x y))
+(go/func StrictMath_CeilDivExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_CeilDivExact_J_J__J x y))
+(go/func StrictMath_IncrementExact_I__I ^int32 [^int32 a] (Math_IncrementExact_I__I a))
+(go/func StrictMath_IncrementExact_J__J ^int64 [^int64 a] (Math_IncrementExact_J__J a))
+(go/func StrictMath_DecrementExact_I__I ^int32 [^int32 a] (Math_DecrementExact_I__I a))
+(go/func StrictMath_DecrementExact_J__J ^int64 [^int64 a] (Math_DecrementExact_J__J a))
+(go/func StrictMath_NegateExact_I__I ^int32 [^int32 a] (Math_NegateExact_I__I a))
+(go/func StrictMath_NegateExact_J__J ^int64 [^int64 a] (Math_NegateExact_J__J a))
+(go/func StrictMath_ToIntExact_J__I ^int32 [^int64 a] (Math_ToIntExact_J__I a))
+(go/func StrictMath_MultiplyFull_I_I__J ^int64 [^int32 x ^int32 y] (Math_MultiplyFull_I_I__J x y))
+(go/func StrictMath_MultiplyHigh_J_J__J ^int64 [^int64 x ^int64 y] (Math_MultiplyHigh_J_J__J x y))
+(go/func StrictMath_UnsignedMultiplyHigh_J_J__J ^int64 [^int64 x ^int64 y] (Math_UnsignedMultiplyHigh_J_J__J x y))
+(go/func StrictMath_FloorDiv_I_I__I ^int32 [^int32 x ^int32 y] (Math_FloorDiv_I_I__I x y))
+(go/func StrictMath_FloorDiv_J_I__J ^int64 [^int64 x ^int32 y] (Math_FloorDiv_J_I__J x y))
+(go/func StrictMath_FloorDiv_J_J__J ^int64 [^int64 x ^int64 y] (Math_FloorDiv_J_J__J x y))
+(go/func StrictMath_FloorMod_I_I__I ^int32 [^int32 x ^int32 y] (Math_FloorMod_I_I__I x y))
+(go/func StrictMath_FloorMod_J_I__I ^int32 [^int64 x ^int32 y] (Math_FloorMod_J_I__I x y))
+(go/func StrictMath_FloorMod_J_J__J ^int64 [^int64 x ^int64 y] (Math_FloorMod_J_J__J x y))
+(go/func StrictMath_CeilDiv_I_I__I ^int32 [^int32 x ^int32 y] (Math_CeilDiv_I_I__I x y))
+(go/func StrictMath_CeilDiv_J_I__J ^int64 [^int64 x ^int32 y] (Math_CeilDiv_J_I__J x y))
+(go/func StrictMath_CeilDiv_J_J__J ^int64 [^int64 x ^int64 y] (Math_CeilDiv_J_J__J x y))
+(go/func StrictMath_CeilMod_I_I__I ^int32 [^int32 x ^int32 y] (Math_CeilMod_I_I__I x y))
+(go/func StrictMath_CeilMod_J_I__I ^int32 [^int64 x ^int32 y] (Math_CeilMod_J_I__I x y))
+(go/func StrictMath_CeilMod_J_J__J ^int64 [^int64 x ^int64 y] (Math_CeilMod_J_J__J x y))
+(go/func StrictMath_Abs_I__I ^int32 [^int32 a] (Math_Abs_I__I a))
+(go/func StrictMath_Abs_J__J ^int64 [^int64 a] (Math_Abs_J__J a))
+(go/func StrictMath_Abs_F__F ^float32 [^float32 a] (Math_Abs_F__F a))
+(go/func StrictMath_Abs_D__D ^float64 [^float64 a] (Math_Abs_D__D a))
+(go/func StrictMath_AbsExact_I__I ^int32 [^int32 a] (Math_AbsExact_I__I a))
+(go/func StrictMath_AbsExact_J__J ^int64 [^int64 a] (Math_AbsExact_J__J a))
+(go/func StrictMath_Max_I_I__I ^int32 [^int32 a ^int32 b] (Math_Max_I_I__I a b))
+(go/func StrictMath_Max_J_J__J ^int64 [^int64 a ^int64 b] (Math_Max_J_J__J a b))
+(go/func StrictMath_Max_F_F__F ^float32 [^float32 a ^float32 b] (Math_Max_F_F__F a b))
+(go/func StrictMath_Max_D_D__D ^float64 [^float64 a ^float64 b] (Math_Max_D_D__D a b))
+(go/func StrictMath_Min_I_I__I ^int32 [^int32 a ^int32 b] (Math_Min_I_I__I a b))
+(go/func StrictMath_Min_J_J__J ^int64 [^int64 a ^int64 b] (Math_Min_J_J__J a b))
+(go/func StrictMath_Min_F_F__F ^float32 [^float32 a ^float32 b] (Math_Min_F_F__F a b))
+(go/func StrictMath_Min_D_D__D ^float64 [^float64 a ^float64 b] (Math_Min_D_D__D a b))
+(go/func StrictMath_Clamp_J_I_I__I ^int32 [^int64 v ^int32 lo ^int32 hi] (Math_Clamp_J_I_I__I v lo hi))
+(go/func StrictMath_Clamp_J_J_J__J ^int64 [^int64 v ^int64 lo ^int64 hi] (Math_Clamp_J_J_J__J v lo hi))
+(go/func StrictMath_Clamp_D_D_D__D ^float64 [^float64 v ^float64 lo ^float64 hi] (Math_Clamp_D_D_D__D v lo hi))
+(go/func StrictMath_Clamp_F_F_F__F ^float32 [^float32 v ^float32 lo ^float32 hi] (Math_Clamp_F_F_F__F v lo hi))
+(go/func StrictMath_Fma_D_D_D__D ^float64 [^float64 a ^float64 b ^float64 c] (Math_Fma_D_D_D__D a b c))
+(go/func StrictMath_Fma_F_F_F__F ^float32 [^float32 a ^float32 b ^float32 c] (Math_Fma_F_F_F__F a b c))
+(go/func StrictMath_Ulp_D__D ^float64 [^float64 d] (Math_Ulp_D__D d))
+(go/func StrictMath_Ulp_F__F ^float32 [^float32 f] (Math_Ulp_F__F f))
+(go/func StrictMath_Signum_D__D ^float64 [^float64 d] (Math_Signum_D__D d))
+(go/func StrictMath_Signum_F__F ^float32 [^float32 f] (Math_Signum_F__F f))
+(go/func StrictMath_CopySign_D_D__D "StrictMath_CopySign_D_D__D is StrictMath.copySign: a NaN sign counts as positive.\n"
+  ^float64 [^float64 m ^float64 s]
+  (when (!= s s) (set! s 1.0))
+  (Math_CopySign_D_D__D m s))
+(go/func StrictMath_CopySign_F_F__F ^float32 [^float32 m ^float32 s]
+  (when (!= s s) (set! s 1.0))
+  (Math_CopySign_F_F__F m s))
+(go/func StrictMath_GetExponent_F__I ^int32 [^float32 f] (Math_GetExponent_F__I f))
+(go/func StrictMath_GetExponent_D__I ^int32 [^float64 d] (Math_GetExponent_D__I d))
+(go/func StrictMath_NextAfter_D_D__D ^float64 [^float64 s ^float64 d] (Math_NextAfter_D_D__D s d))
+(go/func StrictMath_NextAfter_F_D__F ^float32 [^float32 s ^float64 d] (Math_NextAfter_F_D__F s d))
+(go/func StrictMath_NextUp_D__D ^float64 [^float64 d] (Math_NextUp_D__D d))
+(go/func StrictMath_NextUp_F__F ^float32 [^float32 f] (Math_NextUp_F__F f))
+(go/func StrictMath_NextDown_D__D ^float64 [^float64 d] (Math_NextDown_D__D d))
+(go/func StrictMath_NextDown_F__F ^float32 [^float32 f] (Math_NextDown_F__F f))
+(go/func StrictMath_Scalb_D_I__D ^float64 [^float64 d ^int32 n] (Math_Scalb_D_I__D d n))
+(go/func StrictMath_Scalb_F_I__F ^float32 [^float32 f ^int32 n] (Math_Scalb_F_I__F f n))
+(go/func StrictMath_UnsignedMultiplyExact_I_I__I ^int32 [^int32 x ^int32 y] (Math_UnsignedMultiplyExact_I_I__I x y))
+(go/func StrictMath_UnsignedMultiplyExact_J_I__J ^int64 [^int64 x ^int32 y] (Math_UnsignedMultiplyExact_J_I__J x y))
+(go/func StrictMath_UnsignedMultiplyExact_J_J__J ^int64 [^int64 x ^int64 y] (Math_UnsignedMultiplyExact_J_J__J x y))
+(go/func StrictMath_PowExact_I_I__I ^int32 [^int32 x ^int32 n] (Math_PowExact_I_I__I x n))
+(go/func StrictMath_PowExact_J_I__J ^int64 [^int64 x ^int32 n] (Math_PowExact_J_I__J x n))
+(go/func StrictMath_UnsignedPowExact_I_I__I ^int32 [^int32 x ^int32 n] (Math_UnsignedPowExact_I_I__I x n))
+(go/func StrictMath_UnsignedPowExact_J_I__J ^int64 [^int64 x ^int32 n] (Math_UnsignedPowExact_J_I__J x n))
