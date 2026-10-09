@@ -3236,9 +3236,15 @@
       out)))
 
 (defn- erased-params [n envs c m]
-  "Erased parameter descriptors of method m of class c, as a member of class n."
+  "Erased parameter descriptors of method m of class c, as a member of class n. c's type
+  variables are substituted by n's view of them, so their bounds are n's: m's scope (which
+  holds c's class type variables too) only bounds m's own (EnumMap's K extends Enum, not Map's
+  K, makes EnumMap.put(K, V) need the bridge put(Object, Object))."
   (let [env (if (= c n) {} (or (get envs c) {}))
-        bounds (merge (:bounds (decl n)) (:bounds m))]
+        bounds (if (= c n)
+                 (merge (:bounds (decl n)) (:bounds m))
+                 (merge (:bounds (decl n))
+                        (apply dissoc (:bounds m) (keys env))))]
     (mapv #(t/erase bounds (t/subst env %)) (:params m))))
 
 (defn add-bridges!
