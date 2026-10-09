@@ -12,7 +12,8 @@
   InvocationTargetException)."
   (:require [arbace.string :as str]
             [arbace.instant :as inst]
-            [jrt.testdata-util :refer [esc ex-text line write]])
+            [jrt.testdata-util :refer [esc ex-text line write]]
+            [g2c.jrt-sources :as jrt-sources])
   (:import [java.lang.reflect Array Field Method Modifier InvocationTargetException]
            [java.nio.charset Charset]
            [java.util Date Locale Random TimeZone]))
@@ -98,15 +99,61 @@
    "java.nio.charset.Charset" "sun.nio.cs.UTF_8" "java.lang.reflect.Method" "java.lang.reflect.Field"
    "java.lang.reflect.Member" "java.lang.ClassLoader" "java.text.DecimalFormatSymbols" "java.lang.Enum"])
 
-(defn method-lines []
-  (for [n method-classes
+(def translated-classes
+  "The top-level classes c2g translates from the JDK closure (g2c.jrt-sources: the measured
+  closure, the files added to it, jrt's own Java), by binary name."
+  (delay
+    (set (concat
+           (for [s (jrt-sources/sources "doc/go/java-surface.edn")]
+             (-> s (str/replace #"^src/java\.base/share/classes/|^build/[^/]+/support/gensrc/java\.base/" "")
+                 (str/replace #"\.java$" "") (str/replace "/" ".")))
+           (for [s (jrt-sources/overlay-sources)]
+             (-> s (str/replace #"^java\.base/" "") (str/replace #"\.java$" "") (str/replace "/" ".")))))))
+
+(defn translated? [^Class c]
+  (let [n (.getName c) i (.indexOf n "$")]
+    (and (not (contains? manifest (symbol n)))
+         (contains? @translated-classes (if (neg? i) n (subs n 0 i))))))
+
+(defn in-world?
+  "Is type c in the Go program (a member naming another type has no table entry)?"
+  [^Class c]
+  (cond (.isArray c) (in-world? (.getComponentType c))
+        (.isPrimitive c) true
+        :else (or (= c Object) (contains? manifest (symbol (.getName c))) (translated? c))))
+
+(defn table-sigs-c2g
+  "table-sigs with c2g's translation of the JDK closure in the program: the public methods
+  that the translated supertypes of c declare (their member tables, C2G-SPEC §5.11) too."
+  [^Class c]
+  (let [supers (loop [todo [c] seen #{}]
+                 (if (empty? todo)
+                   seen
+                   (let [x (first todo)]
+                     (recur (into (rest todo) (remove nil? (cons (.getSuperclass ^Class x) (.getInterfaces ^Class x))))
+                            (conj seen x)))))]
+    (into (table-sigs c)
+          (for [^Class s supers
+                :when (translated? s)
+                ^Method m (.getDeclaredMethods s)
+                :when (and (Modifier/isPublic (.getModifiers m))
+                           (every? in-world? (cons (.getReturnType m) (.getParameterTypes m))))]
+            (str (.getName m) (desc m))))))
+
+(defn method-lines
+  "methods: getMethods of jrt's own build (stand-ins, the hand-written tables); methods-c2g:
+  the same with c2g's translated JDK classes (bin/jrt test --prog), whose tables add the
+  translated supertypes' methods (bridges such as compareTo(Object) through Comparable)."
+  []
+  (for [[kind sigs-of] [["methods" table-sigs] ["methods-c2g" table-sigs-c2g]]
+        n method-classes
         :let [c (class-of n)
-              ok (table-sigs c)
+              ok (sigs-of c)
               ms (sort (distinct (for [^Method m (.getMethods c)
                                        :let [s (sig m)]
                                        :when (ok (first (str/split s #" ")))]
                                    s)))]]
-    (line "methods" n (str/join "|" ms))))
+    (line kind n (str/join "|" ms))))
 
 (def lookups
   ;; [class name params]

@@ -209,15 +209,30 @@
         ;; c2g writes it into jrt's c2g_support when Formatter is translated
         formatter? (and (contains? @(:compile-set world) "java/util/Formatter")
                         (or (empty? (:slice opts)) (some #(re-find % "java/util/Formatter") (:slice opts))))
-        scan (cond-> scan
-               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"]))
         slice (:slice opts)
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
+        ;; jrt's statics whose values are translated objects (overlay/jdk's jrt classes): the
+        ;; standard streams of System and String.CASE_INSENSITIVE_ORDER, written by c2g into
+        ;; jrt's c2g_support (out/jrt-statics-forms) when their classes are translated
+        jrt-java? (fn [n] (and (contains? @(:compile-set world) n) (in-slice? n)))
+        streams? (jrt-java? "jdk/internal/jrt/StandardStreams")
+        ci-order? (jrt-java? "jdk/internal/jrt/CaseInsensitiveComparator")
+        scan (cond-> scan
+               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
+               streams? (update :vars into ["System_in" "System_out" "System_err"])
+               streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
+               ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER"))
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})}
             t1 (now)
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
+                               (when streams?
+                                 [["jdk/internal/jrt/StandardStreams" "in" "()Ljava/io/InputStream;"]
+                                  ["jdk/internal/jrt/StandardStreams" "out" "()Ljava/io/PrintStream;"]
+                                  ["jdk/internal/jrt/StandardStreams" "err" "()Ljava/io/PrintStream;"]])
+                               (when ci-order?
+                                 [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
                                (when formatter?
                                  [["java/util/Formatter" "<init>" "()V"]
                                   ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]

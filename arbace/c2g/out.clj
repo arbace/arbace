@@ -243,6 +243,43 @@ translated java.util.Formatter).\n"
           "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
           ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
           (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
+     ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (let [is (m/go-type :jrt "Ljava/io/InputStream;")
+             ps (m/go-type :jrt "Ljava/io/PrintStream;")]
+         (list 'go/var [(tag 'System_in is)] [(tag 'System_out ps)] [(tag 'System_err ps)])))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetIn_InputStream__V "System_SetIn_InputStream__V is System.setIn.\n"
+             [(tag 'in (m/go-type :jrt "Ljava/io/InputStream;"))] '(set! System_in in)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetOut_PrintStream__V "System_SetOut_PrintStream__V is System.setOut.\n"
+             [(tag 'out (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_out out)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetErr_PrintStream__V "System_SetErr_PrintStream__V is System.setErr.\n"
+             [(tag 'err (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_err err)))
+     (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+       (list 'go/var (tag 'String_CASE_INSENSITIVE_ORDER (m/go-type :jrt "Ljava/util/Comparator;"))))
+     (when (or (m/translated? "jdk/internal/jrt/StandardStreams") (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator"))
+       (apply list 'go/func 'init []
+              (concat
+                (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+                  (concat (when-not (m/trivial-init? "jdk/internal/jrt/CaseInsensitiveComparator")
+                            ['(CaseInsensitiveComparator_Init)])
+                          ['(set! String_CASE_INSENSITIVE_ORDER CaseInsensitiveComparator_INSTANCE)]))
+                (when (m/translated? "jdk/internal/jrt/StandardStreams")
+                  ['(set! System_in (StandardStreams_In__InputStream))
+                   '(set! System_out (StandardStreams_Out__PrintStream))
+                   '(set! System_err (StandardStreams_Err__PrintStream))
+                   ;; printStackTrace() and uncaught exceptions print to System.err, as the
+                   ;; JVM's do (jrt's host stream while it is null)
+                   (list 'let [(tag 'host (list 'func ['string])) 'StderrPrint]
+                         (list 'set! 'StderrPrint
+                               (list 'fn [(tag 's 'string)]
+                                     (list 'when (list '== 'System_err nil)
+                                           '(host s)
+                                           '(return))
+                                     '(.Print_String__V System_err (Str s))
+                                     '(.Flush__V System_err))))]))))
      ;; records' derived equals and hashCode (java.lang.runtime.ObjectMethods)
      '(go/func C2g_ObjHash "C2g_ObjHash is Objects.hashCode.\n" ^int32 [^any x]
         (when (== x nil) (return 0))
