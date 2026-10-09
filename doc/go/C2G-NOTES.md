@@ -279,26 +279,35 @@ Work that can proceed in parallel, each part with its own check:
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
+All accepted 2026-10-09 and folded into C2G-SPEC, renamed C1-C8 there (C2G-SPEC §16).
+
 - **A1 (§4.6) Indexed static initializers.** Variants address a class's n-th
   `static-initializer` (0-based, in source order): `(c2g/cut (static-initializer n))`, and a
   replacement is `(static-initializer ...)` tagged `^{:c2g/nth n}`. Needed by `Compiler`, whose
-  static initializers are several.
+  static initializers are several. *Accepted 2026-10-09, folded into C2G-SPEC §4.6 as C1.*
 - **A2 (§4.1) Slices.** `--slice REGEX` restricts translated code, not the closed world:
   classes outside keep their types, tables and stubs. And operation-level stubs: an operation
   naming something outside the world becomes `C2g_Missing[T]` (throwing
-  `UnsupportedOperationException("c2g: ...")`) instead of failing the method.
+  `UnsupportedOperationException("c2g: ...")`) instead of failing the method. *Accepted
+  2026-10-09, folded into C2G-SPEC §4.1 (and §4.3, §11) as C2.*
 - **A3 (§9.1, J9) Replaced stand-ins initialize eagerly.** A translated class replacing a
   stand-in whose static initializer is not trivial is initialized from `init()` of package
-  jrt, as jrt's hand-written code reads its statics directly.
+  jrt, as jrt's hand-written code reads its statics directly. *Accepted 2026-10-09, folded into
+  C2G-SPEC §4.3 and §6.3 as C3.*
 - **A4 (§4.1, §5.7) Cut classes and reflected marker interfaces.** A class literal of a class
   outside the world is a registered class without instances (`instanceof` false); a JDK
-  marker interface without class forms is declared from reflection (no methods).
+  marker interface without class forms is declared from reflection (no methods). *Accepted
+  2026-10-09, folded into C2G-SPEC §4.1 and §5.7 as C4.*
 - **A5 (§11) `String.format` by c2g.** When `java.util.Formatter` is translated, c2g
   generates `String_Format_String_O1__String` (and the `Locale` overload) in jrt's package.
+  *Accepted 2026-10-09, folded into C2G-SPEC §11 as C5.*
 - **A6 (§4.4) The rename table** starts with `jdk/internal/util/ByteArray` → `Jdk_ByteArray`.
+  *Accepted 2026-10-09, folded into C2G-SPEC §4.4 as C6.*
 - **A7 (§7.13) Records' object methods** are generated in Go as `ObjectMethods` defines them,
-  with the support helpers above.
+  with the support helpers above. *Accepted 2026-10-09, folded into C2G-SPEC §7.13 (and §11)
+  as C7.*
 - **A8 (§7.2) Order of evaluation**: the second hoisting rule above, stated in §7.2.
+  *Accepted 2026-10-09, folded into C2G-SPEC §7.2 as C8.*
 
 Corrected in passing (marked "Correction" in the spec): §5.8's identity hash (jrt's global
 sequence mixed by a finalizer, V3) and §7.9.5's bounds errors (jrt reads `boundsError`'s
@@ -418,19 +427,26 @@ and `arbace.main`'s bindings, not the classes.
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
+All accepted 2026-10-09 and folded into C2G-SPEC, renamed P1-P4 there (C2G-SPEC §16).
+
 - **P2A-1 (§4.6) Variants' natives and member classes.** A variant may add `^:native` static
   methods, translated as calls of jrt's `C_M..._native` functions (hand-written in
-  `go/arbace/jrt/natives.clj`), and member classes (`c2g/add` of a `defclass`).
+  `go/arbace/jrt/natives.clj`), and member classes (`c2g/add` of a `defclass`). *Accepted
+  2026-10-09, folded into C2G-SPEC §4.6 and §9.1 (and §11) as P1; with B6 (E6): jrt's function
+  when jrt defines it, else the class's own package's.*
 - **P2A-2 (§10.1, §5.11) Reflective roots.** A program that calls members by name roots the
   public members of every class it may call so (the REPL: every class in jrt's registry);
-  reachability does not follow reflection.
+  reachability does not follow reflection. *Accepted 2026-10-09, folded into C2G-SPEC §4.1,
+  §5.11 and §10.6 as P2.*
 - **P2A-3 (§4.1, A4) Dropped fields.** A field whose type is outside the closed world is
   dropped from its struct (as implemented); a store of the constant `null` into it, on `this`
-  or static, is dropped too; any other access is an operation-level stub (A2).
+  or static, is dropped too; any other access is an operation-level stub (A2). *Accepted
+  2026-10-09, folded into C2G-SPEC §4.1 as P3.*
 - **P2A-4 (§9.4, §10.3) RT's variant** binds `*out*`, `*err*`, `*in*` over jrt's host streams
   through `RT$HostWriter`/`RT$HostReader` until jrt has `System`'s streams, and resolves classes
   through `Class.forName` with one loader (`baseLoader` without the context loader,
-  `classForName` without `DynamicClassLoader`), as §10.3 describes.
+  `classForName` without `DynamicClassLoader`), as §10.3 describes. *Accepted 2026-10-09,
+  folded into C2G-SPEC §9.4 and §10.3 as P4.*
 
 Corrected in passing: §4.6's `(c2g/cut ^:public ^:static loadClassForName ^Class [^String
 name])` now works as the spec writes it (it was the implementation, not the spec).
@@ -471,21 +487,27 @@ because its use was translated before the operation was found missing (phase 2D)
 
 ## Proposed amendments to C2G-SPEC, phase 2B (for the user's review)
 
+All accepted 2026-10-09 and folded into C2G-SPEC, renamed E1-E8 there (C2G-SPEC §16), with
+EVAL-PLAN's Q1-Q7 where they touch §10.
+
 - **B1 (§4.6) Nested-class variants.** A variant names a nested class by its binary name,
   `(c2g/variant Compiler$ObjExpr ...)`, and replaces, cuts or adds its members as for a
-  top-level class. `Compiler`'s back end lives in its nested classes.
+  top-level class. `Compiler`'s back end lives in its nested classes. *Accepted 2026-10-09,
+  folded into C2G-SPEC §4.6 as E1.*
 - **B2 (§4.6, §10.1) Erased packages.** A variant file's `(c2g/erase "arbace/asm/")` erases the
   classes of a package outside the closed world: an expression of an erased type is nil (its
   operands not evaluated: ASM's factories are pure), a store into a field or array of an
   erased type is dropped, and members whose descriptors name an erased class do not exist in Go
   (as for any class outside the world). Operations of non-erased types on erased values still
   throw. This replaces cutting the about 150 `emit` methods and 120 ASM fields one by one, and
-  copies no line of `Compiler` into the variant.
+  copies no line of `Compiler` into the variant. *Accepted 2026-10-09, folded into C2G-SPEC
+  §4.6 and §10.1 as E2 (with EVAL-PLAN Q7).*
 - **B3 (§10.2) The evaluator's classes** are nested classes the `Compiler` variant adds:
   `Compiler$Frame`, `Compiler$EvalFn extends RestFn` (one class for every arity: required
   arity 0, the arguments as a seq; §10.2's `EvalFn`/`EvalRestFn` pair is EVAL-PLAN Q3),
   `Compiler$Evaluator` (`eval(Expr, Frame)`, `invokeFn`) and `Compiler$Dyn`. `ObjExpr.eval` of a
-  `FnExpr` is an `EvalFn`.
+  `FnExpr` is an `EvalFn`. *Accepted 2026-10-09, folded into C2G-SPEC §10.2 as E3 (with
+  EVAL-PLAN Q1, Q3).*
 - **B4 (§5.12) `Dyn` as built.** `lang.Dyn` is `{jrt.Object; D *DynClass; F []any}`; the slot
   table is per class (`DynClass`: `Cls`, `Slots []IFn`, the implemented interfaces with their
   superinterfaces, the methods by name and descriptor); slots 0-2 are `toString`, `hashCode`
@@ -500,21 +522,25 @@ because its use was translated before the operation was found missing (phase 2D)
   jrt's functions cannot name a type of arbace/lang). jrt adds `Dynamic`, `DefineDynamic` (a
   registration a later deftype of the same name may replace) and `Class.Descriptor`
   (`dyn.clj`). The Java API is `Compiler$Dyn`'s natives: `defineClass`, `setMethod`,
-  `newInstance`, `getField`, `setField`.
+  `newInstance`, `getField`, `setField`. *Accepted 2026-10-09, folded into C2G-SPEC §5.12 (and
+  §10.4, §11, V9) as E4.*
 - **B5 (§7.11, R13) `FromFn` from arbace/lang.** c2g writes `c2g_fromfn.go` in arbace/lang (it
   calls `IFn` and `RT`), whose `init` sets `FromFn` of every `@FunctionalInterface` translated
   (jrt's included; a class with source is asked through its declaration's annotations). The
   adapter behaves as Reflector's proxy: arguments boxed, `applyTo`, the result converted as
   `coerceAdapterReturn` does. Reachability treats these interfaces as lambda targets (their
   default methods). The analyzer's `:fi-adapter` is the interface's adapter calling the
-  `FnInvokers` invoker the analyzer chose.
+  `FnInvokers` invoker the analyzer chose. *Accepted 2026-10-09, folded into C2G-SPEC §7.11
+  (and §5.11, §14.3) as E5.*
 - **B6 (§9.1) Natives in their class's package.** A `^:native` method is a call of
   `C_M..._native` in the class's own package (jrt's for the JDK, arbace/lang's for `Compiler$Dyn`,
-  which c2g writes).
+  which c2g writes). *Accepted 2026-10-09, folded into C2G-SPEC §9.1 as E6; with P2A-1 (P1):
+  jrt's function when jrt defines it, else the class's own package's.*
 - **B7 (bin/c2g) The root spec `CLASS$*`**: the class and its named nested classes.
+  *Accepted 2026-10-09, folded into C2G-SPEC §4.1 as E7.*
 - **B8 (classes/SPEC.md, the analyzer) `clj-fi-method` for classes from source.** Compiler's
   functional interface test reflected on the running JDK and found nothing for a class with
   class forms in the world (`*from-source*`: c2g's JDK closure), so c2g's world compiled a
   checkcast where the JVM adapts; the analyzer now asks the declaration (its
   `@FunctionalInterface` annotation and single abstract method). The JVM build's choice is
-  unchanged.
+  unchanged. *Accepted 2026-10-09, folded into C2G-SPEC §4.1 as E8.*
