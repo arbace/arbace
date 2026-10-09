@@ -1351,3 +1351,98 @@ All accepted 2026-10-08; C2G-SPEC names them T11-T16 (§16), apart from phase 2b
   `java/lang/System.java` (`checkKey`'s messages); the translated classes' uses of `Unsafe` in
   `.tmp/jrt/conv` (`ConcurrentHashMap`, `BufferedInputStream`, `BigInteger`, `BigDecimal`,
   `HashMap`, `Random`, `ArraysSupport`, `DecimalDigits`).
+
+# Phase 2C: the rest of the JDK closure
+
+B1a step 4, phase 2, part C (branch `c2g-2c`, 2026-10-09; parts A, B and D are parallel
+branches, C2G-NOTES.md): every stand-in replaced by a translated class, the standard streams,
+files, `String.CASE_INSENSITIVE_ORDER`, `String`'s regex methods, BigInteger and BigDecimal
+checked, and the `java.util.regex` port run on the oracle's regex corpus.
+
+## The closure, grown (`bin/jrt-convert`)
+
+`bin/jrt-convert` now translates **223 files** (215 of jdk26u, 8 generated), all compiled from
+their class forms to javac's class shapes (630 classes), against the measured closure's 184:
+
+- **31 jdk26u files added** (`g2c.jrt-sources/added-sources`, outside the measured closure,
+  each for a reason recorded there):
+  - the 26 classes jrt had as stand-ins without sources (all plain Java: the exceptions
+    `AbstractMethodError`, `ArrayStoreException`, `CloneNotSupportedException`,
+    `IllegalAccessException`, `IllegalMonitorStateException`, `IllegalThreadStateException`,
+    `InstantiationException`, `InterruptedException`, `NegativeArraySizeException`,
+    `NoClassDefFoundError`, `NoSuchFieldException`, `NoSuchMethodException`,
+    `StackOverflowError`, `InvocationTargetException`, `UnsupportedEncodingException`,
+    `IllegalCharsetNameException`, `UnsupportedCharsetException`, `CancellationException`,
+    `ExecutionException`, `RejectedExecutionException`, `TimeoutException`; the interfaces
+    `Cloneable`, `Runnable`, `Serializable`, `java.lang.reflect.Type`, `Supplier`);
+  - `PrintStream`, `Closeable`, `Flushable`, `AutoCloseable` (the standard streams);
+  - `java.math.SignedMutableBigInteger` (`BigInteger.modInverse`, `modPow` with a negative
+    exponent).
+- **jrt's own Java, `overlay/jdk/java.base/`** (new; KIND `overlay` in `sources.txt`): classes
+  whose jdk26u sources need what is cut (`java.nio`'s encoders, decoders and channels, the VM's
+  file natives), written for jrt from their documented APIs (Arbace's own, EPL; LICENSE.md),
+  converted and checked like the rest:
+  - `java.io.FileDescriptor` (jdk26u's public members and the package-private `set` and
+    `close` the streams use), `FileInputStream`, `FileOutputStream` (unbuffered, over jrt's
+    file table; the constructors taking a `File` are stubs, `File` being outside the world);
+  - `java.io.OutputStreamWriter` and `InputStreamReader`: jrt's three charsets (R18), with the
+    JDK's REPLACE behaviour: a malformed or unmappable character as `?` (a surrogate pair as one
+    character), a high surrogate kept for the next write and written as `?` at `close`;
+    UTF-8's malformed sequences as U+FFFD with the lengths of jdk26u's `sun.nio.cs.UTF_8`'s
+    decoder, an incomplete sequence at the end as one U+FFFD; a read blocks only while it has
+    decoded nothing; historical encoding names (`UTF8`, `ISO8859_1`, `ASCII`);
+  - `jdk.internal.jrt.HostFiles` (the file table: handles 0, 1, 2 the host's standard streams,
+    the others `Host.Open`'s files; descriptors registered by identity), `StandardStreams`
+    (`System.in`, `out`, `err` as `System.initPhase1` makes them: a `BufferedInputStream`, and
+    autoflush `PrintStream`s over a 128-byte `BufferedOutputStream`, in `stdout.encoding` and
+    `stderr.encoding`), `CaseInsensitiveComparator` (`String.CASE_INSENSITIVE_ORDER`, comparing
+    as `compareToIgnoreCase`; c2g registers it as `java.lang.String$CaseInsensitiveComparator`).
+- **Go-build variants of JDK classes, `overlay/jdk/variants/`** (read by c2g with the JDK
+  input): `CaseFolding`'s key array, built through a stream (cut), built by a loop.
+- jrt's own files are compared with javac in one chunk of `bin/class-forms-check`: they use one
+  another's members that jdk26u's classes of the same names lack.
+
+## The 26 stand-ins: decisions
+
+All 26 translated from jdk26u (above): each is plain Java with nothing jrt must do by hand, and
+the stand-in shapes were exactly the translated ones, so jrt's hand-written code needed no
+change. With them **c2g replaces all 64 of jrt's stand-ins**: in a c2g program no `standin_*`
+class remains hand-written. The stand-in files stay for jrt's own build (`bin/jrt build`,
+`bin/jrt test` without c2g), which has no translated classes; nothing in them is meant to stay.
+None was cut.
+
+## New in jrt
+
+- `files.clj`: `HostFiles`' natives (`open0` with the JVM's reasons in `FileNotFoundException`'s
+  message, `No such file or directory`, `Permission denied`, `Is a directory`; `read0`, `write0`,
+  `available0` (a file's bytes after its position, 0 for the standard input), `skip0` (a file
+  seeks, the standard input reads), `close0`; errors as `IOException`).
+- From c2g's support (C2G-NOTES.md, phase 2C), when their classes are translated: `System_in`,
+  `System_out`, `System_err` and `System.setIn`/`setOut`/`setErr`; `StderrPrint`
+  (`printStackTrace()`, uncaught exceptions) through `System.err`; `String_CASE_INSENSITIVE_ORDER`;
+  `String.split` (both), `replaceAll`, `replaceFirst`, `matches` over the translated
+  `java.util.regex`.
+- `bin/jrt build|test --prog DIR` builds or tests a c2g program root (`bin/c2g --tests --out
+  OUT` writes `OUT/prog`): jrt's tests with the stand-ins replaced.
+- `TestReflectAgainstJVM`'s expectations are generated twice (`test/jrt/testdata_reflect.clj`):
+  `methods` for jrt's own build (the hand-written tables), `methods-c2g` for a c2g program,
+  where the translated supertypes' tables add their public methods whose types are in the world
+  (the bridges `compareTo(Object)` through `Comparable`, `append(C)Appendable` through
+  `Appendable`; not `chars()`/`codePoints()`, whose `IntStream` is cut). The test takes the one
+  that applies (a c2g program registers `jdk.internal.jrt.StandardStreams`).
+
+## Tests (phase 2C)
+
+| what | result |
+|---|---|
+| `bin/jrt test`, jrt alone, amd64 and arm64 | all pass |
+| `bin/jrt test --prog` on c2g's JDK slice (all 64 stand-ins replaced), amd64 and arm64 | all pass (phase 1: 53 of 54) |
+| fixture `FxStreams` (`bin/c2g-check fixtures`): the writers and readers in the three charsets with malformed and unmappable input, one char at a time and in bulk, `PrintStream`, `PrintWriter`, files (write, append, read, `available`, `skip`, closed streams, the three `FileNotFoundException` messages), `System`'s streams, `CASE_INSENSITIVE_ORDER` (sorting through the translated `TimSort`) | 13 of 13, amd64 and arm64, as the JVM's |
+
+## Not done
+
+- `java.text.Normalizer` (regex `CANON_EQ`) and `CharacterName` (`\N{name}`) need the JDK's
+  resource data (ICU's `nfc.nrm` read through `java.nio.ByteBuffer`, `uniName.dat` through
+  `java.util.zip`): resources and those classes are a later step (`getResourceAsStream` stays
+  undefined).
+- `File`, so `new FileInputStream(File)` and `PrintStream(File)` are stubs.

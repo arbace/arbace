@@ -50,6 +50,10 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.clj` and `overlay/go/runtime.clj` are
   Arbace's own.
+- `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
+  "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
+  documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
+  jdk26u files that bin/jrt-convert translates are read from the jdk26u checkout, not kept here.
 - `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`

@@ -230,6 +230,13 @@
        ^bool [^{:tag (* String)} t ^{:tag (* String)} regex]
        (Pattern_Matches_String_CharSequence__Z regex t))]])
 
+(def java-names
+  "Classes of jrt's own Java (overlay/jdk) that stand for a JDK class jrt cannot translate (a
+  nested class of a hand-written one): the name Class.getName answers for them."
+  {"jdk/internal/jrt/CaseInsensitiveComparator" "java.lang.String$CaseInsensitiveComparator"})
+
+(defn java-name [n] (or (java-names n) (str/replace n "/" ".")))
+
 (defn support-forms
   "c2g's helpers in package jrt (c2g_support): what translated code calls besides jrt's API."
   []
@@ -425,7 +432,7 @@ translated java.util.Formatter).\n"
                    (list 'addr
                          (apply list 'lit (m/jrt-sym pkg "ClassInfo")
                                 (concat
-                                  [:Name (str/replace n "/" ".") :Modifiers (modifiers n) :Kind (kind-sym pkg n)]
+                                  [:Name (java-name n) :Modifiers (modifiers n) :Kind (kind-sym pkg n)]
                                   (when (and sup (not iface)) [:Super (c/class-val (str "L" sup ";"))])
                                   (when (seq ifaces)
                                     [:Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
@@ -464,7 +471,7 @@ translated java.util.Formatter).\n"
     (list 'go/var (symbol (str (m/go-name n) "_class"))
           (list (m/jrt-sym pkg "Define")
                 (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
-                                  :Name (str/replace n "/" ".")
+                                  :Name (java-name n)
                                   :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
                                   :Super (when-not (env/interface? n) (m/jrt-sym pkg "Object_class"))
                                   :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))
