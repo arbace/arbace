@@ -535,6 +535,26 @@ Counter/NAME
 (apply (Adder. 100) [1 2])
 (try ((Adder. 1)) (catch Exception e (class e)))
 
+;; ----- code forms in fns and deftypes (handed over to the class forms compiler, SPEC §9.5)
+(defn cf-square [n] (let [^int x (unchecked-int n)] (unchecked-multiply-int x x)))
+(cf-square 7)
+(cf-square 100000)
+(defn cf-sum [n] (let [^:mutable s 0] (dotimes [i n] (set! s (+ s i))) s))
+(cf-sum 10)
+(defn cf-first-neg [xs] (for-each [x (cast Iterable xs)] (when (neg? x) (return x))) :none)
+[(cf-first-neg [1 -2 3]) (cf-first-neg [1 2])]
+(let [k 10] (defn cf-adder [x] (let [^long y x] (unchecked-add y k))))
+(cf-adder 5)
+(map (fn [x] (let [^:mutable acc 1] (dotimes [_ x] (set! acc (* acc 2))) acc)) [0 1 5])
+(class (fn [] (let [^int a 1] a)))
+(deftype CFCounter [^:unsynchronized-mutable n]
+  arbace.lang.IDeref
+  (deref [this] (let [^int k 1] (set! n (+ n k)) n)))
+(def cfc (CFCounter. 1))
+[(deref cfc) (deref cfc) @cfc]
+(defrecord CFRec [a b] arbace.lang.IDeref (deref [this] (let [^int c 2] (unchecked-add-int c 1))))
+[(deref (->CFRec 1 2)) (:a (->CFRec 1 2)) (into {} (->CFRec 1 2))]
+
 ;; ----- reflection on the classes
 (map #(.getName %) (sort-by #(.getName %) (.getDeclaredMethods Counter)))
 (.getName (.getDeclaringClass user.Outer$Inner))

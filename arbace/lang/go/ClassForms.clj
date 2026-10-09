@@ -142,6 +142,8 @@
         ;; constructor (which runs the field initializers after its super call)
         (method ^:public ^:static construct [^Meth ctor ^Object/1 args]
           (let [k (.-k ctor)]
+            (when (not (== 0 (bit-and-int (.-flags k) 0x0600)))
+              (throw (InstantiationError. (.-name k))))
             (.init k)
             (let [o (.alloc HOST k)]
               (.invoke ctor o args)
@@ -219,7 +221,9 @@
         (method ^:public superCall [this o ^Class c ^String key ^Object/1 args]
           (throw (UnsupportedOperationException. (java-str "superclass " (.getName c)))))
         ;; k is an enum: its constants are values()'s
-        (method ^:public setEnum ^void [this ^Klass k ^Meth values] nil))
+        (method ^:public setEnum ^void [this ^Klass k ^Meth values] nil)
+        ;; k is a member class of outer (simple: its simple name, nil for an anonymous class)
+        (method ^:public outer ^void [this ^Klass k ^Class outer ^String simple] nil))
 
       ;; the JVM's stand-in for classes made at run time: objects are Obj (tests only)
       (defclass ^:public ^:static Obj
@@ -2375,7 +2379,7 @@
             (System/arraycopy ifs 0 all (alength kis) (alength ifs))
             (CFGo/defineClass (.-name k)
                               (if (some? (.-sup k)) (.-cls (.-sup k)) (.-superClass k))
-                              all (.-flags k)
+                              all (bit-and-int (.-flags k) (bit-not-int 0x20))
                               (int (cond (.-iface k) 1 (.-fnClass k) 2 :else 0))
                               k)))
 
@@ -2412,7 +2416,10 @@
         (method ^:public method ^void [this ^CF$Klass k ^CF$Meth m]
           (when-not (.-fnClass k)
             (CFGo/setMethod (.-cls k) (.-name m) (.-params m) (.-retClass m) (.-flags m)
-                            (CF$MethodFn. m))))
+                            (if (== 0 (bit-and-int (.-flags m) 0x0400)) (CF$MethodFn. m) nil))))
+
+        (method ^:public outer ^void [this ^CF$Klass k ^Class outer ^String simple]
+          (CFGo/setOuter (.-cls k) outer simple))
 
         (method ^:public ctor ^void [this ^CF$Klass k ^CF$Meth m]
           (CFGo/addCtor (.-cls k) (.-params m) (.-flags m) (CF$CtorFn. m)))
@@ -2463,6 +2470,8 @@
       (method ^:public ^:static ^:native canExtend ^boolean [^Class c])
       (method ^:public ^:static ^:native superCtor ^void [o ^Class c ^String desc ^Object/1 args])
       (method ^:public ^:static ^:native superCall [o ^Class c ^String key ^Object/1 args])
+      ;; a member class's enclosing class and simple name
+      (method ^:public ^:static ^:native setOuter ^void [^Class c ^Class outer ^String simple])
       ;; an enum class: its Kind, and Enum.valueOf's constants (values's fn)
       (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values]))))
 

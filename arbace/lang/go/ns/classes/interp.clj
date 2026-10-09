@@ -1229,7 +1229,6 @@
         seen (java.util.HashSet.)]
     (doseq [[key ^Compiler$CF$Meth m] (concat (.-vtable k) (.-methods k))
             :when (.add seen key)
-            :when (not (has? (.-flags m) ACC_ABSTRACT))
             :when (not= key "doInvoke")]
       (meth-classes m)
       (.method h k m))
@@ -1293,6 +1292,12 @@
               (.ensure m))
             (clinit! k n))
           (doseq [n sorted] (publish! (ks n)))
+          (doseq [n sorted
+                  :let [d (a/decl n)]
+                  :when (= :member (:nesting d))
+                  :let [o (ks (:outer d))]
+                  :when (and o (.-cls ^Compiler$CF$Klass o))]
+            (.outer (host) (ks n) (.-cls ^Compiler$CF$Klass o) (str (:simple d))))
           (doseq [n sorted
                   :let [^Compiler$CF$Klass k (ks n)]
                   :when (= :enum (:kind (a/decl n)))]

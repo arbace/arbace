@@ -225,6 +225,11 @@ or CF$FnObj, whose getClass is their class).\n"
               (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
                                    (jrt/Str (+ "super call of " (.-Name (.Info c)) "." (.String key) " is not in the Go build"))))))
             (f o (.-A args))))
+   (list 'go/func (native-name "setOuter" "(Ljava/lang/Class;Ljava/lang/Class;Ljava/lang/String;)V")
+         [(tag 'c '(* jrt/Class)) (tag 'outer '(* jrt/Class)) (tag 'simple '(* jrt/String))]
+         '(let [info (.Info c)]
+            (set! (.-Declaring info) outer)
+            (when (!= simple nil) (set! (.-Simple info) (.String simple)))))
    (list 'go/func (native-name "setEnum" "(Ljava/lang/Class;Larbace/lang/IFn;)V")
          [(tag 'c '(* jrt/Class)) (tag 'values 'IFn)]
          '(let [info (.Info c)]
@@ -247,13 +252,17 @@ or CF$FnObj, whose getClass is their class).\n"
                                  :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
                                            (dynConvert ret (dynCall impl nil args))))))
               (return))
-            (let [dc (dynClassOf c)
-                  key (+ (.String (jrt/NN name)) "(")]
+            (let [key (+ (.String (jrt/NN name)) "(")]
               (range [_ p ps] (set! key (+ key (.Descriptor p))))
               (set! key (+ key ")" (.Descriptor (jrt/NN ret))))
-              (let [(values i ok) (aget (.-SlotMap dc) key)]
-                (when ok (aset (.-Slots dc) i impl)))
-              (aset (.-ByKey dc) key impl)
+              ;; an interface's method, or an abstract one: the member table's entry only
+              (.Lock dynMu)
+              (let [(values dc ok) (aget dynClasses c)]
+                (.Unlock dynMu)
+                (when (and ok (!= impl nil))
+                  (let [(values i ok) (aget (.-SlotMap dc) key)]
+                    (when ok (aset (.-Slots dc) i impl)))
+                  (aset (.-ByKey dc) key impl)))
               (set! (.-Methods info)
                     (append (.-Methods info)
                             (lit jrt/MethodInfo :Name (.String name) :Params ps :Return ret :Modifiers flags
@@ -262,6 +271,8 @@ or CF$FnObj, whose getClass is their class).\n"
                                            (let [d (dynOf this)
                                                  f (aget (.-ByKey (.DynClassOf d)) key)]
                                              (when (== f nil) (set! f impl))
+                                             (when (== f nil)
+                                               (panic (dynAbstract d (+ "'" (.String name) "' of " (.-Name (.Info c))))))
                                              (dynConvert ret (dynCall f d args))))))))))
    (list 'go/func (native-name "addCtor" "(Ljava/lang/Class;[Ljava/lang/Class;ILarbace/lang/IFn;)V")
          [(tag 'c '(* jrt/Class)) (tag 'params '(* jrt/RefArray)) (tag 'flags 'int32) (tag 'impl 'IFn)]
@@ -271,16 +282,16 @@ or CF$FnObj, whose getClass is their class).\n"
                           (lit jrt/CtorInfo :Params (dynClassList params) :Modifiers flags
                                :New (fn ^any [^{:tag (slice any)} args] (dynCall impl nil args)))))))
    (list 'go/func (native-name "addField" "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;II)V")
-         [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'type '(* jrt/Class)) (tag 'flags 'int32) (tag 'i 'int32)]
+         [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'ftype '(* jrt/Class)) (tag 'flags 'int32) (tag 'i 'int32)]
          '(let [info (.Info c)
                 k i]
             (set! (.-Fields info)
                   (append (.-Fields info)
-                          (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type type :Modifiers flags
-                               :Get (fn ^any [^any o] (cfGoValue type (aget (arbace.core/deref (.DynFields (dynOf o))) k)))
+                          (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type ftype :Modifiers flags
+                               :Get (fn ^any [^any o] (cfGoValue ftype (aget (arbace.core/deref (.DynFields (dynOf o))) k)))
                                :Set (fn [^any o ^any v] (aset (arbace.core/deref (.DynFields (dynOf o))) k (jrt/Box v))))))))
    (list 'go/func (native-name "addStatic" "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;I[Ljava/lang/Object;ILarbace/lang/IFn;)V")
-         [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'type '(* jrt/Class)) (tag 'flags 'int32)
+         [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'ftype '(* jrt/Class)) (tag 'flags 'int32)
           (tag 'store '(* jrt/RefArray)) (tag 'i 'int32) (tag 'init 'IFn)]
          '(let [info (.Info c)
                 k i]
@@ -288,15 +299,15 @@ or CF$FnObj, whose getClass is their class).\n"
               (set! (.-Init info) (fn [] (.Invoke__O init))))
             (set! (.-Fields info)
                   (append (.-Fields info)
-                          (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type type :Modifiers flags
-                               :Get (fn ^any [^any o] (.Invoke__O init) (cfGoValue type (aget (.-A store) k)))
+                          (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type ftype :Modifiers flags
+                               :Get (fn ^any [^any o] (.Invoke__O init) (cfGoValue ftype (aget (.-A store) k)))
                                :Set (fn [^any o ^any v] (.Invoke__O init) (aset (.-A store) k (jrt/Box v))))))))
    '(go/func cfGoValue
       "cfGoValue: a field's value (an object) in the member tables' convention: a primitive as its Go
 value.\n"
-      ^any [^{:tag (* jrt/Class)} type ^any v]
-      (when (and (.IsPrimitive__Z type) (!= v nil))
-        (let [(values x ok) (jrt/Unbox type v)]
+      ^any [^{:tag (* jrt/Class)} ftype ^any v]
+      (when (and (.IsPrimitive__Z ftype) (!= v nil))
+        (let [(values x ok) (jrt/Unbox ftype v)]
           (when ok (return x))))
       v)]))
 
@@ -320,9 +331,14 @@ value.\n"
                       :when g
                       :let [generic? (seq (:tparams g))
                             supers (vec (remove nil? (:supers g)))]
-                      :when (or generic? (some (comp seq :args) supers))]
+                      :let [abstract? (and (not (m/interface? n)) (pos? (bit-and (or (:flags d) 0) 0x0400)))]
+                      :when (or generic? abstract? (some (comp seq :args) supers))]
                   [n (strip-anns
                        (cond-> {:tparams (vec (:tparams g)) :supers supers}
+                         abstract? (assoc :ctors (vec (for [mm (:methods d)
+                                                            :when (= "<init>" (:name mm))
+                                                            :when (zero? (bit-and (or (:flags mm) 0) 0x1002))]
+                                                        [(:desc mm) (:flags mm)])))
                          generic? (assoc :methods (vec (for [mm (:methods g)
                                                              :when (zero? (bit-and (or (:flags mm) 0) 0x1002))]
                                                          (select-keys mm [:name :desc :flags :params :bounds]))))))])]

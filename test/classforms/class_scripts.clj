@@ -22,6 +22,11 @@
   REPL: classes whose class forms use only public members of the rest of the runtime."
   {"Murmur3" ["Murmur3"]})
 
+;; Not feasible so: scripts whose classes the driver or the runtime recognizes by identity (Seqs:
+;; the driver does not print lazy seqs, by class, so cf.lang.Repeat is printed forever; Names: the
+;; runtime's printer and keyword functions know arbace.lang.Keyword, not cf.lang.Keyword), and
+;; those whose classes extend classes of the world without a DynSub type (RatioBigInt: Number).
+
 (defn- lang-classes
   "The simple names of the classes of arbace.lang (top-level), from arbace/lang.clj."
   []
@@ -34,19 +39,21 @@
 
 (defn preamble
   "The forms defining classes cs (simple names) in cf.lang, as text: the namespace with the
-  runtime's other classes and the sources' imports, then the sources' class forms."
+  runtime's other classes and the sources' imports, then the sources' class forms in one do (they
+  refer to each other, SPEC §9.2)."
   [cs]
   (let [own (set cs)
         imports (for [n (lang-classes) :when (not (own n))] n)
-        forms (mapcat #(source-forms (str "arbace/lang/" % ".clj")) cs)]
-    (binding [*print-meta* true *print-length* nil *print-level* nil]
-      (str "(ns cf.lang)\n"
-           (pr-str (list 'import (list* 'quote [(apply list 'arbace.lang (map symbol imports))]))) "\n"
-           (str/join "\n" (for [f forms
-                                :when (seq? f)
-                                :when (not= 'in-ns (first f))]
-                            (pr-str f)))
-           "\n(in-ns 'user)\n"))))
+        forms (mapcat #(oracle.runner/read-source (io/file (str "arbace/lang/" % ".clj"))) cs)
+        head (fn [{:keys [form]}] (when (seq? form) (first form)))]
+    (str "(ns cf.lang)\n"
+         ;; each class the program has (the Go build's world lacks some of the JVM's)
+         "(doseq [c '" (pr-str (vec (map symbol imports))) "]\n"
+         "  (try (.importClass *ns* (Class/forName (str \"arbace.lang.\" c))) (catch Throwable _ nil)))\n"
+         (str/join "\n" (for [f forms :when (= 'import (head f))] (:text f)))
+         "\n(do\n"
+         (str/join "\n" (for [f forms :when (not (#{'import 'in-ns} (head f)))] (:text f)))
+         ")\n(in-ns 'user)\n")))
 
 (defn- renamed [cs ^String s]
   (reduce (fn [s c] (str/replace s (str "arbace.lang." c) (str "cf.lang." c))) s cs))
@@ -68,7 +75,7 @@
                    "(oracle.driver/done " (count cases) ")\n")
         cmd (if (= impl "jvm") "bin/arbace -" impl)
         t0 (System/nanoTime)
-        {:keys [records noise err exit]} (oracle.runner/run-impl cmd input 900)
+        {:keys [records noise err exit]} (oracle.runner/run-impl cmd input (Long/parseLong (or (System/getenv "CF_TIMEOUT") "900")))
         done (some :done records)
         got (oracle.runner/merge-results "classes" cases (unrenamed (remove :done records)))
         canon (fn [x] (oracle.driver/emit (walk/postwalk #(if (map? %) (into (sorted-map) %) %) x)))

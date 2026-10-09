@@ -79,3 +79,13 @@
              :supers (remove nil? (cons (some-> (.getSuperclass c) t/reflect->tnode)
                                         (map t/reflect->tnode (.getInterfaces c))))
              :methods (raw)})))
+
+(defn constructors
+  "The constructors [[descriptor flags]] of class n (internal name), which jrt's reflection does
+  not list for abstract classes: from the world's signatures, else Enum's and Record's."
+  [n]
+  (or (:ctors (get @world-generics n))
+      (get {"java/lang/Enum" [["(Ljava/lang/String;I)V" 4]]
+            "java/lang/Record" [["()V" 4]]
+            "java/lang/Object" [["()V" 1]]}
+           n)))
