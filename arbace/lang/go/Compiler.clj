@@ -1530,6 +1530,8 @@
                 (set! (.-compiledClass nie) (Compiler$Evaluator/defineType nie (cast String/1 (aget ev 3)))))
             (.equals k "iface")
               (Compiler$Dyn/defineInterface (cast String (aget ev 2)) (cast Class/1 (aget ev 3)))
+            (.equals k "ns")
+              (.set RT/CURRENT_NS (Namespace/findOrCreate (cast Symbol (aget ev 2))))
             (.equals k "proxy")
               (.applyTo (RT/var "arbace.core" "get-proxy-class")
                         (RT/cons (aget ev 2) (RT/seq (aget ev 3))))

@@ -178,3 +178,14 @@
 (c2g/variant RT
   ;; (baseLoader and classForName: above, from phase 2A)
   (method ^:public ^:static makeClassLoader ^ClassLoader [] nil))
+
+;; B1a step 6 (doc/go/EXEC-NOTES.md): the boot ns macro (core.clj's first form) sets *ns* when it
+;; expands, so a source of the image of prepared namespaces replays that: an event of the image
+(c2g/variant RT
+  (field ^:static ^:final ^IFn bootNamespace
+    (anon AFn []
+      (method ^:public invoke [this __form __env arg1]
+        (let [nsname (cast Symbol arg1) ns (Namespace/findOrCreate nsname)]
+          (Compiler$Image/event (new Object/1 ["ns" nil nsname]))
+          (.set CURRENT_NS ns)
+          ns)))))
