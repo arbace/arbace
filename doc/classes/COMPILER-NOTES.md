@@ -543,3 +543,11 @@ All accepted by the user and folded into SPEC.md; the original texts are in git 
 14. **Java's order of imports in name resolution.** The own package comes before Clojure's
     default imports and `java.lang`, as implemented since the vendoring (VENDOR-NOTES,
     "Changes to arbace.classes" 5). Accepted (2026-10-08), folded into SPEC §5.2.
+15. **Bridges under the subclass's bounds.** When bridges are computed, a supertype method's
+    class type variables are substituted by the subclass's view of them, so they are bounded as
+    the subclass bounds them (`arbace.classes.analyze/erased-params`). With `Map` from source
+    (c2g's world), `Map.put(K, V)`'s own scope bounded `K` by `Object` over `EnumMap`'s `K
+    extends Enum<K>`, and `EnumMap` got no bridge `put(Object, Object)`; the class forms checks
+    compile against the JDK's classes by reflection, which carry no such scope, and the stages
+    were unchanged by the fix. Found in B1a step 5 (doc/go/EVAL-NOTES.md, phase 2B, B8; S8 in
+    doc/go/C2G-SPEC.md §16). Accepted (2026-10-09), folded into SPEC §6.

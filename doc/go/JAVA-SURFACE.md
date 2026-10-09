@@ -276,6 +276,16 @@ the plan says.
 
 `ProxyHandler` (53 lines) is unused upstream legacy and cut with `proxy`.
 
+**Since B1a step 5 (2026-10-09)** part of this cut is undone (C2G-SPEC §16, the amendments of
+EVAL-NOTES.md): `ForkJoinPool` and `ForkJoinTask` are jrt's, with real parallelism (amendment
+S5); `java.util.stream` is translated whole with `java.util.function`; `java.time.Instant`,
+`java.sql.Timestamp` and `java.sql.Date` are translated, and `Calendar`, `GregorianCalendar`
+and `TimeZone` are jrt's own Java (fixed-offset zones), so `#inst` reads and prints all of
+`arbace.instant`'s types (decision 7 stands: jrt's `Date` stays small and hand-written); `bean`
+works over reflection (`java.beans` stays cut); `java.net.URI` is translated (the rest of
+`java.net` stays cut). `proxy` itself is back (amendments X1, X2; B1-PLAN.md D6), not through
+`ProxyHandler`.
+
 ## Effort per treatment
 
 Agent-assisted days, at the pace of the class forms and g2c work; they refine plan step 3
@@ -305,7 +315,11 @@ only the VM's edge hand-written; a hand-written UTF-16 `String`/`StringBuilder` 
 hand-written `Unsafe` compare-and-set); thread identity by a goroutine-local slot added to the
 Go runtime held as forms (the goroutine id from `runtime.Stack` as the stopgap); the REPL's
 start trimmed of the namespaces that need processes, URLs and sockets; `#inst` over a small
-hand-written `Date` on Go's `time`.
+hand-written `Date` on Go's `time`. (Decisions 2, 4 and 7 as applied since B1a step 5: the
+closure grew beyond the measured one, streams included, by the files listed in
+JRT-SOURCES.md, "The closure as grown"; the fork-join pool joined the hand-written concurrency
+(C2G-SPEC §8.4, amendment S5); `Calendar`, `Timestamp` and `Instant` joined the world around
+the small `Date`, which became non-leaf (C2G-SPEC §5.3, S3).)
 
 1. **Reflection.** (a) Shim `java.lang.reflect` and `Class` over member tables c2g generates
    for every class built in, translating `Compiler` and `Reflector` unchanged (closed world, as

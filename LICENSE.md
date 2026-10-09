@@ -59,9 +59,15 @@ covers what.
   phase 2B "Dates") hold code transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/java/util/Calendar.java`, `GregorianCalendar.java`,
   `TimeZone.java`, `sun/util/calendar/ZoneInfoFile.java`, `java/time/format/DateTimeFormatter.java`,
-  each file's header names the parts): Copyright (c) Oracle and/or its affiliates, under the GNU
-  General Public License version 2 with the Classpath Exception (text below); the rest of those
-  files is Arbace's own.
+  `java/time/LocalDate.java`; each file's header names the parts): Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception
+  (text below); the rest of those files is Arbace's own. Kept so by the user's decision
+  (2026-10-09; doc/go/EVAL-NOTES.md, B7), rather than rewritten from the documented behaviour.
+- `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
+  `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
+  `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
+  and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below).
 - `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`

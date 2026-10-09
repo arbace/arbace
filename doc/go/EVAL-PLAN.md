@@ -1,6 +1,9 @@
 # The evaluator: plan (B1a step 5)
 
-Status: proposal (2026-10-09, c2g phase 2B), for the user's review. B1a step 5
+Status: proposal (2026-10-09, c2g phase 2B); the user decided Q1-Q7 as recommended (§9), and
+step 5 built it ([EVAL-NOTES.md](EVAL-NOTES.md), whose "Deviations from EVAL-PLAN" list where
+the evaluator differs from this plan; its amendments M1-M8, X1-X4 and S1-S8, accepted
+2026-10-09, are folded into C2G-SPEC and noted below where they touch this plan). B1a step 5
 ([B1-PLAN.md](B1-PLAN.md), decision D2): Arbace on Go evaluates the `Expr` trees of its
 translated `Compiler` instead of emitting bytecode. This document fixes the evaluator's design
 over the translated tree, records what phase 2B built and proved, estimates the rest, and asks
@@ -87,6 +90,11 @@ run-time side the bytecode had.
   evaluated fn with Go's interface call `(.Invoke_O__O f x)`, through `RestFn`'s dispatch.
 - Metadata (`MetaExpr` over a `FnExpr`): `AFunction.withMeta`, as on the JVM.
 - `ArityException` names the fn by its analyzed name.
+- **As built** (amendment M2, accepted 2026-10-09; C2G-SPEC §10.2): each `FnExpr` has a class
+  made at run time, a subclass of `EvalFn` named as the JVM names the fn's class
+  (`arbace.core$map`), which `getClass` answers through `EvalFn`'s field `c2g$class`; `EvalFn`
+  binds the arguments from `RestFn`'s seq, the rest parameter unrealized (EVAL-NOTES.md,
+  "Functions").
 - Step 7 replaces `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk with
   closures.
 
@@ -145,6 +153,12 @@ run-time side the bytecode had.
   `Class` objects as on the JVM.
 - Record fields: `defrecord`'s `ILookup`, `IPersistentMap` and the rest are the evaluated
   methods `defrecord` writes, as on the JVM.
+- **`proxy`** (amendments X1-X3, accepted 2026-10-09; the user's decision reversing D6 for it;
+  C2G-SPEC §5.12, §10.4): a proxy of `Object` is a `Dyn`; a proxy of a class of a fixed list
+  (`Writer`, `Reader`, `PushbackReader`, `InputStream`, `OutputStream`, `APersistentMap`, jrt's
+  `ThreadLocal`) is a `DynSub_C`, which c2g writes ahead of time; the namespace variant
+  `core_proxy.clj` replaces only `generate-proxy`. A class made at run time that defines a
+  method twice throws `ClassFormatError`, as on the JVM.
 
 ### 2.6 Interop
 
@@ -173,6 +187,10 @@ run-time side the bytecode had.
   `reduce`, `print-method`'s multimethods, `IKVReduce`) need §2.5; `gen-interface` is used
   by `defprotocol` (Q5).
 - `*compiler-options*`, direct linking: off (the variant); `:static` fns are ordinary fns.
+- **As built** (amendments M1, M3, M5, accepted 2026-10-09; C2G-SPEC §10.3, §4.1): `bin/c2g
+  --program` embeds the namespaces' sources with the Go build's namespace variants applied
+  (`arbace/lang/go/ns/`); `RT.load` reads them, then the directories of `ARBACE_PATH`; the
+  classes the namespaces name outside the world are cut classes whose members throw.
 
 ### 2.8 Recursion depth and errors
 
@@ -182,6 +200,10 @@ run-time side the bytecode had.
 - Errors: `CompilerException` with phase `:execution` around invokes and interop, as the
   bytecode's line tables give it on the JVM (done for invoke and the method calls). Stack
   traces show the evaluator's Go frames, not the Clojure fns (Q6).
+- **As built** (EVAL-NOTES.md, deviation 5; amendment M6, accepted 2026-10-09, C2G-SPEC §10.7):
+  exceptions are not wrapped in `CompilerException` inside fns, as compiled code does not wrap
+  them; stack traces show the evaluated Clojure frames (Q6's (a)), which jrt's frame mapping
+  puts in place of the evaluator's Go frames.
 
 ## 3. Primitive fns
 

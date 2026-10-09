@@ -221,3 +221,39 @@ Arbace (step 1's closure) and stubs the rest of each file, throwing
 `UnsupportedOperationException` if ever called. c2g needs a reachability pass for this. The
 alternative, adding the files of the 80 classes outside the closure until it is closed, was not
 taken.
+
+## The closure as grown (B1a step 4 phase 2C, step 5 phase 2B)
+
+The 184 files above are the measured closure. `bin/jrt-convert` now translates **340 files**
+(`sources.txt` lines as `MODULE KIND REL`): 317 of `src/java.base/share/classes` (KIND
+`share`), 8 generated (`gensrc`), 2 of another module (`share:java.sql`) and 13 of jrt's own
+Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
+
+- `added-sources`: java.base files added, each with its reason there: phase 2C's 31 (the
+  stand-ins jrt had without sources, the standard streams' `PrintStream` and interfaces,
+  `SignedMutableBigInteger`; JRT-NOTES.md, "Phase 2C"), and step 5's (JRT-NOTES.md, "Phase 2B
+  (step 5)"): JDK 21's sequenced collections, `java.lang.constant`'s `Constable` and
+  `ConstantDesc`, `java.util.stream` whole with `java.util.function`, `Optional` and the rest
+  streams need, `CountedCompleter`, `EnumSet`/`EnumMap`, `RandomGenerator`, `URI`,
+  `CyclicBarrier`, `java.time.Instant` and `DateTimeException`.
+- **Other modules' files** (amendment S2, accepted 2026-10-09; C2G-SPEC §16):
+  `added-module-sources` lists files of `src/MODULE/share/classes` (paths relative to jdk26u),
+  `java.sql.Timestamp` and `java.sql.Date`, which `bin/jrt-convert` copies into java.base's
+  tree and javac's `--patch-module java.base` compiles with it; `sources.txt` gives them KIND
+  `share:MODULE`.
+- **jrt's own Java**, `overlay/jdk/MODULE/...` (KIND `overlay`, `overlay-sources`), replacing or
+  adding to jdk26u's files (C2G-SPEC §4.1, K1).
+
+Two options of the conversion (amendment S2):
+
+- **`J2C_PATCH_ALL`** (an environment variable of j2c's `jdk` conversion,
+  `arbace/j2c/main.clj`; `bin/jrt-convert` sets it): each chunk of packages has the other
+  chunks' sources on its patch path, its own first. jrt's own Java in `jdk.internal.jrt` is used
+  across packages (`java.io`), and with more files the chunks split it apart (javac: "package
+  jdk.internal.jrt does not exist"). Opt-in, so `bin/j2c-check --jdk` is unchanged.
+- **`known-differences`** (`g2c.jrt-sources`): files whose classes differ from javac's in known,
+  harmless ways, by file with the kind and the number of differences, count as converted when
+  the number matches (any other difference fails): a lambda constructing a local class passes
+  the class's captured variables in capture order, javac in reverse (`Collectors` 3,
+  `Gatherers` 9, `MatchOps` 12), and an `InnerClasses` entry javac's stack map frames name
+  (`Nodes` 2).

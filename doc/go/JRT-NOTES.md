@@ -1582,19 +1582,23 @@ with the Classpath Exception): `java/util/Calendar.java` (`selectFields`, the st
 (`toCustomID`), `java/time/format/DateTimeFormatter.java` (`InstantPrinterParser`) and
 `java/time/LocalDate.java` (`toString`'s year).
 
-**Proposed amendments** (numbered W for the merge):
+**Proposed amendments** (numbered W for the merge): merged into EVAL-NOTES.md's phase 2B list
+as B1, B2, B3 and B7, all accepted 2026-10-09 and folded, renamed S1, S2, S3 and S7 (C2G-SPEC
+§16; these W numbers are not C2G-SPEC's W1-W6):
 
 - **W1 (C2G-SPEC §4.4, Collisions) A rename table entry**: `java/sql/Date` is `Sql_Date` (jrt's
-  `java.util.Date` is `Date`).
+  `java.util.Date` is `Date`). *Folded into C2G-SPEC §4.4 as S1.*
 - **W2 (JRT-SOURCES.md, the tool) Other modules' files**: `added-module-sources` lists files of
   other modules (`src/MODULE/share/classes/...`) compiled into the java.base tree; `sources.txt`
-  gives them KIND `share:MODULE`.
+  gives them KIND `share:MODULE`. *Folded into JRT-SOURCES.md as S2.*
 - **W3 (C2G-SPEC §5.3; the manifest) `java.util.Date` is a non-leaf hand-written class.**
+  *Folded into C2G-SPEC §5.3 as S3.*
 - **W4 (LICENSE.md) Code transcribed from jdk26u in jrt's own Java**: `Calendar.java`,
   `GregorianCalendar.java`, `TimeZone.java` and `TimeText.java` under `overlay/jdk/` hold parts
   of jdk26u's code under the GPL version 2 with the Classpath Exception (LICENSE.md now says so
   and holds the text); the alternative, the user's call, is to rewrite those parts from the
-  documented behaviour alone, as the overlay's other files are.
+  documented behaviour alone, as the overlay's other files are. *Decided: kept (S7), as
+  LICENSE.md records it.*
 
 ## The rest of part B: the JDK surface the REPL and Clojure's suite reach
 
@@ -1656,7 +1660,8 @@ class passes the class's captured variables in capture order, javac in reverse
   (`charsets.txt`: the encode and decode cases of the three new charsets, 15 more byte
   sequences). The overlay's `InputStreamReader` and `OutputStreamWriter` still code UTF-8,
   ISO-8859-1 and US-ASCII only and now refuse the others (`UnsupportedOperationException`)
-  instead of decoding them as UTF-8. (V9: jrt has six charsets.)
+  instead of decoding them as UTF-8. (V9: jrt has six charsets; amendment B6 of EVAL-NOTES.md,
+  accepted and folded into C2G-SPEC §12 and V9 as S6.)
 - **`ForkJoinTask`, `ForkJoinPool`** (`forkjoin.clj`, rewritten; both now in the manifest, so
   in the REPL's tables): a pool of parallelism P runs a task given from outside (`invoke`,
   `execute`, `submit`) in a worker thread of its own, and a task forked in a worker in a new
@@ -1671,7 +1676,7 @@ class passes the class's captured variables in capture order, javac in reverse
   `ForkJoinWorkerThread`, no `managedBlock`, `getException` gives the exception itself (the
   JDK may rewrap it for the joining thread). Reducers' `fold` and parallel streams run
   in parallel (`TestForkJoin`: a fold-shaped sum in a pool of 4 used 2 to 4 workers at once, never
-  more; `bin/jrt test --race` clean).
+  more; `bin/jrt test --race` clean). (EVAL-NOTES.md's B5: C2G-SPEC §8.4, S5.)
 - **`String`**: `indent`, `stripIndent`, `translateEscapes` (jdk26u's algorithms over lines
   split as `lines()` splits them; tested against the JVM on 17 multi-line strings),
   `contentEquals(StringBuffer)`, `String(byte[], int)`, and the interfaces `Constable`,
@@ -1680,7 +1685,8 @@ class passes the class's captured variables in capture order, javac in reverse
   Iterable)`, `formatted`, `lines` (over an `ArrayList`'s stream: sequential, not jdk26u's lazy
   spliterator), `describeConstable`, and, for every hand-written leaf class implementing a
   translated interface, forwarders to the default methods it does not define (`chars`,
-  `codePoints` of `CharSequence` on `String`, `StringBuilder`, `StringBuffer`).
+  `codePoints` of `CharSequence` on `String`, `StringBuilder`, `StringBuffer`). (C2G-SPEC §11,
+  §5.4, §9.1: S3, S4.)
 - **`StringBuilder`, `StringBuffer`**: `insert(int, double|float)`, `insert(int, CharSequence,
   int, int)`, `insert(int, char[], int, int)` (with the JDK's checks); both now have all of
   their JDK 26 public members.
@@ -1691,8 +1697,8 @@ class passes the class's captured variables in capture order, javac in reverse
 - **Atomics**: the other memory orders (`getOpaque`, `setOpaque`, `getPlain`, `setPlain`,
   `setRelease`, `weakCompareAndSet*`, `compareAndExchange*`; Go's atomics are sequentially
   consistent, so all are the same operations). `AtomicInteger` and `AtomicLong` now embed
-  `Number` (amendment T12: `(pos? (AtomicInteger. 1))` casts to `Number`). Left: the
-  functional ones (`updateAndGet`, `accumulateAndGet` ...).
+  `Number` (amendment T12: `(pos? (AtomicInteger. 1))` casts to `Number`; C2G-SPEC §5.3,
+  S3). Left: the functional ones (`updateAndGet`, `accumulateAndGet` ...).
 - **`Class`**: `asSubclass`, `componentType`, `arrayType`, `descriptorString`,
   `forPrimitiveName`, `getNestHost`, `newInstance` (the deprecated one), `isAnonymousClass`,
   `isLocalClass`, `isHidden`, `isSealed` (false), `getEnclosingMethod`,
@@ -1725,6 +1731,7 @@ record components, type parameters, signers, `getResource*`, `toGenericString`).
   bridge `put(Object, Object)`: `Map.put` on an `EnumMap` ran `AbstractMap.put` (it throws).
   The class forms check compiles against the JDK's classes by reflection, which carry no such
   scope, so the bug did not show there. `bin/gate` passes (the stages are unchanged).
+  (classes/SPEC.md §6, COMPILER-NOTES.md amendment 15; S8.)
 - **A bridge narrowing a generic return** casts (`decls.clj`, `derived-body`):
   `Spliterators$EmptySpliterator$OfDouble.trySplit()` returns the `Spliterator` of its
   superclass's erased `T_SPLITR` as a `Spliterator.OfDouble`.

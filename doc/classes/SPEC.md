@@ -1124,7 +1124,7 @@ with javac's names. The converter writes none of this.
 | field initializers, `initializer` | folded into the constructors that call `super.`, after the call |
 | static field initializers, `static-initializer` | `<clinit>`, in textual order |
 | constant fields | `ConstantValue`; reads elsewhere inlined |
-| covariant returns, generic overrides | bridge methods (`ACC_BRIDGE`, `ACC_SYNTHETIC`), from the erased signatures of the overridden methods with the supertypes' type arguments substituted |
+| covariant returns, generic overrides | bridge methods (`ACC_BRIDGE`, `ACC_SYNTHETIC`), from the erased signatures of the overridden methods with the supertypes' type arguments substituted: a supertype method's class type variables become the subclass's view of them and are erased by the subclass's bounds, not by the method's own scope (`EnumMap<K extends Enum<K>, V>` needs the bridge `put(Object, Object)` for `Map.put(K, V)`; amendment, accepted 2026-10-09: COMPILER-NOTES.md 15) |
 | generic declarations | `Signature` attributes |
 | inner classes | `this$0` field, outer instance constructor parameter (`MANDATED`, with `MethodParameters`), stored before the `super` call; `Objects.requireNonNull` on an explicit outer instance |
 | local and anonymous classes | `val$x` capture fields and constructor parameters, `Outer$1` and `Outer$1Local` names, `EnclosingMethod`, anonymous constructors passing their arguments on |
@@ -1966,6 +1966,10 @@ proposed amendments (14 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`). The
 all of them; they are folded into the text above (§1, §3, §4.4 to §4.8, §4.10, §4.11, §5.2 to §5.8,
 §5.10, §5.12, §6, §7, §9.1, §9.2, §9.5, §10). The last five are marked "amendment, accepted"
 with their date where they apply.
+
+**Amendment (2026-10-09):** B1a step 5 found one more, `COMPILER-NOTES.md` 15 (bridges computed
+under the subclass's bounds of a supertype's type variables; doc/go/EVAL-NOTES.md's B8,
+doc/go/C2G-SPEC.md's S8), accepted and folded into §6.
 
 Each with the recommendation the spec follows.
 

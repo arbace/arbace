@@ -1,7 +1,7 @@
 # B1: Arbace on Go — plan
 
 Status: plan, revised at the user's proposal (2026-10-08); the user decided D1, D2, D4, D5 and
-D6 the same day (below).
+D6 the same day (below); D6 was partly reversed on 2026-10-09 (`proxy`, the fork-join pool).
 B1 is the milestone after g2c's G0-G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's
 decisions of 2026-10-07 put the box built by gc + TamaGo first; on 2026-10-08 the user proposed
 to postpone the box and arm64, and to reach first **a standalone static `linux/amd64` Go
@@ -108,7 +108,12 @@ pinned by commit, or vendored) is decided then.
 - **D6 Scope of the first REPL.** Leave out at first: `defclass` and the class forms (their
   compiler emits JVM classes), `gen-class`, `proxy`, JVM interop beyond jrt's classes, agents'
   executors beyond goroutines (recommended); each comes back as its Go-side meaning is defined.
-  *Decided: left out at first.*
+  *Decided: left out at first.* **Partly reversed (2026-10-09, B1a step 5):** `proxy` is back,
+  over the evaluator's `Dyn` (the user's decision; for `Object`, interfaces and a fixed list of
+  non-leaf classes: C2G-SPEC §5.12, §10.4, amendments X1, X2), and the fork-join pool is real,
+  goroutine workers in jrt, so reducers' `fold` and parallel streams run in parallel (C2G-SPEC
+  §8.4, amendment S5). `gen-class`, `defclass` at the REPL and JVM interop beyond the closed
+  world stay out.
 
 (D3, how Arbace depends on go-whim, moves to B1b.)
 

@@ -14,12 +14,12 @@ Under `test/oracle/`:
 |---|---|---|---|
 | forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 6,898 forms, 14 files |
 | forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,179 forms, 28 files |
-| classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 4,969 steps, 17 files |
+| classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
 
 and `driver.clj` (sent to the implementation under test), `runner.clj` (the runner, on the JVM
 Arbace), `harvest.clj` (the harvest), and the recorded results in `expected/<part>/<file>.edn`,
-one per source file. Expected files total 4.0 MB (forms 1.1 MB, classes 1.2 MB, regex 1.6 MB).
+one per source file. Expected files total 5.3 MB (forms 1.2 MB, classes 2.5 MB, regex 1.6 MB).
 
 Hand-written forms (`forms/`): `numbers` (overflow and promotion, ratios, BigInt, BigDecimal,
 doubles, casts, bit operations, literals, `parse-*`, hashes), `strings` (UTF-16 and non-BMP
@@ -47,7 +47,9 @@ transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients)
 `VarNamespace`, `LispReader` (`RT.readString`, `LispReader.read`, `EdnReader`), `Printer`
 (`RT.printString`, `RT.print`, `RT.format`), `Murmur3` (and `Util.hasheq`), `UtilRT` (`Util`'s
 equality and comparison, `RT`'s collection functions and casts), `Strings` (`StringBuilder`,
-`String`, number conversions, `Compiler.munge`/`demunge`).
+`String`, number conversions, `Compiler.munge`/`demunge`), `BigNumbers` (every operation of
+`BigInteger` and `BigDecimal` across the algorithms' thresholds, then `BigInt` and `Numbers`
+over them; C2G-NOTES.md, phase 2C).
 
 Regex (`regex/`): `basics`, `classes`, `unicode`, `anchors`, `quantifiers`, `groups`,
 `lookaround`, `flags`, `split_replace`, `errors` (`PatternSyntaxException` descriptions, indexes
@@ -63,7 +65,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   (`bin/arbace -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
 - `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for
-  `bin/arbace -`, and `bin/oracle check jvm` passes (15,854 of 15,854 cases). It prints a line per file, the
+  `bin/arbace -`, and `bin/oracle check jvm` passes (20,253 of 20,253 cases). It prints a line per file, the
   first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
   is 0 when every case matches.
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
@@ -246,7 +248,13 @@ Everything recorded is deterministic; left out:
 - Identity: identity hashes and the printing of objects without value semantics (fns, atoms,
   transients, arrays, `PersistentQueue`'s `#object` form, regex patterns' hashes, `deftype`s
   without `hashCode`); what remains in messages and `#object[...]` is normalized (above).
-- The class forms (`defclass`), `gen-class` (D6), and loading or compiling files.
+- The class forms (`defclass`), `gen-class` (D6), and loading or compiling files. `proxy` is
+  covered (amendment X4, accepted 2026-10-09; C2G-SPEC §16): the Go build has it since the
+  user's decision reversing D6 for it (C2G-SPEC §10.4), and `forms/types.clj` checks it (proxies
+  of `Object`, of interfaces, of `Writer`, `PushbackReader`, `InputStream` and `OutputStream`,
+  `proxy-super`, `update-proxy`, `bean`, pprint's writers). The harvest still leaves out the
+  suite's `proxy` namespace and every form naming `proxy` (`harvest.clj`'s `excluded` and
+  `unsafe`, from when D6 cut it).
 - In the harvest, whole test namespaces: `agents`, `annotations`, `clearing`, `compilation`,
   `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop`, `main`,
   `method_thunks`, `ns_libs`, `parallel`, `param_tags`, `proxy`, `reflect`, `refs`, `repl`, `rt`,

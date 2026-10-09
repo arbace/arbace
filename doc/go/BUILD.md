@@ -53,6 +53,10 @@ DIR/
   path without `.clj` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
   against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
   §9.5, §9.6 and §12.4.)
+- **Data directories** (amendment M5 of C2G-SPEC §16, accepted 2026-10-09). A directory under
+  `DIR/go` holding a file `.g2c-data` holds data, not forms: its `.clj` files (and those of its
+  subdirectories) are not read as Go forms. `bin/c2g --program` marks so the main package's
+  embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
 - **Configuration.** The target is the command's: `GOOS=linux`, `GOARCH` from `--arch`. A

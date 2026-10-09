@@ -357,30 +357,41 @@ can; the shared files are `arbace/lang/go/Compiler.clj`, `arbace/c2g/out.clj` an
 
 ## Proposed amendments (for the user's review)
 
+All accepted 2026-10-09 and folded, renamed M1-M8 so as not to collide with C2G-SPEC's
+deviations V1-V13 (C2G-SPEC §16 has the scheme: phase 1 M, phase 2A X, phase 2B S).
+
 - **V1 (C2G-SPEC §10.3) Namespace variants.** The Go build's differences in the namespaces live
   in `arbace/lang/go/ns/`: `P.clj` replaces `arbace/P.clj` in the executable, `P.after.clj` is
   appended, `P.subst.clj` replaces strings found exactly once; applied by `bin/c2g --program`
-  when it embeds the sources.
+  when it embeds the sources. *Accepted 2026-10-09, folded into C2G-SPEC §10.3 as M1.*
 - **V2 (§5.11, §10.2) A run-time class per fn.** A class with an instance field `c2g$class`
   answers `getClass` with it when set; the evaluator gives each `FnExpr` a class made at run
-  time, a subclass of `EvalFn` named as the JVM names the fn's class.
+  time, a subclass of `EvalFn` named as the JVM names the fn's class. *Accepted 2026-10-09,
+  folded into C2G-SPEC §5.11 and §10.2 as M2 (and EVAL-PLAN §2.2).*
 - **V3 (§4.1, §10.6) The REPL's cut classes and absent members.** `--program` registers the
   classes the embedded namespaces name outside the world as cut classes, with member tables from
   the JVM's reflection whose members throw, and lists the public members of translated classes
-  that do not exist in Go in their tables, throwing; the code naming them analyzes.
+  that do not exist in Go in their tables, throwing; the code naming them analyzes. *Accepted
+  2026-10-09, folded into C2G-SPEC §4.1 as M3.*
 - **V4 (§5.11) Overload order.** Member tables (c2g's and jrt's) list a name's overloads in the
-  order the JVM's reflection gives them; `Reflector` chooses by that order.
+  order the JVM's reflection gives them; `Reflector` chooses by that order. *Accepted
+  2026-10-09, folded into C2G-SPEC §5.11 as M4.*
 - **V5 (§10.3, §9.4) Embedded sources.** `--program` embeds the namespaces' sources in the main
   package (`//go:embed res`, the host's `Resources`); `RT.load` reads them, then `ARBACE_PATH`; a
   forms directory holding `.g2c-data` is data to `bin/g2c` (amendment to SPEC §4: g2c's program
-  layout).
+  layout). *Accepted 2026-10-09, folded into C2G-SPEC §10.3 as M5; the `.g2c-data` rule into
+  BUILD.md, "The program's layout" (g2c's program layout is BUILD.md's, not SPEC §4's).*
 - **V6 (§10.7) Evaluated frames.** jrt's `EvalTrace` hook and the frame mapping above.
+  *Accepted 2026-10-09, folded into C2G-SPEC §10.7 (and §11) as M6.*
 - **V7 (§9.1) JDK variants for VarHandle and SecureRandom**: `ByteArray`,
-  `ByteArrayLittleEndian` and `UUID.randomUUID` (overlay/jdk/variants).
+  `ByteArrayLittleEndian` and `UUID.randomUUID` (overlay/jdk/variants). *Accepted 2026-10-09,
+  folded into C2G-SPEC §4.6, where the JDK's variants are (and §11, `UUID`'s natives), as M7.*
 - **V8 (C2G-SPEC §7) c2g fixes** found with the whole world: a `this(...)`/`super(...)` call of a
   constructor outside the world is a missing operation; catch clauses of classes outside the
   world are dropped; `identical?` of two interface types compares as `any`; volatile fields have
   setters in member tables; a superinterface outside the world stands for its superinterfaces.
+  *Accepted 2026-10-09, folded into C2G-SPEC §4.1 and §5.11 as M8 (the identity rule was
+  already §5.8's).*
 
 ## Phase 2A: types made at run time
 
@@ -544,17 +555,25 @@ for other reasons (`java_interop`: `arbace.inspector`, the suite's Java classes;
 
 ### Proposed amendments (for the user's review)
 
+All accepted 2026-10-09 and folded, renamed X1-X4 (C2G-SPEC §16).
+
 - **A1 (C2G-SPEC §5.12, §5.3) Proxies of a class: `DynSub_C`.** For each class of a configured
   list (`arbace.c2g.dyn/proxy-supers`: translated, not final, not a leaf), c2g writes a Go type
   embedding the class's struct, with `Dyn`'s methods and the class's virtual methods, each
   calling its slot's fn and else the class's implementation; `Compiler$Dyn.defineProxyClass` and
   `superMarker`; a slot fn answering the marker runs the superclass's implementation. §5.3's
   "nothing can subclass a class at run time" then reads: nothing but a proxy of a listed class.
+  *Accepted 2026-10-09, folded into C2G-SPEC §5.12 and §5.3 (and V9) as X1. The list's classes
+  may be hand-written too (jrt's `ThreadLocal`), as above, not only translated.*
 - **A2 (C2G-SPEC §10.4; B1-PLAN D6) `proxy` over `Dyn`**, the namespace variant
-  `core_proxy.clj` above; `bean` by reflection; `gen-class` stays out.
+  `core_proxy.clj` above; `bean` by reflection; `gen-class` stays out. *Accepted 2026-10-09,
+  folded into C2G-SPEC §10.4 and §12 as X2, B1-PLAN D6 (partly reversed) and EVAL-PLAN §2.5.*
 - **A3 (C2G-SPEC §5.12) A duplicate method is `ClassFormatError`** when a class is made at run
-  time, with the JVM's message; jrt's stand-in `ClassFormatError`.
-- **A4 (ORACLE.md) The oracle covers proxy** (`types.clj`), no longer excluded.
+  time, with the JVM's message; jrt's stand-in `ClassFormatError`. *Accepted 2026-10-09,
+  folded into C2G-SPEC §5.12 as X3.*
+- **A4 (ORACLE.md) The oracle covers proxy** (`types.clj`), no longer excluded. *Accepted
+  2026-10-09, folded into ORACLE.md ("Exclusions") as X4; the harvest still leaves out the
+  suite's `proxy` namespace and forms naming `proxy` (`harvest.clj`).*
 
 ## Phase 2C: Clojure's test suite on the Go build, and the oracle's NPE rule
 
@@ -571,7 +590,9 @@ that the whole message matches the grammar of HotSpot's `print_NPE_failed_action
 counts the cases that match only so (`N by V11` per file and in the summary). Explicit
 `NullPointerException`s (a message the code chose, or none) are compared as before.
 [ORACLE.md](ORACLE.md), "Helpful NullPointerException messages", has the details. Re-recorded:
-12 expected files, 54 entries marked (52 forms, 2 class script steps), nothing else changed.
+12 expected files, 54 entries marked (52 forms, 2 class script steps), nothing else changed. (The
+rule is the user's decision, so no amendment: ORACLE.md describes it, and C2G-SPEC §7.9.5 and
+V11 refer to it. The gate proposal below is still open.)
 
 Results: `bin/oracle check jvm` 19,828 of 19,828 (none by V11). On the Go build (amd64) the 52
 forms all pass now: the forms corpus 9,416 of 9,652 (9,364 before), the whole oracle 19,562 of
@@ -802,30 +823,45 @@ of it), 56 MB on arm64; `bin/c2g --program` about 55 s; `bin/jrt-convert` 340 fi
 
 ### Proposed amendments (for the user's review)
 
+All accepted 2026-10-09 and folded, renamed S1-S8 (C2G-SPEC §16); B7 by keeping the
+transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B3 and B7.
+
 - **B1 (C2G-SPEC §4.4, Collisions)** the rename table: `java/sql/Date` → `Sql_Date`,
-  `java/util/stream/Tripwire` → `Stream_Tripwire`.
+  `java/util/stream/Tripwire` → `Stream_Tripwire`. *Accepted 2026-10-09, folded into C2G-SPEC
+  §4.4 as S1.*
 - **B2 (JRT-SOURCES.md, the tool)** other modules' files (`added-module-sources`, KIND
   `share:MODULE`: `java.sql.Timestamp`, `Date`); `J2C_PATCH_ALL` (each chunk sees the others'
   sources); `known-differences` (shape differences of known kinds count as converted).
+  *Accepted 2026-10-09, folded into JRT-SOURCES.md, "The closure as grown", as S2.*
 - **B3 (C2G-SPEC §5.3; the manifest)** `java.util.Date` and `ForkJoinTask` are non-leaf
   hand-written classes; `AtomicInteger` and `AtomicLong` embed the translated `Number` (T12
-  done); `String` implements `Constable` and `ConstantDesc`.
+  done); `String` implements `Constable` and `ConstantDesc`. *Accepted 2026-10-09, folded into
+  C2G-SPEC §5.3, §5.4 and §9.1 as S3.*
 - **B4 (C2G-SPEC §11, c2g's support)** c2g writes, into jrt's package, the members of
   hand-written classes that name translated classes (`String.join(CharSequence, Iterable)`,
   `formatted`, `lines`, `describeConstable`; `Date.toInstant`, `from`;
   `Throwable.printStackTrace(PrintStream|PrintWriter)`; `System.getenv()`) and forwarders on
   hand-written leaf classes to the translated interfaces' default methods they lack (§5.4).
+  *Accepted 2026-10-09, folded into C2G-SPEC §11 and §5.4 as S4.*
 - **B5 (C2G-SPEC §8.2) the fork-join pool**: jrt's `ForkJoinPool` runs tasks on worker threads
   (goroutines), the claim/await protocol above, a fork without a free worker running in the
   forking thread; reducers' `fold` and parallel streams are parallel (JAVA-SURFACE.md decision
-  6 had cut the pool).
+  6 had cut the pool). *Accepted 2026-10-09, folded into C2G-SPEC §8.4 as S5 (§8.2 is
+  `volatile`; the pool's cut was D6's, in JAVA-SURFACE.md's "What the cut leaves out", not its
+  decision 6), with B1-PLAN D6 and JAVA-SURFACE.md.*
 - **B6 (JRT-NOTES V9)** jrt has six charsets (`UTF-16`, `UTF-16BE`, `UTF-16LE` added); the
-  stream readers and writers keep three.
+  stream readers and writers keep three. *Accepted 2026-10-09, folded into C2G-SPEC §12 and V9
+  as S6 (V9 is C2G-SPEC's deviation, which JRT-NOTES cites).*
 - **B7 (LICENSE.md)** jrt's own Java for `Calendar`, `GregorianCalendar`, `TimeZone` and
   `TimeText` transcribes parts of jdk26u (GPL version 2 with the Classpath Exception), or those
   parts are rewritten from the documented behaviour: the user's call (JRT-NOTES.md, "Dates").
+  *Accepted 2026-10-09 as S7: the transcribed parts are kept under the GPL version 2 with the
+  Classpath Exception, as LICENSE.md records them (completed: `java/time/LocalDate.java` among
+  the sources, and jrt's FdLibm port).*
 - **B8 (the class forms compiler, classes/SPEC.md §9's bridges)** a supertype method's class type
-  variables are bounded as the subclass bounds them when bridges are computed.
+  variables are bounded as the subclass bounds them when bridges are computed. *Accepted
+  2026-10-09, folded into classes/SPEC.md §6 (the derived bridges; not §9) as
+  COMPILER-NOTES.md's amendment 15, S8 in C2G-SPEC §16.*
 
 ## Sources
 
