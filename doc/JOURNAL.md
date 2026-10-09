@@ -950,3 +950,33 @@ decision (2026-10-08).
   20,253, the 32 as recorded). Memory used at most 59 GB in the suites' phase (as without the
   Go checks), at most 26 GB after. Docs: CLAUDE.md, `bin/gate`'s header, `bin/oracle`'s usage,
   ORACLE.md (the option and the format), EVAL-NOTES.md (proposal -> done).
+
+## 2026-10-09: Semaphore in jrt; proxy forms in the oracle; the regex cases analysed
+
+- Agent, `a8352a8` (branch `smalls`), merged:
+  - c2g named a class that jrt provides and c2g does not translate by its Java name; jrt's
+    `ReentrantLock_ConditionObject` registers as `AbstractQueuedSynchronizer$ConditionObject`, so
+    translated code named an undefined Go type. Now such a class takes the Go name jrt registers
+    (`arbace/c2g/model.clj`, `go-name`).
+  - `Semaphore` hand-written in jrt (`go/arbace/jrt/executor.clj`), like jrt's locks: the full
+    public API, Java's messages, no fairness (as `ReentrantLock`); 21 ns an uncontended
+    acquire/release. Considered and measured: `AbstractQueuedSynchronizer` translated: it builds
+    but needs `Unsafe`'s `putIntOpaque`, `getAndBitwiseAndInt`, `weakCompareAndSetReference`,
+    `park`, and its `Node.waiter` is a racy two-word field in Go.
+  - `Dyn` (reify, deftype) also implements jrt's hand-written interfaces that have a cast function
+    (`Future`, `ExecutorService`, `Executor`, `Lock`, `Condition`), with a nominal check
+    (`jrt.dynNominal`): on main `(instance? java.util.concurrent.Future (future 1))` was false.
+  - The harvester keeps `java_interop`'s assertions that name proxy functions (new file
+    `test/oracle/forms/harvest/java_interop.clj`, 10 cases); the suite's `proxy/` directory only
+    defines classes.
+  - Results: Clojure's suite on Go 19,251 of 19,280 assertions (62 of 64 namespaces load; pprint
+    470 of 474, its 4 errors a proxy of `java.io.BufferedWriter`, a leaf class in c2g).
+  - Analysed, not done: the 5 `\N{name}` regex cases (`uniName.dat`, zlib) and the 24 `CANON_EQ`
+    ones (`java.text.Normalizer`, ICU data through `java.nio` buffers). Amendments Y1-Y4 proposed
+    (EVAL-NOTES, "Phase 2B follow-up").
+- Main session: the one new Go mismatch, `java_interop.clj:14` (a proxy serialized through
+  `ObjectOutputStream`, cut by D6), added to `test/oracle/known-go-amd64.edn` with its reason.
+  `bin/oracle check jvm` (agent) 20,263 of 20,263; Go (main) 20,230 of 20,263, as recorded.
+- The user's decisions: do both regex groups, `\N{name}` and `CANON_EQ` (agent, branch
+  `regex-res`), and pprint's 4 errors, a proxy of `BufferedWriter` (agent, branch `pprint-bw`).
+  `bin/gate` passed on the merge (3m55s).
