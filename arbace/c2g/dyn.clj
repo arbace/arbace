@@ -341,6 +341,10 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
               (when (> i 0) (set! s (+ s ", ")))
               (set! s (+ s (dynTypeName p))))
             (+ s ")' of interface " (.-Name (.Info c)) ".")))
+       (list 'go/func (symbol (native-name "hideField" "(Ljava/lang/Class;I)V"))
+             [(tag 'c '(* jrt/Class)) (tag 'i 'int32)]
+             '(let [info (.Info c)]
+                (set! (.-Modifiers (aget (.-Fields info) i)) jrt/AccPrivate)))
        '(go/func dynClassList
           "dynClassList: the classes of a Class[] (nil for null)."
           ^{:tag (slice (* jrt/Class))} [^{:tag (* jrt/RefArray)} a]

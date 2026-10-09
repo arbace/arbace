@@ -82,7 +82,8 @@
         (set! (.-method this) method)
         (set! (.-objx this) objx)
         (set! (.-self this) self)
-        (set! (.-line this) (.-line method)))
+        (set! (.-line this) (.-line method))
+        (set! (.-source this) (.-evalSource objx)))
 
       ;; the i-th closed-over value
       (method ^:public closed [this ^int i]
@@ -111,8 +112,10 @@
 
       (method ^:public getRequiredArity ^int [this] 0)
 
+      ;; the arguments as RestFn passes them: a seq, realized only as far as the method's
+      ;; fixed parameters (apply of an infinite seq to a variadic fn, as on the JVM)
       (method ^:protected doInvoke [this args]
-        (Evaluator/invokeFn this (RT/seqToArray (RT/seq args))))))
+        (Evaluator/invokeFn this (RT/seq args)))))
 
   (c2g/add
     (defclass ^:public ^:static EvalMethod
@@ -183,6 +186,9 @@
 
       (method ^:public ^:static ^:native getField [o ^int i])
 
+      ;; field i of a class made at run time is private (reflection does not find it)
+      (method ^:public ^:static ^:native hideField ^void [^Class c ^int i])
+
       (method ^:public ^:static ^:native setField ^void [o ^int i v])))
 
   (c2g/add
@@ -239,7 +245,6 @@
       (method ^:static push ^EvalState [^Frame fr]
         (let [s (Evaluator/state)]
           (set! (.-caller fr) (.-top s))
-          (let [c (.-top s)] (when (some? c) (set! (.-source fr) (.-source c))))
           (set! (.-top s) fr)
           (set! (.-depth s) (unchecked-inc-int (.-depth s)))
           (when (> (.-depth s) MAX_DEPTH)
@@ -255,8 +260,7 @@
       ;; the line and source of the form being evaluated in frame f (stack traces)
       (method ^:public ^:static at ^void [^Frame f ^int line ^String source]
         (when (some? f)
-          (set! (.-line f) line)
-          (when (some? source) (set! (.-source f) source))))
+          (set! (.-line f) line)))
 
       ;; the class of fe's fns (cached on the FnExpr)
       (method ^:public ^:static fnClass ^Class [^FnExpr fe]
@@ -342,6 +346,10 @@
       (method ^:public ^:static prim [^Class c v]
         (cond
           (nil? c) v
+          ;; a char where the bytecode widens it (a primitive char hinted ^int)
+          (and (instance? Character v) (.isPrimitive c) (not (identical? c Character/TYPE))
+               (not (identical? c Boolean/TYPE)))
+            (Evaluator/prim c (Integer/valueOf (int (.charValue (cast Character v)))))
           (identical? c Long/TYPE) (if (instance? Long v) v (Numbers/num (RT/longCast v)))
           (identical? c Double/TYPE) (if (instance? Double v) v (Double/valueOf (RT/doubleCast v)))
           (identical? c Integer/TYPE) (if (instance? Integer v) v (Integer/valueOf (RT/intCast v)))
@@ -367,7 +375,10 @@
                           (cond
                             (identical? p Boolean/TYPE) (cast Boolean v)
                             (identical? p Character/TYPE) (cast Character v)
-                            :else (let [n (cast Number v)]
+                            :else (let [n (if (instance? Character v)
+                                              ;; a primitive char the bytecode widens
+                                              (Integer/valueOf (int (.charValue (cast Character v))))
+                                              (cast Number v))]
                                     (cond
                                       (identical? p Integer/TYPE) (Integer/valueOf (RT/intCast n))
                                       (identical? p Long/TYPE) (Long/valueOf (RT/longCast n))
@@ -431,51 +442,107 @@
       ;; the value of e in frame f (nil: no frame, a top-level form)
       (method ^:public ^:static eval [^Expr e ^Frame f] (.evalIn e f))
 
+      ;; the index of field name among the fields of a class made at run time (its stub's
+      ;; fields are all public, in order)
+      (method ^:public ^:static fieldIndex ^int [^Class c ^String name]
+        (let [fs (.getFields c)]
+          (loop [^int i 0]
+            (if (< i (alength fs))
+                (if (.equals (.getName (aget fs i)) name) i (recur (unchecked-inc-int i)))
+                (throw (IllegalArgumentException.
+                         (java-str "No matching field found: " name " for class " (.getName c))))))))
+
       ;; a class of a deftype's methods: the class being defined (deftype's stub class)
       (method ^:public ^:static destub ^Class [^Class c]
         (if (.startsWith (.getName c) COMPILE_STUB_PREFIX)
             (Class/forName (arbace.lang.Compiler/destubClassName (.getName c)))
             c))
 
-      ;; a call of an evaluated fn: the method of the arity, its parameters bound in a new
-      ;; frame, its body run until it does not recur
-      (method ^:public ^:static invokeFn [^EvalFn fn ^Object/1 args]
+      ;; the largest fixed arity of fe's methods, or -1 (cached on the FnExpr)
+      (method ^:static maxFixed ^int [^FnExpr fe]
+        (let [^:mutable k (.-evalMaxFixed fe)]
+          (when (== k 0)
+            (set! k -1)
+            (loop [s (RT/seq (.-methods fe))]
+              (when (some? s)
+                (let [fm (cast FnMethod (.first s))]
+                  (when (and (nil? (.-restParm fm)) (> (.count (.-reqParms fm)) k))
+                    (set! k (.count (.-reqParms fm)))))
+                (recur (.next s))))
+            ;; 0 means not known yet: store the arity plus one
+            (set! (.-evalMaxFixed fe) (unchecked-inc-int k))
+            (return k))
+          (unchecked-dec-int k)))
+
+      ;; a call of an evaluated fn with the arguments args (a seq, or nil): the method of the
+      ;; arity (a fixed one first, then the variadic one), its parameters bound in a new frame
+      ;; (the rest parameter the remaining seq, unrealized), its body run until it does not
+      ;; recur, its result converted to a primitive return as the bytecode does
+      (method ^:public ^:static invokeFn [^EvalFn fn ^ISeq args]
         (let [fe (.-fe fn)
-              n (alength args)
+              vm (.-variadicMethod fe)
+              maxf (Evaluator/maxFixed fe)
+              vreq (if (some? vm) (.count (.-reqParms vm)) -1)
+              limit (if (> maxf vreq) maxf vreq)
+              n (RT/boundedLength args limit)
               ^:mutable ^FnMethod m nil]
-          (loop [s (RT/seq (.-methods fe))]
-            (when (some? s)
-              (let [fm (cast FnMethod (.first s))]
-                (if (and (nil? (.-restParm fm)) (== (.count (.-reqParms fm)) n))
-                    (set! m fm)
-                    (recur (.next s))))))
-          (when (and (nil? m) (some? (.-variadicMethod fe))
-                     (>= n (.count (.-reqParms (.-variadicMethod fe)))))
-            (set! m (.-variadicMethod fe)))
-          (when (nil? m) (throw (ArityException. n (.-name fe))))
+          (when (<= n maxf)
+            (loop [s (RT/seq (.-methods fe))]
+              (when (some? s)
+                (let [fm (cast FnMethod (.first s))]
+                  (if (and (nil? (.-restParm fm)) (== (.count (.-reqParms fm)) n))
+                      (set! m fm)
+                      (recur (.next s)))))))
+          (when (and (nil? m) (some? vm) (>= n vreq))
+            (set! m vm))
+          (when (nil? m)
+            (throw (ArityException. (if (instance? Counted args) (RT/count args) n) (.-name fe))))
           (let [f (Frame. (unchecked-add-int (.-maxLocal m) 2) fn m fe nil)
                 slots (.-slots f)
                 req (.-reqParms m)
                 nreq (.count req)
-                pcs (.-argclasses m)]
+                pcs (.-argclasses m)
+                ^:mutable ^ISeq s args]
             (when-not (.-canBeDirect fe) (aset slots 0 fn))
             (loop [^int i 0]
               (when (< i nreq)
                 (aset slots (.-idx (cast LocalBinding (.nth req i)))
-                      (if (some? pcs) (Evaluator/prim (aget pcs i) (aget args i)) (aget args i)))
+                      (if (some? pcs) (Evaluator/prim (aget pcs i) (.first s)) (.first s)))
+                (set! s (.next s))
                 (recur (unchecked-inc-int i))))
             (when (some? (.-restParm m))
-              (aset slots (.-idx (.-restParm m))
-                    (when (> n nreq)
-                      (ArraySeq/create (^[Object/1 int int] Arrays/copyOfRange args nreq n)))))
-            (let [s (Evaluator/push f)]
+              (aset slots (.-idx (.-restParm m)) s))
+            (let [st (Evaluator/push f)]
               (try
-                (let [rc (.-retClass m)
-                      r (loop []
+                (let [r (loop []
                           (let [r (.evalIn (.-body m) f)]
                             (if (identical? r RECUR) (recur) r)))]
-                  (if (and (some? rc) (.isPrimitive rc)) (Evaluator/prim rc r) r))
-                (finally (Evaluator/pop s f)))))))
+                  (Evaluator/result (.-retClass m) (.-body m) r))
+                (finally (Evaluator/pop st f)))))))
+
+      ;; a method's result converted to its return class as the bytecode does
+      ;; (ObjMethod.emitBody): a primitive body by RT's checked casts, any other unboxed
+      ;; (Number.intValue ...), boxed again for the caller
+      (method ^:public ^:static result [^Class rc ^Expr body r]
+        (cond
+          (or (nil? rc) (not (.isPrimitive rc))) r
+          (identical? rc Void/TYPE) nil
+          :else
+            (let [bc (arbace.lang.Compiler/maybePrimitiveType body)]
+              (cond
+                (some? bc) (Evaluator/prim rc r)
+                (identical? rc Boolean/TYPE) (if (.booleanValue (cast Boolean r)) Boolean/TRUE Boolean/FALSE)
+                (identical? rc Character/TYPE) (cast Character r)
+                :else
+                  (let [x (cast Number r)]
+                    (cond
+                      (identical? rc Integer/TYPE) (Integer/valueOf (.intValue x))
+                      (identical? rc Long/TYPE) (Long/valueOf (.longValue x))
+                      (identical? rc Double/TYPE) (Double/valueOf (.doubleValue x))
+                      (identical? rc Float/TYPE) (Float/valueOf (.floatValue x))
+                      (identical? rc Short/TYPE) (Short/valueOf (.shortValue x))
+                      (identical? rc Byte/TYPE) (Byte/valueOf (.byteValue x))
+                      :else x))))))
 
       ;; a call of a deftype's or reify's method: args[0] is the object (this, slot 0)
       (method ^:public ^:static invokeMethod [^EvalMethod em ^Object/1 args]
@@ -497,9 +564,10 @@
               (recur (unchecked-inc-int i))))
           (let [s (Evaluator/push f)]
             (try
-              (loop []
-                (let [r (.evalIn (.-body m) f)]
-                  (if (identical? r RECUR) (recur) r)))
+              (let [r (loop []
+                        (let [r (.evalIn (.-body m) f)]
+                          (if (identical? r RECUR) (recur) r)))]
+                (Evaluator/result (.-retClass m) (.-body m) r))
               (finally (Evaluator/pop s f))))))
 
       ;; the parameter classes of a deftype's method
@@ -532,6 +600,13 @@
               (recur (unchecked-inc-int i))))
           (when meta (aset names (alength bs) "__meta"))
           (let [c (Dyn/defineClass (.-name nie) ifaces names)]
+            ;; a deftype's mutable fields are private (compileStub's are public: the methods
+            ;; read them through the stub)
+            (loop [^int i 0]
+              (when (< i (alength bs))
+                (when (.isMutable nie (aget bs i)) (Dyn/hideField c i))
+                (recur (unchecked-inc-int i))))
+            (when meta (Dyn/hideField c (alength bs)))
             ;; methods, with every covariant return they answer to
             (loop [s (RT/seq (.-methods nie))]
               (when (some? s)
@@ -663,6 +738,9 @@
   ;; reify's class is made at run time (Compiler$Dyn), at analysis as the JVM loads it
   (method compile :throws [IOException] ^void [this ^String superName ^String/1 interfaceNames
                                                ^boolean oneTimeUse]
+    ;; the source file the fn or type is analyzed in (a compiled class's SourceFile): its
+    ;; frames' file in stack traces
+    (set! evalSource (cast String (.deref SOURCE)))
     (when (instance? NewInstanceExpr this)
       (set! compiledClass (Compiler$Evaluator/defineType (cast NewInstanceExpr this) interfaceNames))))
 
@@ -680,6 +758,8 @@
   (c2g/add (field ^:public ^LocalBinding/1 evalCloses))
   (c2g/add (field ^:public ^int/1 evalWhere))
   (c2g/add (field ^:public ^Class evalClass))
+  (c2g/add (field ^:public ^String evalSource))
+  (c2g/add (field ^:public ^int evalMaxFixed))
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (if (instance? FnExpr this)
@@ -934,8 +1014,25 @@
 
 (c2g/variant Compiler$InstanceFieldExpr
   (c2g/add
+    ;; a resolved field as the bytecode reads it (checkcast to its class, getfield), else by
+    ;; reflection
     (method ^:public evalIn [this ^Compiler$Frame f]
-      (Reflector/invokeNoArgInstanceMember (.evalIn target f) fieldName requireField))))
+      (let [t (.evalIn target f)]
+        (cond
+          (or (nil? targetClass) (nil? field))
+            (Reflector/invokeNoArgInstanceMember t fieldName requireField)
+          ;; a field of the type being defined (its stub class, in its methods): the object's
+          ;; field, private or not
+          (not (identical? (Compiler$Evaluator/destub targetClass) targetClass))
+            (do
+              (Compiler$Evaluator/checkCast (Compiler$Evaluator/destub targetClass) t)
+              (when (nil? t) (throw (NullPointerException.)))
+              (Compiler$Dyn/getField t (Compiler$Evaluator/fieldIndex targetClass fieldName)))
+          :else
+            (do
+              (Compiler$Evaluator/checkCast targetClass t)
+              (when (nil? t) (throw (NullPointerException.)))
+              (.get field t)))))))
 
 (c2g/variant Compiler$StaticFieldExpr
   (c2g/add

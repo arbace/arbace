@@ -115,9 +115,16 @@
         (some? ins)
           (let [slash (.lastIndexOf scriptfile \/)
                 file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
-            (try
-              (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
-              (finally (.close ins))))
+            (let [t0 (System/nanoTime)]
+              (try
+                (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
+                (finally
+                  (.close ins)
+                  ;; ARBACE_LOAD_TIMES: each source's load time on stderr (EVAL-NOTES.md)
+                  (when (some? (System/getenv "ARBACE_LOAD_TIMES"))
+                    (.println (RT/errPrintWriter)
+                              (java-str "load " scriptfile " "
+                                        (quot (- (System/nanoTime) t0) 1000000) " ms")))))))
         failIfNotFound
           (throw
             (FileNotFoundException.
