@@ -657,3 +657,21 @@ decision (2026-10-08).
   field outside the closed world dropped; RT's streams and class lookup).
 - Process note: the agent used `git stash` (shared by all worktrees) and a system-wide `pkill`
   pattern; the other agents were told to check their state and to avoid both.
+
+## 2026-10-09: The evaluator's questions decided; c2g's amendments accepted
+
+- Part B of step 4's phase 2 (`9ffd5e5` .. `0dd7675`, merged; conflicts with part A in the
+  `RT` and `Reflector` variants and `arbace.c2g.code` resolved: A's variants kept, B's
+  `makeClassLoader` added, both "dropped store" conditions combined): `Compiler` translates
+  through c2g with ASM erased by package (`c2g/erase`), the evaluator's interface
+  (`Compiler$Frame`, `EvalFn`, `Evaluator`, `Dyn`), `Dyn` for run-time classes with the nominal
+  interface check, `:fi-adapter` and generated `FromFn` adapters, `bin/c2g-evalproof` (25 forms
+  read, analyzed and evaluated in Go, identical on amd64 and arm64), and `doc/go/EVAL-PLAN.md`
+  (step 5's design, 8.5-12 days).
+- The user accepted EVAL-PLAN's Q1-Q7 as recommended: primitive fns evaluated boxed
+  (`primInterface` nil in the Go build); the REPL's world roots every public member of every
+  built-in class; one `EvalFn` over `RestFn` now; a per-thread depth counter with
+  `StackOverflowError` at about 10,000 frames; run-time interfaces by `defineClass` of an
+  interface kind; Clojure fn and line per frame in stack traces; ASM erased by package.
+- The user accepted all of c2g's proposed amendments so far (core A1-A8, part A P2A-1..4, part
+  B B1-B8); they will be folded into C2G-SPEC together with parts C's and D's.

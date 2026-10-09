@@ -247,6 +247,8 @@ c2g in `arbace/lang`, B6 natives in their class's package, B7 the root spec `CLA
 
 ## 9. Open questions, with recommendations
 
+**Decided (2026-10-09):** the user accepted the recommendation of each of Q1-Q7.
+
 - **Q1 Primitive fns.** (a) No primitive fns in the Go build: `primInterface` returns nil and
   the evaluator converts `^long`/`^double` parameters and returns (§3) (recommended: small,
   keeps arithmetic); (b) `EvalFn` subclasses per primitive interface used (only those the
