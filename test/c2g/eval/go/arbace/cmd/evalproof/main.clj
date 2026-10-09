@@ -208,7 +208,14 @@ whether they are functional interfaces (isAnnotationPresent)."
                      "(twice 21)"
                      "((fn* f [n] (if (arbace.lang.Numbers/lte n 1) 1 (arbace.lang.Numbers/multiply n (f (arbace.lang.Numbers/dec n))))) 10)"
                      "((fn* [& xs] xs) 1 2 3)"
-                     "(nosuch 1)")]
+                     "(nosuch 1)"
+                     ;; B1a step 5, phase 1 (doc/go/EVAL-NOTES.md): the other node kinds
+                     "(let* [x 1] (try (throw (new java.lang.Exception \"boom\")) (catch java.lang.Exception e (. e getMessage)) (finally x)))"
+                     "(letfn* [ev? (fn* ev? [n] (if (arbace.lang.Numbers/isZero n) true (od? (arbace.lang.Numbers/dec n)))) od? (fn* od? [n] (if (arbace.lang.Numbers/isZero n) false (ev? (arbace.lang.Numbers/dec n))))] (ev? 10))"
+                     "(let* [x 2] (case* x 0 0 :default {1 [1 :one] 2 [2 :two]} :compact :int))"
+                     "(let* [x 1 y :k] [x {y x} #{x} (y {:k 5})])"
+                     "(let* [s \"abc\" o (new java.lang.Object)] (monitor-enter o) (monitor-exit o) (instance? java.lang.String s))"
+                     "((fn* f [n] (if (arbace.lang.Numbers/isZero n) 0 (f (arbace.lang.Numbers/dec n)))) 20000)")]
     (show src))
   (dynDemo)
   (fromFnDemo))

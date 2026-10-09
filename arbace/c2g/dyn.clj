@@ -117,7 +117,9 @@
   method's signature and its interface (the first of ifaces declaring it)."
   [ifaces [name desc :as k]]
   (let [[ps r] (t/parse-method-desc desc)
-        j (first (filter #(some (fn [[kk _]] (= kk k)) (m/vmethods %)) ifaces))]
+        declares? (fn [j] (some #(and (= name (:name %)) (= desc (:desc %))) (:methods (a/decl j))))
+        j (or (first (filter declares? ifaces))
+              (first (filter #(some (fn [[kk _]] (= kk k)) (m/vmethods %)) ifaces)))]
     (str "'abstract " (java-type-name r) " " name "(" (str/join ", " (map java-type-name ps)) ")'"
          (when j (str " of interface " (str/replace j "/" "."))) ".")))
 
