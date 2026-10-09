@@ -309,3 +309,136 @@ fields).
 Nothing vendored. Studied: `java.lang.runtime.ObjectMethods` (openjdk/jdk26u,
 `src/java.base/share/classes/java/lang/runtime/ObjectMethods.java`) for the records' methods;
 the Go specification's order of evaluation (go.dev/ref/spec#Order_of_evaluation) for A8.
+
+# c2g, phase 2A: Reflector, RT's runtime services, printing
+
+B1a step 4, phase 2, part A (branch `c2g-2a`, 2026-10-09; parts B, the evaluator boundary, C,
+the rest of the JDK closure, and D, c2g's quality, are parallel branches): what of `RT` and
+`Reflector` works in the Go build before `arbace.core` is loaded, and the oracle's class
+scripts `Printer`, `VarNamespace`, `UtilRT` and `LispReader` passing every step that does not
+need `arbace.core`.
+
+State: every step of the four scripts passes on linux/amd64 and, under `qemu-aarch64`,
+linux/arm64, except the 39 that need `arbace.core` (below); with them, all the oracle's class
+scripts pass but for 46 steps that need `arbace.core` and the 10 unavailable ones of phase 1
+(`String.CASE_INSENSITIVE_ORDER`). Both architectures give the same results, step for step.
+
+## What changed
+
+| where | what |
+|---|---|
+| `arbace/lang/go/Reflector.clj` (new variant) | `canAccess` calls `Method.canAccess` directly (no `MethodHandle`; the field `CAN_ACCESS_PRED`, the static initializer and `isJava8` are cut); `instanceMethods` collects with a loop (no `java.util.stream`); `boxArg` adapts a Clojure function to a functional interface with `Reflector.adaptFn`, a native calling `jrt.AdaptFn` (amendment R13), instead of `Proxy.newProxyInstance` |
+| `arbace/lang/go/RT.clj` | `*out*`, `*err*`, `*in*` bound to `RT$HostWriter` (fd 1), a `PrintWriter` (autoflush) over `RT$HostWriter` (fd 2) and a `LineNumberingPushbackReader` over `RT$HostReader`, two nested classes the variant adds (natives over jrt's host streams); `baseLoader` and `classForName(String, boolean, ClassLoader)` per C2G-SPEC §10.3: no `DynamicClassLoader`, no thread context loader, `Class.forName` over jrt's registry |
+| `go/arbace/jrt/natives.clj` | the variants' natives: `Reflector_AdaptFn_Class_O__O_native`; `RT_HostWriter_HostWrite_I_C1_I_I__V_native` and `..._HostFlush_I__V_native` (UTF-16 to UTF-8, an 8 KiB `bufio.Writer` per stream as `OutputStreamWriter`'s encoder buffers, a high surrogate held until its pair, a lone one written as `?` as Java's encoder does, write errors as `IOException`); `RT_HostReader_HostRead_C1_I_I__I_native` (UTF-8 to UTF-16, malformed bytes as U+FFFD, blocking for the first char and then taking only what is buffered, as `InputStreamReader` does; a supplementary character split across reads keeps its low surrogate) |
+| `arbace/c2g/world.clj` (shared, 3 lines) | `(c2g/cut ^:static name ^Ret [params])`, a method's head spliced into the cut as C2G-SPEC §4.6's example writes it, was rejected ("Don't know how to create ISeq from Symbol"); only `(c2g/cut (field ...))` and `(c2g/cut (static-initializer n))` worked |
+| `arbace/c2g/code.clj` (shared, small) | the store of the constant `null` into a field the world drops (its type is outside it) of `this`, or a static one, is dropped: the field can hold nothing else. `PrintWriter`'s field initializer `psOut = null` (a `PrintStream`) made every `PrintWriter` constructor throw `UnsupportedOperationException`, so `*err*` could not be made |
+| `test/c2g/check.clj`, `bin/c2g-check` | the oracle's context: the program first binds `*ns*` to `user` (as the driver runs, `arbace.main -` then `in-ns 'user`); `test/c2g/needs-core.edn`, the steps that need `arbace.core`, counted as "need core" when they fail (a listed step that passes is named, so the list cannot go stale); a total line per architecture; `C2G_SHOW=all` lists the need-core steps too; `bin/jrt overlay`'s path taken from its last line (a first run in a fresh worktree printed its progress before it, and every build failed) |
+| `test/c2g/fixtures/FxRuntime.clj` (new) | keyword interning across `System.gc()` (jrt's weak references: a held keyword stays the interned one, a dropped one is interned anew, equal); `Reflector` by name: static methods with run-time overload choice, static fields, instance methods (arity, a `Long` for an `int` parameter, `Boolean` results), public fields, constructors, and the error messages; the stream vars |
+
+## Results
+
+`bin/c2g-check Printer VarNamespace UtilRT LispReader -- --slice '^arbace/lang/' --slice '^java/'
+--slice '^jdk/'`, before (main at `30c4a60`) and after; identical on amd64 and arm64:
+
+| script | steps | pass before | pass after | need core | fail after |
+|---|---|---|---|---|---|
+| Printer | 211 | 194 | 194 | 17 | 0 |
+| VarNamespace | 139 | 133 | 135 | 4 | 0 |
+| UtilRT | 614 | 612 | 614 | 0 | 0 |
+| LispReader | 264 | 239 | 246 | 18 | 0 |
+| **the four** | **1228** | **1178** | **1189** | **39** | **0** |
+
+What made the difference: `UtilRT` 518 and 527 (`RT.get`/`nth` on a Java array go through
+`Reflector.prepRet`, whose class failed to initialize on `MethodHandles.Lookup`): the `Reflector`
+variant. `VarNamespace` 126 and 127 (`Namespace.refer` replacing a mapping warns on `*err*`, which
+was unbound): the `*err*` writer and the dropped `psOut` store. `LispReader` 98, 133-135 and 142-144
+(`::a` and syntax-quote resolve in `*ns*`, `user` in the oracle): the harness's context.
+
+The whole check (`bin/c2g-check -- --slice ...`, every script and the fixtures, both
+architectures, 8 min 48 s): 4,953 of 5,009 steps pass (phase 1's 5,005 and `FxRuntime`'s 4),
+0 fail, 10 unavailable, 46 need core; per architecture the same.
+
+Also checked by hand (a program reading forms from `*in*` and printing them with `RT.print` to
+`*out*`, then a line to `RT.errPrintWriter()`): UTF-8 both ways with a supplementary character,
+output buffered until `flush`, stderr flushed by `println`. And `bin/jrt test` (amd64), `bin/jrt
+build` (vet, amd64 and arm64) pass with the new natives.
+
+## The steps that need `arbace.core`
+
+`test/c2g/needs-core.edn` lists them with their reasons; 46 steps, in four kinds:
+
+- **Core's printer** (`print-method`; `RT.print` calls `pr-on` once `*print-initialized*` is
+  true, otherwise its own printer runs, which the Go build uses until step 5): `Printer` 22, 24,
+  26, 146 (`##Inf`, `##-Inf`, `##NaN`; RT prints `Infinity`, `NaN`), 157 (a `BigInteger` without
+  suffix; RT: `BIGINT`), 184, 187, 191 (`java.util` collections as Clojure's), 193, 195 (a class
+  by name; RT: `#=java.lang.String`), 197 (a var as `#'`; RT: `#=(var ...)`); `VarNamespace` 80
+  (a var in a printed map); `LispReader` 258, 262, 264 (`ReaderConditional`); `PersistentHashMap`
+  127 and `PersistentTreeMap` 180-183, 187, 188 (a `BigInteger` key in a printed map).
+- **Namespace maps** (core's printer with `*print-namespace-maps*`, a core var `arbace.main`
+  binds true): `Printer` 109, 110, 113-116; `LispReader` 162, 164.
+- **Data readers** (core's `default-data-readers` for `#inst` and `#uuid`, and its
+  `*default-data-reader-fn*`, root `nil`, so an unknown tag throws; RT's root before core is an
+  empty map, which answers a tag's form itself): `LispReader` 167-170, 235, 249-256.
+- **Core's vars**: `VarNamespace` 137-139 (`arbace.core/+`).
+
+So when step 5 loads `arbace.core`, these are the steps to watch: the printer, the data readers
+and `arbace.main`'s bindings, not the classes.
+
+## Decisions where the spec was silent
+
+- **Natives of Arbace's variants.** A `^:native` method a variant adds to an `arbace.lang` class
+  is translated as the JDK's are (§9.1), into a call of the jrt function `C_M..._native`; that
+  is how the Go build's `arbace.lang` reaches Go-only code (`jrt.AdaptFn`, the host streams)
+  without a jrt class with a Java API for it. Only static natives: jrt cannot name
+  `arbace/lang`'s types. The manifest does not list them (it declares jrt's classes).
+- **Nested classes in variants.** `(c2g/add (defclass ^:static ...))` adds a member class
+  (`RT$HostWriter`, `RT$HostReader`); the variant code already allowed it.
+- **Interim streams.** jrt has neither `OutputStreamWriter`/`InputStreamReader` (their
+  `StreamEncoder`/`StreamDecoder` are `java.nio`'s, cut by R18) nor `System.out`/`err`/`in` yet
+  (part C). `RT$HostWriter` and `RT$HostReader` stand in for them, with the JVM's buffering:
+  output reaches the host at `flush` (or when 8 KiB are buffered); nothing flushes `*out*` at exit,
+  as on the JVM. When jrt has `System`'s streams and the two adapters, the variant's `OUT`, `ERR`
+  and `IN` revert to the JVM's initializers and the two classes and their natives go.
+- **Reflective targets must be reached.** c2g's reachability does not see the target of a
+  reflective call, so a method called only by name is a stub in a sliced translation (the
+  fixtures' first run: `PersistentVector.nth(int, Object)` "not translated"). The member tables
+  list it, `Reflector` finds it, its invoker throws. A program that calls by name must root the
+  public members of the classes it may call: `bin/c2g-check` roots the classes `FxRuntime`
+  reflects on (`fixture-reflected`); the REPL program (part D's whole-program `--main`) roots
+  all of them.
+- **`adaptFn` without an adapter** throws `UnsupportedOperationException("no functional
+  interface adapter for C")`. `Compiler.FISupport.maybeFIMethod` asks
+  `isAnnotationPresent(FunctionalInterface)`, which jrt answers with `FromFn != nil` (R16); c2g
+  does not generate `FromFn` yet (`:fi-adapter`, part B), so `boxArg` never takes that branch
+  for now, and `Reflector` passes an `IFn` to a functional interface parameter as the JVM
+  would without the adaptation: by `cast` (a `ClassCastException`).
+- **The harness's context** is the oracle driver's as far as it needs no `arbace.core`: `*ns*`
+  bound to `user`. The driver's other bindings (`arbace.main`'s `with-bindings`) are core vars
+  or have no effect on the class scripts.
+
+## Proposed amendments to C2G-SPEC (for the user's review)
+
+- **P2A-1 (§4.6) Variants' natives and member classes.** A variant may add `^:native` static
+  methods, translated as calls of jrt's `C_M..._native` functions (hand-written in
+  `go/arbace/jrt/natives.clj`), and member classes (`c2g/add` of a `defclass`).
+- **P2A-2 (§10.1, §5.11) Reflective roots.** A program that calls members by name roots the
+  public members of every class it may call so (the REPL: every class in jrt's registry);
+  reachability does not follow reflection.
+- **P2A-3 (§4.1, A4) Dropped fields.** A field whose type is outside the closed world is
+  dropped from its struct (as implemented); a store of the constant `null` into it, on `this`
+  or static, is dropped too; any other access is an operation-level stub (A2).
+- **P2A-4 (§9.4, §10.3) RT's variant** binds `*out*`, `*err*`, `*in*` over jrt's host streams
+  through `RT$HostWriter`/`RT$HostReader` until jrt has `System`'s streams, and resolves classes
+  through `Class.forName` with one loader (`baseLoader` without the context loader,
+  `classForName` without `DynamicClassLoader`), as §10.3 describes.
+
+Corrected in passing: §4.6's `(c2g/cut ^:public ^:static loadClassForName ^Class [^String
+name])` now works as the spec writes it (it was the implementation, not the spec).
+
+## Sources (phase 2A)
+
+Nothing vendored. Studied: openjdk/jdk26u `src/java.base/share/classes/sun/nio/cs/StreamEncoder.java`
+and `StreamDecoder.java` (the 8 KiB buffer, flushing only on `flush`, `?` for an unmappable
+lone surrogate in UTF-8, U+FFFD for malformed input, `InputStreamReader.read` returning what is
+available after the first char); Arbace's `arbace/main.clj` (`with-bindings`, the oracle
+driver's context) and `test/oracle/driver.clj`.

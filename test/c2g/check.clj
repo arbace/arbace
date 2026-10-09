@@ -8,8 +8,10 @@
 
   A step whose method is not translated (outside the slice, or a stub) is counted as
   unavailable; a step whose expected result is a printed collection (:pr) needs the printer
-  (RT.printString) and is counted apart until it is translated; the JVM's helpful
-  NullPointerException messages are accepted as a null message (V11)."
+  (RT.printString) and is counted apart until it is translated; a failing step listed in
+  test/c2g/needs-core.edn needs arbace.core loaded and is counted apart too (need core); the
+  JVM's helpful NullPointerException messages are accepted as a null message (V11). The
+  program runs the steps as the oracle's driver does, in the namespace user (*ns* bound)."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
@@ -393,6 +395,24 @@
             (units s)))
        '(go/func printed ^string [^any v] "-"))]))
 
+(def context-members
+  "What the oracle's context needs (context-forms): [class name desc]."
+  [["arbace/lang/RT" "mapUniqueKeys" "([Ljava/lang/Object;)Larbace/lang/IPersistentMap;"]
+   ["arbace/lang/Var" "pushThreadBindings" "(Larbace/lang/Associative;)V"]
+   ["arbace/lang/Namespace" "findOrCreate" "(Larbace/lang/Symbol;)Larbace/lang/Namespace;"]
+   ["arbace/lang/Symbol" "intern" "(Ljava/lang/String;)Larbace/lang/Symbol;"]])
+
+(defn- context-forms
+  "The oracle's context, as far as it needs no arbace.core (doc/go/ORACLE.md: the driver runs
+  as arbace.main - runs a script, then in the namespace user): *ns* bound to user. Nothing
+  when RT or the members are not translated."
+  []
+  (when (every? (fn [[c n d]] (and (m/translated? c) (contains? arbace.c2g.decls/*reached* [c n d]))) context-members)
+    '[(lang/Var_PushThreadBindings_Associative__V
+        (lang/RT_MapUniqueKeys_O1__IPersistentMap
+          (jrt/RefArrayOf jrt/Object_class (.Ref (ctxCurrentNs))
+                          (.Ref (lang/Namespace_FindOrCreate_Symbol__Namespace (lang/Symbol_Intern_String__Symbol (jrt/Str "user")))))))]))
+
 (defn program-forms
   "The main package's file: one function per step, main running them in order. A step using
   a binding an unavailable step should have made is unavailable too."
@@ -410,13 +430,20 @@
     (concat
       support-forms
       (printer-forms)
+      (when (seq (context-forms))
+        ;; RT's statics are initialized on first use
+        ['(go/func ctxCurrentNs ^{:tag (* lang/Var)} [] (lang/RT_Init) lang/RT_CURRENT_NS)
+         (apply list 'go/func 'context [] (context-forms))])
       (for [st steps :when (= :ok (:k st))]
         (apply list 'go/func (symbol (str "step" (:i st))) [] (:body st)))
       [(apply list 'go/func 'main []
-              (for [st steps]
-                (if (= :ok (:k st))
-                  (list 'runStep (:i st) (:bind st) (symbol (str "step" (:i st))))
-                  (list 'fmt/Printf "@@c2g %d U %s\n" (:i st) (str/replace (str (:body st)) "\n" " ")))))])))
+              (concat
+                ;; as a step 0 (no expected record): a failure is reported, not fatal
+                (when (seq (context-forms)) ['(runStep 0 "" context)])
+                (for [st steps]
+                  (if (= :ok (:k st))
+                    (list 'runStep (:i st) (:bind st) (symbol (str "step" (:i st))))
+                    (list 'fmt/Printf "@@c2g %d U %s\n" (:i st) (str/replace (str (:body st)) "\n" " "))))))])))
 
 (defn write-program! [prog-dir cases]
   (let [dir (str prog-dir "/go/arbace/cmd")]
@@ -522,15 +549,43 @@
           :else (if (= (:value er) (:value gr)) {:status :pass} {:status :fail :why (str "value " (pr-str (:value gr)) " expected " (pr-str (:value er)))}))
         :else {:status :pass}))))
 
-(defn compare-run [cases output]
-  (let [got (into {} (for [l (str/split-lines output) :when (str/starts-with? l "@@c2g ")]
-                       (let [r (decode-line l)] [(:i r) r])))]
-    (for [s cases] (assoc (compare-case s (get got (:i s))) :i (:i s) :src (:src s)))))
+(def needs-core-file "test/c2g/needs-core.edn")
+
+(defn needs-core
+  "{script {step reason}}: the steps whose recorded result needs arbace.core loaded (its
+  printer, its vars, its data readers), which the Go build has not before the evaluator (B1a
+  step 5); test/c2g/needs-core.edn (C2G-NOTES.md, phase 2A)."
+  []
+  (let [f (io/file needs-core-file)]
+    (if (.exists f) (first (w/read-forms (str f))) {})))
+
+(defn compare-run
+  "The steps' comparisons; a failing step listed in core (step -> reason) is :core, a passing
+  one :pass with :listed (the list is stale there)."
+  ([cases output] (compare-run cases output {}))
+  ([cases output core]
+   (let [got (into {} (for [l (str/split-lines output) :when (str/starts-with? l "@@c2g ")]
+                        (let [r (decode-line l)] [(:i r) r])))]
+     (for [s cases]
+       (let [c (assoc (compare-case s (get got (:i s))) :i (:i s) :src (:src s))]
+         (if-let [why (get core (:i s))]
+           (case (:status c)
+             :fail (assoc c :status :core :core why)
+             :pass (assoc c :listed why)
+             c)
+           c))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; fixtures (test/c2g/fixtures): recorded on this JVM, in-process
 
 (def fixtures-dir "test/c2g/fixtures")
+
+(def fixture-reflected
+  "The translated classes the fixtures call by name through Reflector (FxRuntime): all their
+  public members are roots, as a program calling by name must have them (reachability sees
+  no reflective call's target); jrt's hand-written classes have all their members anyway."
+  ["arbace/lang/Numbers" "arbace/lang/Util" "arbace/lang/PersistentVector" "arbace/lang/MapEntry"
+   "java/lang/Integer"])
 
 (defn- fixture-observe [v]
   (cond (nil? v) {:type "nil"}
@@ -598,7 +653,8 @@
         expected (into (array-map) (concat (for [f files] [f (read-expected (str "test/oracle/expected/classes/" f ".edn"))])
                                            (when fixtures? (fixture-expected))))
         c2g-args (if fixtures?
-                   (concat c2g-args ["--input" fixtures-dir] (when (some #{"--slice"} c2g-args) ["--slice" "^c2g/"]))
+                   (concat c2g-args ["--input" fixtures-dir] (when (some #{"--slice"} c2g-args) ["--slice" "^c2g/"])
+                           (mapcat #(vector "--root" %) fixture-reflected))
                    c2g-args)
         ;; each file runs alone (bindings are per script): one program per file, built once
         all-cases (vec (mapcat (fn [[f x]] (map #(assoc % ::file f) (:cases x))) expected))
@@ -607,7 +663,9 @@
         results (atom {})]
     (c2g/run (assoc opts
                     :root-fn (fn [] (concat (roots-of all-cases)
-                                            (when (a/decl "arbace/lang/RT") ["arbace/lang/RT#printString"])))
+                                            (when (a/decl "arbace/lang/RT")
+                                              (cons "arbace/lang/RT#printString"
+                                                    (for [[c n _] context-members] (str c "#" n))))))
                     :after (fn [{:keys [prog-dir]}]
                              ;; one main per file: steps are numbered per file
                              (doseq [[f x] expected]
@@ -615,7 +673,9 @@
                                  (sh "rm" "-rf" dir)
                                  (sh "cp" "-r" prog-dir dir)
                                  (write-program! dir (:cases x)))))))
-    (let [overlay (str/trim (second (sh "bin/jrt" "overlay")))
+    (let [core (needs-core)
+          ;; the overlay file is the last line (a first run also reports its making)
+          overlay (str/trim (last (str/split-lines (second (sh "bin/jrt" "overlay")))))
           lines (atom [])]
       (doseq [[f x] expected
               arch arches]
@@ -631,17 +691,29 @@
                 (println (str/join "\n" (take 30 (remove #(str/includes? % "WARNING") (str/split-lines bo)))))
                 (swap! results assoc [f arch] {:build-failed true}))
             (let [[rc ro] (if (= arch "arm64") (sh "/usr/bin/qemu-aarch64" exe) (sh exe))
-                  cmp (compare-run (:cases x) ro)
+                  cmp (compare-run (:cases x) ro (get core f {}))
+                  stale (filter :listed cmp)
                   counts (frequencies (map :status cmp))
                   size (.length (io/file exe))]
               (swap! results assoc [f arch] {:counts counts :cases (count (:cases x)) :build-s tb :size size :exit rc
                                              :fails (vec (take 12 (filter #(= :fail (:status %)) cmp)))})
-              (println (format "c2g-check: %-20s %-5s %4d steps: %4d pass, %4d fail, %4d unavailable, %4d printer (build %.1f s, %d bytes)"
+              (println (format "c2g-check: %-20s %-5s %4d steps: %4d pass, %4d fail, %4d unavailable, %4d printer, %4d need core (build %.1f s, %d bytes)"
                                f arch (count (:cases x)) (:pass counts 0) (:fail counts 0) (:unavailable counts 0) (:pr counts 0)
-                               tb size))
+                               (:core counts 0) tb size))
+              (doseq [c stale]
+                (println "   PASSES, listed as needing core:" (:i c) (:src c) "--" (:listed c)))
+              (when (= "all" (System/getenv "C2G_SHOW"))
+                (doseq [c (filter #(= :core (:status %)) cmp)]
+                  (println "   CORE" (:i c) (:src c) "--" (:core c) "--" (:why c))))
               (when (System/getenv "C2G_SHOW")
                 (doseq [c (take (if (= "all" (System/getenv "C2G_SHOW")) 100000 20) (filter #(= :fail (:status %)) cmp))]
                   (println "   FAIL" (:i c) (:src c) "--" (:why c))))))))
+      (doseq [arch arches]
+        (let [rs (keep (fn [[[_ a] r]] (when (= a arch) r)) @results)
+              t (apply merge-with + (map :counts rs))]
+          (println (format "c2g-check: %-20s %-5s %4d steps: %4d pass, %4d fail, %4d unavailable, %4d printer, %4d need core%s"
+                           "total" arch (reduce + (keep :cases rs)) (:pass t 0) (:fail t 0) (:unavailable t 0) (:pr t 0)
+                           (:core t 0) (let [b (count (filter :build-failed rs))] (if (pos? b) (str ", " b " builds failed") ""))))))
       (spit (str out-dir "/results.edn") (with-out-str (arbace.pprint/pprint @results)))
       (shutdown-agents)
       (System/exit (if (some :build-failed (vals @results)) 1 0)))))
