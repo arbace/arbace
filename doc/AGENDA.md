@@ -128,8 +128,10 @@ fallbacks of `arbace/core_classes.clj` are gone.
   passes 20,221 of 20,253 (the forms 10,075 of 10,077), Clojure's suite 18,781 of 18,806
   assertions (61 of 64 namespaces load).
   - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
-    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`, and the
-    determinism issue at `polymorphism.clj:176` (identity-hash order).
+    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`.
+  - Done (2026-10-09, the user's decision): the determinism issue at `polymorphism.clj:176`: a
+    multimethod's ambiguity message names two classes in the order of their names
+    (VENDOR-NOTES.md, hand change 14), on the JVM as on Go.
   - Then: the `.ae` rename; step 6 (the executables), step 7 (speed, D7), step 8 (the freeze).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure

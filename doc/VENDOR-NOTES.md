@@ -692,6 +692,18 @@ step 4 (2026-10-07); the others came with later work, as each says:
     1` unchanged (median 393 → 391 ms with the AOT cache, which pre-resolves these sites; 833 →
     842 ms without, noise ±20 ms).
 
+14. **A multimethod's ambiguity message names two classes in the order of their names**
+    (2026-10-09, the user's decision): `MultiFn.findAndCacheBestMethod`
+    (`arbace/lang/MultiFn.clj`) reports two matching methods neither preferred in the order of
+    the method table, a hash map whose keys hash by identity when they are classes, so the
+    message's order varied with the JVM's identity hashes (and differed between the JVM and
+    Go builds: the oracle's `test/oracle/forms/polymorphism.clj:176`). When both dispatch
+    values are classes they are now named in the order of `Class.getName`: `... class
+    java.lang.String -> interface java.io.Serializable and interface java.lang.Comparable, and
+    neither is preferred`. Other dispatch values keep the table's order (keywords, symbols and
+    collections hash by value, the same on every run). With three or more matching methods,
+    which two are named still follows the table.
+
 ## Spec (2026-10-07)
 
 The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of

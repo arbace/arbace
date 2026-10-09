@@ -530,7 +530,9 @@ method-defined-twice failure before), `proxy.examples` loads; `data-structures-i
 mismatch in the existing files, `polymorphism.clj:176` (`class-ambig`), names the two ambiguous
 interfaces in the other order: the order is that of a hash map keyed by `Class` objects, whose
 hashes are identity hashes, which the classes made while `core_proxy` loads shift (it passed by
-the same luck before). Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
+the same luck before). Fixed afterwards (2026-10-09, the user's decision): two classes are
+named in the order of their names (VENDOR-NOTES.md, hand change 14), on the JVM as on Go, and
+the case re-recorded. Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
 `protocols` 196 of 196 (195 before the duplicate-method fix), `printer` 74 of 74 (`bean`),
 `transients` 35 of 35, and `java_interop`'s proxy tests (`test-proxy-chain`, `test-bases`,
 `test-supers`, `test-proxy-abstract-super`, `test-iterable-bean`, `test-set!`) pass;

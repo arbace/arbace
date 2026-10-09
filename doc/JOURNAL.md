@@ -866,3 +866,23 @@ decision (2026-10-08).
   `bin/c2g-check -- --program` 9,010 of 9,010, `bin/jrt test` on amd64, arm64 and `--race`.
 - Step 5 is done. Open before the `.ae` rename: the amendments (A1-A4, B1-B8; V1-V8 to fold),
   the Go checks in `bin/gate --full`, and the `polymorphism.clj:176` determinism issue.
+
+## 2026-10-09: a multimethod's ambiguity message names classes in name order
+
+- The oracle case `test/oracle/forms/polymorphism.clj:176`, `(class-ambig "s")` with methods for
+  `Comparable` and `java.io.Serializable`, throws "Multiple methods ... match dispatch value:
+  class java.lang.String -> A and B, and neither is preferred", A and B in the order of
+  `MultiFn`'s method table, a hash map keyed by the classes, whose hashes are identity hashes:
+  the order varied between runs and between the JVM and Go builds (it matched on Go by luck).
+- The user's decision: name the two in the order of their class names, in Arbace's source.
+  Done in `MultiFn.findAndCacheBestMethod` (`arbace/lang/MultiFn.clj`): when both dispatch
+  values are classes they are ordered by `Class.getName`; other dispatch values (keywords and
+  the like, which hash by value) keep the table's order, so no other message changes.
+  Recorded as hand change 14 in `doc/VENDOR-NOTES.md`. Considered: ordering any two values by
+  their printed form (changes the keyword cases' messages for no gain); keeping the method
+  table sorted (it needs an order over any dispatch value, and only the message needs one).
+- Re-recorded with `bin/oracle record forms/polymorphism`: only case 169 (line 176) changed,
+  now "... -> interface java.io.Serializable and interface java.lang.Comparable, ...".
+  `bin/oracle check jvm` passes 20,253 of 20,253; the Go build (amd64) gives the same message,
+  and its oracle run still mismatches only its 32 known cases. The bootstrap passes (stage 2 =
+  stage 3).
