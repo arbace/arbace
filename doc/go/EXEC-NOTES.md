@@ -224,12 +224,13 @@ executable and the key into the cache, and smoke-tests it. Measured on this mach
 
 | | the check `go` | the essential gate |
 |---|---:|---:|
-| a miss | 5m13s (built in 310 s) | 6m46s |
-| a hit | GATE-HIT-GO | GATE-HIT-TOTAL |
+| a miss | 5m13s and 5m37s (built in 310 s, 334 s) | 6m46s, 7m06s |
+| a hit | 0m04s | 3m38s |
 | before (no check `go`) | | about 4m20s |
 
-At a miss the gate's peak memory use was 25 GB of 62 (the suite's 24 JVMs, the class forms
-tests, and the build's JVMs and `go build` beside them).
+At the first miss the machine's peak memory use was 25 GB of 62 (the suite's 24 JVMs, the class
+forms tests, and the build's JVMs and `go build` beside them); during the second pair of runs,
+with other agents' work beside, it reached 40 GB, 6 GB left available.
 ## Results
 
 - **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`), on this branch before
