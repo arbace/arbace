@@ -42,6 +42,7 @@
             [arbace.c2g.dyn :as dyn]
             [arbace.c2g.fromfn :as fromfn]
             [arbace.c2g.checks :as chk]
+            [arbace.c2g.embed :as embed]
             [arbace.g2c.print :as gp]
             [arbace.pprint]))
 
@@ -198,9 +199,12 @@
 
 (defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
 
-(defn- program-package-forms []
+(defn- program-package-forms
+  "The main package: main.go and the embedded sources (res/..., EVAL-NOTES.md, \"Loading\")."
+  [embedded]
   ['(ns go.arbace.cmd.arbace (:require [arbace.go :as go]))
-   '(go/package main :path "arbace/cmd/arbace" :files ["main.go"])
+   (list 'go/package 'main :path "arbace/cmd/arbace" :files ["main.go"]
+         :embed-files (vec (for [p embedded] [(str "res/" p) nil])))
    '(load "arbace/main")])
 
 (defn- program-main-forms
@@ -208,8 +212,14 @@
   thread main, uncaught exceptions printed as the JVM prints them, status 1), its status the
   process's."
   []
-  ['(go/file "main.go" :imports [[os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+  ['(go/file "main.go" :imports [[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+   '(go/var ^{:go/embed ["res"] :tag embed/FS
+              :doc "resources are the namespaces' sources RT.load reads (EVAL-NOTES.md, \"Loading\").\n"}
+      resources)
    '(go/func main []
+      (let [(values sub err) (fs/Sub resources "res")]
+        (when (== err nil)
+          (jrt/SetHost (lit jrt/OSHost :Resources sub))))
       (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
         (range [i a (subslice os/Args 1)]
           (aset (.-A args) i (jrt/Str a)))
@@ -228,6 +238,10 @@
 (defn run [opts]
   (let [t0 (now)
         root-dir "."
+        opts (if (:program opts)
+               (let [srcs (embed/sources root-dir)]
+                 (assoc opts :embedded srcs :cut-candidates (sort (embed/cut-candidates srcs))))
+               opts)
         jdk (or (:jdk opts) ".tmp/jrt/conv")
         inputs (vec (concat
                       (when (or (:lang opts) (not (:jdk opts))) [{:root "arbace" :dirs ["lang"]}])
@@ -276,7 +290,11 @@
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
                  :erased (:erased world)}
             t1 (now)
-            roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))))
+            roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))
+                                                         ;; --program: the REPL's world, every public
+                                                         ;; member of every class with class forms
+                                                         ;; (C2G-SPEC §10.6, EVAL-PLAN.md Q2)
+                                                         (when (:program opts) (filter a/decl (sort @(:order a/*unit*))))))
                                ;; what the evaluator's Dyn (c2g_dyn.go) calls
                                (when (a/decl dyn/api-class) (dyn/roots))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
@@ -323,6 +341,7 @@
             files (atom {})   ; [pkg go-file] -> forms
             errors (atom [])]
         (binding [m/*w* wst
+                  out/*absent-members* (boolean (:program opts))
                   d/*reached* (:reached res)
                   c/*races* (atom #{})]
           ;; classes, grouped by the file of their top-level class
@@ -355,16 +374,43 @@
                     (binding [c/*pkgstate* (get pkgstates pkg)]
                       (swap! files update [pkg "c2g_lambdas.go"] (fnil into []) (out/adapter-forms pkg fi)))))
                 (recur (into done todo)))))
-          ;; per package: registrations, the literal pool, conversions, frames, support
+          ;; per package: registrations first (their member tables may name cut classes of
+          ;; either package), then the literal pool, conversions, frames, support, cut classes
           (doseq [pkg [:jrt :lang]
                   :let [ps (get pkgstates pkg)
                         classes (sort (filter #(= pkg (m/pkg %)) T))]
                   :when (or (seq classes) (= pkg :jrt))]
             (binding [c/*pkgstate* ps]
-              (swap! files assoc [pkg "c2g_classes.go"] (vec (mapcat #(out/class-registration pkg %) classes)))
+              (swap! files assoc [pkg "c2g_classes.go"] (vec (mapcat #(out/class-registration pkg %) classes)))))
+          (doseq [pkg [:jrt :lang]
+                  :let [ps (get pkgstates pkg)
+                        classes (sort (filter #(= pkg (m/pkg %)) T))]
+                  :when (or (seq classes) (= pkg :jrt))]
+            (binding [c/*pkgstate* ps]
               (when-let [fr (out/frames-forms pkg classes)] (swap! files assoc [pkg "c2g_frames.go"] (vec fr)))
-              (when (= pkg :jrt) (swap! files assoc [pkg "c2g_support.go"] (out/support-forms))))
-            (swap! files assoc [pkg "c2g_cut.go"] (vec (out/cut-forms pkg (filter #(= pkg (m/pkg %)) @cuts))))
+              (when (= pkg :jrt) (swap! files assoc [pkg "c2g_support.go"] (out/support-forms)))
+              (when (= pkg :jrt)
+                (when-let [tf (out/support-table-forms)]
+                  (swap! files assoc [pkg "reflect_tables_c2g.go"] (vec tf)))))
+            ;; --program: the classes the embedded namespaces name outside the world are cut
+            ;; classes too, so that their imports and hints resolve (EVAL-NOTES.md)
+            (let [taken (into (set (map m/go-name T)) (concat (:vars (:jrt m/*w*)) (keys (:types (:jrt m/*w*)))))
+                  taken (into taken (map #(str (m/go-name %) "_class") T))
+                  cands (set (:cut-candidates opts))]
+              (doseq [n (embed/with-member-types (:cut-candidates opts) m/in-world?)
+                      :when (or (not (m/in-world? n))
+                                (and (m/hand-written? n)
+                                     (not (contains? (:vars (:jrt m/*w*)) (str (m/go-name n) "_class")))))
+                      ;; a member type whose Go name another class has (java.sql.Date) is left out
+                      :when (or (contains? cands n)
+                                (not (or (taken (m/go-name n)) (taken (str (m/go-name n) "_class"))
+                                         (some #(and (not= % n) (= (m/go-name %) (m/go-name n))) @cuts))))]
+                (swap! cuts conj n)))
+            (swap! files assoc [pkg "c2g_cut.go"]
+                   (vec (concat (out/cut-forms pkg (filter #(= pkg (m/pkg %)) @cuts))
+                                ;; --program: the cut classes' members, throwing (EVAL-NOTES.md)
+                                (when (:program opts)
+                                  (out/cut-table-forms pkg @cuts (filter #(= pkg (m/pkg %)) @cuts))))))
             ;; the classes that replace jrt's stand-ins initialize at Go package initialization:
             ;; jrt's hand-written code reads their statics as the stand-ins' package variables
             ;; (C2G-NOTES.md, proposed amendment A3)
@@ -454,9 +500,14 @@
             (when-let [after (:after opts)]
               (after {:prog-dir prog-dir :T T :res res :world world}))
             (when (:program opts)
+              (doseq [[p text] (:embedded opts)]
+                (write! (str prog-dir "/go/arbace/cmd/arbace/res/" p) text))
+              ;; the sources are data to g2c, not forms
+              (write! (str prog-dir "/go/arbace/cmd/arbace/res/.g2c-data")
+                      "The main package's embedded sources (c2g --program): data, not Go forms.\n")
               (write! (str prog-dir "/go/arbace/cmd/arbace.clj")
                       (str ";; Generated by c2g --program (C2G-SPEC §10.6): the program's main package.\n"
-                           (str/join "\n" (map out/form-text (program-package-forms))) "\n"))
+                           (str/join "\n" (map out/form-text (program-package-forms (keys (:embedded opts))))) "\n"))
               (write! (str prog-dir "/go/arbace/cmd/arbace/main.clj")
                       (str ";; Generated by c2g --program (C2G-SPEC §10.6).\n(in-ns 'go.arbace.cmd.arbace)\n\n"
                            (str/join "\n\n" (map out/form-text (program-main-forms))) "\n")))

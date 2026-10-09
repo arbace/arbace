@@ -36,6 +36,7 @@ use.\n"
           ^Throwable_I cause
           ^bool causeSet
           ^{:tag (slice uintptr)} pcs
+          ^{:tag (* RefArray)} evalTrace
           ^{:tag (* RefArray)} stackTrace
           ^{:tag (slice Throwable_I)} suppressed
           ^bool noSuppression
@@ -135,6 +136,7 @@ nothing (no JFR).\n"
 (go/method Impl_FillInStackTrace__Throwable ^Throwable_I [^{:tag (* Throwable)} t ^Throwable_I this]
   (when (not (.-notWritable t))
     (set! (.-pcs t) (callers 2))
+    (set! (.-evalTrace t) (evalTrace))
     (set! (.-stackTrace t) nil))
   this)
 
@@ -143,7 +145,7 @@ nothing (no JFR).\n"
 
 (go/method ourStackTrace ^{:tag (* RefArray)} [^{:tag (* Throwable)} t]
   (when (== (.-stackTrace t) nil)
-    (set! (.-stackTrace t) (javaFrames (.-pcs t))))
+    (set! (.-stackTrace t) (javaFrames (.-pcs t) (.-evalTrace t))))
   (.-stackTrace t))
 
 (go/method Impl_SetStackTrace_StackTraceElement1__V
@@ -494,6 +496,40 @@ a dispatch method that forwards (§5.4).\n"
         j (strings/LastIndexByte callee \.)]
     (and (>= i 0) (>= j 0) (== (subslice callee (+ j 1)) (+ "Impl_" (subslice fn (+ i 1)))))))
 
+(go/var ^{:tag Supplier
+          :doc "EvalTrace, set by the evaluator (Compiler$Evaluator's static initializer), gives
+the evaluated frames of the current thread, innermost first, as a StackTraceElement[]
+(C2G-SPEC §10.7).\n"}
+  EvalTrace)
+
+(go/func evalTrace "evalTrace: the evaluated frames when an exception is made, or nil.\n"
+  ^{:tag (* RefArray)} []
+  (when (== EvalTrace nil)
+    (return nil))
+  (let [(values a _) (assert (* RefArray) (.Get__O EvalTrace))]
+    a))
+
+(go/func isEvalCall
+  "isEvalCall: whether fn is the body of the evaluator's call of an evaluated fn or method
+(the function literal of the try in Evaluator.invokeFn and invokeMethod), where the frame is
+pushed.\n"
+  ^bool [^string fn]
+  (and (or (strings/HasPrefix fn "arbace/lang.Compiler_Evaluator_InvokeFn_")
+           (strings/HasPrefix fn "arbace/lang.Compiler_Evaluator_InvokeMethod_"))
+       (strings/Contains fn ".func")
+       (not (strings/Contains fn ".func1.")) (not (strings/Contains fn ".func2."))))
+
+(go/func isEvalInternal
+  "isEvalInternal: whether fn is the evaluator's own (its walk, its fns' dispatch), not shown in
+stack traces.\n"
+  ^bool [^string fn]
+  (or (strings/HasPrefix fn "arbace/lang.Compiler_Evaluator")
+      (strings/Contains fn ").EvalIn_")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_EvalFn).")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_EvalMethod).")
+      (strings/HasPrefix fn "arbace/lang.(*RestFn).")
+      (strings/HasPrefix fn "arbace/lang.Compiler_Expr_")))
+
 (go/func isThrowableClass ^bool [^string name]
   (let [c (ForName name)]
     (and (!= c nil) (.assignableFrom Throwable_class c))))
@@ -504,8 +540,9 @@ the last runtime.gopanic dropped (an exception made while a run-time error panic
 frames of fillInStackTrace and of the exception's constructors dropped at the top, as
 HotSpot drops them, elided frames left out, a function literal's frame merged with the frame
 of the function that called it.\n"
-  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs]
+  ^{:tag (* RefArray)} [^{:tag (slice uintptr)} pcs ^{:tag (* RefArray)} evals]
   (let [^{:tag (slice runtime/Frame)} raw nil
+        ^{:tag (slice any)} ev nil
         frames (runtime/CallersFrames pcs)]
     (while true
       (let [(values fr more) (.Next frames)]
@@ -515,11 +552,26 @@ of the function that called it.\n"
     (range [i fr raw]
       (when (== (.-Function fr) "runtime.gopanic")
         (set! raw (subslice raw (+ i 1)))))
+    (when (!= evals nil)
+      (set! ev (.-A evals)))
     (let [^{:tag (slice jframe)} fs nil
           top true]
       (range [i fr raw]
         (let [f (frameOf fr)]
           (cond
+            ;; an evaluated fn's or method's call (the evaluator's try body): its Clojure frame,
+            ;; the evaluator's own frames elided (C2G-SPEC §10.7)
+            (isEvalCall (.-Function fr))
+            (when (> (len ev) 0)
+              (let [e (assert (* StackTraceElement) (aget ev 0))
+                    file ""]
+                (set! ev (subslice ev 1))
+                (set! top false)
+                (when (!= (.-fileName e) nil)
+                  (set! file (.String (.-fileName e))))
+                (set! fs (append fs (lit jframe :cls (.String (.-declaringClass e)) :method (.String (.-methodName e))
+                                         :file file :line (conv int (.-lineNumber e)))))))
+            (isEvalInternal (.-Function fr)) (do)
             (.-elide f) (do)
             ;; a forwarder: its callee is the implementation Impl_M of its method M
             (and (> i 0) (isForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))

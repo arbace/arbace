@@ -764,6 +764,33 @@
          :Get (fn ^any [^any o] StrictMath_PI))
         (lit FieldInfo :Name "TAU" :Type Prim_double :Modifiers 0x19
          :Get (fn ^any [^any o] StrictMath_TAU))))
+  ;; java.lang.System
+  (set! (.-Methods (.Info System_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "arraycopy" :Params (lit (slice (* Class)) Object_class Prim_int Object_class Prim_int Prim_int) :Return Prim_void :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_Arraycopy_O_I_O_I_I__V (aget args 0) (assert int32 (aget args 1)) (aget args 2) (assert int32 (aget args 3)) (assert int32 (aget args 4))) nil))
+        (lit MethodInfo :Name "clearProperty" :Params (lit (slice (* Class)) String_class) :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_ClearProperty_String__String ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "currentTimeMillis" :Params nil :Return Prim_long :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_CurrentTimeMillis__J)))
+        (lit MethodInfo :Name "exit" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_Exit_I__V (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "gc" :Params nil :Return Prim_void :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_Gc__V) nil))
+        (lit MethodInfo :Name "getProperty" :Params (lit (slice (* Class)) String_class) :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_GetProperty_String__String ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "getProperty" :Params (lit (slice (* Class)) String_class String_class) :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_GetProperty_String_String__String ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)))))
+        (lit MethodInfo :Name "getenv" :Params (lit (slice (* Class)) String_class) :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_Getenv_String__String ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "identityHashCode" :Params (lit (slice (* Class)) Object_class) :Return Prim_int :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_IdentityHashCode_O__I (aget args 0))))
+        (lit MethodInfo :Name "lineSeparator" :Params nil :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_LineSeparator__String)))
+        (lit MethodInfo :Name "nanoTime" :Params nil :Return Prim_long :Modifiers 0x109
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_NanoTime__J)))
+        (lit MethodInfo :Name "setProperty" :Params (lit (slice (* Class)) String_class String_class) :Return String_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (System_SetProperty_String_String__String ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)))))))
   ;; java.lang.reflect.Array
   (set! (.-Methods (.Info Array_class))
     (lit (slice MethodInfo)

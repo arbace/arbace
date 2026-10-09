@@ -39,7 +39,15 @@ its wrapper (Integer.valueOf ..., with their caches), a reference stays itself.\
     (case [int64] (return (Long_ValueOf_J__Long x)))
     (case [float32] (return (Float_ValueOf_F__Float x)))
     (case [float64] (return (Double_ValueOf_D__Double x))))
+  ;; a nil pointer of a Java class, typed in the any (an invoker's *Class result): null
+  (let [(values r ok) (assert refValue v)]
+    (when ok
+      (return (.Ref r))))
   v)
+
+(go/type refValue
+  "refValue is a Java object's Ref: itself, or nil for a nil pointer (Box's null).\n"
+  (interface (Ref ^any [])))
 
 (go/func unwrap
   "unwrap: the primitive value and descriptor code of a wrapper object (0 when x is not one).\n"

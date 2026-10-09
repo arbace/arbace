@@ -398,6 +398,10 @@ translated java.util.Formatter).\n"
         (m/pointer-desc? d) (list (m/jrt-sym pkg "C2g_RefP") call)
         :else call))
 
+(def ^:dynamic *absent-members*
+  "Whether member tables list the public methods that do not exist in Go (bin/c2g --program)."
+  false)
+
 (defn member-tables
   "The member tables (§5.11, amendment R12) of translated class n: its public members."
   [pkg n]
@@ -424,6 +428,41 @@ translated java.util.Formatter).\n"
                           :Return (cls r)
                           :Modifiers (bit-and (:flags mm) 0x1fff)
                           :Invoke (list* 'fn (with-meta [(tag 'this 'any) (tag 'args '(slice any))] {:tag 'any}) body)))
+          ;; --program: the public methods that do not exist in Go (their descriptors name
+          ;; classes outside the world), as entries that throw, so that code naming them
+          ;; analyzes (RT/toUrl) and fails when run (EVAL-NOTES.md, "Cut classes")
+          absent (when *absent-members*
+                   (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
+                     (for [mm (:methods (a/decl n))
+                           :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
+                                      (not (present [(:name mm) (:desc mm)])))
+                           :let [[ps r] (t/parse-method-desc (:desc mm))]]
+                       (list 'lit (m/jrt-sym pkg "MethodInfo")
+                             :Name (:name mm)
+                             :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
+                             :Return (cls r)
+                             :Modifiers (bit-and (:flags mm) 0x1fff)
+                             :Invoke (list 'fn (with-meta [(tag 'this 'any) (tag 'args '(slice any))] {:tag 'any})
+                                           (list 'panic (list (m/jrt-sym pkg "Thrown")
+                                                              (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
+                                                                    (list (m/jrt-sym pkg "Str")
+                                                                          (str (java-name n) "." (:name mm) (:desc mm)
+                                                                               " is not in the Go build"))))))))))
+          methods (concat methods absent)
+          absent-ctors (when (and *absent-members* (not abstract) (not iface))
+                         (let [present (set (map :desc (filter #(= "<init>" (:name %)) (d/class-methods n))))]
+                           (for [mm (:methods (a/decl n))
+                                 :when (and (public? mm) (= "<init>" (:name mm)) (not (present (:desc mm))))
+                                 :let [[ps _] (t/parse-method-desc (:desc mm))]]
+                             (list 'lit (m/jrt-sym pkg "CtorInfo")
+                                   :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
+                                   :Modifiers (bit-and (:flags mm) 0x1fff)
+                                   :New (list 'fn (with-meta [(tag 'args '(slice any))] {:tag 'any})
+                                              (list 'panic (list (m/jrt-sym pkg "Thrown")
+                                                                 (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
+                                                                       (list (m/jrt-sym pkg "Str")
+                                                                             (str (java-name n) ".<init>" (:desc mm)
+                                                                                  " is not in the Go build"))))))))))
           ctors (for [mm (d/class-methods n)
                       :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
                       :let [real (e/ctor-real-desc n mm)
@@ -451,10 +490,12 @@ translated java.util.Formatter).\n"
                           :Get (list 'fn (with-meta [(tag 'o 'any)] {:tag 'any})
                                      (let [r (if vol (c/volatile-read place (:desc f)) place)]
                                        (or (result-any pkg (:desc f) r) r)))
-                          (when-not (or final vol)
+                          (when-not final
                             [:Set (list 'fn [(tag 'o 'any) (tag 'v 'any)]
-                                        (list 'set! place (arg-conv pkg (:desc f) 'v)))])))]
-      {:methods methods :ctors ctors :fields fields})))
+                                        (if vol
+                                          (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
+                                          (list 'set! place (arg-conv pkg (:desc f) 'v))))])))]
+      {:methods methods :ctors (concat ctors absent-ctors) :fields fields})))
 
 (defn class-registration
   "C_class (Define, hierarchy only) and the init function setting its function and table
@@ -466,7 +507,11 @@ translated java.util.Formatter).\n"
                                    :simple (t/simple-name-of n) :reflected true))
           iface (m/interface? n)
           sup (:super dd)
-          ifaces (filter m/in-world? (:interfaces dd))
+          ;; a superinterface outside the world stands for its own superinterfaces (JDK 21's
+          ;; SequencedCollection between List and Collection), so that getInterfaces still
+          ;; reaches Collection (core's print-method preferences: EVAL-NOTES.md)
+          ifaces (distinct (mapcat (fn up [i] (if (m/in-world? i) [i] (mapcat up (:interfaces (m/info i)))))
+                                   (:interfaces dd)))
           tables (if (:reflected dd) {} (member-tables pkg n))
           cls-sym (symbol (str g "_class"))]
       [(list 'go/var cls-sym
@@ -517,6 +562,147 @@ translated java.util.Formatter).\n"
                                   :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
                                   :Super (when-not (env/interface? n) (m/jrt-sym pkg "Object_class"))
                                   :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))
+
+(defn support-table-forms
+  "The member table entries of jrt's statics and methods that c2g writes (C2G-NOTES.md, phase
+  2C: String.format, String's regex methods, System.in, out, err and their setters), so that
+  reflection finds them at the REPL (System/out, String/format). In reflect_tables_c2g.go: its
+  init runs after reflect_tables.go's, which sets the hand-written classes' tables."
+  []
+  (let [sig (fn [nme params ret mods call]
+              (list 'lit 'MethodInfo :Name nme :Params (when (seq params) (apply list 'lit '(slice (* Class)) params))
+                    :Return ret :Modifiers mods
+                    :Invoke (list 'fn '^any [^any this ^{:tag (slice any)} args] call)))
+        s0 '((inst As (* String)) (aget args 0))
+        s1 '((inst As (* String)) (aget args 1))
+        str-ms (concat
+                 (when (m/translated? "java/util/Formatter")
+                   [(sig "format" '[String_class (.ArrayClass Object_class)] 'String_class 0x89
+                         (list 'String_Format_String_O1__String s0 '((inst As (* RefArray)) (aget args 1))))
+                    (sig "format" '[Locale_class String_class (.ArrayClass Object_class)] 'String_class 0x89
+                         (list 'String_Format_Locale_String_O1__String '((inst As (* Locale)) (aget args 0)) s1
+                               '((inst As (* RefArray)) (aget args 2))))])
+                 (when (m/translated? "java/util/regex/Pattern")
+                   [(sig "matches" '[String_class] 'Prim_boolean 0x1
+                         (list '.Matches_String__Z '((inst As (* String)) this) s0))
+                    (sig "replaceAll" '[String_class String_class] 'String_class 0x1
+                         (list '.ReplaceAll_String_String__String '((inst As (* String)) this) s0 s1))
+                    (sig "replaceFirst" '[String_class String_class] 'String_class 0x1
+                         (list '.ReplaceFirst_String_String__String '((inst As (* String)) this) s0 s1))
+                    (sig "split" '[String_class] '(.ArrayClass String_class) 0x1
+                         (list '.Split_String__String1 '((inst As (* String)) this) s0))
+                    (sig "split" '[String_class Prim_int] '(.ArrayClass String_class) 0x1
+                         (list '.Split_String_I__String1 '((inst As (* String)) this) s0 '(assert int32 (aget args 1))))]))
+        streams? (m/translated? "jdk/internal/jrt/StandardStreams")
+        ;; the context class loader and resources (core's data_readers lookup, io/resource):
+        ;; the system loader; resources are the host's (the program's embedded sources), with
+        ;; no URLs (java.net is cut)
+        loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))]
+    (when (or (seq str-ms) streams? loaders?)
+      [(apply list 'go/func 'init []
+              (concat
+                (when loaders?
+                  [(list 'set! '(.-Methods (.Info Thread_class))
+                         (list 'append '(.-Methods (.Info Thread_class))
+                               (sig "getContextClassLoader" [] 'ClassLoader_class 0x1
+                                    '(ClassLoader_GetSystemClassLoader__ClassLoader))
+                               (sig "setContextClassLoader" '[ClassLoader_class] 'Prim_void 0x1 '(return nil))))
+                   (list 'set! '(.-Methods (.Info ClassLoader_class))
+                         (list 'append '(.-Methods (.Info ClassLoader_class))
+                               (sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                    '(Collections_EmptyEnumeration__Enumeration))
+                               (sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
+                                    '(let [(values b ok) (.Resource (CurrentHost) (.String (NN ((inst As (* String)) (aget args 0)))))]
+                                       (when (not ok) (return nil))
+                                       (let [a (NewByteArray (conv int32 (len b)))]
+                                         (range [i x b] (aset (.-A a) i (conv int8 x)))
+                                         (return (ByteArrayInputStream_New_B1 a)))))))])
+                (when (seq str-ms)
+                  [(list 'set! '(.-Methods (.Info String_class))
+                         (apply list 'append '(.-Methods (.Info String_class)) str-ms))])
+                (when streams?
+                  ['(set! (.-Fields (.Info System_class))
+                          (append (.-Fields (.Info System_class))
+                                  (lit FieldInfo :Name "err" :Type PrintStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] (.Ref System_err)))
+                                  (lit FieldInfo :Name "in" :Type InputStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] System_in))
+                                  (lit FieldInfo :Name "out" :Type PrintStream_class :Modifiers 0x19
+                                       :Get (fn ^any [^any o] (.Ref System_out)))))
+                   (list 'set! '(.-Methods (.Info System_class))
+                         (list 'append '(.-Methods (.Info System_class))
+                               (sig "setErr" '[PrintStream_class] 'Prim_void 0x9
+                                    '(do (System_SetErr_PrintStream__V (PrintStream_Cast (aget args 0))) (return nil)))
+                               (sig "setIn" '[InputStream_class] 'Prim_void 0x9
+                                    '(do (System_SetIn_InputStream__V (InputStream_Cast (aget args 0))) (return nil)))
+                               (sig "setOut" '[PrintStream_class] 'Prim_void 0x9
+                                    '(do (System_SetOut_PrintStream__V (PrintStream_Cast (aget args 0))) (return nil)))))])))])))
+
+(defn- cut-type-expr
+  "The Class expression of JVM class c as a cut class's member table names it from pkg, or nil
+  when the Go build has no Class object for it there (a class outside the world that is not
+  cut, or one of arbace/lang named from jrt)."
+  [pkg cuts ^Class c]
+  (cond
+    (.isPrimitive c) (symbol (str (if (= pkg :jrt) "" "jrt/") "Prim_" (.getName c)))
+    (.isArray c) (when-let [e (cut-type-expr pkg cuts (.getComponentType c))] (list '.ArrayClass e))
+    :else (let [n (str/replace (.getName c) "." "/")]
+            (when (and (or (m/in-world? n) (contains? cuts n))
+                       (or (= pkg :lang) (= :jrt (m/pkg n)))
+                       ;; jrt's hand-written classes without a Class object
+                       (or (not (m/hand-written? n)) (= n "java/lang/Object")
+                           (contains? (:vars (:jrt m/*w*)) (str (m/go-name n) "_class"))))
+              (if (= n "java/lang/Object") (m/jrt-sym pkg "Object_class") (m/class-sym pkg n "_class"))))))
+
+(defn cut-table-forms
+  "The member tables of the cut classes of pkg (C2G-SPEC §4.1, D6; doc/go/EVAL-NOTES.md): their
+  public members as the JVM reports them, whose types the Go build can name, each throwing
+  UnsupportedOperationException when called, so that code naming them analyzes (core's
+  annotation support names ASM's Type) and fails only when run."
+  [pkg cuts classes]
+  (let [stub (fn [what]
+               (list 'panic (list (m/jrt-sym pkg "Thrown")
+                                  (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
+                                        (list (m/jrt-sym pkg "Str") (str what " is not in the Go build"))))))
+        tables (for [n (sort classes)
+                     :let [^Class c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
+                                         (catch Throwable _ nil))]
+                     :when c
+                     :let [cls (m/class-sym pkg n "_class")
+                           texpr #(cut-type-expr pkg cuts %)
+                           ms (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %))))
+                                                                         (.getMethods c))
+                                    :when (= c (.getDeclaringClass mt))
+                                    :let [ps (map texpr (.getParameterTypes mt))
+                                          r (texpr (.getReturnType mt))]
+                                    :when (and r (every? some? ps))]
+                                (list 'lit (m/jrt-sym pkg "MethodInfo") :Name (.getName mt)
+                                      :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) ps))
+                                      :Return r :Modifiers (.getModifiers mt)
+                                      :Invoke (list 'fn (with-meta [(with-meta 'this {:tag 'any}) (with-meta 'args {:tag '(slice any)})] {:tag 'any})
+                                                    (stub (str (.getName c) "." (.getName mt))))))
+                           fs (for [^java.lang.reflect.Field fd (sort-by #(.getName ^java.lang.reflect.Field %) (.getFields c))
+                                    :when (= c (.getDeclaringClass fd))
+                                    :let [t (texpr (.getType fd))]
+                                    :when t]
+                                (list 'lit (m/jrt-sym pkg "FieldInfo") :Name (.getName fd) :Type t :Modifiers (.getModifiers fd)
+                                      :Get (list 'fn (with-meta [(with-meta 'o {:tag 'any})] {:tag 'any})
+                                                 (stub (str (.getName c) "." (.getName fd))))))
+                           ks (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))
+                                    :let [ps (map texpr (.getParameterTypes k))]
+                                    :when (every? some? ps)]
+                                (list 'lit (m/jrt-sym pkg "CtorInfo")
+                                      :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) ps))
+                                      :Modifiers (.getModifiers k)
+                                      :New (list 'fn (with-meta [(with-meta 'args {:tag '(slice any)})] {:tag 'any})
+                                                 (stub (str (.getName c) "'s constructor")))))]
+                     :when (or (seq ms) (seq fs) (seq ks))]
+                 (concat
+                   (when (seq ms) [(list 'set! (list '.-Methods (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "MethodInfo")) ms))])
+                   (when (seq fs) [(list 'set! (list '.-Fields (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "FieldInfo")) fs))])
+                   (when (seq ks) [(list 'set! (list '.-Ctors (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "CtorInfo")) ks))])))]
+    (when (seq tables)
+      [(apply list 'go/func 'init [] (apply concat tables))])))
 
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler

@@ -213,6 +213,11 @@
           thisx (if leaf 't 'this)
           kind (:kind node)]
       (cond
+        ;; a constructor whose parameters name a class outside the world does not exist in Go
+        (some #(not (m/in-world? %)) (m/method-desc-classes (:desc (:ctor node))))
+        (c/emit! (c/missing-expr (str "constructor " (or (:class node) n) (:desc (:ctor node))
+                                      " is not in the closed world")
+                                 "V"))
         (= kind :this)
         (let [real (ctor-desc n (:ctor node))
               base (nm/ctor-base real)

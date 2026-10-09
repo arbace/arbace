@@ -9,6 +9,13 @@
   :imports [[runtime "runtime"] [debug "runtime/debug"] [sort "sort"] [strings "strings"]
             [sync "sync"]])
 
+(go/var ^{:doc "System_class is java.lang.System's Class object: reflection reaches its static members
+through the member table (reflect_tables.go; the REPL's System/getProperty), System.in, out
+and err through c2g's support, which defines them.\n"}
+  System_class
+  (Define (addr (lit ClassInfo :Name "java.lang.System" :Kind KindClass
+                     :Modifiers (bit-or AccPublic AccFinal) :Super Object_class :Go "arbace/jrt.System"))))
+
 ;; ---------------------------------------------------------------------------------------
 ;; The clocks and the environment
 
