@@ -406,12 +406,14 @@ non-private ones: allocate the `DynSub_C`, run `C`'s initialization and construc
 
 `proxy-supers` (the classes a proxy may extend besides `Object`): `java.io.Writer` (pprint's
 writers, `PrintWriter-on`, cl-format's case writers), `Reader`, `PushbackReader` (`arbace.repl`'s
-`source-fn`), `InputStream`, `OutputStream`, `arbace.lang.APersistentMap` (`bean`). A class must be
-translated, not final and not a leaf (a leaf's values are `*C`, §5.3: `BufferedWriter` or
+`source-fn`), `InputStream`, `OutputStream`, `arbace.lang.APersistentMap` (`bean`), and jrt's
+hand-written `ThreadLocal` (`clojure.test.check.random`; its constructor body and `Impl_`
+methods follow the shapes of translated non-leaf classes). A class must be translated or
+hand-written, not final and not a leaf (a leaf's values are `*C`, §5.3: `BufferedWriter` or
 `BitSet` cannot be extended without making them non-leaf, which changes every use; a proxy of
 one, or of a class outside the list, expands to a throw of `UnsupportedOperationException`
 "proxy of C is not in the Go build", so code naming it loads). Each type has about 650 methods;
-the six add 3.6 MB to the executable (amd64 37.4 to 41.0 MB, arm64 35.5 to 38.7 MB). Their
+the seven add about 4 MB to the executable (amd64 37.4 to 41.6 MB, arm64 35.5 to 39.3 MB). Their
 roots (`dyn/proxy-roots`: `C`'s constructors and instance methods, up its superclass chain) keep
 the implementations translated.
 
@@ -423,7 +425,10 @@ whether it is a proxy; `setMethod` on a proxy's method that has a slot sets only
 method is reached by reflection through `C`'s or the interface's member, which calls the Go
 method, so `proxy-super`'s reflective call runs `C`'s implementation); a method without a slot
 (of an interface made at run time) gets a member as for `deftype`. The natives taking an object
-work on both kinds through the Go interface `dynObject` (`DynClassOf`, `DynFields`). jrt's
+work on both kinds through the Go interface `dynObject` (`DynClassOf`, `DynFields`). A third
+native, `fillProxySlots(c, factory)`, gives the superclass's methods that reflection does not
+list (the protected ones of jrt's classes: `ThreadLocal.initialValue`) the fn `(factory name)`,
+so a proxy can override them as on the JVM. jrt's
 stack traces leave out `DynSub_C` dispatch frames as they do `Dyn`'s.
 
 **The Clojure side** (`arbace/lang/go/ns/core_proxy.clj`, replacing the variant that expanded
@@ -502,15 +507,26 @@ the evaluator's meaning.
 
 ### Results
 
-| | before (phase 1) | after |
-|---|---:|---:|
-| oracle forms (existing files) | 9,364 / 9,652 | 9,393 / 9,652 |
-| `printing.clj` | 366 / 396 | 396 / 396 |
-| `types.clj` (new) | | 425 / 425 |
-| oracle forms, all | | 9,818 / 10,077 |
-| whole oracle (forms, classes, regex), amd64 | 19,508 / 19,828 | 19,962 / 20,253 |
+| | phase 1 | phase 2C (main) | with 2A |
+|---|---:|---:|---:|
+| oracle forms (existing files) | 9,364 / 9,652 | 9,416 / 9,652 | 9,446 / 9,652 |
+| `printing.clj` | 366 / 396 | 366 / 396 | 396 / 396 |
+| `types.clj` (new) | | | 425 / 425 |
+| oracle forms, all | | | 9,871 / 10,077 |
+| whole oracle (forms, classes, regex), amd64 | 19,508 / 19,828 | 19,562 / 19,828 | 20,017 / 20,253 |
 
-linux/arm64 under `qemu-aarch64` gives the same forms results file for file. The one new
+(2C's numbers count V11's helpful-NPE rule; 2A alone, before merging main: forms 9,393 of 9,652
+and 9,818 of 10,077, the whole oracle 19,962 of 20,253.)
+
+linux/arm64 under `qemu-aarch64` gives the same forms results file for file.
+
+Clojure's suite on the Go build (`CLOJURE_TESTS_GO=... bin/clojure-tests`, phase 2C's runner,
+after merging main): 1,874 assertions pass (1,852 in 2C's reference), `printer` 74 of 74 (13
+errors before: pprint's writers), `protocols` 196 of 196 (a proxy error and the
+method-defined-twice failure before), `proxy.examples` loads; `data-structures-interop`,
+`parse`, `sequences` and `transducers` get past `clojure.test.check.random`'s proxy of
+`ThreadLocal` and now stop at jrt's `Math/exp` (part B). The reference
+`test/arbace-go-results.edn` is updated accordingly. The one new
 mismatch in the existing files, `polymorphism.clj:176` (`class-ambig`), names the two ambiguous
 interfaces in the other order: the order is that of a hash map keyed by `Class` objects, whose
 hashes are identity hashes, which the classes made while `core_proxy` loads shift (it passed by
