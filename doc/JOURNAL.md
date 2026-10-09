@@ -640,3 +640,20 @@ decision (2026-10-08).
   both releases and its journal records v2. The README names both tags. The seed stays the v1
   jar: stage 1, compiled by its compiler, keeps the old NaN code, and stage 2, compiled by the
   fixed compiler, is what ships.
+
+## 2026-10-09: B1a step 4, phase 2A: Reflector, RT's runtime services
+
+- Agent, `0da8d70`, merged: a `Reflector` variant (no `MethodHandles`; `boxArg` adapts Clojure
+  functions through `jrt.AdaptFn`, which waits for c2g's `FromFn` adapters), RT's variant binding
+  `*out*`/`*err*`/`*in*` over jrt's host streams (stopgap writer and reader classes until jrt has
+  the JDK's stream classes) and looking classes up without a `DynamicClassLoader` (§10.3), small
+  fixes in c2g (cut members with their signatures; a constant null stored into a field outside
+  the closed world), a fixture for interning across GC, Reflector by name and the stream vars;
+  `test/c2g/needs-core.edn` lists the steps that need `arbace.core` loaded, with reasons.
+- `bin/c2g-check`: 4,953 of 5,009 steps pass on each architecture, 0 fail, 10 unavailable, 46
+  need core (core's printer, namespaced maps, data readers, core's vars): step 5's work.
+- Proposed amendments P2A-1..4 (native methods and member classes in variants; programs that
+  call by name must root what they may call, since reachability does not follow reflection; a
+  field outside the closed world dropped; RT's streams and class lookup).
+- Process note: the agent used `git stash` (shared by all worktrees) and a system-wide `pkill`
+  pattern; the other agents were told to check their state and to avoid both.
