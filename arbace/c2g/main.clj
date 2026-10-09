@@ -387,7 +387,7 @@
           ;; the class forms' host at the REPL (doc/go/CLASSFORMS-REPL.md)
           (when (and (dyn/enabled?) (dyncf/enabled?))
             (binding [c/*pkgstate* (get pkgstates :lang)]
-              (swap! files assoc [:lang "c2g_cf.go"] (vec (dyncf/forms)))))
+              (swap! files assoc [:lang "c2g_cf.go"] (vec (dyncf/forms T)))))
           ;; FromFn of the functional interfaces (C2G-SPEC §7.11), their adapters with the lambdas'
           (let [fis (filter #(contains? T %) (fromfn/fis T))]
             (when (seq fis)

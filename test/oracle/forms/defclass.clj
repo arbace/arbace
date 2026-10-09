@@ -463,6 +463,78 @@ Counter/NAME
 (binding [*dyn* 42] (Clj/dyn))
 (Clj/ratio)
 
+;; ----- enums
+(defclass ^:public ^:enum Color (constants RED GREEN BLUE)
+  (method ^:public next ^Color [this] (aget (Color/values) (unchecked-remainder-int (unchecked-inc-int (.ordinal this)) 3))))
+(Color/values)
+(vec (Color/values))
+[(.name Color/GREEN) (.ordinal Color/GREEN) (str Color/BLUE)]
+(Color/valueOf "BLUE")
+(try (Color/valueOf "PURPLE") (catch IllegalArgumentException e (ex-message e)))
+(.next Color/BLUE)
+(compare Color/RED Color/BLUE)
+(Enum/valueOf Color "RED")
+[(instance? Enum Color/RED) (.isEnum Color) (= Color (.getDeclaringClass Color/RED))]
+(seq (.getEnumConstants Color))
+(sort [Color/BLUE Color/RED Color/GREEN])
+
+(defclass ^:public ^:enum Op
+  (constants (PLUS ["+"] (method ^:public apply ^int [this ^int a ^int b] (unchecked-add-int a b)))
+             (TIMES ["*"] (method ^:public apply ^int [this ^int a ^int b] (unchecked-multiply-int a b))))
+  (field ^:private ^:final ^String sym)
+  (constructor [this ^String sym] (set! (.-sym this) sym))
+  (method ^:public ^:abstract apply ^int [this ^int a ^int b])
+  (method ^:public sym ^String [this] sym)
+  (method ^:public ^:static eval ^String [^Op op ^int a ^int b]
+    (java-str a " " (.sym op) " " b " = " (.apply op a b) " (" (switch op PLUS "plus" TIMES "times") ")")))
+(map #(Op/eval % 6 7) (Op/values))
+(.apply Op/TIMES 3 4)
+[(.name Op/PLUS) (.ordinal Op/TIMES) (= Op (.getDeclaringClass Op/TIMES))]
+
+;; ----- exceptions of class forms
+(defclass ^:public AppException
+  :extends Exception
+  (field ^:private ^int code)
+  (constructor ^:public [this ^String msg ^int code] (super. msg) (set! (.-code this) code))
+  (method ^:public code ^int [this] code)
+  (method ^:public getMessage ^String [this] (java-str "[" code "] " (.getMessage super))))
+(defclass ^:public NotFound
+  :extends AppException
+  (constructor ^:public [this ^String what] (super. (java-str what " not found") 404)))
+(defclass ^:public Thrower
+  (method ^:public ^:static find ^String [^String k]
+    (if (.equals k "x") "found" (throw (NotFound. k))))
+  (method ^:public ^:static safe ^String [^String k]
+    (try (Thrower/find k)
+      (catch NotFound e (java-str "nf:" (.code e)))
+      (catch AppException e "app")))
+  (method ^:public ^:static wrap ^String [^String k]
+    (try (Thrower/find k) (catch Exception e (.getMessage e)))))
+[(Thrower/safe "x") (Thrower/safe "y") (Thrower/wrap "z")]
+(try (Thrower/find "q") (catch AppException e [(ex-message e) (.code e) (class e)]))
+(try (throw (NotFound. "w")) (catch Exception e [(instance? AppException e) (instance? Exception e) (instance? RuntimeException e)]))
+(.getMessage (AppException. "m" 7))
+(str (AppException. "m" 7))
+(.getSuperclass NotFound)
+
+(defclass ^:public Unchecked
+  :extends IllegalStateException
+  (constructor ^:public [this ^String m] (super. m)))
+(try (throw (Unchecked. "u")) (catch IllegalStateException e [(ex-message e) (class e)]))
+
+;; ----- a class of class forms as a Clojure fn: extending AFn
+(defclass ^:public Adder
+  :extends arbace.lang.AFn
+  (field ^:private ^long k)
+  (constructor ^:public [this ^long k] (set! (.-k this) k))
+  (method ^:public invoke [this x] (+ x k))
+  (method ^:public invoke [this x y] (+ x y k)))
+((Adder. 10) 5)
+((Adder. 10) 5 6)
+(map (Adder. 1) [1 2 3])
+(apply (Adder. 100) [1 2])
+(try ((Adder. 1)) (catch Exception e (class e)))
+
 ;; ----- reflection on the classes
 (map #(.getName %) (sort-by #(.getName %) (.getDeclaredMethods Counter)))
 (.getName (.getDeclaringClass user.Outer$Inner))

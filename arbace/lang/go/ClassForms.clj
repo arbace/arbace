@@ -208,7 +208,18 @@
         ;; a Clojure fn passed for functional interface c (Clojure's FISupport adapter)
         (method ^:public ^:abstract adaptFn [this ^Class c o])
         ;; Object's own toString, hashCode and equals of an object (super calls)
-        (method ^:public ^:abstract objectMethod [this ^String name o arg]))
+        (method ^:public ^:abstract objectMethod [this ^String name o arg])
+        ;; whether an interpreted class may extend class c of the world
+        (method ^:public canExtend ^boolean [this ^Class c]
+          (or (identical? c Object) (identical? c Record)))
+        ;; c's constructor (descriptor desc) on o, an allocated object of a subclass of c
+        (method ^:public superCtor ^void [this o ^Class c ^String desc ^Object/1 args]
+          (throw (UnsupportedOperationException. (java-str "superclass " (.getName c)))))
+        ;; c's implementation of method key (name and descriptor) on o (super.m())
+        (method ^:public superCall [this o ^Class c ^String key ^Object/1 args]
+          (throw (UnsupportedOperationException. (java-str "superclass " (.getName c)))))
+        ;; k is an enum: its constants are values()'s
+        (method ^:public setEnum ^void [this ^Klass k ^Meth values] nil))
 
       ;; the JVM's stand-in for classes made at run time: objects are Obj (tests only)
       (defclass ^:public ^:static Obj
@@ -1420,6 +1431,14 @@
                 \V (.runV m g)
                 (.run m g))))))
 
+      ;; CallV's inline cache: a receiver class and its method
+      (defclass ^:public ^:static VCache
+        (field ^:public ^:final ^Klass k)
+        (field ^:public ^:final ^Meth m)
+        (constructor ^:public [this ^Klass k ^Meth m]
+          (set! (.-k this) k)
+          (set! (.-m this) m)))
+
       ;; a virtual or interface call: an interpreted receiver's method by its class's vtable,
       ;; else (or when the class does not have it) by reflection
       (defclass ^:public ^:static CallV
@@ -1429,9 +1448,8 @@
         (field ^:public ^:final ^Node target)
         (field ^:public ^:final ^Node/1 args)
         (field ^:public ^:final ^char/1 ptypes)
-        ;; the last receiver class and its method
-        (field ^Klass ck)
-        (field ^Meth cm)
+        ;; the last receiver class and its method (one object: threads read it whole)
+        (field ^VCache cache)
         (constructor ^:public [this ^char t ^String key ^java.lang.reflect.Method rm ^Node target
                                ^Node/1 args ^char/1 ptypes]
           (set! (.-t this) t)
@@ -1442,13 +1460,13 @@
           (set! (.-ptypes this) ptypes))
         ;; the interpreted method for receiver o, or nil
         (method ^:public lookup ^Meth [this o]
-          (let [k (.klassOf Rt/HOST o)]
+          (let [k (.klassOf Rt/HOST o)
+                c cache]
             (cond
               (nil? k) nil
-              (identical? k ck) cm
+              (and (some? c) (identical? k (.-k c))) (.-m c)
               :else (let [m (.virtual k key)]
-                      (set! cm m)
-                      (set! ck k)
+                      (set! cache (VCache. k m))
                       m))))
         ;; a reflective call (the receiver and the method's arguments evaluated)
         (method ^:public reflect [this o ^Frame f]
@@ -2222,6 +2240,50 @@
                 (recur (unchecked-inc-int i))))
             o)))
 
+
+      ;; a constructor's call of its superclass's constructor when the superclass is of the
+      ;; world (Throwable, Enum...: the object is that class's DynSub)
+      (defclass ^:public ^:static SuperCtor
+        :extends Node
+        (field ^:public ^:final ^Class c)
+        (field ^:public ^:final ^String desc)
+        (field ^:public ^:final ^int self)
+        (field ^:public ^:final ^Node/1 args)
+        (field ^:public ^:final ^char/1 ptypes)
+        (constructor ^:public [this ^Class c ^String desc ^int self ^Node/1 args ^char/1 ptypes]
+          (set! (.-t this) \V)
+          (set! (.-c this) c)
+          (set! (.-desc this) desc)
+          (set! (.-self this) self)
+          (set! (.-args this) args)
+          (set! (.-ptypes this) ptypes))
+        (method ^:public eval [this ^Frame f]
+          (let [vs (Rt/boxed args ptypes f)]
+            (when (some? vs)
+              (.superCtor Rt/HOST (aget (.-r f) self) c desc vs))
+            nil)))
+
+      ;; super.m() of a method of a superclass of the world
+      (defclass ^:public ^:static SuperCall
+        :extends Node
+        (field ^:public ^:final ^Class c)
+        (field ^:public ^:final ^String key)
+        (field ^:public ^:final ^Node target)
+        (field ^:public ^:final ^Node/1 args)
+        (field ^:public ^:final ^char/1 ptypes)
+        (constructor ^:public [this ^char t ^Class c ^String key ^Node target ^Node/1 args ^char/1 ptypes]
+          (set! (.-t this) t)
+          (set! (.-c this) c)
+          (set! (.-key this) key)
+          (set! (.-target this) target)
+          (set! (.-args this) args)
+          (set! (.-ptypes this) ptypes))
+        (method ^:public eval [this ^Frame f]
+          (let [o (.eval target f)]
+            (when (not (== (.-jump f) 0)) (return nil))
+            (let [vs (Rt/boxed args ptypes f)]
+              (if (nil? vs) nil (.superCall Rt/HOST o c key vs))))))
+
       ;; a record's equals (op 0), hashCode (1), toString (2), as ObjectMethods makes them:
       ;; the components' fields (index, type), names for toString
       (defclass ^:public ^:static RecordOp
@@ -2355,6 +2417,19 @@
         (method ^:public ctor ^void [this ^CF$Klass k ^CF$Meth m]
           (CFGo/addCtor (.-cls k) (.-params m) (.-flags m) (CF$CtorFn. m)))
 
+        (method ^:public canExtend ^boolean [this ^Class c] (CFGo/canExtend c))
+
+        (method ^:public superCtor ^void [this o ^Class c ^String desc ^Object/1 args]
+          (CFGo/superCtor o c desc args))
+
+        (method ^:public superCall [this o ^Class c ^String key ^Object/1 args]
+          (CFGo/superCall o c key args))
+
+        (method ^:public setEnum ^void [this ^CF$Klass k ^CF$Meth values]
+          (CFGo/setEnum (.-cls k)
+                        (anon AFn []
+                          (method ^:public invoke [this] (.invoke values nil (new Object/1 0))))))
+
         (method ^:public addField ^void [this ^CF$Klass k ^String name ^Class type ^int flags ^int i
                                          ^boolean isStatic]
           (if isStatic
@@ -2383,7 +2458,13 @@
       ;; an object's field i (of type type), and a static field (store[i], init run first)
       (method ^:public ^:static ^:native addField ^void [^Class c ^String name ^Class type ^int flags ^int i])
       (method ^:public ^:static ^:native addStatic ^void [^Class c ^String name ^Class type ^int flags
-                                                          ^Object/1 store ^int i ^IFn init]))))
+                                                          ^Object/1 store ^int i ^IFn init])
+      ;; superclasses of the world (their DynSub types, arbace.c2g.dyn/sub-supers)
+      (method ^:public ^:static ^:native canExtend ^boolean [^Class c])
+      (method ^:public ^:static ^:native superCtor ^void [o ^Class c ^String desc ^Object/1 args])
+      (method ^:public ^:static ^:native superCall [o ^Class c ^String key ^Object/1 args])
+      ;; an enum class: its Kind, and Enum.valueOf's constants (values's fn)
+      (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values]))))
 
 ;; arbace.classes.native, the boundary to the class forms (SPEC §9.5), is loaded on first use as
 ;; on the JVM; in the Go build it and the analysis it requires are evaluated from their embedded

@@ -29,7 +29,8 @@
                         Compiler$CF$FieldR Compiler$CF$NewArray Compiler$CF$ArrayInit
                         Compiler$CF$Aget Compiler$CF$Aset Compiler$CF$Alength Compiler$CF$ArrayClone
                         Compiler$CF$JavaStr Compiler$CF$ForEach Compiler$CF$Pat Compiler$CF$Switch
-                        Compiler$CF$IfInstance Compiler$CF$MakeLambda Compiler$CF$RecordOp)
+                        Compiler$CF$IfInstance Compiler$CF$MakeLambda Compiler$CF$RecordOp
+                        Compiler$CF$SuperCtor Compiler$CF$SuperCall)
            (java.lang.reflect Method Constructor Field Modifier)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -498,7 +499,9 @@
                (= (real-method owner name desc) (find-method Object name desc)))
           (Compiler$CF$ObjectCall. (char (tc ty)) name tn (when (seq args) (coerce ctx (first args) "Ljava/lang/Object;")))
           :else
-          (fail (str "The Go build's class forms cannot call " owner "." key " non-virtually yet"))))
+          ;; a method of the nearest superclass of the world (super.m())
+          (let [c (loop [k k] (if k (if (.-sup k) (recur (.-sup k)) (.-superClass k)) (internal->class owner)))]
+            (Compiler$CF$SuperCall. (char (tc ty)) c key tn (arg-nodes ctx args desc) (ptypes desc)))))
 
       :else
       (let [tt (a/value-type (:type target))
@@ -546,8 +549,10 @@
         k (klass cn)]
     (if k
       (let [xs (vec (concat (implicit-fields ctx cn (:outer an)) (super-outer-fields ctx cn an)))]
-        (when (:enum-const an) (fail "The Go build's class forms do not support enums yet"))
-        (Compiler$CF$NewI. k (ctor-meth k (:desc m)) (arg-nodes ctx (:args an) (:desc m))
+        (Compiler$CF$NewI. k (ctor-meth k (:desc m))
+                           (nodes (concat (when-let [ec (:enum-const an)]
+                                            [(konst "Ljava/lang/String;" (:name ec)) (konst "I" (int (:ordinal ec)))])
+                                          (arg-nodes ctx (:args an) (:desc m))))
                            (int-array (map first xs)) (nodes (map second xs))))
       (let [c (internal->class cn)
             outer? (:outer-instance? (env/info cn))
@@ -810,7 +815,7 @@
         sup (:super d)
         sk (klass sup)]
     (when (and sup (not sk) (not (.-iface k)) (not (.-fnClass k))
-               (not= sup "java/lang/Object") (not= sup "java/lang/Record"))
+               (not (.canExtend (host) (internal->class sup))))
       (fail (str "The Go build's class forms cannot extend " (str/replace sup "/" ".") " yet")))
     (set! (.-sup k) sk)
     (set! (.-superClass k) (when (and sup (not sk)) (internal->class sup)))
@@ -937,12 +942,32 @@
       :record-object-method
       (let [slots (vec (for [p bps] (slot! ctx p)))]
         [slots (record-op-node k d m self)])
+      :enum-values
+      (let [self-desc (t/internal->desc (:name d))
+            [sk i] (find-static k "$VALUES")]
+        [[] (Compiler$CF$CheckCast. (desc->class (str "[" self-desc)) nil
+                                    (Compiler$CF$ArrayClone. (Compiler$CF$GetStatic. \L sk (int i))))])
+      :enum-valueOf
+      (let [s (slot! ctx "Ljava/lang/String;")]
+        [[s] (Compiler$CF$CheckCast. (.-cls k) k
+                                     (Compiler$CF$CallR. \L (find-method Enum "valueOf" "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
+                                                         nil (nodes [(konst "Ljava/lang/Class;" (.-cls k))
+                                                                     (Compiler$CF$Local. \L (int s))])
+                                                         (char-array [\L \L])))])
+      :enum-$values
+      (let [self-desc (t/internal->desc (:name d))]
+        [[] (Compiler$CF$ArrayInit. (or (.-cls k) Object) \L
+                                    (nodes (for [c (:constants d)
+                                                 :let [[sk i] (find-static k (:name c))]]
+                                             (Compiler$CF$GetStatic. \L sk (int i)))))])
       (fail (str "The Go build's class forms do not support " (:derived m) " yet")))))
 
 (defn- init-nodes
   "The instance initializers of class n (field initializers and initializer blocks), in ctx."
   [ctx n]
   (mapv #(node ctx %) (:init @(:state (a/decl n)))))
+
+(declare enum-arg-nodes)
 
 (defn- trivial-super?
   "Is cn a superclass whose constructor the interpreter does not run: Object, Record, and the
@@ -960,33 +985,48 @@
         inits (fn [] (when (:calls-super ab) (init-nodes ctx n)))]
     (cond
       (nil? call) (inits)
-      (:enum-args call) (fail "The Go build's class forms do not support enums yet")
+      (:enum-args call)
+      (concat [(Compiler$CF$SuperCtor. Enum "(Ljava/lang/String;I)V" self (nodes (enum-arg-nodes ctx))
+                                       (char-array [\L \I]))]
+              (inits))
       (:anon-args call)
       (let [sk (.-sup k)
-            args (map #(local-node ctx %) (:params ab))]
+            cn (:class call)
+            cdesc (:desc (:ctor call))
+            args (concat (enum-arg-nodes ctx) (map #(local-node ctx %) (:params ab)))]
         (concat
-          (when sk
-            [(Compiler$CF$CtorCall. (ctor-meth sk (:desc (:ctor call))) self (nodes args) (int-array []) (nodes []))])
-          (when (and (not sk) (not (trivial-super? k (:class call))))
-            (fail (str "The Go build's class forms cannot extend " (str/replace (:class call) "/" ".") " yet")))
+          (cond
+            sk [(Compiler$CF$CtorCall. (ctor-meth sk cdesc) self (nodes args) (int-array []) (nodes []))]
+            (trivial-super? k cn) nil
+            :else [(Compiler$CF$SuperCtor. (internal->class cn) cdesc self (nodes args) (ptypes cdesc))])
           (inits)))
       (= :this (:kind call))
-      [(Compiler$CF$CtorCall. (ctor-meth k (:desc (:ctor call))) self (arg-nodes ctx (:args call) (:desc (:ctor call)))
+      [(Compiler$CF$CtorCall. (ctor-meth k (:desc (:ctor call))) self
+                              (nodes (concat (enum-arg-nodes ctx) (arg-nodes ctx (:args call) (:desc (:ctor call)))))
                               (int-array []) (nodes []))]
       :else
       (let [cn (:class call)
             sk (klass cn)
+            cdesc (:desc (:ctor call))
             xs (when (and sk (:outer call))
                  (when-let [i (get (:field-index (.-info sk)) "this$0")]
                    [[i (node ctx (:outer call))]]))]
         (concat
           (cond
-            sk [(Compiler$CF$CtorCall. (ctor-meth sk (:desc (:ctor call))) self
-                                       (arg-nodes ctx (:args call) (:desc (:ctor call)))
+            sk [(Compiler$CF$CtorCall. (ctor-meth sk cdesc) self
+                                       (arg-nodes ctx (:args call) cdesc)
                                        (int-array (map first xs)) (nodes (map second xs)))]
             (trivial-super? k cn) []
-            :else (fail (str "The Go build's class forms cannot extend " (str/replace cn "/" ".") " yet")))
+            :else [(Compiler$CF$SuperCtor. (internal->class cn) cdesc self (arg-nodes ctx (:args call) cdesc)
+                                           (ptypes cdesc))])
           (inits))))))
+
+(defn- enum-arg-nodes
+  "An enum constructor's implicit name and ordinal (its first two slots), for its super or this
+  call; none for other classes."
+  [ctx]
+  (when-let [[ns os] (:enum-slots ctx)]
+    [(Compiler$CF$Local. \L (int ns)) (Compiler$CF$Local. \I (int os))]))
 
 (defmethod build-op :ctor-call [ctx an]
   (if-let [site (:ctor-site ctx)]
@@ -1006,7 +1046,15 @@
       (cond
         ctor?
         (let [ctx (if (:recv ab) (ctx-for n "V" (:recv ab)) (receiver-ctx n "V"))
+              enum? (or (= :enum (:kind d)) (:enum-body d))
+              ctx (if enum?
+                    (assoc ctx :enum-slots [(slot! ctx "Ljava/lang/String;") (slot! ctx "I")])
+                    ctx)
               _ (params! ctx mt (:params ab))
+              _ (when enum?
+                  (let [[ns os] (:enum-slots ctx)]
+                    (set! (.-pslots mt) (int-array (concat [ns os] (.-pslots mt))))
+                    (set! (.-ptypes mt) (char-array (concat [\L \I] (.-ptypes mt))))))
               call-node (fn [ctx call] (ctor-call-node ctx k d ab call))
               ctx (assoc ctx :ctor-site call-node)
               body (if (:nested-call ab)
@@ -1245,6 +1293,10 @@
               (.ensure m))
             (clinit! k n))
           (doseq [n sorted] (publish! (ks n)))
+          (doseq [n sorted
+                  :let [^Compiler$CF$Klass k (ks n)]
+                  :when (= :enum (:kind (a/decl n)))]
+            (.setEnum (host) k (.declared k (str "values()[" (t/internal->desc n)))))
           (doseq [n order
                   :let [^Compiler$CF$Klass k (ks n)]]
             (when (.-cls k)

@@ -8,9 +8,14 @@
   their modifiers, for reflection."
   (:require [arbace.string :as str]
             [arbace.walk :as walk]
+            [arbace.classes.types :as t]
             [arbace.classes.analyze :as a]
+            [arbace.classes.emit :as e]
             [arbace.c2g.model :as m]
-            [arbace.c2g.names :as nm]))
+            [arbace.c2g.names :as nm]
+            [arbace.c2g.code :as c]
+            [arbace.c2g.dyn :as dyn]
+            [arbace.c2g.jrt :as jrt]))
 
 (def api-class "arbace/lang/Compiler$CFGo")
 
@@ -24,9 +29,96 @@
 (defn- native-name [mname desc]
   (symbol (str (m/go-name api-class) "_" (nm/method-base mname desc) "_native")))
 
+
+;; ---------------------------------------------------------------------------------------------
+;; superclasses of the world (arbace.c2g.dyn/sub-supers): an interpreted class extending C (or
+;; extending an interpreted class that does) has DynSub_C objects. For each C: the allocation
+;; (C's static initialization, then the object, without a constructor), C's constructors on an
+;; allocated object (the super call of the interpreted constructor), and C's implementations of
+;; its virtual methods (invokespecial: super.m()), by descriptor and key, from objects.
+
+(defn- sub-name [n] (str "DynSub_" (m/go-name n)))
+
+(defn- from-object
+  "The Java object x (an interpreter's argument) as the Go value of descriptor d."
+  [d x]
+  (cond (t/prim? d) (list 'assert (m/go-type :lang d)
+                          (list 'dynUnbox (symbol (str "jrt/Prim_" (t/prim-desc->name d))) x))
+        (= d "Ljava/lang/Object;") x
+        :else (list (list 'inst 'jrt/As (m/go-type :lang d)) x)))
+
+(defn- sub-forms
+  "dynCfNew_G, dynCfCtors_G, dynCfSupers_G of class n."
+  [n]
+  (let [g (sub-name n)
+        recv (list '* (symbol g))]
+    (binding [c/*f* {:pkg :lang}]
+      [(list 'go/func (symbol (str "dynCfNew_" g)) (with-meta [(tag 'dc '(* DynClass)) (tag 'f '(slice any))] {:tag 'any})
+             (if (or (m/hand-written? n) (m/trivial-init? n))
+               '(do)
+               (list (m/class-sym :lang n "_Init")))
+             (list 'addr (list 'lit (symbol g) :D 'dc :F 'f)))
+       (list 'go/var (tag (symbol (str "dynCfCtors_" g)) '(map string (func [any (slice any)])))
+             (apply list 'lit '(map string (func [any (slice any)]))
+                    (for [mm (if (m/hand-written? n) (m/methods-of n) (:methods (a/decl n)))
+                          :when (and (= "<init>" (:name mm)) (not (m/private? mm)) (m/mdesc-in-world? (:desc mm)))
+                          :when (or (not (m/hand-written? n))
+                                    (contains? (jrt/struct-methods (:jrt m/*w*) (m/go-name n)) (nm/ctor-base (:desc mm))))
+                          :let [real (if (m/hand-written? n) (:desc mm) (e/ctor-real-desc n mm))
+                                [ps _] (t/parse-method-desc (:desc mm))
+                                [rps _] (t/parse-method-desc real)]
+                          :when (= (count ps) (count rps))]
+                      [(:desc mm)
+                       (list 'fn [(tag 'o 'any) (tag 'args '(slice any))]
+                             (list 'let ['t (list 'assert recv 'o)]
+                                   (apply list (symbol (str "." (nm/ctor-base real)))
+                                          (list (symbol (str ".-" (m/go-name n))) 't) 't
+                                          (map-indexed (fn [i p] (from-object p (list 'aget 'args i))) ps))))])))
+       (list 'go/var (tag (symbol (str "dynCfSupers_" g)) '(map string (func [any (slice any)] [any])))
+             (apply list 'lit '(map string (func [any (slice any)] [any]))
+                    (for [[[name desc :as k] _] (sort-by first (m/vmethods n))
+                          :when (m/mdesc-in-world? desc)
+                          :let [impl (m/impl-of n k)
+                                base (nm/method-base name desc)
+                                [ps r] (t/parse-method-desc desc)
+                                pn (map-indexed (fn [i p] (from-object p (list 'aget 'args i))) ps)
+                                call (case (:kind impl)
+                                       (:class :jrt-impl) (apply list (symbol (str ".Impl_" base)) 't 't pn)
+                                       :default (apply list (m/class-sym :lang (:owner impl) (str "_" base)) 't pn)
+                                       :promoted (apply list (symbol (str "." base)) (list (symbol (str ".-" (m/go-name n))) 't) pn)
+                                       nil)]
+                          :when call]
+                      [(str name desc)
+                       (list 'fn (with-meta [(tag 'o 'any) (tag 'args '(slice any))] {:tag 'any})
+                             (list 'let ['t (list 'assert recv 'o)]
+                                   (if (= "V" r)
+                                     (list 'do call '(return nil))
+                                     (list 'return (list 'jrt/Box call)))))])))])))
+
+(defn subs-forms
+  "The forms of the superclasses of the world, and cfSubFor (nil when c has none)."
+  [T]
+  (let [cs (dyn/proxy-classes T)]
+    (concat
+      (mapcat sub-forms cs)
+      [(list 'go/func 'cfSubFor
+             "cfSubFor: the allocation, constructors and implementations of superclass c of the world
+(nil: c has no DynSub type).\n"
+             [(tag 'c '(* jrt/Class))]
+             :results '[(func [(* DynClass) (slice any)] [any]) (map string (func [any (slice any)]))
+                        (map string (func [any (slice any)] [any]))]
+             (apply list 'switch 'c
+                    (for [p cs :let [g (sub-name p)]]
+                      (list 'case [(m/class-sym :lang p "_class")]
+                            (list 'return (symbol (str "dynCfNew_" g)) (symbol (str "dynCfCtors_" g))
+                                  (symbol (str "dynCfSupers_" g))))))
+             '(return nil nil nil))])))
+
 (defn forms
   "The forms of c2g_cf.go (package arbace/lang)."
-  []
+  [T]
+  (concat
+  (subs-forms T)
   [(list 'c2g/comment "---- the class forms at the REPL: Compiler$CFGo's natives (doc/go/CLASSFORMS-REPL.md)")
    '(go/func cfIsInstance
       "cfIsInstance: whether x's class is c or a subclass of c (an interpreted class's objects: Dyn,
@@ -64,12 +156,24 @@ or CF$FnObj, whose getClass is their class).\n"
                     c (jrt/DefineDynamic info)]
                 (set! (.-IsInstance info) (fn ^bool [^any x] (cfIsInstance c x)))
                 (return c)))
-            (let [info (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name)) :Modifiers flags
+            ;; the nearest superclass of the world: Object (Dyn) or one with a DynSub type
+            (let [base super]
+              (while (cfInterpreted base) (set! base (.-Super (.Info base))))
+              (let [(values nw _ _) (cfSubFor base)
+                    (values bslots _ bown) (dynSubFor base)]
+                (when (and (!= base jrt/Object_class) (== nw nil))
+                  (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
+                                       (jrt/Str (+ "a class extending " (.-Name (.Info base)) " is not in the Go build"))))))
+            (let [slots bslots
+                  info (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name)) :Modifiers flags
                                   :Kind jrt/KindClass :Super super :Interfaces ifs
                                   :Go "arbace/lang.Dyn (class form)"))
-                  dc (addr (lit DynClass :Slots (make (slice IFn) (len dynSlots)) :SlotMap dynSlots
+                  dc (addr (lit DynClass :Slots (make (slice IFn) (len slots)) :SlotMap slots :Own bown
                                 :Ifaces (make (map (* jrt/Class) bool)) :ByKey (make (map string IFn))
                                 :CF klass))]
+              (when (== nw nil)
+                (set! (.-SlotMap dc) dynSlots)
+                (set! (.-Slots dc) (make (slice IFn) (len dynSlots))))
               (range [_ i ifs] (dynAddInterface dc i))
               ;; the interfaces of the superclasses
               (let [s super]
@@ -81,11 +185,51 @@ or CF$FnObj, whose getClass is their class).\n"
                 (set! (.-IsInstance info) (fn ^bool [^any x] (cfIsInstance c x)))
                 (.Lock dynMu)
                 (aset dynClasses c dc)
+                (when (!= nw nil) (aset cfNews c nw))
                 (.Unlock dynMu)
-                c))))
+                c))))))
+   '(go/var ^{:tag (map (* jrt/Class) (func [(* DynClass) (slice any)] [any]))
+              :doc "cfNews: the allocation of the interpreted classes whose objects are DynSub_C (under dynMu).\n"}
+      cfNews (make (map (* jrt/Class) (func [(* DynClass) (slice any)] [any]))))
+   '(go/func cfInterpreted "cfInterpreted: whether c is an interpreted class (made by Compiler$CFGo).\n"
+      ^bool [^{:tag (* jrt/Class)} c]
+      (.Lock dynMu)
+      (let [(values dc ok) (aget dynClasses c)]
+        (.Unlock dynMu)
+        (and ok (!= (.-CF dc) nil))))
    (list 'go/func (native-name "alloc" "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;")
          (with-meta [(tag 'c '(* jrt/Class)) (tag 'values '(* jrt/RefArray))] {:tag 'any})
-         '(addr (lit Dyn :D (dynClassOf c) :F (.-A values))))
+         '(let [dc (dynClassOf c)]
+            (.Lock dynMu)
+            (let [nw (aget cfNews c)]
+              (.Unlock dynMu)
+              (when (!= nw nil) (return (nw dc (.-A values))))
+              (addr (lit Dyn :D dc :F (.-A values))))))
+   (list 'go/func (native-name "canExtend" "(Ljava/lang/Class;)Z")
+         (with-meta [(tag 'c '(* jrt/Class))] {:tag 'bool})
+         '(let [(values nw _ _) (cfSubFor c)]
+            (or (== c jrt/Object_class) (!= nw nil))))
+   (list 'go/func (native-name "superCtor" "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)V")
+         [(tag 'o 'any) (tag 'c '(* jrt/Class)) (tag 'desc '(* jrt/String)) (tag 'args '(* jrt/RefArray))]
+         '(let [(values _ ctors _) (cfSubFor c)
+                f (aget ctors (.String (jrt/NN desc)))]
+            (when (== f nil)
+              (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
+                                   (jrt/Str (+ "constructor " (.-Name (.Info c)) (.String desc) " is not in the Go build"))))))
+            (f o (.-A args))))
+   (list 'go/func (native-name "superCall" "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
+         (with-meta [(tag 'o 'any) (tag 'c '(* jrt/Class)) (tag 'key '(* jrt/String)) (tag 'args '(* jrt/RefArray))] {:tag 'any})
+         '(let [(values _ _ supers) (cfSubFor c)
+                f (aget supers (.String (jrt/NN key)))]
+            (when (== f nil)
+              (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
+                                   (jrt/Str (+ "super call of " (.-Name (.Info c)) "." (.String key) " is not in the Go build"))))))
+            (f o (.-A args))))
+   (list 'go/func (native-name "setEnum" "(Ljava/lang/Class;Larbace/lang/IFn;)V")
+         [(tag 'c '(* jrt/Class)) (tag 'values 'IFn)]
+         '(let [info (.Info c)]
+            (set! (.-Kind info) jrt/KindEnum)
+            (set! (.-Enum info) (fn ^{:tag (* jrt/RefArray)} [] (assert (* jrt/RefArray) (.Invoke__O values))))))
    (list 'go/func (native-name "klassOf" "(Ljava/lang/Object;)Ljava/lang/Object;")
          (with-meta [(tag 'o 'any)] {:tag 'any})
          '(let [(values d ok) (assert dynObject o)]
@@ -154,7 +298,7 @@ value.\n"
       (when (and (.IsPrimitive__Z type) (!= v nil))
         (let [(values x ok) (jrt/Unbox type v)]
           (when ok (return x))))
-      v)])
+      v)]))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the generic signatures of the world (arbace/classes/generics.edn, embedded): what
