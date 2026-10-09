@@ -4,15 +4,18 @@
 # §4.3), printed by the printer (arbace.g2c.print, through bin/g2c build --print-only) into a
 # module and built, vetted and tested by gc.
 #
-# Usage: bin/jrt build [--arch amd64|arm64|all]
+# Usage: bin/jrt build [--arch amd64|arm64|all] [--prog DIR]
 #            print the module into .tmp/jrt-go/mod (with the test files), then go build and
 #            go vet the package for linux/ARCH (default all: amd64 and arm64)
-#        bin/jrt test [--arch amd64|arm64|all] [--race] [GO-TEST-FLAGS...]
+#        bin/jrt test [--arch amd64|arm64|all] [--race] [--prog DIR] [GO-TEST-FLAGS...]
 #            print the module with its test files (the forms' _test files, SPEC §15 Q14),
 #            add the test data (made first if missing or older than test/jrt), and go test the
 #            package: amd64 natively, arm64
 #            under qemu-aarch64 (go test -exec); --race adds -race (amd64 only); other flags
 #            go to go test (-run RE, -v, -bench RE, -count N ...)
+#        --prog DIR: build or test the program root DIR instead of go/: c2g's (bin/c2g --tests
+#            --out OUT writes OUT/prog: jrt with the stand-ins replaced by the translated JDK
+#            classes), printed into .tmp/jrt-go/prog/mod
 #        bin/jrt testdata [--check]
 #            regenerate the differential tests' expected values from the JVM into
 #            $JRT_WORK/testdata (bin/arbace runs test/jrt/testdata.clj; regenerated, not
@@ -60,9 +63,9 @@ make_testdata() {
 # print_module DIR: the module of go/ (package arbace/jrt) with its tests into DIR/mod, and
 # the test data (made when missing or older than its generator)
 print_module() {
-  local out=$1
+  local out=$1 src=${2:-$root}
   mkdir -p "$out"
-  bin/g2c build --print-only --tests --module arbace --work "$out" "$root" >&2
+  bin/g2c build --print-only --tests --module arbace --work "$out" "$src" >&2
   if [ ! -f "$work/testdata/.done" ] || [ -n "$(find test/jrt -name 'testdata*.clj' -newer "$work/testdata/.done")" ]; then
     echo "== test data from the JVM (test/jrt/testdata.clj)" >&2
     make_testdata "$work/testdata" && touch "$work/testdata/.done"
@@ -76,7 +79,7 @@ print_module() {
 make_overlay() {
   local dir=$work/overlay
   local json=$dir/overlay.json
-  if [ ! -f "$json" ] || [ -n "$(find overlay -newer "$json")" ] || ! grep -q "\"$goroot/src/runtime/" "$json"; then
+  if [ ! -f "$json" ] || [ -n "$(find overlay/go -newer "$json")" ] || ! grep -q "\"$goroot/src/runtime/" "$json"; then
     echo "== the patched runtime (overlay/go/runtime.clj)" >&2
     rm -rf "$dir"; mkdir -p "$dir"
     bin/g2c-print --layout gofmt overlay/go/runtime.clj "$dir/runtime" >&2
@@ -132,31 +135,34 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
   build)
-    arch=all
+    arch=all prog=
     while [ $# -gt 0 ]; do
-      case $1 in --arch) arch=$2; shift 2 ;; *) usage ;; esac
+      case $1 in --arch) arch=$2; shift 2 ;; --prog) prog=$2; shift 2 ;; *) usage ;; esac
     done
-    print_module "$work"
+    mod=$work
+    if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
     ovl=$(make_overlay)
     status=0
     for a in $(arches "$arch"); do
       echo "== linux/$a: go build, go vet" >&2
       # shellcheck disable=SC2046
-      (cd "$work/mod" && env $(goenv "$a") "$go" build -trimpath -overlay "$ovl" ./... &&
+      (cd "$mod/mod" && env $(goenv "$a") "$go" build -trimpath -overlay "$ovl" ./... &&
          env $(goenv "$a") "$go" vet -overlay "$ovl" ./...) || status=1
     done
     exit $status ;;
   test)
-    arch=all race=
+    arch=all race= prog=
     flags=()
     while [ $# -gt 0 ]; do
       case $1 in
         --arch) arch=$2; shift 2 ;;
         --race) race=1; shift ;;
+        --prog) prog=$2; shift 2 ;;
         *) flags+=("$1"); shift ;;
       esac
     done
-    print_module "$work"
+    mod=$work
+    if [ -n "$prog" ]; then mod=$work/prog; print_module "$mod" "$(cd "$prog" && pwd)"; else print_module "$mod"; fi
     ovl=$(make_overlay)
     status=0
     for a in $(arches "$arch"); do
@@ -170,10 +176,10 @@ case $cmd in
       if [ -n "$race" ] && [ "$a" = amd64 ]; then
         # the race detector needs cgo on linux/amd64
         # shellcheck disable=SC2046
-        (cd "$work/mod" && env $(goenv "$a") CGO_ENABLED=1 "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
+        (cd "$mod/mod" && env $(goenv "$a") CGO_ENABLED=1 "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
       else
         # shellcheck disable=SC2046
-        (cd "$work/mod" && env $(goenv "$a") "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
+        (cd "$mod/mod" && env $(goenv "$a") "$go" test -trimpath "${extra[@]}" "${flags[@]}" ./...) || status=1
       fi
     done
     exit $status ;;

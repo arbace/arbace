@@ -544,3 +544,105 @@ EVAL-PLAN's Q1-Q7 where they touch §10.
   checkcast where the JVM adapts; the analyzer now asks the declaration (its
   `@FunctionalInterface` annotation and single abstract method). The JVM build's choice is
   unchanged. *Accepted 2026-10-09, folded into C2G-SPEC §4.1 as E8.*
+
+# c2g, phase 2C: the rest of the JDK closure
+
+B1a step 4, phase 2, part C (branch `c2g-2c`, 2026-10-09): the JDK closure completed where the
+oracle reaches it, the ICU analysis failure, BigInteger and BigDecimal checked against the JVM,
+and the `java.util.regex` port run on the oracle's regex corpus. jrt's side is JRT-NOTES.md,
+"Phase 2C".
+
+## What changed
+
+| where | what |
+|---|---|
+| `bin/jrt-convert`, `test/g2c/jrt_sources.clj` | 31 jdk26u files added to the closure (`added-sources`) and jrt's own Java (`overlay/jdk/java.base`, KIND `overlay`): 223 files, all shape-identical to javac's; jrt's own files checked in one chunk |
+| `overlay/jdk/` (new) | jrt's Java (`FileDescriptor`, `FileInputStream`, `FileOutputStream`, `OutputStreamWriter`, `InputStreamReader`, `jdk.internal.jrt.HostFiles`, `StandardStreams`, `CaseInsensitiveComparator`) and the JDK's Go-build variants (`variants/CaseFolding.clj`) |
+| `arbace/c2g/main.clj` (shared, small) | the JDK's variant files (`overlay/jdk/variants`) when the JDK is an input; jrt's statics c2g writes (below) declared to the scan, their classes' members rooted |
+| `arbace/c2g/out.clj` (shared, small) | c2g's support writes `System_in`/`out`/`err`, `System.setIn`/`setOut`/`setErr` and their initialization (by `StandardStreams`), `StderrPrint` through `System.err`, `String_CASE_INSENSITIVE_ORDER`, and `String`'s `split` (2), `replaceAll`, `replaceFirst`, `matches` over `Pattern` (`string-regex-methods`), each only when its classes are translated; `java-names`: a class of jrt's Java registered under the JDK's name it stands for |
+| `arbace/c2g/code.clj` (shared, one form) | **bug fix**: a private method of a non-leaf class called on a receiver that is not a local or `this` evaluated the receiver twice (`Impl_` takes the struct and the receiver): `MutableBigInteger` became non-leaf with `SignedMutableBigInteger`, and `this.divideLongMagnitude(...).toLong()` divided twice, corrupting the quotient (21 `BigDecimal` steps threw `ArrayIndexOutOfBoundsException`). The receiver now goes to a temporary before the arguments |
+| `arbace/classes/analyze.clj` (the class forms compiler, one form) | **bug fix**, the ICU failure: an import of a nested class by its binary name (`(import '(jdk.internal.icu.util CodePointTrie$Fast16))`, as j2c writes `import ...CodePointTrie.Fast16`) of a class compiled from source was entered in `env/source-imports`, which `resolve-class-sym`'s `$` branch did not consult ("Unknown type: CodePointTrie$Fast16" in `NormalizerImpl`, then 7 more classes). Regression test `classes.loader-test/source-import-of-member-class` (two packages built from source by `arbace.classes.build`, as the bootstrap does). The world now analyzes without failures; the bootstrap still reproduces itself |
+| `arbace/lang/go/RT.clj`, `go/arbace/jrt/natives.clj` | A's interim `RT$HostWriter`/`RT$HostReader` and their natives are gone: `*out*`, `*err*`, `*in*` are RT's own (an `OutputStreamWriter` over `System.out` ...), all translated (P2A-4's interim part is superseded) |
+| `test/oracle/classes/BigNumbers.clj` (new) | 3,974 steps (below) |
+| `test/c2g/fixtures/FxStreams.clj` (new) | the streams, files and the comparator against the JVM |
+| `bin/c2g-regex`, `test/c2g/regex_check.clj`, `test/c2g/regex/RegexCheck.clj` (new) | the regex corpus on the translated `java.util.regex` (below) |
+| `test/c2g/check.clj` | a `Float` result of infinity compared without `float`'s overflow check; `test/c2g/needs-core.edn`: BigNumbers 3974 |
+| `bin/jrt` | `build`/`test --prog DIR`; the runtime overlay's staleness looks at `overlay/go` only (`overlay/jdk` made every call rebuild it, and its progress lines broke the overlay path) |
+
+## Results
+
+`bin/c2g-check -- --slice '^arbace/lang/' --slice '^java/' --slice '^jdk/'` (every class script,
+`BigNumbers` included, and the fixtures), linux/amd64 and, under `qemu-aarch64`, linux/arm64,
+identical step for step: **8,949 of 8,996 steps pass, 0 fail, 0 unavailable, 47 need core**
+(A's 46 and `BigNumbers` 3974). The 10 steps unavailable since phase 1
+(`String.CASE_INSENSITIVE_ORDER`) pass.
+
+**BigInteger and BigDecimal** (`BigNumbers`, 3,974 steps): every operation of both classes over
+values across the Karatsuba, Toom-Cook 3 and Burnikel-Ziegler thresholds (numbers to about 28,500
+bits), the bit operations, `modPow`/`modInverse`, `sqrt`, the conversions and exact
+conversions, `toString` in radixes 2 to 36, `BigDecimal`'s division in its four forms with
+`MathContext`s and `RoundingMode`s, `setScale`, `round`, `stripTrailingZeros`, the plain,
+scientific and engineering texts, the parsing errors and arithmetic exceptions with their
+messages, then `BigInt` and `Numbers` over them: **3,973 pass on both architectures**; the last
+prints a `BigInteger` with core's printer (need core).
+
+**The regex corpus** (`bin/c2g-regex`, `C2G_ARCH=amd64,arm64`; c2g translates the closure with
+`RegexCheck` as the root, 352 classes; the Go program runs the 1,233 cases in 0.1 s):
+
+| file | cases | pass | inputs | pass |
+|---|---:|---:|---:|---:|
+| anchors | 109 | 109 | 1,096 | 1,096 |
+| basics | 132 | 129 | 1,400 | 1,349 |
+| classes | 173 | 173 | 1,538 | 1,538 |
+| cross | 60 | 60 | 1,080 | 1,080 |
+| errors | 167 | 165 | 167 | 165 |
+| flags | 153 | 153 | 1,319 | 1,319 |
+| groups | 70 | 70 | 874 | 874 |
+| lookaround | 60 | 60 | 947 | 947 |
+| quantifiers | 83 | 83 | 820 | 820 |
+| split_replace | 31 | 31 | 383 | 383 |
+| unicode | 195 | 171 | 2,058 | 1,794 |
+| **total** | **1,233** | **1,204** | **11,682** | **11,365** |
+
+The same on both architectures. All 29 failing cases need JDK resource data: 24 `CANON_EQ`
+(`java.text.Normalizer`, over ICU's `nfc.nrm` read through `java.nio.ByteBuffer`) and 5 `\N{name}`
+(`CharacterName`, `uniName.dat` through `java.util.zip`). Before `CaseFolding`'s variant, 9 more
+(`CASE_INSENSITIVE | UNICODE_CASE` classes) failed: its static initializer used a stream.
+
+## Decisions where the spec was silent
+
+- **jrt's own Java.** Where a JDK class's source needs what is cut, jrt's replacement is Java
+  (`overlay/jdk/java.base`, the JDK's path), converted by j2c and checked against javac with the
+  closure, translated by c2g like any JDK class, rather than Go in jrt: it extends translated
+  classes (`Writer`, `OutputStream` ...), which hand-written Go cannot name in jrt's own build.
+  What only Go can do is a `native` method (static, primitive and array parameters, so that jrt
+  builds without the translated types): `HostFiles`' natives in `go/arbace/jrt/files.clj`.
+- **jrt's statics with translated values** (`System.out`, `String.CASE_INSENSITIVE_ORDER`) are
+  written by c2g into jrt's `c2g_support`, as `String.format` is (A5), and initialized at package
+  initialization by jrt's Java (`StandardStreams`); likewise `String`'s regex methods, Go methods
+  of jrt's `String` declared by c2g.
+- **JDK variants** (`overlay/jdk/variants`) are read whenever the JDK closure is an input, with
+  the same forms as `arbace/lang/go`'s.
+
+## Proposed amendments to C2G-SPEC (for the user's review)
+
+- **P2C-1 (§4.1, §4.3) jrt's own Java and the JDK's variants.** The JDK input is the translated
+  closure plus `overlay/jdk/java.base` (jrt's Java, replacing or adding to jdk26u's files);
+  Go-build variants of JDK classes live in `overlay/jdk/variants`. A class of jrt's Java may be
+  registered under the JDK name it stands for (`java-names`).
+- **P2C-2 (§11, A5) c2g-written jrt members.** Beyond `String.format`: `System.in`/`out`/`err` and
+  their setters, `String.CASE_INSENSITIVE_ORDER`, `String.split`/`replaceAll`/`replaceFirst`/
+  `matches`, written by c2g when their classes are translated; `printStackTrace()` and uncaught
+  exceptions print through `System.err`.
+- **P2C-3 (J9) The stand-ins.** All 64 are translated classes in a c2g program; the stand-in
+  files remain only for jrt's own build.
+
+## Sources (phase 2C)
+
+Nothing vendored. Read: openjdk/jdk26u (`/root/jdk26u`, `baf63fb`)
+`src/java.base/share/classes/sun/nio/cs/UTF_8.java` (the decoder's malformed lengths),
+`StreamEncoder.java` and `StreamDecoder.java` (REPLACE, the leftover surrogate, reading what is
+ready), `java/io/OutputStreamWriter.java`, `InputStreamReader.java`, `FileDescriptor.java`,
+`FileInputStream.java`, `FileOutputStream.java` (APIs and messages), `java/lang/System.java`
+(`initPhase1`, `newPrintStream`), `java/lang/String.java` (`CaseInsensitiveComparator`, `split`,
+`replaceAll`, `replaceFirst`, `matches`); the JVM for every expected result.

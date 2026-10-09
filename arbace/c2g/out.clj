@@ -204,12 +204,48 @@
                                      :Interfaces (list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (m/class-sym pkg fi "_class"))
                                      :Go (str (nm/pkg-path pkg) "." a)))))])))
 
+(def string-regex-methods
+  "String's methods over java.util.regex, which c2g writes into jrt's c2g_support when Pattern is
+  translated (jrt's String is hand-written; JRT-NOTES.md, \"waiting for the regex port\"): Go
+  method name, then its definition as jdk26u's String defines it (split's one-character fast
+  path gives what Pattern.split gives)."
+  [["Split_String__String1"
+    '(go/method Split_String__String1 "Split_String__String1 is String.split(regex).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (.Split_String_I__String1 t regex 0))]
+   ["Split_String_I__String1"
+    '(go/method Split_String_I__String1 "Split_String_I__String1 is String.split(regex, limit).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex ^int32 limit]
+       (.Split_CharSequence_I__String1 (Pattern_Compile_String__Pattern regex) t limit))]
+   ["ReplaceAll_String_String__String"
+    '(go/method ReplaceAll_String_String__String "ReplaceAll_String_String__String is String.replaceAll.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceAll_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["ReplaceFirst_String_String__String"
+    '(go/method ReplaceFirst_String_String__String "ReplaceFirst_String_String__String is String.replaceFirst.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceFirst_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["Matches_String__Z"
+    '(go/method Matches_String__Z "Matches_String__Z is String.matches.\n"
+       ^bool [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (Pattern_Matches_String_CharSequence__Z regex t))]])
+
+(def java-names
+  "Classes of jrt's own Java (overlay/jdk) that stand for a JDK class jrt cannot translate (a
+  nested class of a hand-written one): the name Class.getName answers for them."
+  {"jdk/internal/jrt/CaseInsensitiveComparator" "java.lang.String$CaseInsensitiveComparator"})
+
+(defn java-name [n] (or (java-names n) (str/replace n "/" ".")))
+
 (defn support-forms
   "c2g's helpers in package jrt (c2g_support): what translated code calls besides jrt's API."
   []
   (let [bool-translated (m/translated? "java/lang/Boolean")
         bool-init (and bool-translated (not (m/trivial-init? "java/lang/Boolean")))]
-    (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
+    (concat
+     ;; String's regex methods
+     (when (m/translated? "java/util/regex/Pattern") (map second string-regex-methods))
+     (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
      (list 'go/func 'C2g_Missing :type-params ['T] (with-meta [(tag 'why 'string)] {:tag 'T})
@@ -243,6 +279,43 @@ translated java.util.Formatter).\n"
           "String_Format_Locale_String_O1__String is String.format(Locale, ...).\n"
           ^{:tag (* String)} [^{:tag (* Locale)} l ^{:tag (* String)} format ^{:tag (* RefArray)} args]
           (.ToString__String (.Format_String_O1__Formatter (Formatter_New_Locale l) format args))))
+     ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (let [is (m/go-type :jrt "Ljava/io/InputStream;")
+             ps (m/go-type :jrt "Ljava/io/PrintStream;")]
+         (list 'go/var [(tag 'System_in is)] [(tag 'System_out ps)] [(tag 'System_err ps)])))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetIn_InputStream__V "System_SetIn_InputStream__V is System.setIn.\n"
+             [(tag 'in (m/go-type :jrt "Ljava/io/InputStream;"))] '(set! System_in in)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetOut_PrintStream__V "System_SetOut_PrintStream__V is System.setOut.\n"
+             [(tag 'out (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_out out)))
+     (when (m/translated? "jdk/internal/jrt/StandardStreams")
+       (list 'go/func 'System_SetErr_PrintStream__V "System_SetErr_PrintStream__V is System.setErr.\n"
+             [(tag 'err (m/go-type :jrt "Ljava/io/PrintStream;"))] '(set! System_err err)))
+     (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+       (list 'go/var (tag 'String_CASE_INSENSITIVE_ORDER (m/go-type :jrt "Ljava/util/Comparator;"))))
+     (when (or (m/translated? "jdk/internal/jrt/StandardStreams") (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator"))
+       (apply list 'go/func 'init []
+              (concat
+                (when (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+                  (concat (when-not (m/trivial-init? "jdk/internal/jrt/CaseInsensitiveComparator")
+                            ['(CaseInsensitiveComparator_Init)])
+                          ['(set! String_CASE_INSENSITIVE_ORDER CaseInsensitiveComparator_INSTANCE)]))
+                (when (m/translated? "jdk/internal/jrt/StandardStreams")
+                  ['(set! System_in (StandardStreams_In__InputStream))
+                   '(set! System_out (StandardStreams_Out__PrintStream))
+                   '(set! System_err (StandardStreams_Err__PrintStream))
+                   ;; printStackTrace() and uncaught exceptions print to System.err, as the
+                   ;; JVM's do (jrt's host stream while it is null)
+                   (list 'let [(tag 'host (list 'func ['string])) 'StderrPrint]
+                         (list 'set! 'StderrPrint
+                               (list 'fn [(tag 's 'string)]
+                                     (list 'when (list '== 'System_err nil)
+                                           '(host s)
+                                           '(return))
+                                     '(.Print_String__V System_err (Str s))
+                                     '(.Flush__V System_err))))]))))
      ;; records' derived equals and hashCode (java.lang.runtime.ObjectMethods)
      '(go/func C2g_ObjHash "C2g_ObjHash is Objects.hashCode.\n" ^int32 [^any x]
         (when (== x nil) (return 0))
@@ -259,7 +332,7 @@ translated java.util.Formatter).\n"
         (conv int32 (math/Float32bits f)))
      (list 'go/type 'C2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
      (list 'go/func 'C2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
-           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))])))
+           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))]))))
 
 (defn- modifiers [n]
   (let [dd (a/decl n)
@@ -359,7 +432,7 @@ translated java.util.Formatter).\n"
                    (list 'addr
                          (apply list 'lit (m/jrt-sym pkg "ClassInfo")
                                 (concat
-                                  [:Name (str/replace n "/" ".") :Modifiers (modifiers n) :Kind (kind-sym pkg n)]
+                                  [:Name (java-name n) :Modifiers (modifiers n) :Kind (kind-sym pkg n)]
                                   (when (and sup (not iface)) [:Super (c/class-val (str "L" sup ";"))])
                                   (when (seq ifaces)
                                     [:Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
@@ -398,7 +471,7 @@ translated java.util.Formatter).\n"
     (list 'go/var (symbol (str (m/go-name n) "_class"))
           (list (m/jrt-sym pkg "Define")
                 (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
-                                  :Name (str/replace n "/" ".")
+                                  :Name (java-name n)
                                   :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
                                   :Super (when-not (env/interface? n) (m/jrt-sym pkg "Object_class"))
                                   :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))

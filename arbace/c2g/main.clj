@@ -199,11 +199,14 @@
                       (when (or (:lang opts) (not (:jdk opts))) [{:root "arbace" :dirs ["lang"]}])
                       (when (or (:jdk opts) (not (:lang opts))) (when (.isDirectory (io/file jdk)) [{:root jdk :tree true}]))
                       (for [i (:inputs opts)] {:root i :tree true})))
-        variant-files (or (:variant-files opts)
-                          (when (some #(= "arbace" (:root %)) inputs)
-                            (let [d (io/file "arbace/lang/go")]
+        clj-files (fn [dir] (let [d (io/file dir)]
                               (when (.isDirectory d)
-                                (sort (filter #(str/ends-with? (str %) ".clj") (.listFiles d)))))))
+                                (sort (filter #(str/ends-with? (str %) ".clj") (.listFiles d))))))
+        variant-files (or (:variant-files opts)
+                          (concat
+                            (when (some #(= "arbace" (:root %)) inputs) (clj-files "arbace/lang/go"))
+                            ;; the JDK closure's variants (jrt's, overlay/jdk/variants)
+                            (when (some #(= jdk (:root %)) inputs) (clj-files "overlay/jdk/variants"))))
         world (w/load-world inputs :variant-files variant-files)
         _ (doseq [[n c] (sort (:variants world))]
             (println (str "c2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
@@ -218,10 +221,22 @@
         ;; c2g writes it into jrt's c2g_support when Formatter is translated
         formatter? (and (contains? @(:compile-set world) "java/util/Formatter")
                         (or (empty? (:slice opts)) (some #(re-find % "java/util/Formatter") (:slice opts))))
-        scan (cond-> scan
-               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"]))
         slice (:slice opts)
         in-slice? (fn [n] (or (empty? slice) (some #(re-find % n) slice)))
+        ;; jrt's statics whose values are translated objects (overlay/jdk's jrt classes): the
+        ;; standard streams of System and String.CASE_INSENSITIVE_ORDER, written by c2g into
+        ;; jrt's c2g_support (out/jrt-statics-forms) when their classes are translated
+        jrt-java? (fn [n] (and (contains? @(:compile-set world) n) (in-slice? n)))
+        streams? (jrt-java? "jdk/internal/jrt/StandardStreams")
+        ci-order? (jrt-java? "jdk/internal/jrt/CaseInsensitiveComparator")
+        ;; String's regex methods over the translated java.util.regex (out/support-forms)
+        regex? (jrt-java? "java/util/regex/Pattern")
+        scan (cond-> scan
+               formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
+               streams? (update :vars into ["System_in" "System_out" "System_err"])
+               streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
+               ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
+               regex? (update-in [:methods "String"] (fnil into #{}) (map first out/string-regex-methods)))
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
@@ -231,6 +246,19 @@
                                ;; what the evaluator's Dyn (c2g_dyn.go) calls
                                (when (a/decl dyn/api-class) (dyn/roots))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
+                               (when streams?
+                                 [["jdk/internal/jrt/StandardStreams" "in" "()Ljava/io/InputStream;"]
+                                  ["jdk/internal/jrt/StandardStreams" "out" "()Ljava/io/PrintStream;"]
+                                  ["jdk/internal/jrt/StandardStreams" "err" "()Ljava/io/PrintStream;"]])
+                               (when regex?
+                                 [["java/util/regex/Pattern" "compile" "(Ljava/lang/String;)Ljava/util/regex/Pattern;"]
+                                  ["java/util/regex/Pattern" "split" "(Ljava/lang/CharSequence;I)[Ljava/lang/String;"]
+                                  ["java/util/regex/Pattern" "matcher" "(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;"]
+                                  ["java/util/regex/Pattern" "matches" "(Ljava/lang/String;Ljava/lang/CharSequence;)Z"]
+                                  ["java/util/regex/Matcher" "replaceAll" "(Ljava/lang/String;)Ljava/lang/String;"]
+                                  ["java/util/regex/Matcher" "replaceFirst" "(Ljava/lang/String;)Ljava/lang/String;"]])
+                               (when ci-order?
+                                 [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
                                (when formatter?
                                  [["java/util/Formatter" "<init>" "()V"]
                                   ["java/util/Formatter" "<init>" "(Ljava/util/Locale;)V"]

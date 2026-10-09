@@ -591,7 +591,11 @@ want of that kind matches the bare class.\n"
             (aset parts i (subslice p _ j))))
         (set! want (strings/Join parts "|")))
       (switch (aget c 0)
-        (case ["methods"]
+        (case ["methods" "methods-c2g"]
+          ;; methods-c2g holds when c2g's translation of the JDK is in the program (bin/jrt
+          ;; test --prog): its class jdk.internal.jrt.StandardStreams, always translated, is registered
+          (when (!= (== (aget c 0) "methods-c2g") (!= (ForName "jdk.internal.jrt.StandardStreams") nil))
+            (continue))
           (let [^{:tag (slice string)} ss nil]
             (range [_ x (.-A (.GetMethods__Method1 (classOf (aget c 1))))]
               (set! ss (append ss (sigOf (assert (* Method) x)))))

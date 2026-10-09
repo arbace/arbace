@@ -10,7 +10,9 @@
 #   --twice   afterwards run the generators and j2c a second time into $JRT_WORK/again and
 #             require the same files (determinism)
 # Steps ($JRT_STEPS, default all, comma-separated: sources,generate,convert,javac,check,edge,report):
-#   sources   the closure's files (g2c.jrt-sources/print-sources) copied from $JDK into
+#   sources   the closure's files (g2c.jrt-sources/print-sources: the measured closure, the
+#             files added to it, g2c.jrt-sources/added-sources) copied from $JDK, and jrt's
+#             own Java (overlay/jdk/java.base, replacing or adding to jdk26u's files), into
 #             $JRT_WORK/src/java.base (the tree j2c and javac read); sources.txt lists them
 #   generate  the 8 files the JDK build generates (CharacterData*, CaseFolding,
 #             IndicConjunctBreak) made as make/modules/java.base/gensrc/GensrcCharacterData.gmk
@@ -76,6 +78,9 @@ make_sources() {
     if [ "$kind" = share ]; then
       mkdir -p "$tree/java.base/$(dirname "$rel")"
       cp "$jdk/src/java.base/share/classes/$rel" "$tree/java.base/$rel"
+    elif [ "$kind" = overlay ]; then
+      mkdir -p "$tree/java.base/$(dirname "$rel")"
+      cp "$root/overlay/jdk/java.base/$rel" "$tree/java.base/$rel"
     fi
   done < "$work/sources.txt"
 }
@@ -135,7 +140,7 @@ convert() {
 if has sources; then
   echo "== sources ($surface)"
   make_sources "$work/src" || exit 1
-  echo "$(wc -l < "$work/sources.txt") files: $(grep -c ' share ' "$work/sources.txt") from $jdk/src/java.base/share/classes, $(grep -c ' gensrc ' "$work/sources.txt") generated"
+  echo "$(wc -l < "$work/sources.txt") files: $(grep -c ' share ' "$work/sources.txt") from $jdk/src/java.base/share/classes, $(grep -c ' gensrc ' "$work/sources.txt") generated, $(grep -c ' overlay ' "$work/sources.txt") of jrt's own (overlay/jdk)"
 fi
 
 if has generate; then
@@ -185,10 +190,15 @@ if has check; then
   t0=$(date +%s)
   rm -rf "$work/res" "$work/chunks" "$work/forms-classes"
   mkdir -p "$work/res" "$work/chunks" "$work/forms-classes"
-  # largest files first, dealt round-robin into chunks of about 8
+  # jrt's own files (overlay/jdk) in one chunk: they use each other's members that jdk26u's
+  # classes of the same names lack, which only the same compilation sees
+  sed -n 's|^java\.base overlay \(.*\)\.java$|\1.clj|p' "$work/sources.txt" | sort > "$work/chunks/c.overlay"
+  # the others largest first, dealt round-robin into chunks of about 8
   (cd "$work/conv" && find . -mindepth 2 -name '*.clj' -printf '%s %P\n' | sort -k1,1nr -k2) |
+    awk 'NR == FNR { own[$1] = 1; next } !($2 in own) { print $2 }' "$work/chunks/c.overlay" - |
     awk -v n=$(( ($(find "$work/conv" -mindepth 2 -name '*.clj' | wc -l) + 7) / 8 )) \
-      '{ f = sprintf("'"$work"'/chunks/c.%04d", (NR - 1) % n); print $2 > f }'
+      '{ f = sprintf("'"$work"'/chunks/c.%04d", (NR - 1) % n); print $1 > f }'
+  [ -s "$work/chunks/c.overlay" ] || rm -f "$work/chunks/c.overlay"
   ls "$work/chunks" | xargs -P "$jobs" -I{} bash -c '
     k=${1#c.}
     CONCAT=inline FILES="$2/chunks/$1" REF="$2/ref1:$2/ref2" CLASS_FORMS_CP="$2/conv" WRITE="$2/forms-classes" \
