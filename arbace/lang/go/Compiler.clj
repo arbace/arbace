@@ -89,6 +89,31 @@
         (Evaluator/invokeFn this (RT/seqToArray (RT/seq args))))))
 
   (c2g/add
+    (defclass ^:public ^:static Dyn
+      ;; classes made at run time (deftype, defrecord, reify; C2G-SPEC §5.12, §10.4): their
+      ;; instances are values of Go's Dyn, a type c2g generates with a method for every method
+      ;; of every interface of the closed world, each calling the fn set for it here. The
+      ;; natives are c2g's (arbace/lang's c2g_dyn.go). B1a step 5 builds deftype and reify on
+      ;; them (EVAL-PLAN.md)
+
+      ;; a class extending Object, implementing the interfaces (closed-world ones dispatch
+      ;; through Go's Dyn methods, run-time ones through the class's member table), with
+      ;; public fields of these names
+      (method ^:public ^:static ^:native defineClass ^Class [^String name ^Class/1 interfaces
+                                                             ^String/1 fieldNames])
+
+      ;; the implementation of method name(params)ret: impl is called with the object and
+      ;; the arguments (boxed), its result converted to ret as compiled deftype methods convert
+      (method ^:public ^:static ^:native setMethod ^void [^Class c ^String name ^Class/1 params
+                                                          ^Class ret ^IFn impl])
+
+      (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
+
+      (method ^:public ^:static ^:native getField [o ^int i])
+
+      (method ^:public ^:static ^:native setField ^void [o ^int i v])))
+
+  (c2g/add
     (defclass ^:public ^:static Evaluator
       ;; what RecurExpr returns to its loop or fn method
       (field ^:static ^:final RECUR (Object.))

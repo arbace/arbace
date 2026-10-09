@@ -122,6 +122,51 @@ of Compiler.eval."
     (fmt/Printf "tree   %s\n" (try (fn ^string [] (tree (lang/Compiler_Analyze_Compiler_C_O__Compiler_Expr lang/Compiler_C_EVAL form)))))
     (fmt/Printf "eval   %s\n\n" (try (fn ^string [] (pr (lang/Compiler_Eval_O__O form)))))))
 
+(go/func evalStr "evalStr evaluates the form src with Compiler.eval." ^any [^string src]
+  (lang/Compiler_Eval_O__O (lang/RT_ReadString_String__O (jrt/Str src))))
+
+(go/func goAssertsVector ^bool [^any o]
+  (let [(values _ ok) (assert lang/IPersistentVector o)] ok))
+
+(go/func dynDemo
+  "dynDemo makes a class at run time as deftype will (C2G-SPEC §5.12): user.Foo implementing
+Counted and ILookup, with a field a and count implemented by an evaluated fn; then uses an
+instance from Go (translated code's interface calls and checks) and from evaluated forms
+(reflection)."
+  []
+  (fmt/Println "== a class made at run time (Dyn)")
+  (let [c (lang/Compiler_Dyn_DefineClass_String_Class1_String1__Class
+            (jrt/Str "user.Foo")
+            (jrt/RefArrayOf jrt/Class_class lang/Counted_class lang/ILookup_class)
+            (jrt/RefArrayOf jrt/String_class (jrt/Str "a")))
+        impl (lang/IFn_Cast (evalStr "(fn* [this] 42)"))]
+    (lang/Compiler_Dyn_SetMethod_Class_String_Class1_Class_IFn__V c (jrt/Str "count") nil jrt/Prim_int impl)
+    (lang/Compiler_Dyn_SetMethod_Class_String_Class1_Class_IFn__V
+      c (jrt/Str "toString") nil jrt/String_class (lang/IFn_Cast (evalStr "(fn* [this] \"#<Foo>\")")))
+    (let [o (lang/Compiler_Dyn_NewInstance_Class_O1__O c (jrt/RefArrayOf jrt/Object_class (jrt/Str "field a")))]
+      (fmt/Printf "class               %s (forName: %v)\n" (cls o)
+                  (== (jrt/Class_ForName_String__Class (jrt/Str "user.Foo")) c))
+      (fmt/Printf "RT.count            %s\n" (try (fn ^string [] (fmt/Sprint (lang/RT_Count_O__I o)))))
+      (fmt/Printf "toString            %s\n" (try (fn ^string [] (.String (jrt/ToString o)))))
+      (fmt/Printf "instanceof Counted  %v\n" (lang/Counted_InstanceOf o))
+      (fmt/Printf "instanceof ILookup  %v\n" (lang/ILookup_InstanceOf o))
+      (fmt/Printf "instanceof IPersistentVector %v (the Go assertion alone: %v)\n"
+                  (lang/IPersistentVector_InstanceOf o)
+                  (goAssertsVector o))
+      (fmt/Printf "cast to Seqable     %s\n" (try (fn ^string [] (lang/Seqable_Cast o) "ok")))
+      (fmt/Printf "valAt (not set)     %s\n" (try (fn ^string [] (pr (.ValAt_O__O (lang/ILookup_Cast o) (jrt/Str "k"))))))
+      (.BindRoot_O__V (lang/Var_Cast (evalStr "(def foo nil)")) o)))
+  (range [_ src (lit (slice string)
+                     "foo"
+                     "(arbace.lang.RT/count foo)"
+                     "(. foo count)"
+                     "(. foo -a)"
+                     "(let* [c arbace.lang.Counted] (. c (isInstance foo)))"
+                     "(let* [c arbace.lang.IPersistentVector] (. c (isInstance foo)))"
+                     "(. (. foo getClass) getName)")]
+    (fmt/Printf "form   %s\neval   %s\n" src (try (fn ^string [] (pr (evalStr src))))))
+  (fmt/Println))
+
 (go/func main []
   (lang/Compiler_C_Init)
   (fmt/Println "== the translated reader and analyzer, Expr.eval, and the evaluator")
@@ -148,4 +193,5 @@ of Compiler.eval."
                      "((fn* f [n] (if (arbace.lang.Numbers/lte n 1) 1 (arbace.lang.Numbers/multiply n (f (arbace.lang.Numbers/dec n))))) 10)"
                      "((fn* [& xs] xs) 1 2 3)"
                      "(nosuch 1)")]
-    (show src)))
+    (show src))
+  (dynDemo))

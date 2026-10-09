@@ -429,7 +429,9 @@
             (cond
               native
               (let [pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
-                    f (m/jrt-sym pkg (str g "_" base "_native"))
+                    ;; in the class's own package: jrt's hand-written natives, or (for
+                    ;; arbace/lang) the evaluator's that c2g writes (c2g_dyn.go)
+                    f (symbol (str g "_" base "_native"))
                     call (apply list f (concat (when-not static ['t]) pn))]
                 [pn [(if (= "V" r) call (list 'return call))]])
               (and (:derived mm)
@@ -598,13 +600,27 @@
         ty (if (or (m/interface? n) (not (m/leaf? n)))
              (symbol (if (m/interface? n) g (str g "_I")))
              (list '* (symbol g)))]
-    [(list 'go/func (symbol (str g "_InstanceOf")) (with-meta [(tag 'x 'any)] {:tag 'bool})
-           (list 'let [(list 'values '_ 'ok) (list 'assert ty 'x)] 'ok))
-     (list 'go/func (symbol (str g "_Cast")) (with-meta [(tag 'x 'any)] {:tag ty})
-           (list 'when (list '== 'x nil) (list 'return nil))
-           (list 'let [(list 'values 'v 'ok) (list 'assert ty 'x)]
-                 (list 'when (list 'not 'ok) (list 'panic (list (m/jrt-sym pkg "ClassCast") 'x (symbol (str g "_class")))))
-                 'v))]))
+    (if (m/interface? n)
+      ;; an interface: the Go assertion succeeds for every object of a class made at run time
+      ;; (Dyn, §5.12), whose class must implement the interface (the nominal check)
+      (let [dyn-check (list 'when 'ok
+                            (list 'let [(list 'values 'd 'dyn) (list 'assert (m/jrt-sym pkg "Dynamic") 'x)]
+                                  (list 'when 'dyn (list 'set! 'ok (list '.DynImplements 'd (symbol (str g "_class")))))))]
+        [(list 'go/func (symbol (str g "_InstanceOf")) (with-meta [(tag 'x 'any)] {:tag 'bool})
+               (list 'let [(list 'values '_ 'ok) (list 'assert ty 'x)] dyn-check 'ok))
+         (list 'go/func (symbol (str g "_Cast")) (with-meta [(tag 'x 'any)] {:tag ty})
+               (list 'when (list '== 'x nil) (list 'return nil))
+               (list 'let [(list 'values 'v 'ok) (list 'assert ty 'x)]
+                     dyn-check
+                     (list 'when (list 'not 'ok) (list 'panic (list (m/jrt-sym pkg "ClassCast") 'x (symbol (str g "_class")))))
+                     'v))])
+      [(list 'go/func (symbol (str g "_InstanceOf")) (with-meta [(tag 'x 'any)] {:tag 'bool})
+             (list 'let [(list 'values '_ 'ok) (list 'assert ty 'x)] 'ok))
+       (list 'go/func (symbol (str g "_Cast")) (with-meta [(tag 'x 'any)] {:tag ty})
+             (list 'when (list '== 'x nil) (list 'return nil))
+             (list 'let [(list 'values 'v 'ok) (list 'assert ty 'x)]
+                   (list 'when (list 'not 'ok) (list 'panic (list (m/jrt-sym pkg "ClassCast") 'x (symbol (str g "_class")))))
+                   'v))])))
 
 ;; ---------------------------------------------------------------------------------------
 ;; one class

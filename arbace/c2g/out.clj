@@ -74,7 +74,7 @@
 
 (def import-paths
   {"jrt" "arbace/jrt" "math" "math" "atomic" "sync/atomic" "reflect" "reflect" "unsafe" "unsafe"
-   "strings" "strings" "lang" "arbace/lang"})
+   "strings" "strings" "lang" "arbace/lang" "sync" "sync"})
 
 (defn- used-qualifiers [forms]
   (let [acc (volatile! #{})]
