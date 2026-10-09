@@ -120,8 +120,11 @@
   "Classes outside the world that libraries loaded from ARBACE_PATH import, cut as those the
   embedded sources name are: Clojure's suite's test.generative runner requires
   clojure.tools.namespace.find and clojure.java.classpath, which import java.util.jar's JarFile
-  and JarEntry and extend java.net.URLClassLoader (the runner then lists no jars)."
-  ["java.util.jar.JarFile" "java.util.jar.JarEntry" "java.net.URLClassLoader"])
+  and JarEntry, java.io.FileReader, and extend java.net.URLClassLoader (the runner then lists no
+  jars, and reads no files through them); clojure.tools.reader names java.text.SimpleDateFormat
+  (its #inst reader's formatter)."
+  ["java.util.jar.JarFile" "java.util.jar.JarEntry" "java.net.URLClassLoader" "java.io.FileReader"
+   "java.text.SimpleDateFormat"])
 
 (defn cut-candidates
   "The classes the sources name that exist on this JVM, from the JDK or arbace.lang/arbace.asm

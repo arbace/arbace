@@ -98,7 +98,7 @@ passes), with the JVM's ClassCastException message.\n"
 
 (go/func Compiler_Evaluator_InvokeDirect_Method_O_O1__O_native
   "Compiler_Evaluator_InvokeDirect_Method_O_O1__O_native is the evaluator's call of a resolved
-method (a hinted interop call, EVAL-NOTES.md, \"Hinted calls\"), as compiled code calls it: the
+method (a hinted interop call; EVAL-NOTES.md, \"The suite's last failures\"), as compiled code calls it: the
 arguments converted (convertArgs), the method called through its invoker, an exception it throws
 propagating as it is (Method.invoke wraps it in InvocationTargetException, which Reflector then
 unwraps), a primitive result boxed. A null receiver of an instance method is

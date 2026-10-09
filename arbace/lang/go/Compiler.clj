@@ -246,12 +246,12 @@
 
       ;; a hinted call of method m (parameter types ps) on target (nil: static) with the
       ;; evaluated arguments: what Reflector.invokeMatchingMethod does with the one method,
-      ;; without the selection, the InvocationTargetException and the copies of the parameter
-      ;; types (m's class is public: EVAL-NOTES.md, "Hinted calls")
+      ;; without the selection, the InvocationTargetException, the copies of the parameter
+      ;; types and boxArgs' copy of the arguments (m's class is public: EVAL-NOTES.md, "The
+      ;; suite's last failures")
       (method ^:public ^:static invokeResolved [^java.lang.reflect.Method m ^Class/1 ps target
                                                 ^Object/1 vs]
-        (Reflector/prepRet (.getReturnType m)
-                           (Evaluator/invokeDirect m target (Reflector/boxArgs ps (Evaluator/typedArgs ps vs)))))
+        (Reflector/prepRet (.getReturnType m) (Evaluator/invokeDirect m target (Evaluator/typedArgs ps vs))))
 
       ;; whether the hinted calls of m may take invokeResolved's path (Reflector otherwise
       ;; looks for an accessible base's method)
@@ -429,9 +429,9 @@
       ;; the arguments of a resolved method or constructor as the compiled call passes them
       ;; (MethodExpr.emitTypedArgs, HostExpr.emitUnboxArg): a primitive parameter's argument
       ;; cast to Number (Boolean, Character) and converted by RT's checked casts, a reference
-      ;; parameter's cast to its class (a fn passed for a functional interface is left to
-      ;; Reflector's adapter): ClassCastException and NullPointerException as compiled code
-      ;; throws them. (*unchecked-math*'s unchecked casts are not distinguished: EVAL-NOTES.md.)
+      ;; parameter's cast to its class (a fn passed for a functional interface adapted by
+      ;; Reflector.boxArg, as the compiled call adapts it): ClassCastException and
+      ;; NullPointerException as compiled code throws them; ready for the method's invoker. (*unchecked-math*'s unchecked casts are not distinguished: EVAL-NOTES.md.)
       (method ^:public ^:static typedArgs ^Object/1 [^Class/1 ps ^Object/1 vs]
         (loop [^int i 0]
           (when (and (< i (alength ps)) (< i (alength vs)))
@@ -461,7 +461,7 @@
                 ;; adapts it); another interface is a checkcast
                 (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))
                      (some? (Compiler$FISupport/maybeFIMethod p)))
-                  nil
+                  (aset vs i (Reflector/boxArg p v))
                 :else (Evaluator/checkCast p v)))
             (recur (unchecked-inc-int i))))
         vs)
