@@ -999,13 +999,26 @@
                       (emit! (if (volatile-field? f) (volatile-write place (:desc f) x) (list 'set! place x)))))
 
 (defn- dropped-store?
-  "A static initializer's store into a field of its class that the closed world drops (its
-  type is outside it: serialization's serialPersistentFields): nothing can read the field,
-  so the store goes."
+  "A store into a field that the closed world drops (its type is outside it) that can go:
+  a static initializer's store into a field of its class (serialization's
+  serialPersistentFields: nothing can read the field), or the store of the constant null
+  into a field of this object or a static field (PrintWriter's psOut, a PrintStream: the
+  field can hold nothing else, no instance of its type exists)."
   [node]
-  (and (:clinit *f*) (= :set-static (:op node))
-       (let [f (:field node) o (or (:declarer f) (:owner f))]
-         (and (= o (:class *f*)) (not (m/desc-in-world? (:desc f)))))))
+  (let [f (:field node)]
+    (or (and (:clinit *f*) (= :set-static (:op node))
+             (let [o (or (:declarer f) (:owner f))]
+               (and (= o (:class *f*)) (not (m/desc-in-world? (:desc f))))))
+        (and (#{:set-field :set-static} (:op node))
+             (not (m/desc-in-world? (:desc f)))
+             (let [vn (acc/unaccess (:val node))] (and (= :const (:op vn)) (nil? (:val vn))))
+             (or (= :set-static (:op node)) (= :this-path (:op (acc/unaccess (:target node)))))))))
+
+(defn- set-field! [node]
+  (let [f (:field node)
+        [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
+        place (field-place tv f)]
+    (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv))))))
 
 (defn stmt!
   "Translates node in statement context."
@@ -1016,6 +1029,7 @@
       (case (:op node)
         (:const :local :this-path :class-lit :none) nil
         :set-static (if (dropped-store? node) nil (set-static! node))
+        :set-field (if (dropped-store? node) nil (set-field! node))
         :do (do (run! stmt! (:statements node)) (stmt! (:ret node)))
         :let (do (doseq [[b init] (:bindings node)]
                    (let [s (binding-sym b)]
@@ -1030,10 +1044,6 @@
         :set-local (let [b (:b node)
                          x (expr-as (:val node) (:type b))]
                      (emit! (list 'set! (binding-sym b) x)))
-        :set-field (let [f (:field node)
-                         [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
-                         place (field-place tv f)]
-                     (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv)))))
         :get-static (do (when (guarded-static? node) (emit! (class-init-call (or (:declarer (:field node)) (:owner (:field node))))))
                         nil)
         :aset (let [[a i val] (operands [(:array node) (:index node) (:val node)]

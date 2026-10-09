@@ -112,7 +112,9 @@
         members (reduce
                   (fn [ms vf]
                     (case (head-name vf)
-                      "cut" (let [k (cut-key (second vf))
+                      ;; (c2g/cut (field ...)), (c2g/cut (static-initializer n)), or a
+                      ;; method's head spliced: (c2g/cut ^:static name ^Ret [params])
+                      "cut" (let [k (cut-key (if (symbol? (second vf)) (rest vf) (second vf)))
                                   hit (some #(= k (param-key %)) ms)]
                               (when-not hit (throw (ex-info (str "c2g: variant cuts no member: " (pr-str (second vf))) {})))
                               (swap! counts update :cut inc)
