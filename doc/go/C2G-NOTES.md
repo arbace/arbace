@@ -309,3 +309,79 @@ fields).
 Nothing vendored. Studied: `java.lang.runtime.ObjectMethods` (openjdk/jdk26u,
 `src/java.base/share/classes/java/lang/runtime/ObjectMethods.java`) for the records' methods;
 the Go specification's order of evaluation (go.dev/ref/spec#Order_of_evaluation) for A8.
+
+# c2g, phase 2B: the evaluator boundary
+
+Branch `c2g-2b` (2026-10-09), C2G-SPEC §10, §5.12, §7.11; the evaluator's plan is
+[EVAL-PLAN.md](EVAL-PLAN.md).
+
+- **`Compiler` as a whole** translates and builds (`--root 'arbace.lang.Compiler$*'`): 94 of its
+  96 classes, about 17,400 Go lines; ASM is erased (B2), the back end does not exist in Go,
+  `ObjExpr.compile` generates nothing and a `fn*` evaluates to an evaluator class (B3). What
+  still throws when reached: `loadFile` (files), `compileStub` (deftype: step 5),
+  `isBoxedMath` (annotations' values). Small `RT` and `Reflector` variants go with it
+  (`makeClassLoader`/`baseLoader` nil, `classForName` over jrt's registry; `canAccess` without a
+  method handle); phase 2A's variants of these classes supersede them where they overlap.
+- **The proof** `bin/c2g-evalproof` (`test/c2g/eval/`, expected output
+  `test/c2g/eval/expected.txt`): forms read, analyzed, their trees printed from Go and
+  evaluated; a run-time class; a fn adapted by `FromFn`. Same output on linux/amd64 and
+  linux/arm64 (qemu).
+- **`Dyn`** (§5.12) is generated in arbace/lang's `c2g_dyn.go` when `Compiler$Dyn` is translated
+  (B4). **`:fi-adapter`** is translated (the fixture `FxFi`, 4 of 4 on the JVM's results), and
+  **`FromFn`** is set for every functional interface translated (B5).
+- `bin/c2g-check` (amd64): no regression; `UtilRT` 614 of 614 now (the `Reflector` variant),
+  `NumbersCompare` 784 of 784 (the oracle re-recorded on main), fixtures 40 of 40.
+
+Found on the way: a missing operation can leave a Go local unused (`declared and not used`:
+an `ArrayList.removeIf` in a world without `Predicate`); `fold-items` sees the local as used
+because its use was translated before the operation was found missing (phase 2D).
+
+## Proposed amendments to C2G-SPEC, phase 2B (for the user's review)
+
+- **B1 (§4.6) Nested-class variants.** A variant names a nested class by its binary name,
+  `(c2g/variant Compiler$ObjExpr ...)`, and replaces, cuts or adds its members as for a
+  top-level class. `Compiler`'s back end lives in its nested classes.
+- **B2 (§4.6, §10.1) Erased packages.** A variant file's `(c2g/erase "arbace/asm/")` erases the
+  classes of a package outside the closed world: an expression of an erased type is nil (its
+  operands not evaluated: ASM's factories are pure), a store into a field or array of an
+  erased type is dropped, and members whose descriptors name an erased class do not exist in Go
+  (as for any class outside the world). Operations of non-erased types on erased values still
+  throw. This replaces cutting the about 150 `emit` methods and 120 ASM fields one by one, and
+  copies no line of `Compiler` into the variant.
+- **B3 (§10.2) The evaluator's classes** are nested classes the `Compiler` variant adds:
+  `Compiler$Frame`, `Compiler$EvalFn extends RestFn` (one class for every arity: required
+  arity 0, the arguments as a seq; §10.2's `EvalFn`/`EvalRestFn` pair is EVAL-PLAN Q3),
+  `Compiler$Evaluator` (`eval(Expr, Frame)`, `invokeFn`) and `Compiler$Dyn`. `ObjExpr.eval` of a
+  `FnExpr` is an `EvalFn`.
+- **B4 (§5.12) `Dyn` as built.** `lang.Dyn` is `{jrt.Object; D *DynClass; F []any}`; the slot
+  table is per class (`DynClass`: `Cls`, `Slots []IFn`, the implemented interfaces with their
+  superinterfaces, the methods by name and descriptor); slots 0-2 are `toString`, `hashCode`
+  and `equals` (the header's when unset). The interfaces are every public interface translated
+  with their superinterfaces (hand-written jrt interfaces are not covered: they have
+  hand-written `InstanceOf` without the check); a method's fn is called with the object and
+  the boxed arguments, its result converted as compiled deftype methods convert (`RT`'s casts;
+  `Boolean`/`Character` unboxed); an unset method calls the most specific default method of an
+  implemented interface, else throws `AbstractMethodError`. The nominal check is an assertion
+  to the jrt interface `Dynamic` (`DynImplements`) after a successful assertion, in every
+  interface's `InstanceOf` and `Cast` (an interface assertion, not §5.12's type-word compare:
+  jrt's functions cannot name a type of arbace/lang). jrt adds `Dynamic`, `DefineDynamic` (a
+  registration a later deftype of the same name may replace) and `Class.Descriptor`
+  (`dyn.clj`). The Java API is `Compiler$Dyn`'s natives: `defineClass`, `setMethod`,
+  `newInstance`, `getField`, `setField`.
+- **B5 (§7.11, R13) `FromFn` from arbace/lang.** c2g writes `c2g_fromfn.go` in arbace/lang (it
+  calls `IFn` and `RT`), whose `init` sets `FromFn` of every `@FunctionalInterface` translated
+  (jrt's included; a class with source is asked through its declaration's annotations). The
+  adapter behaves as Reflector's proxy: arguments boxed, `applyTo`, the result converted as
+  `coerceAdapterReturn` does. Reachability treats these interfaces as lambda targets (their
+  default methods). The analyzer's `:fi-adapter` is the interface's adapter calling the
+  `FnInvokers` invoker the analyzer chose.
+- **B6 (§9.1) Natives in their class's package.** A `^:native` method is a call of
+  `C_M..._native` in the class's own package (jrt's for the JDK, arbace/lang's for `Compiler$Dyn`,
+  which c2g writes).
+- **B7 (bin/c2g) The root spec `CLASS$*`**: the class and its named nested classes.
+- **B8 (classes/SPEC.md, the analyzer) `clj-fi-method` for classes from source.** Compiler's
+  functional interface test reflected on the running JDK and found nothing for a class with
+  class forms in the world (`*from-source*`: c2g's JDK closure), so c2g's world compiled a
+  checkcast where the JVM adapts; the analyzer now asks the declaration (its
+  `@FunctionalInterface` annotation and single abstract method). The JVM build's choice is
+  unchanged.
