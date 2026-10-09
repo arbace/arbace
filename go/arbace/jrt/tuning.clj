@@ -2,7 +2,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "tuning.go"
-  :imports [[os "os"] [debug "runtime/debug"] [pprof "runtime/pprof"] [strconv "strconv"]])
+  :imports [[os "os"] [debug "runtime/debug"] [runtime "runtime"] [pprof "runtime/pprof"] [strconv "strconv"]])
 
 (go/const ^{:tag int :val 200
             :doc "DefaultGOGC is the collector's GOGC when the environment sets none: Java programs on
@@ -40,6 +40,10 @@ System.exit).\n"
     (when (and (> mb 0) (== minHeap nil))
       (set! minHeap (make (slice byte) (<< mb 20)))))
   (set! memProfile (os/Getenv "ARBACE_MEMPROFILE"))
+  ;; Go samples allocations for the heap profile whenever a program links it (pprof does here);
+  ;; each sample walks the stack, and the evaluator's are deep
+  (when (== memProfile "")
+    (set! runtime/MemProfileRate 0))
   (let [p (os/Getenv "ARBACE_CPUPROFILE")]
     (when (and (!= p "") (== cpuProfile nil))
       (let [(values f err) (os/Create p)]

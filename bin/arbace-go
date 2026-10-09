@@ -7,6 +7,10 @@
 #                                      missing); arm64 runs under qemu-aarch64
 #        bin/arbace-go --build         translate (bin/c2g --program) and build the executables
 #                                      of $ARBACE_GO_ARCHES into target/arbace-go/<arch>/arbace
+#        bin/arbace-go --build --pgo   the same, then a profile-guided build (doc/go/SPEED-NOTES.md):
+#                                      the amd64 executable runs test/arbace-go-pgo.clj with a
+#                                      CPU profile (target/arbace-go/pgo.pprof), and every
+#                                      executable is built again with it (go build -pgo)
 #        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
 #                                      error's exit status, for each of $ARBACE_GO_ARCHES
 # Environment:
@@ -37,6 +41,26 @@ build() {
        --overlay "$overlay" "$dir/c2g/prog") > "$dir/build-$a.log" 2>&1 \
       || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes)" >&2
+  done
+  [ "${pgo:-}" ] || return 0
+  # the profile of the training workload, from the amd64 executable (the profile names
+  # functions, so it serves arm64's build too)
+  echo "== the training run (test/arbace-go-pgo.clj)" >&2
+  local trainer=$dir/amd64/arbace
+  if [ ! -x "$trainer" ]; then
+    (cd "$root" && bin/g2c build --line-file --arch amd64 --work "$dir/work-amd64" -o "$dir/amd64/arbace" \
+       --overlay "$overlay" "$dir/c2g/prog") > "$dir/build-amd64.log" 2>&1 \
+      || { echo "arbace-go: amd64: build failed" >&2; return 1; }
+  fi
+  rm -f "$dir/pgo.pprof"
+  ARBACE_CPUPROFILE=$dir/pgo.pprof "$trainer" "$root/test/arbace-go-pgo.clj" > "$dir/pgo.log" 2>&1 \
+    || { tail -20 "$dir/pgo.log" >&2; echo "arbace-go: the training run failed ($dir/pgo.log)" >&2; return 1; }
+  for a in ${arches//,/ }; do
+    echo "== bin/g2c build $a --pgo" >&2
+    (cd "$root" && bin/g2c build --line-file --arch "$a" --work "$dir/work-$a" -o "$dir/$a/arbace" \
+       --overlay "$overlay" --pgo "$dir/pgo.pprof" "$dir/c2g/prog") > "$dir/build-$a.log" 2>&1 \
+      || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
+    echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes, profile-guided)" >&2
   done
 }
 
@@ -84,7 +108,7 @@ EOF
 }
 
 case ${1:-} in
-  --build) build ;;
+  --build) [ "${2:-}" = --pgo ] && pgo=1; build ;;
   --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
   *)
     if [ ! -x "$dir/$arch/arbace" ]; then arches=$arch build || exit 1; fi
