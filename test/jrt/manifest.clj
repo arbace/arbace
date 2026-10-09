@@ -142,7 +142,7 @@
    ["sun.util.locale.provider.LocaleProviderAdapter" [] false]
    ["sun.util.locale.provider.LocaleResources" [] false]
    ["sun.util.locale.provider.ResourceBundleBasedAdapter" [] false]
-   ["java.util.Date" ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable"] false]
+   ["java.util.Date" ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable"] true]
    ["jdk.internal.foreign.Utils" [] false]
    ;; phase 2a: threads, concurrency, Unsafe, the VM's services
    ["java.lang.Thread" ["java.lang.Runnable"] true]

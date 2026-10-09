@@ -717,8 +717,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
         loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
-        ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv?)
+        ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
+        ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
+        ;; phase 2B "Dates")
+        instant? (m/translated? "java/time/Instant")]
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant?)
       [(apply list 'go/func 'init []
               (concat
                 (when (or pst-w? pst-s?)
@@ -759,6 +762,13 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                        (let [a (NewByteArray (conv int32 (len b)))]
                                          (range [i x b] (aset (.-A a) i (conv int8 x)))
                                          (return (ByteArrayInputStream_New_B1 a)))))))])
+                (when instant?
+                  [(list 'set! '(.-Methods (.Info Date_class))
+                         (list 'append '(.-Methods (.Info Date_class))
+                               (sig "from" '[Instant_class] 'Date_class 0x9
+                                    '(Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                               (sig "toInstant" [] 'Instant_class 0x1
+                                    '(Instant_OfEpochMilli_J__Instant (.GetTime__J (assert Date_I this))))))])
                 (when (seq str-ms)
                   [(list 'set! '(.-Methods (.Info String_class))
                          (apply list 'append '(.-Methods (.Info String_class)) str-ms))])

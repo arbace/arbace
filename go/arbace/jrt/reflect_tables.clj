@@ -1551,41 +1551,41 @@
         (lit MethodInfo :Name "UTC" :Params (lit (slice (* Class)) Prim_int Prim_int Prim_int Prim_int Prim_int Prim_int) :Return Prim_long :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Date_UTC_I_I_I_I_I_I__J (assert int32 (aget args 0)) (assert int32 (aget args 1)) (assert int32 (aget args 2)) (assert int32 (aget args 3)) (assert int32 (aget args 4)) (assert int32 (aget args 5)))))
         (lit MethodInfo :Name "after" :Params (lit (slice (* Class)) Date_class) :Return Prim_boolean :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.After_Date__Z (assert (* Date) this) ((inst As (* Date)) (aget args 0)))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.After_Date__Z (assert Date_I this) ((inst As Date_I) (aget args 0)))))
         (lit MethodInfo :Name "before" :Params (lit (slice (* Class)) Date_class) :Return Prim_boolean :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Before_Date__Z (assert (* Date) this) ((inst As (* Date)) (aget args 0)))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Before_Date__Z (assert Date_I this) ((inst As Date_I) (aget args 0)))))
         (lit MethodInfo :Name "clone" :Params nil :Return Object_class :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Clone__O (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Clone__O (assert Date_I this))))
         (lit MethodInfo :Name "compareTo" :Params (lit (slice (* Class)) Date_class) :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareTo_Date__I (assert (* Date) this) ((inst As (* Date)) (aget args 0)))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareTo_Date__I (assert Date_I this) ((inst As Date_I) (aget args 0)))))
         (lit MethodInfo :Name "equals" :Params (lit (slice (* Class)) Object_class) :Return Prim_boolean :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Equals_O__Z (assert (* Date) this) (aget args 0))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Equals_O__Z (assert Date_I this) (aget args 0))))
         (lit MethodInfo :Name "getDate" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetDate__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetDate__I (assert Date_I this))))
         (lit MethodInfo :Name "getDay" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetDay__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetDay__I (assert Date_I this))))
         (lit MethodInfo :Name "getHours" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetHours__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetHours__I (assert Date_I this))))
         (lit MethodInfo :Name "getMinutes" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetMinutes__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetMinutes__I (assert Date_I this))))
         (lit MethodInfo :Name "getMonth" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetMonth__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetMonth__I (assert Date_I this))))
         (lit MethodInfo :Name "getSeconds" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetSeconds__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetSeconds__I (assert Date_I this))))
         (lit MethodInfo :Name "getTime" :Params nil :Return Prim_long :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetTime__J (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetTime__J (assert Date_I this))))
         (lit MethodInfo :Name "getTimezoneOffset" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetTimezoneOffset__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetTimezoneOffset__I (assert Date_I this))))
         (lit MethodInfo :Name "getYear" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetYear__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetYear__I (assert Date_I this))))
         (lit MethodInfo :Name "hashCode" :Params nil :Return Prim_int :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HashCode__I (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HashCode__I (assert Date_I this))))
         (lit MethodInfo :Name "setTime" :Params (lit (slice (* Class)) Prim_long) :Return Prim_void :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetTime_J__V (assert (* Date) this) (assert int64 (aget args 0))) nil))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.SetTime_J__V (assert Date_I this) (assert int64 (aget args 0))) nil))
         (lit MethodInfo :Name "toGMTString" :Params nil :Return String_class :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToGMTString__String (assert (* Date) this))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToGMTString__String (assert Date_I this))))
         (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* Date) this))))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert Date_I this))))))
   (set! (.-Ctors (.Info Date_class))
     (lit (slice CtorInfo)
         (lit CtorInfo :Params nil :Modifiers 0x1

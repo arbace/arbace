@@ -1504,3 +1504,94 @@ cases. `bin/jrt test`: passes on amd64 and arm64.
 
 **The oracle**: `forms/harvest/math` 149 of 149 (was 4); the forms corpus 9,509 of 9,652 (was
 9,364; amd64).
+
+## Dates: Calendar, Timestamp, Instant
+
+B1a step 5, phase 2, part B (branch `eval-2b-time`, 2026-10-09): the 37 forms of the oracle's
+`forms/inst.clj` that need `java.util.Calendar`, `java.sql.Timestamp` or `java.time.Instant`
+(EVAL-NOTES.md, "Failure causes"). Decision 7 stands: `#inst` reads and prints over jrt's small
+hand-written `Date`; the other classes join the world around it.
+
+**Per class, and why:**
+
+| class | how | why |
+|---|---|---|
+| `java.time.Instant` | translated from jdk26u (`added-sources`), with `DateTimeException`; a Go-build variant (`overlay/jdk/variants/Instant.clj`) for `toString` and `now()` | plain Java over two fields; what it needs of the rest of `java.time` (`DateTimeFormatter` for `toString` and `parse`, `Clock` for `now`, `ChronoField`/`ChronoUnit` for the temporal accessors) stays outside the world as operation-level stubs. `toString` calls jrt's own `jdk.internal.jrt.TimeText.instant`, `ISO_INSTANT`'s text (10,000-year periods, signed years beyond 9999, the fraction in groups of three); `now()` is `ofEpochMilli(currentTimeMillis)` (millisecond precision) |
+| `java.util.Date` | hand-written (decision 7), now **non-leaf** (`Date_I`, `Impl_` methods, `Ctor_...`; manifest) | `Timestamp` extends it. Its implementations call `getTime()` virtually where the JDK's do (`equals`, `hashCode`, `compareTo`, `before`, `after`); `clone` copies the whole object (a subclass's `CloneShallow`). `toInstant` and `from(Instant)` name the translated `Instant`, which jrt's own build cannot: c2g writes their table entries (`arbace/c2g/out.clj`, `support-table-forms`, as for `String.format`), so reflection (the REPL) finds them; translated code calling them would be a missing operation (none does) |
+| `java.sql.Timestamp` | translated from jdk26u (`src/java.sql/share/classes/java/sql/Timestamp.java`), with `java.sql.Date` (its `toString` uses `Date.formatDecimalInt`) | plain Java over `Date`'s deprecated fields. Both are another module's files: `bin/jrt-convert` copies them into the java.base tree (KIND `share:java.sql` in `sources.txt`, `added-module-sources` in `test/g2c/jrt_sources.clj`), and javac's `--patch-module java.base` takes them. `java.sql.Date`'s Go name would collide with jrt's `Date`: c2g's rename table names it `Sql_Date` |
+| `java.util.Calendar`, `GregorianCalendar`, `TimeZone`, `sun.util.calendar.ZoneInfo` | jrt's own Java (`overlay/jdk/java.base/`), behaving as the JDK's | jdk26u's `Calendar`, `GregorianCalendar`, `TimeZone` and `SimpleTimeZone` are 9,600 lines and need `sun.util.calendar` (12 files, 4,700 lines), the time zone database (`ZoneInfoFile` reads `tzdb.dat`) and the locale providers (`CalendarDataUtility` for the first day of the week): too much for fixed-offset zones. jrt's are 2,300 lines |
+
+**jrt's calendar** (`Calendar.java`, `GregorianCalendar.java`, `TimeZone.java`, `ZoneInfo.java`):
+
+- Zones are fixed offsets without daylight saving time. `TimeZone.getTimeZone` knows the
+  zero-offset IDs (`GMT`, `UTC`, `UCT`, `Universal`, `Zulu`, `Greenwich`, `GMT0` and their `Etc/`
+  forms), `Etc/GMT+h` and `Etc/GMT-h` (POSIX signs), and the custom IDs, normalized as the JDK
+  does (`GMT+5` is `GMT+05:00`, `GMT+0` is `GMT+00:00`); any other ID is GMT, as the JDK falls
+  back for an unknown one. A deviation: region IDs (`Europe/Paris`) are GMT too. The default
+  zone is GMT, as jrt's `Date`. Display names are the root locale's English (`GMT`, `UTC`,
+  `Greenwich Mean Time`, `Coordinated Universal Time`, a custom ID itself, else `GMT+hh:mm`).
+- The calendar is the JDK's: Julian before the cutover (default 1582-10-15, settable with
+  `setGregorianChange`), the fields computed in the zone, the time computed lazily from the
+  fields as the JDK resolves them (`selectFields`: day of month, week of month, day of week in
+  month, day of year, week of year with day of week; hour of day or hour and AM/PM), leniently or
+  not (the JDK's `IllegalArgumentException` messages), `add`, `roll`, `getActualMaximum`,
+  `getWeekYear`, the week numbering around the cutover and the JDK's quirks with it (a BC year's
+  week maxima are those of the AD year of the same number). `setTimeZone` before the time is
+  computed reinterprets the fields in the new zone, which `arbace.instant`'s
+  `construct-calendar` relies on.
+- The week parameters are en_US's (Sunday, 1) for every locale, display names English. Not
+  there: `setWeekDate`, `getWeeksInWeekYear`, `toZonedDateTime`, serialization.
+- `String.format`'s `%t` conversions now work over a `Calendar`, a `Date` or a `long` (the
+  translated `Formatter`'s `printDateTime` reaches `Calendar.getInstance`, `get`,
+  `getTimeZone`), except those that need `DateFormatSymbols` (month and day names, AM/PM:
+  `%tB`, `%tA`, `%tp`, `%tc` ...), which is outside the world.
+
+**The `arbace.instant` variant** (`arbace/lang/go/ns/instant.clj`): `read-instant-calendar`,
+`read-instant-timestamp`, `construct-calendar` and `construct-timestamp`, and the `Calendar`
+printer are `arbace/instant.clj`'s again (the printer through `String.format`'s `%t`); the
+`Timestamp` printer writes the date with the variant's `Date` arithmetic and the nanoseconds
+(`arbace/instant.clj` uses `SimpleDateFormat` in a proxy'd `ThreadLocal`). `read-instant-date`
+and the `Date` printer are unchanged. `arbace/c2g/embed.clj` no longer cuts `java.sql.Timestamp`
+always: it is in the world, and core's `when-class` guard finds it.
+
+**Checks:**
+
+- A differential harness on the JVM (scratch, `.tmp/caltest`): jrt's four Java classes compiled
+  with `--patch-module java.base` replace the JDK's in a JVM and run the same programs as the
+  JDK's: 31,000 lines (zone IDs, the 17 fields of 12,000 times in four zones around the cutover
+  and in BC years, times from fields, lenient overflow, `add` and `roll` of every field with
+  random amounts, the actual maxima, week-based field resolution with random week parameters,
+  `getWeekYear`, `%t` output, `ISO_INSTANT` against `Instant.toString`) are equal.
+- c2g's fixture `test/c2g/fixtures/FxDates.clj` (`bin/c2g-check fixtures`): the same ground in
+  the Go program, against the JVM's recording: 8 of 8 on amd64 and arm64.
+- `bin/jrt test` (amd64, arm64): a `Date` subclass in Go (`shims_test`: virtual `getTime`,
+  clone of the whole object).
+- The oracle's `forms/inst.clj`: 190 of 231 before, **227 of 231** after, on amd64 and arm64
+  (`qemu-aarch64`); the four left are not dates (two helpful `NullPointerException` messages,
+  a `ClassCastException` message, `UUID/nameUUIDFromBytes`). The whole forms corpus on amd64:
+  9,364 to 9,401 of 9,652, no regression.
+
+**Sources.** Translated: openjdk/jdk26u at `baf63fb`,
+`src/java.base/share/classes/java/time/Instant.java`, `java/time/DateTimeException.java`,
+`src/java.sql/share/classes/java/sql/Timestamp.java`, `java/sql/Date.java`. Studied and partly
+transcribed into jrt's own Java (each file's header names the parts; LICENSE.md: GPL version 2
+with the Classpath Exception): `java/util/Calendar.java` (`selectFields`, the stamps),
+`java/util/GregorianCalendar.java` (`computeTime`, `getFixedDate`, `add`, `roll`,
+`getWeekYear`, `getActualMaximum`, the week numbering in `computeFields`, the field tables),
+`java/util/TimeZone.java` (`parseCustomTimeZone`), `sun/util/calendar/ZoneInfoFile.java`
+(`toCustomID`), `java/time/format/DateTimeFormatter.java` (`InstantPrinterParser`) and
+`java/time/LocalDate.java` (`toString`'s year).
+
+**Proposed amendments** (numbered W for the merge):
+
+- **W1 (C2G-SPEC §4.4, Collisions) A rename table entry**: `java/sql/Date` is `Sql_Date` (jrt's
+  `java.util.Date` is `Date`).
+- **W2 (JRT-SOURCES.md, the tool) Other modules' files**: `added-module-sources` lists files of
+  other modules (`src/MODULE/share/classes/...`) compiled into the java.base tree; `sources.txt`
+  gives them KIND `share:MODULE`.
+- **W3 (C2G-SPEC §5.3; the manifest) `java.util.Date` is a non-leaf hand-written class.**
+- **W4 (LICENSE.md) Code transcribed from jdk26u in jrt's own Java**: `Calendar.java`,
+  `GregorianCalendar.java`, `TimeZone.java` and `TimeText.java` under `overlay/jdk/` hold parts
+  of jdk26u's code under the GPL version 2 with the Classpath Exception (LICENSE.md now says so
+  and holds the text); the alternative, the user's call, is to rewrite those parts from the
+  documented behaviour alone, as the overlay's other files are.
