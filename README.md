@@ -25,7 +25,7 @@ can be repeated. Prior art: [Clojure](https://github.com/clojure/clojure),
 
 ## Arbace for Java 26
 
-The branch `arbace-for-java-26` (tag `arbace-for-java-26-v1`) preserves the final state of
+The branch `arbace-for-java-26` (tags `arbace-for-java-26-v1`, and `-v2` with a fix) preserves the final state of
 Arbace on the JVM, binary compatible with the Java ecosystem, before main leaves the JVM behind.
 [doc/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/FREEZE.md) on the branch describes what it holds, how to build, run and verify it, and its
 known limits.

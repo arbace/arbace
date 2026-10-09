@@ -629,3 +629,14 @@ decision (2026-10-08).
   `String.CASE_INSENSITIVE_ORDER`. `bin/c2g` now stops when `.tmp/jrt/conv` is missing (run
   `bin/jrt-convert` first): on a checkout without it the JDK's types came out as `any` and the
   Go did not build. `bin/gate` passed.
+
+## 2026-10-09: arbace-for-java-26-v2, a fix release
+
+- At the user's decision, the NaN comparison fix (`a6b2893`) and its regression test went to the
+  frozen branch as a fix release: `arbace-for-java-26` at `398f01b`, annotated tag
+  `arbace-for-java-26-v2` (v1 unchanged). The branch's gate, run locally, passed (stages 1-3
+  identical, native tests 49/2,847, Clojure's suite 20,750/20,750 on stages 1 and 2,
+  class-forms-tests, j2c-check); the push runs the branch's CI. The branch's FREEZE.md lists
+  both releases and its journal records v2. The README names both tags. The seed stays the v1
+  jar: stage 1, compiled by its compiler, keeps the old NaN code, and stage 2, compiled by the
+  fixed compiler, is what ships.
