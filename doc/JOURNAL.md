@@ -771,3 +771,11 @@ decision (2026-10-08).
   failures: `arbace.math` (jrt's `Math` lacks the trigonometric functions) 145, the JVM's
   helpful NPE messages (an accepted deviation) 52, `Calendar`/`Timestamp`/`Instant` 37, `proxy`
   (cut by D6; pprint's `cl-format` needs it) 30, the rest small. `bin/gate` passed.
+- The user's decisions: `proxy` comes back, over `Dyn` (D6 had left it out; pprint's `cl-format`
+  needs it); the oracle accepts a NullPointerException whose JVM message is a helpful one
+  (deviation V11) by comparing its class only; phase 1's amendments V1-V8 accepted (to be renamed
+  when folded, to avoid C2G-SPEC's V deviations); the `.ae` rename after step 5 phase 2.
+- Step 5 phase 2 started with three agents: run-time types (`proxy` over `Dyn`; deftype, reify,
+  protocols checked); jrt's surface for the REPL (`Math`'s functions, `Calendar`/`Timestamp`/
+  `Instant`, sequenced collections, charsets, the small items); Clojure's test suite on the Go
+  build, with the oracle's NPE rule.
