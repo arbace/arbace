@@ -123,6 +123,14 @@ fallbacks of `arbace/core_classes.clj` are gone.
   and the JDK closure (8,955 of 9,002 oracle steps; 47 need `arbace.core`). Next: step 5, the
   evaluator ([go/EVAL-PLAN.md](go/EVAL-PLAN.md)).
 
+- The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
+  cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`
+  considered and not taken: hard to type and script). One self-contained change right after step
+  5 phase 1 merges and before the `arbace-for-golang` freeze: loaders (`RT.load`, the compiler:
+  `.ae` first, then `.clj`), the tools and their outputs (class forms build, j2c, g2c, c2g), `bin/`,
+  `go/`, tests, the oracle, the docs; `bin/build-arbace` gives the frozen seed a `.clj` view of
+  the sources for stage 1 (the seed stays as it is).
+
 ## Later
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2c.

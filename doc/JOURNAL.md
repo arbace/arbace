@@ -735,3 +735,15 @@ decision (2026-10-08).
   (entries unused for two hours). At the user's request `bin/gate --full` now first deletes
   cache entries unused for a day (Go refreshes an entry's time when it uses it, at most hourly,
   so runs in progress keep theirs) and prints the size before and after.
+
+## 2026-10-09: Arbace's sources move to the `.ae` extension (planned)
+
+- The user proposed an Arbace extension in place of `.clj`, which misleads since the sources
+  hold class forms and Go forms that Clojure cannot evaluate: `.æ` and/or `.ae`. Decided: `.ae`
+  only. `.æ` (U+00E6, without decomposition, so safe under macOS's NFD) works in Go, the JVM,
+  jars and git, but costs typing and scripting everywhere; accepting both would double every
+  loader rule and glob.
+- Planned as one change after step 5 phase 1 merges (it would collide with the evaluator
+  agent's work on loading) and before the `arbace-for-golang` freeze. Constraint: the frozen seed
+  only knows `.clj`, so `bin/build-arbace` gives it a `.clj` view of the sources for stage 1
+  rather than moving the seed.
