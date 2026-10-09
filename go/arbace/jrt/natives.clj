@@ -50,6 +50,48 @@ stack traces (C2G-SPEC §10.7).\n"
   (MonitorExit o))
 
 ;; ---------------------------------------------------------------------------------------
+;; arbace.lang.Compiler$CodeRun (variant, CompilerCode.clj; doc/go/SPEED-NOTES.md): the closure
+;; compiler's calls of resolved methods and constructors, through their member table's invoker
+;; as compiled code calls them: the arguments already of their parameters' types (boxed), no
+;; Reflector, no InvocationTargetException
+
+(go/func directArgs
+  "directArgs: the boxed arguments args for the parameters ps in the tables' convention
+(Unbox: a primitive's wrapper to its Go value).\n"
+  ^{:tag (slice any)} [^{:tag (slice (* Class))} ps ^{:tag (* RefArray)} args]
+  (let [out (make (slice any) (len ps))]
+    (range [i p ps]
+      (let [x (aget (.-A args) i)]
+        (if (.IsPrimitive__Z p)
+          (let [(values v ok) (Unbox p x)]
+            (when (not ok)
+              (panic (NPE)))
+            (aset out i v))
+          (aset out i x))))
+    out))
+
+(go/func Compiler_CodeRun_Call_Method_O_O1__O_native
+  "Compiler_CodeRun_Call_Method_O_O1__O_native calls method m (virtually for an instance method)
+on target with args, its result boxed (Box), void giving null.\n"
+  ^any [^{:tag (* Method)} m ^any target ^{:tag (* RefArray)} args]
+  (let [info (.-info m)]
+    (when (== (.-Invoke info) nil)
+      (panic (AbstractMethodError_New_String (Str (+ (.GoName (.-clazz m)) "." (.-Name info))))))
+    (Box ((.-Invoke info) target (directArgs (.-params m) args)))))
+
+(go/func Compiler_CodeRun_Construct_Constructor_O1__O_native
+  "Compiler_CodeRun_Construct_Constructor_O1__O_native makes an object with constructor k and
+args, the class initialized first; InstantiationException for an abstract class or an
+interface.\n"
+  ^any [^{:tag (* Constructor)} k ^{:tag (* RefArray)} args]
+  (let [c (.-clazz k)]
+    (when (or (!= (bit-and (.GetModifiers__I c) (bit-or AccAbstract AccInterface)) 0) (== (.-New (.-info k)) nil))
+      (panic (InstantiationException_New)))
+    (when (!= (.-Init (.-info c)) nil)
+      ((.-Init (.-info c))))
+    ((.-New (.-info k)) (directArgs (.-params k) args))))
+
+;; ---------------------------------------------------------------------------------------
 ;; arbace.lang.RT (variant; doc/go/EVAL-NOTES.md): the program's embedded sources
 
 (go/func RT_HostResource_String__B1_native

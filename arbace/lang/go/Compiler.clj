@@ -75,6 +75,10 @@
       (field ^:public ^String source)
       ;; the calling frame on this thread
       (field ^:public ^Frame caller)
+      ;; the closure compiler's (CompilerCode.clj): the long and double locals of a compiled
+      ;; method (a double as its raw bits), or nil; set by a recur, cleared by its loop
+      (field ^:public ^long/1 prims)
+      (field ^:public ^boolean recur)
 
       (constructor ^:public [this ^int n ^EvalFn fn ^ObjMethod method ^ObjExpr objx self]
         (set! (.-slots this) (new Object/1 n))
@@ -84,6 +88,21 @@
         (set! (.-self this) self)
         (set! (.-line this) (.-line method))
         (set! (.-source this) (.-evalSource objx)))
+
+      ;; a frame of a compiled method (CompilerCode.clj)
+      (constructor ^:public [this ^CMethod cm ^EvalFn fn self]
+        (set! (.-slots this) (new Object/1 (.-nslots cm)))
+        (when (> (.-nprims cm) 0)
+          (set! (.-prims this) (new long/1 (.-nprims cm))))
+        (set! (.-fn this) fn)
+        ;; slot 0: the fn itself (its name in its body), unless the fn is direct
+        (when (and (some? fn) (.-selfSlot cm))
+          (aset (.-slots this) 0 fn))
+        (set! (.-method this) (.-method cm))
+        (set! (.-objx this) (.-objx cm))
+        (set! (.-self this) self)
+        (set! (.-line this) (.-line (.-method cm)))
+        (set! (.-source this) (.-evalSource (.-objx cm))))
 
       ;; the i-th closed-over value
       (method ^:public closed [this ^int i]
@@ -110,12 +129,76 @@
         (set! (.-c2g$class this) (Evaluator/fnClass fe))
         (set! (.-closed this) (Evaluator/capture fe f)))
 
+      ;; a fn made by compiled code (CodeFn): its closed-over values
+      (constructor ^:public [this ^FnExpr fe ^Object/1 closed]
+        (set! (.-fe this) fe)
+        (set! (.-c2g$class this) (Evaluator/fnClass fe))
+        (set! (.-closed this) closed))
+
       (method ^:public getRequiredArity ^int [this] 0)
 
       ;; the arguments as RestFn passes them: a seq, realized only as far as the method's
       ;; fixed parameters (apply of an infinite seq to a variadic fn, as on the JVM)
       (method ^:protected doInvoke [this args]
-        (Evaluator/invokeFn this (RT/seq args)))))
+        (Evaluator/invokeFn this (RT/seq args)))
+
+      ;; a call of a fixed arity the fn has: its compiled method called with the arguments in
+      ;; a frame, without a seq (CodeRun); the other calls go through RestFn to doInvoke
+      (method ^:public invoke [this]
+        (let [cm (CodeRun/fixed this 0)]
+          (if (some? cm)
+              (Evaluator/invokeFn this cm (Frame. cm this nil))
+              (.doInvoke this nil))))
+
+      (method ^:public invoke [this a]
+        (let [cm (CodeRun/fixed this 1)]
+          (if (some? cm)
+              (let [f (Frame. cm this nil)]
+                (CodeRun/bind f cm 0 a)
+                (Evaluator/invokeFn this cm f))
+              (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a]))))))
+
+      (method ^:public invoke [this a b]
+        (let [cm (CodeRun/fixed this 2)]
+          (if (some? cm)
+              (let [f (Frame. cm this nil)]
+                (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)
+                (Evaluator/invokeFn this cm f))
+              (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b]))))))
+
+      (method ^:public invoke [this a b c]
+        (let [cm (CodeRun/fixed this 3)]
+          (if (some? cm)
+              (let [f (Frame. cm this nil)]
+                (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)
+                (CodeRun/bind f cm 2 c)
+                (Evaluator/invokeFn this cm f))
+              (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c]))))))
+
+      (method ^:public invoke [this a b c d]
+        (let [cm (CodeRun/fixed this 4)]
+          (if (some? cm)
+              (let [f (Frame. cm this nil)]
+                (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)
+                (CodeRun/bind f cm 2 c)
+                (CodeRun/bind f cm 3 d)
+                (Evaluator/invokeFn this cm f))
+              (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c d]))))))
+
+      (method ^:public invoke [this a b c d e]
+        (let [cm (CodeRun/fixed this 5)]
+          (if (some? cm)
+              (let [f (Frame. cm this nil)]
+                (CodeRun/bind f cm 0 a)
+                (CodeRun/bind f cm 1 b)
+                (CodeRun/bind f cm 2 c)
+                (CodeRun/bind f cm 3 d)
+                (CodeRun/bind f cm 4 e)
+                (Evaluator/invokeFn this cm f))
+              (.doInvoke this (^[Object/1] ArraySeq/create (new Object/1 [a b c d e]))))))))
 
   (c2g/add
     (defclass ^:public ^:static EvalMethod
@@ -132,7 +215,39 @@
       (method ^:public getRequiredArity ^int [this] 0)
 
       (method ^:protected doInvoke [this args]
-        (Evaluator/invokeMethod this (RT/seqToArray (RT/seq args))))))
+        (Evaluator/invokeMethod this (RT/seqToArray (RT/seq args))))
+
+      ;; Dyn's dispatch calls invoke with the object and the arguments: the compiled method in
+      ;; a frame, without a seq (CodeRun)
+      (method ^:public invoke [this o]
+        (let [cm (CodeRun/method this 0)
+              f (Frame. cm nil o)]
+          (aset (.-slots f) 0 o)
+          (Evaluator/invokeMethod this cm f)))
+
+      (method ^:public invoke [this o a]
+        (let [cm (CodeRun/method this 1)
+              f (Frame. cm nil o)]
+          (aset (.-slots f) 0 o)
+          (CodeRun/bind f cm 0 a)
+          (Evaluator/invokeMethod this cm f)))
+
+      (method ^:public invoke [this o a b]
+        (let [cm (CodeRun/method this 2)
+              f (Frame. cm nil o)]
+          (aset (.-slots f) 0 o)
+          (CodeRun/bind f cm 0 a)
+          (CodeRun/bind f cm 1 b)
+          (Evaluator/invokeMethod this cm f)))
+
+      (method ^:public invoke [this o a b c]
+        (let [cm (CodeRun/method this 3)
+              f (Frame. cm nil o)]
+          (aset (.-slots f) 0 o)
+          (CodeRun/bind f cm 0 a)
+          (CodeRun/bind f cm 1 b)
+          (CodeRun/bind f cm 2 c)
+          (Evaluator/invokeMethod this cm f)))))
 
   (c2g/add
     (defclass ^:public ^:static EvalState
@@ -519,28 +634,29 @@
             (set! m vm))
           (when (nil? m)
             (throw (ArityException. (if (instance? Counted args) (RT/count args) (RT/boundedLength args 20)) (.-name fe))))
-          (let [f (Frame. (unchecked-add-int (.-maxLocal m) 2) fn m fe nil)
-                slots (.-slots f)
-                req (.-reqParms m)
-                nreq (.count req)
-                pcs (.-argclasses m)
+          ;; the method compiled to closures (CompilerCode.clj), its parameters bound in a frame
+          (let [cm (CodeRun/cmethod m fe true)
+                f (Frame. cm fn nil)
+                nreq (.count (.-reqParms m))
                 ^:mutable ^ISeq s args]
-            (when-not (.-canBeDirect fe) (aset slots 0 fn))
             (loop [^int i 0]
               (when (< i nreq)
-                (aset slots (.-idx (cast LocalBinding (.nth req i)))
-                      (if (some? pcs) (Evaluator/prim (aget pcs i) (.first s)) (.first s)))
+                (CodeRun/bind f cm i (.first s))
                 (set! s (.next s))
                 (recur (unchecked-inc-int i))))
             (when (some? (.-restParm m))
-              (aset slots (.-idx (.-restParm m)) s))
-            (let [st (Evaluator/push f)]
-              (try
-                (let [r (loop []
-                          (let [r (.evalIn (.-body m) f)]
-                            (if (identical? r RECUR) (recur) r)))]
-                  (Evaluator/result (.-retClass m) (.-body m) r))
-                (finally (Evaluator/pop st f)))))))
+              (aset (.-slots f) (.-idx (.-restParm m)) s))
+            (Evaluator/invokeFn fn cm f))))
+
+      ;; a call of a compiled method of an evaluated fn, its parameters bound in frame f: its
+      ;; body run until it does not recur, its result converted to a primitive return as the
+      ;; bytecode does. (The function literal of this try is the Go frame that stack traces show
+      ;; as the fn's Clojure frame: jrt's isEvalCall)
+      (method ^:public ^:static invokeFn [^EvalFn fn ^CMethod cm ^Frame f]
+        (let [st (Evaluator/push f)]
+          (try
+            (CodeRun/run cm f)
+            (finally (Evaluator/pop st f)))))
 
       ;; a method's result converted to its return class as the bytecode does
       ;; (ObjMethod.emitBody): a primitive body by RT's checked casts, any other unboxed
@@ -568,29 +684,24 @@
 
       ;; a call of a deftype's or reify's method: args[0] is the object (this, slot 0)
       (method ^:public ^:static invokeMethod [^EvalMethod em ^Object/1 args]
-        (let [m (.-m em)
-              f (Frame. (unchecked-add-int (.-maxLocal m) 2) nil m (.-nie em) (aget args 0))
-              slots (.-slots f)
-              ps (.-argLocals m)
-              n (.count ps)]
-          (when-not (== (alength args) (unchecked-inc-int n))
-            (throw (ArityException. (unchecked-dec-int (alength args))
-                                    (java-str (.-name (.-nie em)) "." (.-name m)))))
-          (aset slots 0 (aget args 0))
+        (let [cm (CodeRun/method em (unchecked-dec-int (alength args)))
+              f (Frame. cm nil (aget args 0))
+              n (.count (.-argLocals (.-m em)))]
+          (aset (.-slots f) 0 (aget args 0))
           (loop [^int i 0]
             (when (< i n)
-              (let [lb (cast LocalBinding (.nth ps i))]
-                (aset slots (.-idx lb)
-                      (Evaluator/prim (.-c (cast MethodParamExpr (.-init lb)))
-                                      (aget args (unchecked-inc-int i)))))
+              (CodeRun/bind f cm i (aget args (unchecked-inc-int i)))
               (recur (unchecked-inc-int i))))
-          (let [s (Evaluator/push f)]
-            (try
-              (let [r (loop []
-                        (let [r (.evalIn (.-body m) f)]
-                          (if (identical? r RECUR) (recur) r)))]
-                (Evaluator/result (.-retClass m) (.-body m) r))
-              (finally (Evaluator/pop s f))))))
+          (Evaluator/invokeMethod em cm f)))
+
+      ;; a call of a compiled method of a deftype, defrecord or reify, its object and parameters
+      ;; bound in frame f (the function literal of this try is the method's Go frame in stack
+      ;; traces: jrt's isEvalCall)
+      (method ^:public ^:static invokeMethod [^EvalMethod em ^CMethod cm ^Frame f]
+        (let [s (Evaluator/push f)]
+          (try
+            (CodeRun/run cm f)
+            (finally (Evaluator/pop s f)))))
 
       ;; a class's JVM descriptor (I, [Ljava/lang/String;, Ljava/lang/Object;)
       (method ^:static descriptor ^String [^Class c]
@@ -801,7 +912,7 @@
   ;; deftype: nil; a reify: its object
   (method ^:public eval [this]
     (if (instance? FnExpr this)
-        (Compiler$EvalFn. (cast FnExpr this) nil)
+        (Compiler$EvalFn. (cast FnExpr this) (new Object/1 0))
         (Compiler$Evaluator/newInstance (cast NewInstanceExpr this) nil)))
 
   ;; the evaluator's caches: the closed-over locals in order, and where the creating frame

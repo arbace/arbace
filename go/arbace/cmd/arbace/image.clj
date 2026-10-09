@@ -104,7 +104,10 @@
 (go/var ^{:doc "imageSkipped are the fields the analysis fills for the bytecode back end only, which the Go\nbuild's evaluator never reads: not encoded, nil when decoded. ObjExpr.src, the fn's or type's\nwhole form, is read by ObjExpr.compile's class generation; the clearing paths by emit's\nlocals clearing\n"} imageSkipped (lit (map string bool)
     ["Compiler_ObjExpr.F_src" true]
     ["Compiler_LocalBindingExpr.F_clearPath" true]
-    ["Compiler_LocalBindingExpr.F_clearRoot" true]))
+    ["Compiler_LocalBindingExpr.F_clearRoot" true]
+    ;; the closure compiler's caches (CompilerCode.clj), filled when a method is first called
+    ["Compiler_ObjMethod.F_evalCM" true]
+    ["Compiler_FnExpr.F_evalArities" true]))
 
 
 (go/func planOf ^{:tag (* typePlan)} [^reflect/Type t]
