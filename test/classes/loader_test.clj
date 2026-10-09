@@ -43,6 +43,19 @@
     ;; Pong/BASE, a constant of a class entered from source, is inlined
     (is (= 42 (.get (.getDeclaredField ping "LIMIT") nil)))))
 
+(deftest source-import-of-member-class
+  ;; arbace.classes.build compiles two packages from source (env/*from-source*, as the
+  ;; bootstrap and c2g do); one imports a member class of the other by its binary name, as j2c
+  ;; writes import jdk.internal.icu.util.CodePointTrie.Fast16 (C2G-NOTES.md, phase 2C)
+  (require 'arbace.classes.build)
+  (let [out (io/file tmp-root "srcimport" (str (System/nanoTime)))
+        r ((resolve 'arbace.classes.build/build!) "test" (.getPath out) ["classes/srcimport/a" "classes/srcimport/b"])]
+    (is (empty? (:failed r)) (pr-str (:failed r)))
+    (is (= 3 (:classes r)))
+    (let [cl (java.net.URLClassLoader. (into-array java.net.URL [(.toURL (.toURI out))]))
+          user (Class/forName "classes.srcimport.b.User" true cl)]
+      (is (= 42 (.invoke (.getMethod user "twice" (into-array Class [Integer/TYPE])) nil (object-array [(int 21)])))))))
+
 (deftest repl-session
   ;; SPEC §10, typed into a REPL; then a redefinition, which old instances survive
   (let [input "(require 'arbace.classes.boot)

@@ -859,7 +859,13 @@
 
       ;; private methods are not virtual
       (and mm (m/private? mm) (m/translated? mowner))
-      (let [[tv & args] (operands (cons (:target node) (:args node)) (cons nil ps))
+      (let [[tv & args] (if (or (m/leaf? mowner) (#{:local :this-path} (:op (:target node))))
+                          (operands (cons (:target node) (:args node)) (cons nil ps))
+                          ;; a non-leaf class's Impl_ takes the receiver twice (its struct and
+                          ;; itself): any other receiver expression is evaluated once, into a
+                          ;; temporary, before the arguments
+                          (cons (hoist-value (first (operands [(:target node)] [nil])))
+                                (operands (:args node) ps)))
             recv (:x tv)]
         (if (m/leaf? mowner)
           (rv (apply list (symbol (str "." base)) (if (:nn tv) recv (list (jsym "NN") recv)) (map :x args)))

@@ -65,6 +65,9 @@
         (and (str/includes? s "$") (not (str/starts-with? s "$")))
         (or (let [v (when ns (get (ns-map ns) sym))]   ; (import '(java.util Map$Entry))
               (when (class? v) (str/replace (.getName ^Class v) "." "/")))
+            ;; the same import of a class compiled from source (import-classes!)
+            (when-let [n (when ns (get-in @env/source-imports [(ns-name ns) sym]))]
+              (when (class-exists? n) n))
             (let [[head tail] (str/split s #"\$" 2)]
               (when-let [h (resolve-class-sym scope (symbol head))]
                 (let [n (str h "$" tail)] (when (class-exists? n) n)))))

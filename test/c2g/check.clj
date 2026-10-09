@@ -513,7 +513,7 @@
       "java.lang.Character" (= (if (map? ev) (:char ev) (int ev)) (parse-long raw))
       "java.lang.Boolean" (= ev (= raw "true"))
       "java.lang.Double" (= (Double/doubleToLongBits (double ev)) (Double/doubleToLongBits (Double/longBitsToDouble (Long/parseUnsignedLong raw 16))))
-      "java.lang.Float" (= (Float/floatToIntBits (float ev)) (Float/floatToIntBits (Float/intBitsToFloat (Integer/parseUnsignedInt raw 16))))
+      "java.lang.Float" (= (Float/floatToIntBits (unchecked-float ev)) (Float/floatToIntBits (Float/intBitsToFloat (Integer/parseUnsignedInt raw 16))))
       false)))
 
 (defn- npe-helpful? [[c m]]

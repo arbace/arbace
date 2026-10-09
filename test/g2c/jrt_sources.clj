@@ -49,7 +49,10 @@
            ;; the standard streams (System.out, err, in): PrintStream and the interfaces of the
            ;; closure's streams and writers
            (map #(str "java/" % ".java")
-                ["io/PrintStream" "io/Closeable" "io/Flushable" "lang/AutoCloseable"])))))
+                ["io/PrintStream" "io/Closeable" "io/Flushable" "lang/AutoCloseable"])
+           ;; BigInteger's modInverse and modPow with a negative exponent (the oracle's
+           ;; BigNumbers script)
+           ["java/math/SignedMutableBigInteger.java"]))))
 
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes

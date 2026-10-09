@@ -204,12 +204,41 @@
                                      :Interfaces (list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (m/class-sym pkg fi "_class"))
                                      :Go (str (nm/pkg-path pkg) "." a)))))])))
 
+(def string-regex-methods
+  "String's methods over java.util.regex, which c2g writes into jrt's c2g_support when Pattern is
+  translated (jrt's String is hand-written; JRT-NOTES.md, \"waiting for the regex port\"): Go
+  method name, then its definition as jdk26u's String defines it (split's one-character fast
+  path gives what Pattern.split gives)."
+  [["Split_String__String1"
+    '(go/method Split_String__String1 "Split_String__String1 is String.split(regex).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (.Split_String_I__String1 t regex 0))]
+   ["Split_String_I__String1"
+    '(go/method Split_String_I__String1 "Split_String_I__String1 is String.split(regex, limit).\n"
+       ^{:tag (* RefArray)} [^{:tag (* String)} t ^{:tag (* String)} regex ^int32 limit]
+       (.Split_CharSequence_I__String1 (Pattern_Compile_String__Pattern regex) t limit))]
+   ["ReplaceAll_String_String__String"
+    '(go/method ReplaceAll_String_String__String "ReplaceAll_String_String__String is String.replaceAll.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceAll_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["ReplaceFirst_String_String__String"
+    '(go/method ReplaceFirst_String_String__String "ReplaceFirst_String_String__String is String.replaceFirst.\n"
+       ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* String)} regex ^{:tag (* String)} replacement]
+       (.ReplaceFirst_String__String (.Matcher_CharSequence__Matcher (Pattern_Compile_String__Pattern regex) t) replacement))]
+   ["Matches_String__Z"
+    '(go/method Matches_String__Z "Matches_String__Z is String.matches.\n"
+       ^bool [^{:tag (* String)} t ^{:tag (* String)} regex]
+       (Pattern_Matches_String_CharSequence__Z regex t))]])
+
 (defn support-forms
   "c2g's helpers in package jrt (c2g_support): what translated code calls besides jrt's API."
   []
   (let [bool-translated (m/translated? "java/lang/Boolean")
         bool-init (and bool-translated (not (m/trivial-init? "java/lang/Boolean")))]
-    (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
+    (concat
+     ;; String's regex methods
+     (when (m/translated? "java/util/regex/Pattern") (map second string-regex-methods))
+     (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
      (list 'go/func 'C2g_Missing :type-params ['T] (with-meta [(tag 'why 'string)] {:tag 'T})
@@ -296,7 +325,7 @@ translated java.util.Formatter).\n"
         (conv int32 (math/Float32bits f)))
      (list 'go/type 'C2gCloner (list 'interface (list 'CloneShallow (with-meta [] {:tag 'any}))))
      (list 'go/func 'C2g_ObjectClone (with-meta [(tag 'x 'any)] {:tag 'any})
-           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))])))
+           (list '.CloneShallow (list 'assert 'C2gCloner 'x)))]))))
 
 (defn- modifiers [n]
   (let [dd (a/decl n)
