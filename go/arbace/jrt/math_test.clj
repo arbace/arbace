@@ -58,7 +58,35 @@
     ["d2f" (fn ^string [^float64 d] (mhf (conv float32 d)))]
     ["scalb" (fn ^string [^float64 d] (mhd (Math_Scalb_D_I__D d 1000)))]
     ["scalb-1100" (fn ^string [^float64 d] (mhd (Math_Scalb_D_I__D d -1100)))]
-    ["scalb-3" (fn ^string [^float64 d] (mhd (Math_Scalb_D_I__D d -3)))]))
+    ["scalb-3" (fn ^string [^float64 d] (mhd (Math_Scalb_D_I__D d -3)))]
+    ["sin" (fn ^string [^float64 d] (mhd (StrictMath_Sin_D__D d)))]
+    ["Math.sin" (fn ^string [^float64 d] (mhd (Math_Sin_D__D d)))]
+    ["cos" (fn ^string [^float64 d] (mhd (StrictMath_Cos_D__D d)))]
+    ["Math.cos" (fn ^string [^float64 d] (mhd (Math_Cos_D__D d)))]
+    ["tan" (fn ^string [^float64 d] (mhd (StrictMath_Tan_D__D d)))]
+    ["Math.tan" (fn ^string [^float64 d] (mhd (Math_Tan_D__D d)))]
+    ["asin" (fn ^string [^float64 d] (mhd (StrictMath_Asin_D__D d)))]
+    ["Math.asin" (fn ^string [^float64 d] (mhd (Math_Asin_D__D d)))]
+    ["acos" (fn ^string [^float64 d] (mhd (StrictMath_Acos_D__D d)))]
+    ["Math.acos" (fn ^string [^float64 d] (mhd (Math_Acos_D__D d)))]
+    ["atan" (fn ^string [^float64 d] (mhd (StrictMath_Atan_D__D d)))]
+    ["Math.atan" (fn ^string [^float64 d] (mhd (Math_Atan_D__D d)))]
+    ["exp" (fn ^string [^float64 d] (mhd (StrictMath_Exp_D__D d)))]
+    ["Math.exp" (fn ^string [^float64 d] (mhd (Math_Exp_D__D d)))]
+    ["log10" (fn ^string [^float64 d] (mhd (StrictMath_Log10_D__D d)))]
+    ["Math.log10" (fn ^string [^float64 d] (mhd (Math_Log10_D__D d)))]
+    ["log1p" (fn ^string [^float64 d] (mhd (StrictMath_Log1p_D__D d)))]
+    ["Math.log1p" (fn ^string [^float64 d] (mhd (Math_Log1p_D__D d)))]
+    ["expm1" (fn ^string [^float64 d] (mhd (StrictMath_Expm1_D__D d)))]
+    ["Math.expm1" (fn ^string [^float64 d] (mhd (Math_Expm1_D__D d)))]
+    ["sinh" (fn ^string [^float64 d] (mhd (StrictMath_Sinh_D__D d)))]
+    ["Math.sinh" (fn ^string [^float64 d] (mhd (Math_Sinh_D__D d)))]
+    ["cosh" (fn ^string [^float64 d] (mhd (StrictMath_Cosh_D__D d)))]
+    ["Math.cosh" (fn ^string [^float64 d] (mhd (Math_Cosh_D__D d)))]
+    ["tanh" (fn ^string [^float64 d] (mhd (StrictMath_Tanh_D__D d)))]
+    ["Math.tanh" (fn ^string [^float64 d] (mhd (Math_Tanh_D__D d)))]
+    ["toRadians" (fn ^string [^float64 d] (mhd (Math_ToRadians_D__D d)))]
+    ["toDegrees" (fn ^string [^float64 d] (mhd (Math_ToDegrees_D__D d)))]))
 
 (go/var ^{:tag (map string (func [float64 float64] [string]))} doubleOps2
   (lit (map string (func [float64 float64] [string]))
@@ -69,15 +97,26 @@
     ["rem" (fn ^string [^float64 a ^float64 b] (mhd (math/Mod a b)))]
     ["fma" (fn ^string [^float64 a ^float64 b] (mhd (Math_Fma_D_D_D__D a b 1.0)))]
     ["pow" (fn ^string [^float64 a ^float64 b] (mhd (StrictMath_Pow_D_D__D a b)))]
-    ["Math.pow" (fn ^string [^float64 a ^float64 b] (mhd (Math_Pow_D_D__D a b)))]))
+    ["Math.pow" (fn ^string [^float64 a ^float64 b] (mhd (Math_Pow_D_D__D a b)))]
+    ["atan2" (fn ^string [^float64 a ^float64 b] (mhd (StrictMath_Atan2_D_D__D a b)))]
+    ["Math.atan2" (fn ^string [^float64 a ^float64 b] (mhd (Math_Atan2_D_D__D a b)))]
+    ["hypot" (fn ^string [^float64 a ^float64 b] (mhd (StrictMath_Hypot_D_D__D a b)))]
+    ["Math.hypot" (fn ^string [^float64 a ^float64 b] (mhd (Math_Hypot_D_D__D a b)))]
+    ["IEEEremainder" (fn ^string [^float64 a ^float64 b] (mhd (StrictMath_IEEEremainder_D_D__D a b)))]
+    ["Math.IEEEremainder" (fn ^string [^float64 a ^float64 b] (mhd (Math_IEEEremainder_D_D__D a b)))]
+    ["strictCopySign" (fn ^string [^float64 a ^float64 b] (mhd (StrictMath_CopySign_D_D__D a b)))]
+    ["clampD" (fn ^string [^float64 a ^float64 b] (mhd (Math_Clamp_D_D_D__D 0.25 (Math_Min_D_D__D a b) (Math_Max_D_D__D a b))))]
+    ["clampDbad" (fn ^string [^float64 a ^float64 b] (mhd (Math_Clamp_D_D_D__D 0.25 (Math_Max_D_D__D a b) (Math_Min_D_D__D a b))))]))
 
 (go/func TestDoubles
-  "TestDoubles: Math's and StrictMath's double functions. jrt's Math.log, pow and cbrt are
-StrictMath's (FdLibm); the JVM's Math may use intrinsics that differ in the last bit: those
-cases (Math.*) are counted and logged, not failed, and must be within one ulp.\n"
+  "TestDoubles: Math's and StrictMath's double functions. jrt's Math functions of FdLibm are
+StrictMath's; the JVM's Math may use intrinsics that differ in the last bits: those cases
+(Math.*) are counted and logged, not failed, and must be within one ulp of StrictMath's, two
+for sinh, cosh and tanh (whose specification allows 2.5 ulps of error, against 1).\n"
   [^{:tag (* testing/T)} t]
   (let [n 0
-        intrinsic (make (map string int))]
+        intrinsic (make (map string int))
+        maxUlps (make (map string int64))]
     (range [_ c (readCases t "doubles.txt")]
       (let [op (aget c 0)
             ^{:tag (func [] [string])} f nil]
@@ -97,12 +136,16 @@ cases (Math.*) are counted and logged, not failed, and must be within one ulp.\n
                 want (aget c (- (len c) 1))]
             (when (!= got want)
               (aset intrinsic op (+ (aget intrinsic op) 1))
-              (let [d (- (conv int64 (math/Float64bits (md got))) (conv int64 (math/Float64bits (md want))))]
-                (when (or (> d 1) (< d -1))
-                  (.Errorf t "%v: got %s, want %s: more than one ulp" c got want)))))
+              (let [d (- (conv int64 (math/Float64bits (md got))) (conv int64 (math/Float64bits (md want))))
+                    tol (conv int64 1)]
+                (when (< d 0) (set! d (- d)))
+                (when (> d (aget maxUlps op)) (aset maxUlps op d))
+                (when (strings/HasSuffix op "h") (set! tol 2))
+                (when (> d tol)
+                  (.Errorf t "%v: got %s, want %s: %d ulps apart" c got want d)))))
           (check t c (res f)))))
     (range [op k intrinsic]
-      (.Logf t "%s: the JVM's Math differs from StrictMath (jrt) by one ulp in %d cases" op k))
+      (.Logf t "%s: the JVM's Math differs from StrictMath (jrt) in %d cases, by at most %d ulps" op k (aget maxUlps op)))
     (failuresReport t)
     (.Logf t "%d cases" n)))
 
@@ -118,13 +161,16 @@ cases (Math.*) are counted and logged, not failed, and must be within one ulp.\n
     ["f2l" (fn ^string [^float32 f] (mlres (F2L f)))]
     ["f2d" (fn ^string [^float32 f] (mhd (conv float64 f)))]
     ["fscalb" (fn ^string [^float32 f] (mhf (Math_Scalb_F_I__F f 100)))]
-    ["fscalb-160" (fn ^string [^float32 f] (mhf (Math_Scalb_F_I__F f -160)))]))
+    ["fscalb-160" (fn ^string [^float32 f] (mhf (Math_Scalb_F_I__F f -160)))]
+    ["fnextDown" (fn ^string [^float32 f] (mhf (Math_NextDown_F__F f)))]))
 
 (go/var ^{:tag (map string (func [float32 float32] [string]))} floatOps2
   (lit (map string (func [float32 float32] [string]))
     ["fmax" (fn ^string [^float32 a ^float32 b] (mhf (Math_Max_F_F__F a b)))]
     ["fmin" (fn ^string [^float32 a ^float32 b] (mhf (Math_Min_F_F__F a b)))]
     ["fcopySign" (fn ^string [^float32 a ^float32 b] (mhf (Math_CopySign_F_F__F a b)))]
+    ["fnextAfter" (fn ^string [^float32 a ^float32 b] (mhf (Math_NextAfter_F_D__F a (conv float64 b))))]
+    ["fstrictCopySign" (fn ^string [^float32 a ^float32 b] (mhf (StrictMath_CopySign_F_F__F a b)))]
     ["ffma" (fn ^string [^float32 a ^float32 b] (mhf (Math_Fma_F_F_F__F a b 1.5)))]
     ["fclamp" (fn ^string [^float32 a ^float32 b]
                 (mhf (Math_Clamp_F_F_F__F 0.25 (Math_Min_F_F__F a b) (Math_Max_F_F__F a b))))]))
@@ -182,6 +228,14 @@ cases (Math.*) are counted and logged, not failed, and must be within one ulp.\n
     ["ceilModI" (fn ^string [^string a ^string b] (ires (Math_CeilMod_I_I__I (mi a) (mi b))))]
     ["maxI" (fn ^string [^string a ^string b] (ires (Math_Max_I_I__I (mi a) (mi b))))]
     ["minI" (fn ^string [^string a ^string b] (ires (Math_Min_I_I__I (mi a) (mi b))))]
+    ["divideExactI" (fn ^string [^string a ^string b] (ires (Math_DivideExact_I_I__I (mi a) (mi b))))]
+    ["floorDivExactI" (fn ^string [^string a ^string b] (ires (Math_FloorDivExact_I_I__I (mi a) (mi b))))]
+    ["ceilDivExactI" (fn ^string [^string a ^string b] (ires (Math_CeilDivExact_I_I__I (mi a) (mi b))))]
+    ["multiplyFull" (fn ^string [^string a ^string b] (mlres (Math_MultiplyFull_I_I__J (mi a) (mi b))))]
+    ["unsignedMultiplyExactI" (fn ^string [^string a ^string b] (ires (Math_UnsignedMultiplyExact_I_I__I (mi a) (mi b))))]
+    ["powExactI" (fn ^string [^string a ^string b] (ires (Math_PowExact_I_I__I (mi a) (pexp (ml b) 40 3))))]
+    ["unsignedPowExactI" (fn ^string [^string a ^string b] (ires (Math_UnsignedPowExact_I_I__I (mi a) (pexp (ml b) 40 3))))]
+    ["powExactIsmall" (fn ^string [^string a ^string b] (ires (Math_PowExact_I_I__I (- (pexp (ml a) 13 0) 6) (pexp (ml b) 34 0))))]
     ["idiv" (fn ^string [^string a ^string b] (ires (/ (mi a) (mi b))))]
     ["irem" (fn ^string [^string a ^string b] (ires (% (mi a) (mi b))))]
     ["addExactJ" (fn ^string [^string a ^string b] (mlres (Math_AddExact_J_J__J (ml a) (ml b))))]
@@ -204,8 +258,21 @@ cases (Math.*) are counted and logged, not failed, and must be within one ulp.\n
     ["clampJJJbad" (fn ^string [^string a ^string b]
                      (let [x (ml a) y (ml b)]
                        (mlres (Math_Clamp_J_J_J__J 0 (max x y) (min x y)))))]
+    ["divideExactJ" (fn ^string [^string a ^string b] (mlres (Math_DivideExact_J_J__J (ml a) (ml b))))]
+    ["floorDivExactJ" (fn ^string [^string a ^string b] (mlres (Math_FloorDivExact_J_J__J (ml a) (ml b))))]
+    ["ceilDivExactJ" (fn ^string [^string a ^string b] (mlres (Math_CeilDivExact_J_J__J (ml a) (ml b))))]
+    ["unsignedMultiplyExactJ" (fn ^string [^string a ^string b] (mlres (Math_UnsignedMultiplyExact_J_J__J (ml a) (ml b))))]
+    ["unsignedMultiplyExactJI" (fn ^string [^string a ^string b] (mlres (Math_UnsignedMultiplyExact_J_I__J (ml a) (conv int32 (ml b)))))]
+    ["powExactJ" (fn ^string [^string a ^string b] (mlres (Math_PowExact_J_I__J (ml a) (pexp (ml b) 70 3))))]
+    ["unsignedPowExactJ" (fn ^string [^string a ^string b] (mlres (Math_UnsignedPowExact_J_I__J (ml a) (pexp (ml b) 70 3))))]
+    ["powExactJsmall" (fn ^string [^string a ^string b] (mlres (Math_PowExact_J_I__J (conv int64 (- (pexp (ml a) 21 0) 10)) (pexp (ml b) 66 0))))]
     ["ldiv" (fn ^string [^string a ^string b] (mlres (/ (ml a) (ml b))))]
     ["lrem" (fn ^string [^string a ^string b] (mlres (% (ml a) (ml b))))]))
+
+(go/func pexp "pexp is the tests' exponent: Clojure's (mod b m) minus d, as an int.\n" ^int32 [^int64 b ^int64 m ^int64 d]
+  (let [r (% b m)]
+    (when (< r 0) (set! r (+ r m)))
+    (conv int32 (- r d))))
 
 (go/func TestInts [^{:tag (* testing/T)} t]
   (let [n 0]

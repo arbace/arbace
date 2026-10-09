@@ -68,6 +68,29 @@
     :else (let [r (.doubleValue (.remainder (java.math.BigDecimal. a) (java.math.BigDecimal. b)))]
             (if (== r 0.0) (Math/copySign 0.0 a) r))))
 
+(defn trans-doubles
+  "Arguments for FdLibm's functions: the special values, arbitrary bits, and random values
+  in the ranges the algorithms branch on: [-2, 2], [-800, 800] (exp's and sinh's
+  thresholds), magnitudes 1e-310 to 1e300 (tiny, subnormal, and large arguments of sin, cos
+  and tan that need KernelRemPio2), and near multiples of pi/2."
+  []
+  (let [r (Random. 14)
+        sgn #(if (.nextBoolean r) 1.0 -1.0)]
+    (vec (concat special-doubles (rand-doubles 15 1500)
+                 (repeatedly 1500 #(* (sgn) 2.0 (.nextDouble r)))
+                 (repeatedly 1500 #(* (sgn) 800.0 (.nextDouble r)))
+                 (repeatedly 1500 #(* (sgn) (Math/pow 10.0 (- (* 610.0 (.nextDouble r)) 310.0))))
+                 (repeatedly 500 #(* (sgn) (+ (* (/ Math/PI 2) (.nextInt r 1000)) (* 1e-9 (.nextGaussian r)))))
+                 [709.782712893384 -745.1332191019411 710.4758600739439 710.475860073944 -710.4758600739439
+                  22.0 -22.0 0.5493061443340548 1e-8 -1e-8 3.725290298461914E-9 1e308 1e-320]))))
+
+(defn trans-pairs []
+  (let [r (Random. 16)
+        sp (vec (concat special-doubles [3.0 -3.0 7.5 1e-310 -1e-310]))]
+    (concat (for [a sp b sp] [a b])
+            (partition 2 (rand-doubles 17 3000))
+            (repeatedly 1500 #(vector (* 100.0 (- (.nextDouble r) 0.5)) (* 100.0 (- (.nextDouble r) 0.5)))))))
+
 (defn tostring-lines []
   (concat
     (for [d (concat special-doubles (rand-doubles 1 30000))]
@@ -121,6 +144,36 @@
             [op f] [["pow" #(hd (StrictMath/pow ^double %1 ^double %2))]
                     ["Math.pow" #(hd (Math/pow ^double %1 ^double %2))]]]
         (line op (rd x) (rd y) (result (f x y))))
+      ;; FdLibm's functions (phase 2B): StrictMath bit for bit; the JVM's Math (HotSpot's
+      ;; intrinsics on some platforms) within one ulp of jrt's (which is StrictMath)
+      (for [d (trans-doubles)
+            [op f] [["sin" #(hd (StrictMath/sin ^double %))] ["Math.sin" #(hd (Math/sin ^double %))]
+                    ["cos" #(hd (StrictMath/cos ^double %))] ["Math.cos" #(hd (Math/cos ^double %))]
+                    ["tan" #(hd (StrictMath/tan ^double %))] ["Math.tan" #(hd (Math/tan ^double %))]
+                    ["asin" #(hd (StrictMath/asin ^double %))] ["Math.asin" #(hd (Math/asin ^double %))]
+                    ["acos" #(hd (StrictMath/acos ^double %))] ["Math.acos" #(hd (Math/acos ^double %))]
+                    ["atan" #(hd (StrictMath/atan ^double %))] ["Math.atan" #(hd (Math/atan ^double %))]
+                    ["exp" #(hd (StrictMath/exp ^double %))] ["Math.exp" #(hd (Math/exp ^double %))]
+                    ["log10" #(hd (StrictMath/log10 ^double %))] ["Math.log10" #(hd (Math/log10 ^double %))]
+                    ["log1p" #(hd (StrictMath/log1p ^double %))] ["Math.log1p" #(hd (Math/log1p ^double %))]
+                    ["expm1" #(hd (StrictMath/expm1 ^double %))] ["Math.expm1" #(hd (Math/expm1 ^double %))]
+                    ["sinh" #(hd (StrictMath/sinh ^double %))] ["Math.sinh" #(hd (Math/sinh ^double %))]
+                    ["cosh" #(hd (StrictMath/cosh ^double %))] ["Math.cosh" #(hd (Math/cosh ^double %))]
+                    ["tanh" #(hd (StrictMath/tanh ^double %))] ["Math.tanh" #(hd (Math/tanh ^double %))]
+                    ["toRadians" #(hd (Math/toRadians ^double %))]
+                    ["toDegrees" #(hd (Math/toDegrees ^double %))]]]
+        (line op (rd d) (result (f d))))
+      (for [[a b] (trans-pairs)
+            [op f] [["atan2" #(hd (StrictMath/atan2 ^double %1 ^double %2))]
+                    ["Math.atan2" #(hd (Math/atan2 ^double %1 ^double %2))]
+                    ["hypot" #(hd (StrictMath/hypot ^double %1 ^double %2))]
+                    ["Math.hypot" #(hd (Math/hypot ^double %1 ^double %2))]
+                    ["IEEEremainder" #(hd (StrictMath/IEEEremainder ^double %1 ^double %2))]
+                    ["Math.IEEEremainder" #(hd (Math/IEEEremainder ^double %1 ^double %2))]
+                    ["strictCopySign" #(hd (StrictMath/copySign ^double %1 ^double %2))]
+                    ["clampD" #(hd (Math/clamp 0.25 (Math/min ^double %1 ^double %2) (Math/max ^double %1 ^double %2)))]
+                    ["clampDbad" #(hd (Math/clamp 0.25 (Math/max ^double %1 ^double %2) (Math/min ^double %1 ^double %2)))]]]
+        (line op (rd a) (rd b) (result (f a b))))
       (for [d (rand-doubles 8 3000)
             :let [y (Math/abs d)]
             [op f] [["pow1" #(hd (StrictMath/pow 1.0000001 ^double %))]
@@ -142,12 +195,15 @@
                     ["f2l" #(str (unchecked-long (unchecked-float %)))]
                     ["f2d" #(hd (double (unchecked-float %)))]
                     ["fscalb" #(hf (Math/scalb (unchecked-float %) (int 100)))]
-                    ["fscalb-160" #(hf (Math/scalb (unchecked-float %) (int -160)))]]]
+                    ["fscalb-160" #(hf (Math/scalb (unchecked-float %) (int -160)))]
+                    ["fnextDown" #(hf (Math/nextDown (unchecked-float %)))]]]
         (line op (rf f) (result (g f))))
       (for [[a b] (map vector fs (reverse fs))
             [op g] [["fmax" #(hf (Math/max (unchecked-float %1) (unchecked-float %2)))]
                     ["fmin" #(hf (Math/min (unchecked-float %1) (unchecked-float %2)))]
                     ["fcopySign" #(hf (Math/copySign (unchecked-float %1) (unchecked-float %2)))]
+                    ["fnextAfter" #(hf (Math/nextAfter (unchecked-float %1) (double %2)))]
+                    ["fstrictCopySign" #(hf (StrictMath/copySign (unchecked-float %1) (unchecked-float %2)))]
                     ["ffma" #(hf (Math/fma (unchecked-float %1) (unchecked-float %2) (unchecked-float 1.5)))]
                     ["fclamp" #(hf (Math/clamp (unchecked-float 0.25) (unchecked-float (Math/min (unchecked-float %1) (unchecked-float %2))) (unchecked-float (Math/max (unchecked-float %1) (unchecked-float %2)))))]]]
         (line op (rf a) (rf b) (result (g a b)))))))
@@ -195,6 +251,14 @@
                     ["ceilModI" #(str (Math/ceilMod (int %1) (int %2)))]
                     ["maxI" #(str (Math/max (int %1) (int %2)))]
                     ["minI" #(str (Math/min (int %1) (int %2)))]
+                    ["divideExactI" #(str (Math/divideExact (int %1) (int %2)))]
+                    ["floorDivExactI" #(str (Math/floorDivExact (int %1) (int %2)))]
+                    ["ceilDivExactI" #(str (Math/ceilDivExact (int %1) (int %2)))]
+                    ["multiplyFull" #(str (Math/multiplyFull (int %1) (int %2)))]
+                    ["unsignedMultiplyExactI" #(str (Math/unsignedMultiplyExact (int %1) (int %2)))]
+                    ["powExactI" #(str (Math/powExact (int %1) (unchecked-int (- (mod %2 40) 3))))]
+                    ["unsignedPowExactI" #(str (Math/unsignedPowExact (int %1) (unchecked-int (- (mod %2 40) 3))))]
+                    ["powExactIsmall" #(str (Math/powExact (int (- (mod %1 13) 6)) (unchecked-int (mod %2 34))))]
                     ["idiv" #(str (unchecked-divide-int (int %1) (int %2)))]
                     ["irem" #(str (unchecked-remainder-int (int %1) (int %2)))]]]
         (line op (str a) (str b) (result (f a b))))
@@ -213,6 +277,14 @@
                     ["clampJII" #(str (Math/clamp (long %1) (unchecked-int (min %1 %2)) (unchecked-int (max %1 %2))))]
                     ["clampJJJ" #(str (Math/clamp (long 12345) (long (min %1 %2)) (long (max %1 %2))))]
                     ["clampJJJbad" #(str (Math/clamp (long 0) (long (max %1 %2)) (long (min %1 %2))))]
+                    ["divideExactJ" #(str (Math/divideExact (long %1) (long %2)))]
+                    ["floorDivExactJ" #(str (Math/floorDivExact (long %1) (long %2)))]
+                    ["ceilDivExactJ" #(str (Math/ceilDivExact (long %1) (long %2)))]
+                    ["unsignedMultiplyExactJ" #(str (Math/unsignedMultiplyExact (long %1) (long %2)))]
+                    ["unsignedMultiplyExactJI" #(str (Math/unsignedMultiplyExact (long %1) (unchecked-int %2)))]
+                    ["powExactJ" #(str (Math/powExact (long %1) (unchecked-int (- (mod %2 70) 3))))]
+                    ["unsignedPowExactJ" #(str (Math/unsignedPowExact (long %1) (unchecked-int (- (mod %2 70) 3))))]
+                    ["powExactJsmall" #(str (Math/powExact (long (- (mod %1 21) 10)) (unchecked-int (mod %2 66))))]
                     ["ldiv" #(str (quot (long %1) (long %2)))]
                     ["lrem" #(str (rem (long %1) (long %2)))]]]
         (line op (str a) (str b) (result (f a b)))))))

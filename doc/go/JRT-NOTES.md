@@ -1446,3 +1446,61 @@ None was cut.
   `java.util.zip`): resources and those classes are a later step (`getResourceAsStream` stays
   undefined).
 - `File`, so `new FileInputStream(File)` and `PrintStream(File)` are stubs.
+
+# Phase 2B (step 5): jrt's surface for the REPL
+
+B1a step 5, phase 2, part B (branch `eval-2b`, 2026-10-09; EVAL-NOTES.md, "A split for phase
+2"): the members of jrt's hand-written classes that the REPL's interop reaches but the runtime
+did not need, and the JDK classes the oracle's forms corpus found missing.
+
+## Math and StrictMath
+
+`arbace.math` did not load: jrt's `Math` lacked the trigonometric, exponential and hyperbolic
+functions (145 of the corpus's failing forms). jrt's `Math` and `StrictMath` now define **every
+public member of JDK 26's classes** (109 each; `bin/jrt manifest`'s coverage lists none
+missing; the member tables follow from the manifest).
+
+- **`fdlibm.clj`** (new) ports the rest of `java.lang.FdLibm` (openjdk/jdk26u at `baf63fb`,
+  `src/java.base/share/classes/java/lang/FdLibm.java`; phase 1 had `Log`, `Cbrt`, `Pow`):
+  `Sin`, `Cos`, `Tan` with `__kernel_sin`, `__kernel_cos`, `__kernel_tan`, `RemPio2` and
+  `KernelRemPio2` (only the precision `RemPio2` uses, `prec` 2), `Asin`, `Acos`, `Atan`,
+  `Atan2`, `Hypot`, `Exp`, `Log10`, `Log1p`, `Expm1`, `Sinh`, `Cosh`, `Tanh`,
+  `IEEEremainder` with `__ieee754_fmod`. As written, in phase 1's style: every floating-point
+  product through `fmul` (no fused multiply-add on arm64), the constants by their bits (Java
+  writes them as hexadecimal floats), Java's `>>>` on an `int` as `fdUshr`, `(int)` of a
+  double as `D2I`, unsigned comparisons through `uint32`.
+- `math.clj`: `Math`'s functions of FdLibm call the port (`Math.sin` is `StrictMath.sin`, as
+  in Java's source), `toRadians` and `toDegrees` (one product with the JDK's constants),
+  `clamp(double...)`, `divideExact`, `floorDivExact`, `ceilDivExact`, `multiplyFull`,
+  `nextAfter(float, double)`, `nextDown(float)`, `powExact`, `unsignedMultiplyExact`,
+  `unsignedPowExact` (as jdk26u's `Math.java`, with its exception messages); and all of
+  `StrictMath`, delegating as `StrictMath.java` does (`copySign` with a NaN sign as positive;
+  `ceil`, `floor` and `rint`, StrictMath's own Java code in the JDK, give the same results as
+  `Math`'s, being exact).
+
+**Decision: jrt's `Math` is `StrictMath`** on every architecture, as phase 1 decided for `log`,
+`pow` and `cbrt`. HotSpot on amd64 replaces `Math.sin`, `cos`, `tan`, `exp`, `log`, `log10`,
+`pow`, `cbrt`, `sinh` and `tanh` by intrinsic stubs (Intel's libm) whose results differ from
+`StrictMath`'s in the last bits for some arguments; `asin`, `acos`, `atan`, `atan2`, `log1p`,
+`expm1`, `cosh`, `hypot` and `sqrt` are not replaced (identical). Measured on 200,000 random
+arguments per function (JDK 26.0.2.1, amd64, `-Xint` the same): differing results for sin 1.8%,
+cos 1.9%, tan 2.2%, exp 5.3%, log 1.8%, log10 3.6%, pow 9.7%, cbrt 8.3%, sinh 19%, tanh 18%.
+The JVM's own results therefore depend on its platform (HotSpot on arm64 has other
+intrinsics), and Java allows it (1 ulp of error, 2.5 for the hyperbolic functions). jrt gives
+`StrictMath`'s results, the same on amd64 and arm64. Matching amd64 HotSpot bit for bit would
+mean porting its stubs (`macroAssembler_x86_*.cpp`, table-driven), not done.
+
+**Tests** (`test/jrt/testdata_numbers.clj`, `math_test.clj`): each of the 16 functions on about
+9,700 arguments (special values, arbitrary bits, and random values in the ranges the
+algorithms branch on: `[-2, 2]`, `[-800, 800]`, magnitudes 1e-310 to 1e300, near multiples
+of π/2 for `KernelRemPio2`), the two-argument ones on about 10,900 pairs; `StrictMath` must
+equal the JVM's bit for bit (it does, for all of them, on amd64 and on arm64 under qemu), and
+`Math` must be within one ulp of the JVM's `Math` (two for `sinh`, `cosh`, `tanh`), the
+differences counted and logged: sin 145, cos 154, tan 147, exp 314, log10 260, sinh 657 and
+tanh 491 cases (at most 2 ulps), the others none. The integer additions (`divideExact` ...
+`unsignedPowExact`, `multiplyFull`) and the float ones (`nextDown`, `nextAfter(float,
+double)`, `StrictMath.copySign`) join `TestInts` and `TestFloats`. TestDoubles: 572,188
+cases. `bin/jrt test`: passes on amd64 and arm64.
+
+**The oracle**: `forms/harvest/math` 149 of 149 (was 4); the forms corpus 9,509 of 9,652 (was
+9,364; amd64).
