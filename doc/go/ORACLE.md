@@ -56,7 +56,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 ## The runner
 
     bin/oracle record [-j JOBS] [--timeout S] [SEL...]
-    bin/oracle check IMPL [-j JOBS] [--timeout S] [SEL...]
+    bin/oracle check IMPL [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE] [SEL...]
     bin/oracle harvest [SUITE]
 
 - `record` regenerates the expected files of the selected parts from the JVM Arbace
@@ -66,6 +66,32 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   `bin/arbace -`, and `bin/oracle check jvm` passes (15,854 of 15,854 cases). It prints a line per file, the
   first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
   is 0 when every case matches.
+- `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
+  recorded in `FILE`, a reference of the implementation's known mismatches: it prints the new
+  mismatches and the newly passing cases, and fails on either (or on a run that did not
+  complete). A case is named by its corpus file and its line (forms) or index (classes, regex),
+  as the report prints it: `test/oracle/forms/strings.clj:408`. Only the files the check ran
+  count, so a selection compares the reference's cases in the selected files.
+  `check IMPL --write-expected FILE` (re)writes `FILE` from the run: a recorded case of a file
+  the check ran stays, in its group, while it still mismatches; a new one goes into a group
+  with the placeholder reason `(new: give the reason)`, to be replaced by hand; cases of files
+  not run stay. Rewriting an unchanged reference gives the same file. The format (read with
+  `read`):
+
+      ;; comment lines
+      {:impl "target/arbace-go/amd64/arbace -"
+       :about "what the reference is for"
+       :mismatches
+       [{:reason "why these cases differ, and where it is documented"
+         :cases
+         [{:case "test/oracle/regex/basics.clj:45" :form "\\N{LATIN SMALL LETTER E WITH ACUTE}"}
+          ...]}
+        ...]}
+
+  `:form` is the case's text (shortened), for the reader; only `:case` is compared.
+  `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (32 cases in 5 groups,
+  2026-10-09), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
+  file takes about 285 s there).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
   (`forms/numbers`, `harvest`); `-j` the concurrent runs (default 16), `--timeout` the seconds
   allowed to one run (default 300).

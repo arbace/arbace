@@ -398,10 +398,17 @@
   (let [s (if (string? x) x (pr-str x))]
     (if (> (count s) n) (str (subs s 0 n) "...") s)))
 
+(defn case-id
+  "A case's name in reports and in a reference of known mismatches: its corpus file and its line
+  (forms) or index (classes, regex), as test/oracle/forms/numbers.clj:42."
+  [^File src e]
+  (str (rel src) ":" (or (:line e) (:i e))))
+
 (defn check
   "Runs the expected files of the selected parts (or files) against the implementation cmd;
-  prints the mismatches (all of them to .tmp/oracle/check.txt) and a summary. True when every
-  case matches."
+  prints the mismatches (all of them to .tmp/oracle/check.txt) and a summary. Returns
+  {:ok (every case matches) :mismatches [{:case id :form text}...] :incomplete runs
+   :files #{the corpus files checked}}."
   [cmd jobs timeout sel]
   (let [work (for [part parts
                    ^File f (->> (file-seq (io/file oracle-dir "expected" part))
@@ -420,7 +427,7 @@
                               (assoc r :expected (:cases e) :ms (quot (- (System/nanoTime) t0) 1000000))))
                      work)
         report (StringBuilder.)
-        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0)]
+        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom [])]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]
       (let [ks (conj (result-keys part) :missing)
             ;; compared as printed, so that -0.0 differs from 0.0 and ##NaN equals itself
@@ -444,7 +451,8 @@
         (when (and (not done) (not (str/blank? err)))
           (.append report (str "stderr: " (short-str err 4000) "\n")))
         (doseq [[[e a] i] (map vector mism (range))]
-          (let [what (str "  " (rel src) ":" (or (:line e) (:i e)) " " (short-str (or (:form e) (:src e) (:pattern e)) 200) "\n"
+          (swap! ids conj {:case (case-id src e) :form (short-str (or (:form e) (:src e) (:pattern e)) 100)})
+          (let [what (str "  " (case-id src e) " " (short-str (or (:form e) (:src e) (:pattern e)) 200) "\n"
                           (str/join (for [k ks :when (not= (get e k) (get a k))]
                                       (str "    " k "\n      expected " (short-str (get e k) 600)
                                            "\n      actual   " (short-str (get a k) 600) "\n"))))]
@@ -455,7 +463,78 @@
     (println (format "== %d of %d cases match (%d by V11: helpful NullPointerException messages compared by class only), %d mismatches (all in .tmp/oracle/check.txt)%s"
                      (- @total @bad) @total @v11 @bad
                      (if (pos? @incomplete) (str "; " @incomplete " runs incomplete") "")))
-    (and (zero? @bad) (zero? @incomplete))))
+    {:ok (and (zero? @bad) (zero? @incomplete))
+     :mismatches @ids
+     :incomplete @incomplete
+     :files (into #{} (map (fn [[_ src]] (rel src))) work)}))
+
+;; ----- known mismatches: check --expected FILE, check --write-expected FILE
+;; A reference lists an implementation's known mismatches in groups, each with its reason:
+;; {:impl "..." :about "..." :mismatches [{:reason "..." :cases [{:case id :form text}...]}...]}
+;; Only the cases' ids (case-id) are compared; their forms are there for the reader.
+
+(defn- id-file [^String id] (subs id 0 (.lastIndexOf id ":")))
+
+(defn read-known [^File f]
+  (if (.exists f)
+    (with-open [r (java.io.PushbackReader. (io/reader f :encoding "UTF-8"))]
+      (binding [*read-eval* false] (read r)))
+    {}))
+
+(defn check-known
+  "Compares a check's mismatches with the reference f, over the files the check ran: true when
+  they are the same set of cases. Prints the new mismatches and the newly passing cases."
+  [^File f {:keys [mismatches incomplete files]}]
+  (let [known (into (sorted-set)
+                    (for [g (:mismatches (read-known f)) c (:cases g)
+                          :when (contains? files (id-file (:case c)))]
+                      (:case c)))
+        actual (into (sorted-set) (map :case) mismatches)
+        new (remove known actual)
+        fixed (remove actual known)]
+    (doseq [id new] (println "   new mismatch:" id))
+    (doseq [id fixed] (println "   now passing: " id))
+    (println (format "== known mismatches (%s): %d recorded, %d new, %d now passing%s"
+                     (.getPath f) (count known) (count new) (count fixed)
+                     (if (and (empty? new) (empty? fixed))
+                       ", as recorded"
+                       "; fix them, or rewrite the reference with --write-expected and give the reasons")))
+    (and (empty? new) (empty? fixed) (zero? incomplete))))
+
+(defn write-known
+  "Rewrites the reference f from a check's mismatches: a recorded case of a file the check ran
+  stays (with its group's reason) while it still mismatches; a new one goes into a group of
+  its own, to be given a reason by hand. True when every run completed."
+  [^File f impl {:keys [mismatches incomplete files]}]
+  (let [old (read-known f)
+        now (into #{} (map :case) mismatches)
+        keep? (fn [c] (or (not (contains? files (id-file (:case c)))) (now (:case c))))
+        groups (vec (for [g (:mismatches old)
+                          :let [cs (filterv keep? (:cases g))]
+                          :when (seq cs)]
+                      (assoc g :cases cs)))
+        recorded (into #{} (comp (mapcat :cases) (map :case)) groups)
+        fresh (vec (remove #(recorded (:case %)) mismatches))
+        groups (cond-> groups
+                 (seq fresh) (conj {:reason "(new: give the reason)" :cases fresh}))
+        text (str ";; The known mismatches of an implementation in the oracle (doc/go/ORACLE.md):\n"
+                  ";; bin/oracle check IMPL --expected FILE passes when the mismatching cases are\n"
+                  ";; exactly these. Rewritten by bin/oracle check IMPL --write-expected FILE, which\n"
+                  ";; keeps the reasons of the cases still mismatching; edit the reasons by hand.\n"
+                  "{:impl " (pr-str (or (:impl old) impl)) "\n"
+                  (when (:about old) (str " :about " (pr-str (:about old)) "\n"))
+                  " :mismatches\n ["
+                  (str/join "\n\n  "
+                            (for [g groups]
+                              (str "{:reason " (pr-str (:reason g)) "\n   :cases\n   ["
+                                   (str/join "\n    " (map #(str "{:case " (pr-str (:case %)) " :form " (pr-str (:form %)) "}")
+                                                          (:cases g)))
+                                   "]}")))
+                  "]}\n")]
+    (spit f text :encoding "UTF-8")
+    (println (format "== wrote %s: %d known mismatches in %d groups (%d new)"
+                     (.getPath f) (count (mapcat :cases groups)) (count groups) (count fresh)))
+    (zero? incomplete)))
 
 (defn -main [& args]
   (let [[cmd & args] args
@@ -464,11 +543,17 @@
                  (empty? args) o
                  (= "-j" (first args)) (recur (nnext args) (assoc o :jobs (Long/parseLong (second args))))
                  (= "--timeout" (first args)) (recur (nnext args) (assoc o :timeout (Long/parseLong (second args))))
+                 (= "--expected" (first args)) (recur (nnext args) (assoc o :expected (second args)))
+                 (= "--write-expected" (first args)) (recur (nnext args) (assoc o :write-expected (second args)))
                  :else (recur (next args) (update o :sel conj (first args)))))
         ok (case cmd
              "record" (record (:jobs opts) (:timeout opts) (:sel opts))
              "check" (let [[impl & sel] (:sel opts)
                            impl (if (= impl "jvm") default-impl impl)]
-                       (check impl (:jobs opts) (:timeout opts) (vec sel))))]
+                       (let [r (check impl (:jobs opts) (:timeout opts) (vec sel))]
+                         (cond
+                           (:write-expected opts) (write-known (io/file (:write-expected opts)) impl r)
+                           (:expected opts) (check-known (io/file (:expected opts)) r)
+                           :else (:ok r)))))]
     (shutdown-agents)
     (System/exit (if ok 0 1))))

@@ -886,3 +886,39 @@ decision (2026-10-08).
   `bin/oracle check jvm` passes 20,253 of 20,253; the Go build (amd64) gives the same message,
   and its oracle run still mismatches only its 32 known cases. The bootstrap passes (stage 2 =
   stage 3).
+
+## 2026-10-09: the Go checks in `bin/gate --full`
+
+- The user's decision (2026-10-09): the proposal of `doc/go/EVAL-NOTES.md` ("For the gate"),
+  amd64 only; the essential `bin/gate` unchanged. `bin/gate --full` gains a chain: `bin/jrt-convert`,
+  `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, then concurrently `--smoke`, Clojure's suite on
+  the Go build (`CLOJURE_TESTS_GO`, `-j 12`, against `test/arbace-go-results.edn`) and the oracle
+  on it. Each step logs to `.tmp/gate/NAME.log` and has its summary line (`jrt-convert`,
+  `go-build`, `go-smoke`, `suite-go`, `oracle-go`); a step after a failed one reports "not run".
+- The oracle gains `bin/oracle check IMPL --expected FILE` (`test/oracle/runner.clj`,
+  `check-known`): it passes when the set of mismatching cases (named `file:line` for forms,
+  `file:index` for class scripts and regex) equals the reference's, over the files run, and
+  names the new mismatches and the newly passing cases otherwise. `--write-expected FILE`
+  rewrites the reference, keeping the reasons of cases still recorded (new ones get a
+  placeholder reason). Considered: counting mismatches only (a fix hiding a regression would
+  pass); comparing whole records (a reference as large as the expected files, rewritten on
+  every message change). The reference `test/oracle/known-go-amd64.edn`, read with `read`:
+  main's 32 mismatches in five groups with reasons and where they are documented (`deftype
+  Foo/2`'s error source; the `StringBuilder` identity hash; the JVM's recorded `dcmpg` bug; 5
+  `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's resource data). The gate runs it
+  with `--timeout 900`: the reducers file takes about 285 s of the default 300 on Go.
+- Memory: the first two runs with the chain concurrent from the start failed: the OOM killer
+  took g2c's converter (12 GB heap) both times, once with jrt-convert's beside it, and the suite
+  on stage 1 crashed once; the three suites alone (24 JVMs each) reach 40-59 GB. Also found:
+  `suite-go` ran the executable by a relative path, which `bin/clojure-tests` does not resolve
+  (exit 127); it is passed absolute. So g2c and the Go chain now start, concurrently, when the
+  three suites (stages 1 and 2, j2c's) are done. Considered: starting them when the stage suites
+  are done, beside j2c's suite (passed in 22m02s, but peaked at 55 of 62 GB, which the
+  morning's 46 GB host would not have held); chaining g2c before jrt-convert (longer, the Go
+  suite being the long pole anyway).
+- `bin/gate --full` passes in 21m24s (was about 7 minutes): bootstrap 1m31s, suites 3m37s and
+  3m36s, j2c 5m12s, then g2c 1m27s, jrt-convert 1m32s, go-build 2m58s, go-smoke 31 s,
+  suite-go 10m08s (18,781 of 18,806 assertions, no regressions), oracle-go 5m22s (20,221 of
+  20,253, the 32 as recorded). Memory used at most 59 GB in the suites' phase (as without the
+  Go checks), at most 26 GB after. Docs: CLAUDE.md, `bin/gate`'s header, `bin/oracle`'s usage,
+  ORACLE.md (the option and the format), EVAL-NOTES.md (proposal -> done).

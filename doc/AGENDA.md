@@ -128,7 +128,11 @@ fallbacks of `arbace/core_classes.clj` are gone.
   passes 20,221 of 20,253 (the forms 10,075 of 10,077), Clojure's suite 18,781 of 18,806
   assertions (61 of 64 namespaces load).
   - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
-    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`.
+    licensing of transcribed jdk26u parts).
+  - Done (2026-10-09, the user's decision): the Go checks in `bin/gate --full` (amd64): jrt-convert,
+    the Go build, its smoke test, Clojure's suite on it and the oracle against its known
+    mismatches (`bin/oracle check --expected`, `test/oracle/known-go-amd64.edn`, 32 cases);
+    `--full` now takes about 21 minutes.
   - Done (2026-10-09, the user's decision): the determinism issue at `polymorphism.clj:176`: a
     multimethod's ambiguity message names two classes in the order of their names
     (VENDOR-NOTES.md, hand change 14), on the JVM as on Go.
