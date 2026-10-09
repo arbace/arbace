@@ -991,3 +991,12 @@ decision (2026-10-08).
   the file system, and sockets with the socket REPL (`arbace.core.server`), both reversing parts
   of D6; the suite's last failures (`clearing`, `api`, `transducers`' time) with periodic arm64
   checks.
+
+## 2026-10-09: amendments Y1-Y4 accepted and folded
+
+- The user accepted the small items' amendments Y1-Y4 (EVAL-NOTES.md, "Phase 2B follow-up"),
+  folded by the main session: Y1 (c2g names a jrt-provided class by jrt's registered Go name)
+  into C2G-SPEC §4.4; Y2 (`Dyn` implements jrt's hand-written interfaces with a cast function,
+  with the nominal check; narrows E4) into §5.12; Y3 (`Semaphore` hand-written in jrt, AQS
+  measured and not taken) into §8.4 and JAVA-SURFACE.md decision 4; Y4 (the harvest keeps
+  `java_interop`'s proxy assertions) into ORACLE.md; all listed in C2G-SPEC §16.

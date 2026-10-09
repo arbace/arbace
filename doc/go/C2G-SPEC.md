@@ -404,6 +404,11 @@ the reflection tables can refer to everything. Java names are kept verbatim wher
 | the interface type of a non-leaf class `C` (§5.3) | `C_I` |
 | the adapter of a functional interface `F` (§7.11) | `F_Fn` |
 
+**Classes jrt provides** (amendment Y1, accepted 2026-10-09). A class that jrt provides and c2g
+does not translate is named by the Go name jrt registers for it (its class variable's name less
+`_class`), which may differ from the name the table derives from the Java name: jrt's
+`ReentrantLock_ConditionObject` is `AbstractQueuedSynchronizer$ConditionObject`.
+
 **Members of classes** (methods with a receiver on the class's struct; fields of the struct):
 
 | Java | Go | example |
@@ -1020,9 +1025,11 @@ replaces the type-word compare):
   (one fn per slot, nil when unset), the implemented interfaces with all their
   superinterfaces, and the methods by name and descriptor (for the member table). Slots 0-2 are
   `toString`, `hashCode` and `equals`; unset, they are the header's.
-- **The interfaces covered** are every public interface translated, with its superinterfaces.
-  Hand-written jrt interfaces are not covered: their `InstanceOf` is hand-written, without the
-  check.
+- **The interfaces covered** are every public interface translated, with its superinterfaces,
+  and jrt's public hand-written interfaces that have a cast function (`Future`,
+  `ExecutorService`, `Executor`, `Lock`, `Condition`; amendment Y2, accepted 2026-10-09): their
+  hand-written `InstanceOf` and `Cast` make the nominal check too (`jrt.dynNominal`), so
+  `(instance? java.util.concurrent.Future (future 1))` holds as on the JVM.
 - **A method** calls its slot's fn with the object and the boxed arguments, and converts the
   result as compiled `deftype` methods convert it (`RT`'s casts, `intCast`, `longCast` ...;
   `Boolean` and `Character` unboxed). An unset method calls the most specific default method of
@@ -1744,8 +1751,11 @@ this only matters for racy publication, which the race detector also finds.
 - **Stopgap**, before the runtime patch was in the build (jrt's phase 1; replaced in phase 2a):
   the goroutine id parsed from `runtime.Stack`'s header, with a `sync.Map` from id to `Thread`
   (about 3 µs per lookup, §13.3), entries removed at a jrt thread's end.
-- Executors, `CountDownLatch`, `LockSupport` and locks with `Condition` are jrt's shims over
-  `sync` and goroutines (JAVA-SURFACE.md decision 4); `ConcurrentHashMap` and the blocking
+- Executors, `CountDownLatch`, `LockSupport`, locks with `Condition` and `Semaphore` are jrt's
+  shims over `sync` and goroutines (JAVA-SURFACE.md decision 4; `Semaphore` by amendment Y3,
+  accepted 2026-10-09: the full public API with Java's messages, fairness not kept, as for
+  `ReentrantLock`; `AbstractQueuedSynchronizer` translated was measured and not taken: it needs
+  `Unsafe` additions and has a two-word race on `Node.waiter`, §8.3); `ConcurrentHashMap` and the blocking
   queues are translated over `Unsafe`'s compare-and-set (§9.2).
 - **The fork-join pool** (amendment S5, accepted 2026-10-09; it reverses the cut of
   `ForkJoinPool` under D6, JAVA-SURFACE.md "What the cut leaves out") is jrt's hand-written
@@ -3319,6 +3329,12 @@ Where they meet each other or the text they amend, this is what holds:
   host": a namespace not embedded is found only in `ARBACE_PATH`'s directories.
 - M6 settles §10.7's open "how they join the translated frames": jrt's frame mapping (§7.9.6)
   replaces the evaluator's Go frames by the evaluated ones.
+
+**Step 5's follow-up** (EVAL-NOTES.md, "Phase 2B follow-up"; accepted by the user 2026-10-09):
+Y1 c2g names a jrt-provided class by jrt's registered Go name: §4.4. Y2 `Dyn` implements jrt's
+hand-written interfaces with a cast function, with the nominal check: §5.12. Y3 `Semaphore`
+hand-written in jrt: §8.4, JAVA-SURFACE.md decision 4. Y4 the harvest keeps `java_interop`'s
+proxy assertions: ORACLE.md. Y2 narrows E4's "hand-written jrt interfaces are not covered".
 
 Each with a recommendation, which the text above follows, for the user's review.
 
