@@ -1712,6 +1712,38 @@
     (when (not ok) (panic (ClassCast x AssertionError_class)))
     v))
 
+;; ---- java.lang.MatchException
+
+(go/type MatchException (struct RuntimeException))
+(go/var MatchException_class
+  (Define (addr (lit ClassInfo :Name "java.lang.MatchException" :Kind KindClass :Modifiers AccPublic
+                     :Super RuntimeException_class :Go "arbace/jrt.MatchException"))))
+(go/func MatchException_New_String_Throwable ^{:tag (* MatchException)} [^{:tag (* String)} s ^Throwable_I cause]
+  (let [t (addr (lit MatchException))] (.Ctor_String_Throwable t s cause) t))
+(go/method Ctor_String_Throwable [^{:tag (* MatchException)} t ^{:tag (* String)} s ^Throwable_I cause]
+  (.Ctor_String_Throwable (.-RuntimeException t) t s cause))
+(go/method Ref ^any [^{:tag (* MatchException)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* MatchException)} t] MatchException_class)
+(go/method Clone__O ^any [^{:tag (* MatchException)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* MatchException)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* MatchException)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* MatchException)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* MatchException)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* MatchException)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* MatchException)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* MatchException)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* MatchException)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* MatchException)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* MatchException)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* MatchException)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* MatchException)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func MatchException_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* MatchException) x)] ok))
+(go/func MatchException_Cast ^{:tag (* MatchException)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* MatchException) x)]
+    (when (not ok) (panic (ClassCast x MatchException_class)))
+    v))
+
 ;; ---- java.io.IOException
 
 (go/type IOException (struct Exception))
@@ -1845,5 +1877,6 @@
   (set! (.-IsInstance (.Info StackOverflowError_class)) StackOverflowError_InstanceOf)
   (set! (.-IsInstance (.Info InternalError_class)) InternalError_InstanceOf)
   (set! (.-IsInstance (.Info AssertionError_class)) AssertionError_InstanceOf)
+  (set! (.-IsInstance (.Info MatchException_class)) MatchException_InstanceOf)
   (set! (.-IsInstance (.Info IOException_class)) IOException_InstanceOf)
   (set! (.-IsInstance (.Info UnsupportedEncodingException_class)) UnsupportedEncodingException_InstanceOf))

@@ -28,6 +28,26 @@
   :imports (atom #{})}."
   nil)
 
+(def ^:dynamic *races*
+  "An atom collecting the candidate two-word races (C2G-SPEC §8.3, Q10), or nil:
+  #{[class field-name desc static? writer]}."
+  nil)
+
+(defn note-store!
+  "Records a store into field f (declared in o) when it is a two-word race candidate: a
+  non-final, non-volatile field of interface Go type written outside its class's constructors
+  (static initializer for a static field), not in a synchronized method nor in locking on this."
+  [f o]
+  (when *races*
+    (let [static (m/static? f)]
+      (when (and (m/iface-desc? (:desc f))
+                 (not (m/has? (:flags f) 0x10))
+                 (not (m/has? (:flags f) 0x40))
+                 (not (and (= o (:class *f*)) (if static (:clinit *f*) (:ctor *f*))))
+                 (not (:sync *f*))
+                 (not (and (:locked-this *f*) (not static))))
+        (swap! *races* conj [o (:name f) (:desc f) static (str (:class *f*) "." (or (:method-name *f*) "?"))])))))
+
 (defn fail [msg & [data]] (throw (ex-info (str "c2g: " msg) (merge {::fail true} data))))
 
 (defn pkg [] (:pkg *f*))
@@ -77,12 +97,26 @@
 ;; ---------------------------------------------------------------------------------------
 ;; blocks: statements with declarations scoping over the rest of the block (Go forms §7.3)
 
-(defn emit! [form] (swap! *block* conj form) nil)
+(def ^:dynamic *line*
+  "The class forms line of the node being translated (the analyzer's :line), or nil: the
+  statements written meanwhile carry it as :c2g/line metadata, which arbace.c2g.out turns into
+  the forms' positions (C2G-SPEC §4.3, §7.9.6)."
+  nil)
+
+(defn with-line
+  "form with the current line as :c2g/line, unless it has one (lists only)."
+  [form]
+  (if (and *line* (seq? form) (not (:c2g/line (meta form))))
+    (vary-meta form assoc :c2g/line *line*)
+    form))
+
+(defn emit! [form] (swap! *block* conj (with-line form)) nil)
 
 (defn decl!
   "Declares Go local sym of Go type gt with initial value init (nil: the zero value)."
   [sym gt init]
-  (swap! *block* conj [:let (tag sym gt) (if (some? init) init (list 'zero gt))])
+  (swap! *block* conj (with-meta [:let (tag sym gt) (if (some? init) init (list 'zero gt))]
+                        (when *line* {:c2g/line *line*})))
   sym)
 
 (defn- fold-items [items used]
@@ -100,7 +134,8 @@
                            v (if (seq? s) (rest s) [s])
                            :when (and (symbol? v) (not= '_ v) (not (contains? used (str v))))]
                        (list 'set! '_ (symbol (str v))))]
-          (recur more2 (list (apply list 'let bindings (concat unused acc)))))
+          (recur more2 (list (with-meta (apply list 'let bindings (concat unused acc))
+                               (some #(when-let [l (:c2g/line (meta %))] {:c2g/line l}) lets)))))
         (recur more (cons it acc)))
       acc)))
 
@@ -138,7 +173,7 @@
       "I" (long (unchecked-int v)) "J" v "S" (long (unchecked-short v)) "B" (long (unchecked-byte v))
       "C" (long (int (unchecked-char v))) nil)))
 
-(declare expr expr-op expr-as stmt! assign! ret! cond-expr translate-ctx missing-reason missing-expr go-call?
+(declare stmt!* translate-ctx* expr expr-op expr-as stmt! assign! ret! cond-expr translate-ctx missing-reason missing-expr go-call?
          prim-convert box-val)
 
 (defn up-sym
@@ -1008,6 +1043,7 @@
                               (:x (if (and guard (not (stable? (:val node)))) (hoist-value xv) xv)))
                           _ (when guard (emit! (class-init-call o)))
                           place (static-place f)]
+                      (note-store! f o)
                       (emit! (if (volatile-field? f) (volatile-write place (:desc f) x) (list 'set! place x)))))
 
 (defn- dropped-store?
@@ -1034,10 +1070,16 @@
   (let [f (:field node)
         [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
         place (field-place tv f)]
+    (note-store! f (or (:declarer f) (:owner f)))
     (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv))))))
 
 (defn stmt!
   "Translates node in statement context."
+  [node]
+  (binding [*line* (or (:line node) *line*)]
+    (stmt!* node)))
+
+(defn- stmt!*
   [node]
   (let [node (acc/unaccess node)]
     (if-let [why (and (not (dropped-store? node)) (missing-reason node))]
@@ -1129,6 +1171,11 @@
 (defn translate-ctx
   "Translates node in context ctx: {:k :stmt}, {:k :assign :var sym :desc d}, {:k :return}."
   [node ctx]
+  (binding [*line* (or (:line node) *line*)]
+    (translate-ctx* node ctx)))
+
+(defn- translate-ctx*
+  [node ctx]
   (let [node (acc/unaccess node)
         k (:k ctx)]
     (cond
@@ -1215,6 +1262,7 @@
                          [tv vv] (target-operands [(:target node) (:val node)] [nil (:desc f)])
                          vv (hoist-value vv)
                          place (field-place tv f)]
+                     (note-store! f (or (:declarer f) (:owner f)))
                      (emit! (if (volatile-field? f) (volatile-write place (:desc f) (:x vv)) (list 'set! place (:x vv))))
                      (assign-value! (coerce (:x vv) (:desc f) (ctx-desc ctx) false) ctx))
         :set-static (let [f (:field node)
@@ -1345,6 +1393,38 @@
 
 (defn- record-pattern? [p] (= :record (:kind p)))
 
+(defn- derived-accessor
+  "The record component field an accessor reads when the record does not declare the accessor
+  itself (the analyzer derived it: it cannot throw), else nil."
+  [{:keys [owner name desc]}]
+  (when-let [d (and (m/translated? owner) (a/decl owner))]
+    (some #(when (and (= name (:name %)) (= desc (:desc %)) (= :record-accessor (:derived %))) %)
+          (:methods d))))
+
+(defn- accessor-call!
+  "Assigns record r's component (accessor `accessor`) to Go variable c. A derived accessor is
+  the field read (records are final, r is not null); a declared one is called, and an
+  exception it throws is wrapped in MatchException(t.toString(), t), as javac wraps it
+  (JLS 14.30.2)."
+  [r rd accessor c]
+  (if (derived-accessor accessor)
+    (emit! (list 'set! c (list (symbol (str ".-" (nm/field-name (:name accessor)))) r)))
+    (let [call (:x (invoke-val {:op :invoke :kind :virtual :owner (:owner accessor)
+                                :name (:name accessor) :desc (:desc accessor)
+                                :target {:op ::go :x r :t rd :nn true} :args []}))]
+      (if-not (contains? (:funcs (:jrt m/*w*)) "MatchException_New_String_Throwable")
+        (emit! (list 'set! c call))
+        (let [exc (tmp)]
+          (swap! *block* conj [:let exc (list (list 'fn [] :results [(tag 'exc (jsym "Throwable_I"))]
+                                                    (list 'defer (list (jsym "Catch") (list 'addr 'exc)))
+                                                    (list 'set! c call)
+                                                    (list 'return)))])
+          (use-sym! exc)
+          (emit! (list 'when (list '!= exc nil)
+                       (list 'panic (list (jsym "Thrown")
+                                          (list (jsym "MatchException_New_String_Throwable")
+                                                (list (jsym "StrOfObj") exc) exc))))))))))
+
 (defn- match-pattern!
   "Emits the statements matching Go value x (a stable expression of Java type vt) against
   pattern p: the type tests, the record components read through their accessors, the
@@ -1367,12 +1447,10 @@
                                  (k)
                                  (let [{:keys [accessor pattern]} (first cs)
                                        ct (subs (:desc accessor) 2)
-                                       c (tmp)
-                                       cvv (invoke-val {:op :invoke :kind :virtual :owner (:owner accessor)
-                                                        :name (:name accessor) :desc (:desc accessor)
-                                                        :target {:op ::go :x r :t (:class p) :nn true} :args []})]
-                                   (decl! c (gotype ct) (:x cvv))
+                                       c (tmp)]
+                                   (decl! c (gotype ct) nil)
                                    (use-sym! c)
+                                   (accessor-call! r (:class p) accessor c)
                                    (match-pattern! pattern c ct #(comps (rest cs))))))
                              (:comps p)))))]
     (if (:test p)
@@ -1469,54 +1547,63 @@
                           (apply list 'case (vec (map #(enum-ordinal e (:enum %)) ls)) (arm (:body c))))
                         [(apply list 'default default-forms)]))))
       :pattern
+      ;; an if chain in a labeled block: each arm whose pattern (and guard) matches runs its
+      ;; body and leaves the block, so a failed guard falls through to the next arm and no
+      ;; arm's code is repeated (C2G-SPEC §7.8)
       (let [sel (hoist-value (expr (:sel node)))
             st (:t sel)
             null-ci (some (fn [[ci c]] (when (some :null (:labels c)) ci)) (map-indexed vector cases))
-            enum? (and (t/class-desc? st) (m/has? (:flags (m/info (t/desc->internal st))) 0x4000))
             selv {:op ::go :x (:x sel) :t st}
-            chain (fn chain [[[ci c] & more]]
-                    (if (nil? ci)
-                      default-forms
-                      (let [l (first (remove #(or (:null %) (:default %)) (:labels c)))]
-                        (if (nil? l)
-                          (chain more)
-                          (if (and (:pattern l) (record-pattern? (:pattern l)))
-                            (with-block
-                              (fn []
-                                (let [ok (declare-pattern! (:pattern l) (:x sel) st)
-                                      body (if-let [g (:guard c)]
-                                             (with-block #(emit! (list 'if (cond-expr g) (cons 'do (arm (:body c))) (cons 'do (chain more)))))
-                                             (arm (:body c)))]
-                                  (emit! (list 'if ok (cons 'do body) (cons 'do (chain more)))))))
-                          (let [p (:pattern l)
-                                label-test (fn [l]
-                                             (cond
-                                               (:enum l) (list '== (:x sel) (m/class-sym (pkg) (t/desc->internal st) (str "_" (:enum l))))
-                                               :else (let [c (:const l)]
-                                                       (if (string? c)
-                                                         (list '.Equals_O__Z (use-sym! (string-lit c)) (coerce (:x sel) st "Ljava/lang/Object;" false))
-                                                         (missing-expr "a constant pattern label" "Z")))))
-                                test (cond
-                                       p (if (:test p)
-                                           (:x (instance-val {:class (:class p) :expr selv}))
-                                           (list '!= (:x sel) nil))
-                                       ;; a case of several constants: any of them
-                                       :else (let [ts (map label-test (remove #(or (:null %) (:default %)) (:labels c)))]
-                                               (if (next ts) (apply list 'or ts) (first ts))))
-                                body (with-block (fn []
-                                                   (when-let [b (and p (:b p))]
-                                                     (let [cv (cast-val {:class (:class p) :expr selv})]
-                                                       (decl! (binding-sym b) (gotype (:type b)) (coerce (:x cv) (:t cv) (:type b) false))))
-                                                   (if-let [g (:guard c)]
-                                                     (let [gc (cond-expr g)]
-                                                       (emit! (list 'if gc (cons 'do (arm (:body c))) (cons 'do (chain more)))))
-                                                     (swap! *block* into (arm (:body c))))))]
-                            [(list 'if test (cons 'do body) (cons 'do (chain more)))]))))))]
-        (if null-ci
-          (emit! (list 'if (list '== (:x sel) nil) (cons 'do (arm (:body (nth cases null-ci))))
-                       (cons 'do (chain (map-indexed vector cases)))))
-          (do (emit! (list 'when (list '== (:x sel) nil) (list 'panic (list (jsym "NPE")))))
-              (swap! *block* into (chain (map-indexed vector cases))))))))
+            lbl (new-label)
+            used (atom false)
+            done (fn [forms]
+                   (let [l (last forms)]
+                     (if (and (seq? l) ('#{return panic break continue} (first l)))
+                       forms
+                       (do (reset! used true) (concat forms [(list 'break lbl)])))))
+            arm-done (fn [c] (done (arm (:body c))))
+            guarded (fn [c]
+                      (if-let [g (:guard c)]
+                        (let [gc (cond-expr g)]
+                          [(apply list 'when gc (arm-done c))])
+                        (arm-done c)))
+            label-test (fn [l]
+                         (cond
+                           (:enum l) (list '== (:x sel) (m/class-sym (pkg) (t/desc->internal st) (str "_" (:enum l))))
+                           :else (let [c (:const l)]
+                                   (if (string? c)
+                                     (list '.Equals_O__Z (use-sym! (string-lit c)) (coerce (:x sel) st "Ljava/lang/Object;" false))
+                                     (missing-expr "a constant pattern label" "Z")))))
+            arms (with-block
+                   (fn []
+                     (if null-ci
+                       (emit! (apply list 'when (list '== (:x sel) nil) (done (arm (:body (nth cases null-ci))))))
+                       (emit! (list 'when (list '== (:x sel) nil) (list 'panic (list (jsym "NPE"))))))
+                     (doseq [c cases
+                             :let [l (first (remove #(or (:null %) (:default %)) (:labels c)))]
+                             :when l]
+                       (if (and (:pattern l) (record-pattern? (:pattern l)))
+                         (let [ok (declare-pattern! (:pattern l) (:x sel) st)
+                               body (with-block #(swap! *block* into (guarded c)))]
+                           (emit! (apply list 'when ok body)))
+                         (let [p (:pattern l)
+                               test (cond
+                                      p (if (:test p)
+                                          (:x (instance-val {:class (:class p) :expr selv}))
+                                          (list '!= (:x sel) nil))
+                                      ;; a case of several constants: any of them
+                                      :else (let [ts (map label-test (remove #(or (:null %) (:default %)) (:labels c)))]
+                                              (if (next ts) (apply list 'or ts) (first ts))))
+                               body (with-block (fn []
+                                                  (when-let [b (and p (:b p))]
+                                                    (let [cv (cast-val {:class (:class p) :expr selv})]
+                                                      (decl! (binding-sym b) (gotype (:type b)) (coerce (:x cv) (:t cv) (:type b) false))))
+                                                  (swap! *block* into (guarded c))))]
+                           (emit! (apply list 'when test body)))))
+                     (swap! *block* into default-forms)))]
+        (if @used
+          (emit! (list 'label lbl (list 'switch (apply list 'default arms))))
+          (swap! *block* into arms)))))
   (when (= :return (:k ctx))
     nil))
 
@@ -1655,12 +1742,14 @@
                         (if (= "V" d) [{:k :stmt} nil]
                             (let [s (tmp)] (decl! s (gotype d) nil) (use-sym! s) [{:k :assign :var s :desc d} s])))
                       [ctx nil])
+        this-lock? (and (= :this-path (:op (acc/unaccess (:lock node)))) (empty? (:path (acc/unaccess (:lock node)))))
         lk (hoist-value (let [x (expr (:lock node))] (assoc x :x (coerce (:x x) (:t x) "Ljava/lang/Object;" (:nn x)) :t "Ljava/lang/Object;")))
         _ (emit! (list (jsym "MonitorEnter") (:x lk)))
-        lit (try-literal (fn []
-                           (emit! (list 'defer (list (jsym "MonitorExit") (:x lk))))
-                           (translate-ctx (:body node) ctx))
-                         {})
+        lit (binding [*f* (cond-> *f* this-lock? (assoc :locked-this true))]
+              (try-literal (fn []
+                             (emit! (list 'defer (list (jsym "MonitorExit") (:x lk))))
+                             (translate-ctx (:body node) ctx))
+                           {}))
         call (literal-form lit false (:method-ret *f*))]
     (if (:ctl? lit)
       (let [ctl (tmp) rv (tmp)]
@@ -1704,7 +1793,7 @@
         [ips iret] (t/parse-method-desc (:inst-desc node))
         psyms (vec (for [i (range (count ps))] (fresh (str "p" i))))
         fnf (binding [*f* (assoc *f* :fn-id (gensym "lambda") :method-ret iret :method-fn nil :try-frame nil
-                                 :targets {})]
+                                 :targets {} :ctor false :sync false :locked-this false :clinit false)]
               (let [*f2 (assoc *f* :method-fn (:fn-id *f*))]
                 (binding [*f* *f2]
                   (let [body (with-block

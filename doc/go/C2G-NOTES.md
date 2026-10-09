@@ -277,6 +277,166 @@ Work that can proceed in parallel, each part with its own check:
 7. **Wider closure, whole program**: translate without slices (`bin/c2g` with no `--slice`,
    all of `arbace/lang` reached from `Main`), and a `--main` program that starts `RT`.
 
+## Phase 2D: quality and the whole program
+
+Branch `c2g-2d` (2026-10-09): items 6 and 7 of "What phase 2 must do", less `:fi-adapter` and
+`Dyn` (phase 2B). Changed namespaces: `arbace.c2g.code` (`*line*`, `with-line`, `emit!`,
+`decl!`, `fold-items`, `stmt!`, `translate-ctx`, `note-store!`, `*races*`,
+`derived-accessor`, `accessor-call!`, `match-pattern!`, the `:pattern` case of
+`translate-switch`, `translate-monitor`, `lambda-val`), `arbace.c2g.decls` (`member-line`,
+`at-line`, `method-code-forms`, `ctor-forms`, `init-forms`, `method-forms`,
+`touches-statics?`, `needs-entry-guard?`, `terminating?`, `ensure-terminated`),
+`arbace.c2g.out` (the layout: `*lay*`, `out!`, `write-meta`, `write-list`, `write-form`,
+`form-text`, `file-text`), `arbace.c2g.model` (`benign-init?`, `pure-node?`, `pure-ctor?`),
+`arbace.c2g.world` (`:source-of`), `arbace.c2g.main` (`--program`, `source-top`, the
+checks), the new `arbace.c2g.checks`; outside c2g: `arbace.classes.analyze/analyze` (nodes
+keep their form's `:line`) and `arbace.classes.parse/parse-member` (members keep `:line`),
+neither changing any emitted byte (stages 2 and 3 identical, the gate passes); jrt:
+`asObject` (`object.clj`), `Arraycopy` (`array.clj`), `isLiteralOf` (`throwable.clj`), the
+stand-in `MatchException` (`test/jrt/standins.clj`, `standin_lang.clj` regenerated).
+
+**1. Line positions.** The analyzer's nodes carry the line of their form, members the line of
+their member form. c2g binds the line of the node it translates and puts it, as
+`:c2g/line`, on every statement it emits and on each method's declaration. `out` turns these
+into the forms' positions: a form whose line the text has not passed is written on that line
+(the reader's position is then the class forms line), else it gets an explicit `^{:line n}`,
+and so does every list inside it without a line of its own (the reader keeps an explicit
+`:line`). Package-level declarations are written sorted by line (Go does not care about their
+order), so explicit lines are rare. In `arbace/lang` the Go file is named after the class
+forms file (`FxClasses.go` for the fixtures' many classes), so that `bin/g2c build
+--line-file` makes gc's line tables, Go's tracebacks, pprof and jrt's `StackTraceElement`s
+name the class forms file and line:
+
+```
+Exception in thread "main" java.lang.MatchException: java.lang.IllegalStateException: negative
+	at c2g.fixtures.FxOuter.classify(FxClasses.clj:144)
+	...
+Caused by: java.lang.IllegalStateException: negative
+	at c2g.fixtures.FxTouchy.v(FxClasses.clj:69)
+```
+
+`bin/c2g-check` now builds with `--line-file`. Costs: the forms grow 11% (8.1 to 9.0 MB),
+a check program's warm build 11.6 to 12.8 s on average, the executables shrink 4% (25.95 to
+24.87 MB). jrt's frames: a function literal nested in a literal (`f.func1.1`) now stands for
+its function as `f.func1` does. Left: jrt's classes are named by their Go file
+(`java_util_HashMap.clj`, not `HashMap.java`); a member a variant replaces shows the
+variant file's line in its class's file.
+
+**2. Pattern switches and `MatchException`.** A pattern `switch` is now an `if` chain in a
+labeled block (`(label :L (switch (default ...)))`): an arm whose pattern and guard match
+runs its body and leaves the block; a failed guard falls through to the next arm. Before,
+each guarded arm repeated the translation of all later arms under its guard, growing
+exponentially with the guards. A record component is read from the field when the accessor
+is the derived one (records are final, so it cannot be overridden or throw); a declared
+accessor is called in a function literal and its exception thrown as
+`MatchException(t.toString(), t)`, as javac does. `MatchException` is a jrt stand-in (`:st`)
+until the closure has its source. Fixtures `tPatternGuards` and `tMatchException` (record
+`FxTouchy` with a throwing accessor) pass on both architectures.
+
+**3. Names.** `arbace.c2g.checks` checks, after translation, every Go package's
+package-level names and every type's method names across the generated files and jrt's
+hand-written ones (stand-in files excepted), and the package-private methods of translated
+classes redeclared by a subclass in another Java package (JVMS 5.4.5; the Go package does not
+matter, `java.util` and `java.util.concurrent` share jrt). Both are errors (c2g exits 1) and
+are listed in `report.edn` (`:errors`, `:package-private-overrides`). Found: none in the
+world of the check, of the whole program, or of all of `arbace.lang`. The rename table stays
+one entry (class names); member renames are not needed yet.
+
+**4. Races.** c2g records every store into a candidate two-word field (§8.3: non-final,
+non-volatile, interface Go type, outside its class's constructors or static initializer, not
+in a `synchronized` method or `locking` on `this`; lambdas reset the context) and lists them
+in `report.edn` `:race-candidates`, by class, with the writing methods: 67 fields in 36
+classes for the check's world (the JDK's collections' caches and iterators, `Compiler`'s
+expression builders, `LazySeq`/`Delay` fields written under a `ReentrantLock`). `bin/c2g-race`
+builds a program of threads sharing translated objects as Clojure's runtime shares them
+(vector and map hash caches, `Symbol`/`Keyword` interning, `Namespace.findOrCreate`, an
+`Atom`'s compare-and-set, `RT.nextID`; `test/c2g/race`) with `-race` (cgo on; it works on
+Alpine's musl) and summarizes the reports: 4, all on the `int32` hash caches `_hasheq` and
+`_hash` of `APersistentVector`/`APersistentMap`, one-word races Java allows; no race on a
+two-word field; the atom ends at 16,000 as expected. A `bin/c2g-check` program (`Seqs`) runs
+clean under `-race` (`bin/c2g-race .tmp/c2g/check/prog-Seqs`), and so do jrt's own tests
+(`bin/jrt test --race`, with the changes here).
+
+**5. Performance.** `bin/c2g-perf` runs the workloads of `test/c2g/bench/BnWork.clj` (class
+forms over `arbace.lang` only) on the JVM Arbace and translated to Go (linux/amd64, `GOGC`
+default), and checks that both give the same checksums (they do). ns per element, this
+machine shared with three other agents (±20% between runs):
+
+| workload | JVM | Go | Go/JVM |
+|---|---:|---:|---:|
+| `vecConj` (`cons` 100k, `nth`) | 92 | 804 | 8.7 |
+| `hashMapAssoc` (100k) | 420 | 6,221 | 14.8 |
+| `arrayMapSmall` (8 keyword assocs) | 208 | 4,179 | 20 |
+| `hashing` (`Murmur3`, `hasheq`) | 24 | 93 | 3.8 |
+| `numbers` (boxed `Numbers.add`, `multiply`) | 6.0 | 320 | 53 |
+| `seqWalk` (`PersistentList` `first`/`next`) | 11 | 140 | 12.5 |
+| `vecEquiv` (1000 elements) | 17,057 | 106,872 | 6.3 |
+| `strings` (`StringBuilder`) | 49 | 265 | 5.4 |
+
+Profiles (`C2G_PROF=FILE` on the program; pprof shows class forms lines now) put most of the
+difference outside c2g's code: allocation and the collector (`mallocgc`, the mark workers at
+37% of all CPU with `GOGC=100`; the JVM allocates from a TLAB and its escape analysis removes
+the boxes of `numbers`), arrays (`jrt.NewRefArray` is two allocations, a struct and a slice of
+16-byte `any` slots: an `Object[32]` is 512 bytes against the JVM's 144 with compressed
+oops), `any` → `Object_I` assertions behind `getClass`/`hashCode`/`equals` on `Object`
+values, and no inlining across interface calls. `GOGC=400` alone gains 20-40%
+(`hashMapAssoc` 3,975 to 2,899).
+
+What c2g's code did cost, measured on Go benchmarks of the translated functions (`go test
+-bench`, before/after, 3 runs each, ns/op): the class initialization guard at the entry of
+static methods, which keeps small methods like `Integer.rotateLeft` from being inlined
+(`Murmur3.hashLong` 9.4 → 3.7, `hashUnencodedChars` 36.5 → 26.3). A static method now has
+no guard when its class's initialization is benign (`model/benign-init?`: the static
+initializer only stores constants, arrays and objects of its own file built by field-storing
+constructors into its own statics, over a benign superclass; no assertions, no Clojure
+constants) and the method reads no static of its class or superclasses: running the
+initialization later, at the first guarded access, cannot be observed. `Numbers` is not
+benign (`new BigDecimalOps()` initializes `RT`), `Integer`, `Long`, `Murmur3`-like classes
+are. With it, `ensure-terminated` recognizes terminating `if`/`let`/`do` (fewer
+`panic("c2g: unreachable")`), and in jrt `asObject` became inlinable (`GetClass` 5.7 → 4.7,
+`Numbers.category` 8.8 → 7.7, `Util.equiv` 53.9 → 50.1) and `Arraycopy` checks reference
+arrays without element checks first. The workloads move within the noise except `hashing`
+(-25%). The remaining temporaries, `NN` checks and `Up_` conversions are inlined by gc and
+did not show in the profiles.
+
+**6. The whole program.** `bin/c2g --program` (no slice): `arbace.lang.Main#main` is a root
+and c2g writes the main package `arbace/cmd/arbace` (`DIR/prog/go/arbace/cmd/arbace.clj`),
+whose `main` passes the command line as a `String[]` to `Main.main` inside `jrt.RunMain`:
+`RT`'s initialization runs, then `RT.doInit` stops at `arbace.core/refer`, unbound until the
+evaluator (phase 2B) loads `arbace.core`; the uncaught exception is printed as the JVM prints
+it, with lines, and the status is 1. Measured (the machine loaded; the first numbers from a
+quieter moment):
+
+| | |
+|---|---|
+| `bin/c2g --program` | 668 classes, 5,022 methods reached, 329 with missing parts; 46-72 s wall, 2.9 GB peak |
+| `bin/g2c build --line-file`, cold (empty `GOCACHE`, std included) | amd64 33-55 s, arm64 30-48 s (2.5 GB peak) |
+| the same, warm | amd64 9.7-13 s, arm64 9.0-15.8 s |
+| executable (static, not stripped) | amd64 23.5 MB, arm64 22.3 MB |
+| start to the uncaught exception (`RT` initialized) | amd64 7 ms, 18 MB resident; arm64 under qemu 0.65 s |
+
+### Proposed amendments (phase 2D)
+
+- **D1 (§4.3, §7.9.6) Positions.** The analyzer keeps each form's line on its node and each
+  member's line; c2g puts it on the statements and declarations it writes and lays the forms
+  out on those lines (explicit `^{:line n}` where the text has passed them; declarations by
+  line); an `arbace/lang` Go file is named after its class forms file; builds use
+  `--line-file`. The frame table stays as J4 says (names only): lines come from gc.
+- **D2 (§7.8) Pattern switches** are an `if` chain in a labeled block left by each matching
+  arm; derived record accessors are field reads; a declared accessor's exception is wrapped
+  in `MatchException` (a jrt stand-in until the closure has `java.lang.MatchException`).
+- **D3 (§6.2, §13.4) Benign initialization.** A static method needs no entry guard when its
+  class's initialization is benign (defined above) and it reads none of its class's or
+  superclasses' statics.
+- **D4 (§4.4) Checks.** The collision check covers generated and hand-written names; the
+  package-private check compares Java packages, not Go packages; both are errors.
+- **D5 (§8.3) Race report.** `report.edn` `:race-candidates`, and `bin/c2g-race`
+  (`-race` needs cgo, which the race build alone turns on).
+- **D6 (§10.6) `--program`** writes `arbace/cmd/arbace` as above.
+- **D7 (§13.4, for jrt)** `GOGC` set by jrt at start (400 measured here), and arrays of
+  references as one allocation (or 8-byte slots, §13.2's thin pointers) are where the factor
+  lies, not c2g's code.
+
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
 All accepted 2026-10-09 and folded into C2G-SPEC, renamed C1-C8 there (C2G-SPEC §16).

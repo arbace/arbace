@@ -476,6 +476,16 @@ runtime and testing frames and jrt's helpers are elided.\n"
     (set! (.-line f) (.-Line fr))
     f))
 
+(go/func isLiteralOf
+  "isLiteralOf: whether callee is a function literal of fn: fn.funcN, or fn.N when fn is itself
+a literal (Go names a literal nested in a literal f.func1 as f.func1.1).\n"
+  ^bool [^string callee ^string fn]
+  (when (not (strings/HasPrefix callee (+ fn ".")))
+    (return false))
+  (let [r (subslice callee (+ (len fn) 1))]
+    (or (strings/HasPrefix r "func")
+        (and (> (len r) 0) (>= (aget r 0) \0) (<= (aget r 0) \9)))))
+
 (go/func isForwarder
   "isForwarder: whether fn (pkg.(*T).M) called callee as its implementation (pkg.(*U).Impl_M),
 a dispatch method that forwards (§5.4).\n"
@@ -515,7 +525,7 @@ of the function that called it.\n"
             (and (> i 0) (isForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))
             (do)
             ;; the caller of a try body's function literal: the literal's frame stands for it
-            (and (> i 0) (strings/HasPrefix (.-Function (aget raw (- i 1))) (+ (.-Function fr) ".func")))
+            (and (> i 0) (isLiteralOf (.-Function (aget raw (- i 1))) (.-Function fr)))
             (do)
             (and top (or (== (.-method f) "fillInStackTrace")
                          (and (== (.-method f) "<init>") (isThrowableClass (.-cls f)))))

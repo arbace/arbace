@@ -40,13 +40,22 @@
           :counter (atom {}) :label-used (atom #{})}
          more))
 
+(defn terminating?
+  "Is Go form f a terminating statement (Go spec, \"Terminating statements\"): a return or
+  panic, a block (let, do) ending in one, an if whose two branches end in one?"
+  [f]
+  (and (seq? f)
+       (case (first f)
+         (return panic) true
+         (let do) (terminating? (last f))
+         if (and (= 4 (count f)) (terminating? (nth f 2)) (terminating? (nth f 3)))
+         false)))
+
 (defn ensure-terminated
   "Go needs a terminating statement in a function with results: a final panic when the last
-  form is no return or panic."
+  form is not one."
   [forms has-results]
-  (if (and has-results
-           (let [l (last forms)]
-             (not (and (seq? l) (#{'return 'panic} (first l))))))
+  (if (and has-results (not (terminating? (last forms))))
     (concat forms [(list 'panic "c2g: unreachable")])
     forms))
 
@@ -64,12 +73,27 @@
                  [(:id b) (list (symbol (str ".-" (nm/field-name (str "val$" (:sym b))))) tsym)]))
       {})))
 
+(defn member-line
+  "The class forms line of method or constructor m (its member form's), or nil."
+  [m]
+  (:line (:member m)))
+
+(defn- at-line
+  "Declaration forms with the line of member m (C2G-SPEC §4.3)."
+  [m forms]
+  (if-let [l (member-line m)]
+    (map #(if (seq? %) (vary-meta % assoc :c2g/line l) %) forms)
+    forms))
+
 (defn- method-code-forms
   "The Go statements of method m's body (analyzed body ab) of class n."
   [pkg n m ab {:keys [t this static]}]
   (let [ret (:ret m)]
     (binding [c/*f* (new-fn-state pkg n :static static :t t :this this :method-ret ret
-                                  :captured (if t (captured-fields n t) {}))]
+                                  :captured (if t (captured-fields n t) {})
+                                  :method-name (:name m)
+                                  :sync (has? (:flags m) Opcodes/ACC_SYNCHRONIZED))
+              c/*line* (member-line m)]
       (let [fid (:fn-id c/*f*)]
         (binding [c/*f* (assoc c/*f* :method-fn fid)]
           (let [params (vec (for [b (:params ab)] (c/binding-sym b)))
@@ -246,7 +270,8 @@
         ab (body-of n mm)
         reached (reached? n mm)
         st @(:state d)]
-    (binding [c/*f* (new-fn-state pkg n :t 't :this (if leaf 't 'this) :method-ret "V")]
+    (binding [c/*f* (new-fn-state pkg n :t 't :this (if leaf 't 'this) :method-ret "V" :ctor true :method-name "<init>")
+              c/*line* (member-line mm)]
       (let [fid (:fn-id c/*f*)
             outer-p (when (:outer-instance? d) (c/fresh-raw "this_0"))
             so-p (when (:super-outer d) (c/fresh-raw "x0"))
@@ -310,7 +335,7 @@
                                [(list 'let ['t (list 'addr (list 'lit (symbol g)))]
                                       (apply list (symbol (str "." base)) 't (concat (when-not leaf ['t]) (map #(symbol (str %)) new-ps)))
                                       't)])))]
-        (remove nil? [new-form ctor-form])))))
+        (at-line mm (remove nil? [new-form ctor-form]))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; methods (§5.4)
@@ -410,6 +435,35 @@
       :record-object-method (record-object-body pkg n mm ps)
       [(list 'panic (list (m/jrt-sym pkg "C2g_NotTranslated") (str "derived " (name (:derived mm)))))])))
 
+(defn- touches-statics?
+  "Does analyzed code ab access a static field of a class in classes (directly: the guarded
+  accesses of other classes run their own initialization)?"
+  [ab classes]
+  (let [hit (volatile! false)]
+    (letfn [(w [x]
+              (when-not @hit
+                (cond
+                  (map? x) (when (:op x)
+                             (when (and (#{:get-static :set-static :var-deref :var-invoke} (:op x))
+                                        (contains? classes (or (:declarer (:field x)) (:owner (:field x)))))
+                               (vreset! hit true))
+                             (run! w (vals x)))
+                  (or (vector? x) (seq? x)) (run! w x)
+                  :else nil)))]
+      (w (:body ab)))
+    @hit))
+
+(defn needs-entry-guard?
+  "Does static method mm of class n (body ab) start with n's initialization guard (§6.2)? Not
+  when the initialization is benign (unobservable but through n's statics, model/benign-init?)
+  and the body reads none of the statics of n and its superclasses: then delaying the
+  initialization to the first guarded access cannot be told apart (C2G-NOTES, phase 2D)."
+  [n ab]
+  (and (not (m/trivial-init? n))
+       (or (nil? ab)
+           (not (m/benign-init? n))
+           (touches-statics? ab (set (m/superclass-chain n))))))
+
 (defn method-forms
   "The Go method (instance) or function (static) of method mm of class n: its body when
   reached, a stub otherwise."
@@ -461,10 +515,11 @@
               [(vec (for [i (range (count ps))] (symbol (str "p" i)))) (stub-body n (:name mm) (:desc mm))])
             plist (param-list pkg ps pnames)
             plist (with-ret plist pkg r)]
-        (cond
+        (at-line mm
+         (cond
           static
           [(list* 'go/func (symbol (str g "_" base)) plist
-                  (concat (when (and (not (m/trivial-init? n)) (not native)) [(list (symbol (str g "_Init")))]) body))]
+                  (concat (when (and (not native) (needs-entry-guard? n ab)) [(list (symbol (str g "_Init")))]) body))]
           iface
           ;; default and private methods of interfaces: functions taking the receiver first
           [(list* 'go/func (symbol (str g "_" base))
@@ -475,7 +530,7 @@
           :else
           [(list* 'go/method (symbol (nm/impl-name base))
                   (with-meta (vec (concat [(tag 't (list '* (symbol g))) (tag 'this (symbol (str g "_I")))] plist)) (meta plist))
-                  body)])))))
+                  body)]))))))
 
 (defn- forwarder
   "A dispatch method of concrete class n for virtual method k: calls the implementation."
@@ -570,7 +625,7 @@
           st @(:state d)
           sup (:super d)
           reached (contains? *reached* [n "<clinit>" "()V"])
-          body (binding [c/*f* (new-fn-state pkg n :static true :method-ret "V" :clinit true)]
+          body (binding [c/*f* (new-fn-state pkg n :static true :method-ret "V" :clinit true :method-name "<clinit>")]
                  (binding [c/*f* (assoc c/*f* :method-fn (:fn-id c/*f*))]
                    (c/with-block
                      (fn []

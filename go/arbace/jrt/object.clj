@@ -83,13 +83,19 @@ locked), as c2g's Clone__O does after copying the struct.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; Object's methods on values whose Go type is any (§5.8)
 
-(go/func asObject ^Object_I [^any x]
-  (when (== x nil)
-    (panic (NPE)))
+(go/func asObject
+  "asObject: x as an Object_I; small enough for gc to inline (GetClass, HashCode and Equals
+on Object-typed values are hot in translated code), the failures out of line.\n"
+  ^Object_I [^any x]
   (let [(values o ok) (assert Object_I x)]
     (when (not ok)
-      (panic (fmt/Sprintf "jrt: not a Java object: %T" x)))
+      (notObject x))
     o))
+
+(go/func notObject [^any x]
+  (when (== x nil)
+    (panic (NPE)))
+  (panic (fmt/Sprintf "jrt: not a Java object: %T" x)))
 
 (go/func Equals "Equals is x.equals(y) on an Object: NullPointerException when x is null.\n"
   ^bool [^any x ^any y]

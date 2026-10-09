@@ -1141,9 +1141,14 @@
                    ;; any other constant (regex, ratio, big decimal, tagged literal...): read
                    ;; at class initialization, as Clojure embeds constants
                    :else (clj-constant actx form))]
-        (let [node (accessorize actx node)]
-          (if-let [tag (and (instance? arbace.lang.IMeta form) (:tag (meta form)))]
-            (coerce-hint actx node tag)
+        (let [node (accessorize actx node)
+              node (if-let [tag (and (instance? arbace.lang.IMeta form) (:tag (meta form)))]
+                     (coerce-hint actx node tag)
+                     node)]
+          ;; the form's line (the reader's metadata), for back ends that keep positions (c2g's
+          ;; stack traces); the innermost form's line wins
+          (if-let [l (and (seq? form) (map? node) (nil? (:line node)) (:line (meta form)))]
+            (assoc node :line l)
             node))))))
 
 (declare branching-tail? convert-node)

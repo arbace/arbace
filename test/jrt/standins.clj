@@ -58,6 +58,8 @@
    ["StackOverflowError" "VirtualMachineError" :leaf :n :s]
    ["InternalError" "VirtualMachineError" :leaf :n :s :st :t]
    ["AssertionError" "Error" :leaf :n :o]
+   ;; c2g (C2G-SPEC §7.8): record patterns wrap an accessor's exception
+   ["MatchException" "RuntimeException" :leaf :st]
    ["java.io.IOException" "Exception" :nonleaf :n :s :st :t]
    ["java.io.UnsupportedEncodingException" "IOException" :leaf :n :s]])
 

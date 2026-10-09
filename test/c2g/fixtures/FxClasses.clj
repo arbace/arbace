@@ -63,6 +63,12 @@
 
 (defclass ^:public ^:record FxPair [^Object a ^String b])
 
+;; a record whose declared accessor throws: a record pattern wraps it in MatchException
+(defclass ^:public ^:record FxTouchy [^int v]
+  (method ^:public v ^int [this]
+    (when (neg? v) (throw (IllegalStateException. "negative")))
+    v))
+
 (defclass ^:public ^:enum FxOp
   (constants (PLUS ["+"] (method ^:public apply ^int [this ^int x ^int y] (unchecked-add-int x y)))
              (TIMES ["*"] (method ^:public apply ^int [this ^int x ^int y] (unchecked-multiply-int x y)))
@@ -134,6 +140,27 @@
     (let [^Object o (FxRange. 2 9)]
       (java-str (switch o [(FxRange ^int lo hi)] (unchecked-add-int lo hi) [^Object x] -1)
                 (if-instance [(FxPair a ^String b) o] b "-"))))
+  (method ^:static classify ^String [^Object o]
+    (switch o
+      [(FxRange ^int lo hi) :when (> lo 5)] "big range"
+      [(FxRange ^int lo hi) :when (== lo hi)] "empty range"
+      [(FxRange ^int lo hi)] (java-str "range " (unchecked-subtract-int hi lo))
+      [^String s :when (.isEmpty s)] "empty string"
+      [^String s :when (> (.length s) 3)] (java-str "long " s)
+      [^String s] (java-str "short " s)
+      [(FxTouchy ^int v) :when (> v 10)] "touchy big"
+      [(FxTouchy ^int v)] (java-str "touchy " v)
+      nil "null"
+      [^Object x] "other"))
+  (method ^:public ^:static tPatternGuards ^String []
+    (java-str (FxOuter/classify (FxRange. 7 9)) "|" (FxOuter/classify (FxRange. 3 3)) "|" (FxOuter/classify (FxRange. 1 4))
+              "|" (FxOuter/classify "") "|" (FxOuter/classify "abcd") "|" (FxOuter/classify "ab")
+              "|" (FxOuter/classify (FxTouchy. 11)) "|" (FxOuter/classify (FxTouchy. 2)) "|" (FxOuter/classify nil)
+              "|" (FxOuter/classify (Integer/valueOf 1))))
+  (method ^:public ^:static tMatchException ^String []
+    (try (FxOuter/classify (FxTouchy. -1))
+         (catch MatchException e
+           (java-str (.getName (.getClass e)) ": " (.getMessage e) " / " (.getName (.getClass (.getCause e)))))))
   (method ^:public ^:static tEnumBodies ^String []
     (let [sb (StringBuilder.)]
       (for-each [^FxOp op (FxOp/values)]

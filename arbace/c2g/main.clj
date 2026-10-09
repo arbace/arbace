@@ -18,7 +18,12 @@
                        class and its named nested classes, all their public members);
                        internal names with / or binary names with . (repeatable)
     --tests            also copy jrt's test files into the program
-    --main DIR         a main package's forms tree to add to the program (its go/... files)"
+    --main DIR         a main package's forms tree to add to the program (its go/... files)
+    --program          the whole program (C2G-SPEC §10.6): arbace.lang.Main is a root, and
+                       c2g writes the main package arbace/cmd/arbace, whose main makes the
+                       calling goroutine the thread main (jrt.RunMain) and calls
+                       arbace.lang.Main.main(args) (RT's initialization first); build it with
+                       bin/g2c build --line-file DIR/prog"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
@@ -36,6 +41,7 @@
             [arbace.c2g.out :as out]
             [arbace.c2g.dyn :as dyn]
             [arbace.c2g.fromfn :as fromfn]
+            [arbace.c2g.checks :as chk]
             [arbace.g2c.print :as gp]
             [arbace.pprint]))
 
@@ -54,6 +60,7 @@
       "--root" (recur (rest more) (update opts :roots conj (first more)))
       "--tests" (recur more (assoc opts :tests true))
       "--main" (recur (rest more) (update opts :mains (fnil conj []) (first more)))
+      "--program" (recur more (-> opts (assoc :program true) (update :roots conj "arbace.lang.Main#main")))
       (throw (ex-info (str "c2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -191,6 +198,33 @@
 
 (defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
 
+(defn- program-package-forms []
+  ['(ns go.arbace.cmd.arbace (:require [arbace.go :as go]))
+   '(go/package main :path "arbace/cmd/arbace" :files ["main.go"])
+   '(load "arbace/main")])
+
+(defn- program-main-forms
+  "main: the command line as a String[], then arbace.lang.Main.main inside jrt.RunMain (the
+  thread main, uncaught exceptions printed as the JVM prints them, status 1), its status the
+  process's."
+  []
+  ['(go/file "main.go" :imports [[os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+   '(go/func main []
+      (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
+        (range [i a (subslice os/Args 1)]
+          (aset (.-A args) i (jrt/Str a)))
+        (os/Exit (jrt/RunMain (fn [] (lang/Main_Main_String1__V args))))))])
+
+(defn- source-top
+  "The name a Go file is named after (§4.3): in arbace/lang the class forms file of top-level
+  class top (FxClasses for the classes of FxClasses.clj, so that --line-file positions name
+  it), in jrt the class (its Java source path)."
+  [world pkg top]
+  (if-let [f (and (= pkg :lang) (get (:source-of world) top))]
+    (let [b (.getName (io/file f))]
+      (str (subs top 0 (inc (.lastIndexOf ^String top "/"))) (subs b 0 (- (count b) 4))))
+    top))
+
 (defn run [opts]
   (let [t0 (now)
         root-dir "."
@@ -289,11 +323,12 @@
             files (atom {})   ; [pkg go-file] -> forms
             errors (atom [])]
         (binding [m/*w* wst
-                  d/*reached* (:reached res)]
+                  d/*reached* (:reached res)
+                  c/*races* (atom #{})]
           ;; classes, grouped by the file of their top-level class
           (doseq [n (sort T)]
             (let [pkg (m/pkg n)
-                  fname (out/go-file-name pkg (top-of n))]
+                  fname (out/go-file-name pkg (source-top world pkg (top-of n)))]
               (binding [c/*pkgstate* (get pkgstates pkg)]
                 (try
                   (let [forms (if (m/reflected? n) (d/reflected-forms n) (d/class-forms n))]
@@ -345,6 +380,16 @@
             (swap! files assoc [pkg "c2g_strings.go"] (vec (out/strings-forms pkg @(:lits ps))))
             (swap! files assoc [pkg "c2g_up.go"] (vec (out/ups-forms pkg @(:ups ps)))))
           (let [t-trans (secs t2)
+                ;; §4.4: duplicate Go names, package-private methods Go would override; §8.3
+                collisions (chk/collisions @files scan)
+                _ (doseq [c collisions]
+                    (swap! errors conj [(str "Go name " (:name c)) (str "declared more than once in " (name (:pkg c)) ": " (str/join ", " (:sources c)))])
+                    (println (str "c2g: error: Go name " (:name c) " declared more than once in package " (name (:pkg c)) ": " (str/join ", " (:sources c)))))
+                pp-overrides (chk/package-private-overrides T)
+                _ (doseq [o pp-overrides]
+                    (swap! errors conj [(:method o) (str "package-private, redeclared by " (:hidden-by o) " in another package (C2G-SPEC §4.4: rename table)")])
+                    (println (str "c2g: error: package-private " (:method o) " is redeclared by " (:hidden-by o) " in another Java package; Go would override it")))
+                races (chk/race-report @c/*races*)
                 t3 (now)
                 ;; write the generated tree
                 _ (when (.exists (io/file gen-dir)) (doseq [f (reverse (file-seq (io/file gen-dir)))] (io/delete-file f true)))
@@ -408,6 +453,13 @@
             (write! (str prog-dir "/program.edn") "{:module \"arbace\" :go \"1.27\"}\n")
             (when-let [after (:after opts)]
               (after {:prog-dir prog-dir :T T :res res :world world}))
+            (when (:program opts)
+              (write! (str prog-dir "/go/arbace/cmd/arbace.clj")
+                      (str ";; Generated by c2g --program (C2G-SPEC §10.6): the program's main package.\n"
+                           (str/join "\n" (map out/form-text (program-package-forms))) "\n"))
+              (write! (str prog-dir "/go/arbace/cmd/arbace/main.clj")
+                      (str ";; Generated by c2g --program (C2G-SPEC §10.6).\n(in-ns 'go.arbace.cmd.arbace)\n\n"
+                           (str/join "\n\n" (map out/form-text (program-main-forms))) "\n")))
             (doseq [mdir (:mains opts)]
               (doseq [^java.io.File f (file-seq (io/file mdir))
                       :when (.isFile f)
@@ -424,10 +476,17 @@
                           :analysis-failures (:failed world)
                           :variants (:variants world)
                           :errors @errors
+                          ;; §8.3, Q10: non-volatile fields of interface Go type written after
+                          ;; construction without a lock
+                          :race-candidates races
+                          :package-private-overrides pp-overrides
                           :times {:load t-load :reach t-reach :translate t-trans :write (secs t3)}}]
               (write! (str (:out opts) "/report.edn") (with-out-str (arbace.pprint/pprint report)))
               (println (str "c2g: translated in " t-trans " s, written in " (secs t3) " s: "
                             (count written) " files; program root " prog-dir))
+              (println (str "c2g: " (reduce + (map count (vals races))) " candidate two-word race fields in "
+                            (count races) " classes (report.edn :race-candidates); "
+                            (count collisions) " name collisions, " (count pp-overrides) " package-private overrides"))
               report)))))))
 
 (defn -main [& args]

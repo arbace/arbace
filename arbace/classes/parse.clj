@@ -64,7 +64,8 @@
 (defn parse-member
   "A parsed member; :mid identifies it (members equal as values may differ in metadata)."
   [ns f]
-  (assoc (parse-member* ns f) :mid (swap! member-ids inc)))
+  (cond-> (assoc (parse-member* ns f) :mid (swap! member-ids inc))
+    (:line (meta f)) (assoc :line (:line (meta f)))))
 
 (defn- parse-member* [ns f]
   (case (first f)
