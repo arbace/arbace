@@ -61,7 +61,7 @@ Prior art:
   concurrently Clojure's suite on stage 2 and `bin/class-forms-tests` (about 4 minutes).
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite` and the
   g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`)
-  (about 7 minutes): run it when the
+  (about 7 minutes; it also trims Go's build cache of entries unused for a day): run it when the
   class forms compiler, j2c or g2c change. Logs in
   `.tmp/gate/`.
   - `arbace/j2c/`: the Java → class forms converter.

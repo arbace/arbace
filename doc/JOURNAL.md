@@ -727,3 +727,11 @@ decision (2026-10-08).
   the user.
 - The user accepted P2C-1..3 and D1-D6 (to be folded into C2G-SPEC) and put D7's performance
   work (GOGC at start, reference arrays as one allocation) into step 7, after correctness.
+
+## 2026-10-09: `bin/gate --full` trims Go's build cache
+
+- The disk reached 80% again: Go's build cache had grown to 47 GB (c2g's check programs, the
+  round trips, jrt's builds), and Go itself keeps entries five days. Trimmed by hand to 8.8 GB
+  (entries unused for two hours). At the user's request `bin/gate --full` now first deletes
+  cache entries unused for a day (Go refreshes an entry's time when it uses it, at most hourly,
+  so runs in progress keep theirs) and prints the size before and after.
