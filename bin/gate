@@ -20,6 +20,19 @@
 #                                 test/g2c/roundtrip-amd64.edn and roundtrip-linux-amd64.edn;
 #                                 one after the other, since two converters at once exhaust
 #                                 the memory beside the suites; needs TamaGo's go, G2C_GOROOT
+#                   go            the Go build on amd64 (doc/go/EVAL-NOTES.md), one chain:
+#                     jrt-convert   bin/jrt-convert (jrt's JDK sources into .tmp/jrt/conv)
+#                     go-build      ARBACE_GO_ARCHES=amd64 bin/arbace-go --build
+#                     then concurrently:
+#                     go-smoke      ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke
+#                     suite-go      Clojure's suite on the Go build, against
+#                                   test/arbace-go-results.edn
+#                     oracle-go     bin/oracle check on the Go build, against its known
+#                                   mismatches, test/oracle/known-go-amd64.edn
+#                   (arm64, under qemu, stays out: its suite takes hours)
+#              g2c and the go chain start, concurrently, when suite-stage1, suite-stage2 and
+#              j2c (whose suite runs on the converted baseline) are done: their converters
+#              beside the three suites exhaust the memory
 # The suite on stage 1 is not essential: the build requires stage 2 = stage 3, and reports
 # whether stage 1 = stage 2; when they are equal, the suite on stage 1 tests the same classes.
 # With --full the gate first trims Go's build cache of entries unused for a day (Go itself keeps
@@ -71,6 +84,32 @@ suite() {  # suite N: Clojure's suite on stage N, as bin/build-arbace --suite ru
   CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage$1 CLOJURE_SRC="$root/target/stage$1:$root" \
     CLOJURE_TESTS_PRECOMPILED=1 bin/clojure-tests -j "$jobs"
 }
+step() {  # step NAME COMMAND...: one check of the go chain, logged as launch logs its checks
+  local name=$1 t0; shift; t0=$(date +%s)
+  "$@" > "$logs/$name.log" 2>&1
+  local st=$?
+  echo $st > "$logs/$name.status"; echo $(( $(date +%s) - t0 )) > "$logs/$name.secs"
+  return $st
+}
+go_chain() {  # the Go build on amd64, then its three checks concurrently
+  step jrt-convert bin/jrt-convert || return 1
+  step go-build env ARBACE_GO_ARCHES=amd64 bin/arbace-go --build || return 1
+  step go-smoke env ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke &
+  step suite-go env CLOJURE_TESTS_GO="$root/target/arbace-go/amd64/arbace" bin/clojure-tests -j 12 &
+  # --timeout: the reducers file takes about 285 s of the default 300 (EVAL-NOTES.md, part 4)
+  step oracle-go bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900 \
+    --expected test/oracle/known-go-amd64.edn &
+  wait
+}
+converters() {  # g2c and the go chain, once the three suites are done: a converter (g2c's
+  # takes up to 12 GB, jrt-convert's 8) beside the suites (up to 43 GB at once, 24 JVMs each)
+  # exhausts the memory (the OOM killer took g2c's in both runs of 2026-10-09 that tried)
+  until [ -f "$logs/suite-stage1.status" ] && [ -f "$logs/suite-stage2.status" ] \
+          && [ -f "$logs/j2c.status" ]; do sleep 2; done
+  step g2c sh -c 'bin/g2c roundtrip amd64 && bin/g2c roundtrip linux/amd64' &
+  go_chain &
+  wait
+}
 declare -A pids starts
 launch() {  # launch NAME COMMAND...
   local name=$1; shift
@@ -83,11 +122,13 @@ launch cft bin/class-forms-tests
 if [ -n "$full" ]; then
   launch suite-stage1 suite 1
   launch j2c env J2C_TEST_JOBS="$jobs" bin/j2c-check --suite
-  launch g2c sh -c 'bin/g2c roundtrip amd64 && bin/g2c roundtrip linux/amd64'
+  launch converters converters
 fi
-status=0
-for name in suite-stage2 cft ${full:+suite-stage1 j2c g2c}; do
-  wait "${pids[$name]}"
+report() {  # report NAME: a check's outcome, wall time and summary lines
+  local name=$1
+  if [ ! -f "$logs/$name.status" ]; then
+    echo "   FAILED  $name (not run: an earlier step failed)"; status=1; return
+  fi
   s=$(cat "$logs/$name.secs"); w=$(printf '%dm%02ds' $((s / 60)) $((s % 60)))
   if [ "$(cat "$logs/$name.status")" = 0 ]; then
     echo "   ok  $name ($w)"
@@ -98,7 +139,20 @@ for name in suite-stage2 cft ${full:+suite-stage1 j2c g2c}; do
     suite-*|j2c) summary "$name" 'TOTAL|regressions' ;;
     g2c) summary g2c '^package|^test |regressions' 6 ;;
     cft) summary cft '^Ran|failures' ;;
+    jrt-convert) summary jrt-convert . 1 ;;
+    go-build) summary go-build . 1 ;;
+    go-smoke) summary go-smoke 'ok|FAIL' 1 ;;
+    oracle-go) summary oracle-go '^== ' ;;
   esac
+}
+status=0
+for name in suite-stage2 cft ${full:+suite-stage1 j2c converters}; do
+  wait "${pids[$name]}"
+  if [ "$name" = converters ]; then
+    for g in g2c jrt-convert go-build go-smoke suite-go oracle-go; do report "$g"; done
+  else
+    report "$name"
+  fi
 done
 if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
 exit $status

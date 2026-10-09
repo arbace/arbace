@@ -541,7 +541,9 @@ method-defined-twice failure before), `proxy.examples` loads; `data-structures-i
 mismatch in the existing files, `polymorphism.clj:176` (`class-ambig`), names the two ambiguous
 interfaces in the other order: the order is that of a hash map keyed by `Class` objects, whose
 hashes are identity hashes, which the classes made while `core_proxy` loads shift (it passed by
-the same luck before). Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
+the same luck before). Fixed afterwards (2026-10-09, the user's decision): two classes are
+named in the order of their names (VENDOR-NOTES.md, hand change 14), on the JVM as on Go, and
+the case re-recorded. Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
 `protocols` 196 of 196 (195 before the duplicate-method fix), `printer` 74 of 74 (`bean`),
 `transients` 35 of 35, and `java_interop`'s proxy tests (`test-proxy-chain`, `test-bases`,
 `test-supers`, `test-proxy-abstract-super`, `test-iterable-bean`, `test-set!`) pass;
@@ -725,24 +727,41 @@ MB resident), with `GOGC=400` 56 s and 89 s of CPU (650 MB), with `GOMAXPROCS=4`
 The runner sets `GOGC=400` for its processes unless `GOGC` is set: 16 processes need about 10
 GB. Start-up work (part 4: pre-read or pre-analyzed namespaces) would shorten every process.
 
-### For the gate (proposal; `bin/gate` unchanged)
+### For the gate (done, 2026-10-09; `bin/gate` unchanged)
 
-`bin/gate --full`, concurrently with its other checks (they take about 6.5 minutes), one chain:
+The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each step its own log in
+`.tmp/gate/` and line in the summary), concurrently with g2c's round trips once the three suites
+(stages 1 and 2, j2c's) are done:
 
-1. `bin/jrt-convert` (about 70 s), then `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`
-   (c2g and the Go build: a few minutes, the Go cache warm);
-2. then concurrently: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` (seconds);
-   `CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12` against
-   `test/arbace-go-results.edn` (about 5 minutes, about 8 GB); and the oracle on the Go build
-   (`bin/oracle check 'target/arbace-go/amd64/arbace -'`, about 1 minute), once its known
-   mismatches are recorded in a reference as the suite's are (today `check` fails on any
-   mismatch: 266 on the Go build; a `--expected FILE` option comparing the set of mismatching
-   cases would make it a gate check).
+1. `jrt-convert`: `bin/jrt-convert`, then `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go
+   --build` (c2g and the Go build, the Go cache warm);
+2. then concurrently: `go-smoke` (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`); `suite-go`
+   (`CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12`, against
+   `test/arbace-go-results.edn`); and `oracle-go` (`bin/oracle check 'target/arbace-go/amd64/arbace
+   -' --timeout 900 --expected test/oracle/known-go-amd64.edn`).
 
-That makes `--full` about 11 to 12 minutes and adds about 20 GB at its peak beside the g2c round
-trips; arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours).
-The essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
-change is what the Go checks guard (as `--full` is run for compiler, j2c and g2c changes).
+The oracle's new `--expected FILE` (ORACLE.md) passes when the mismatching cases are exactly
+those of the reference, `test/oracle/known-go-amd64.edn`: the 32 of main at `4284edc`, in five
+groups with their reasons (`deftype Foo/2`'s error source, the `StringBuilder` identity hash, the
+JVM's recorded `dcmpg` bug, 5 `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's
+resource data); `--write-expected FILE` rewrites it. The timeout is 900 s, not 300: the reducers
+file takes about 285 s on the Go build. Measured (64 cores; the host's memory read 46 GB in the morning, 62-64 GB in the afternoon):
+
+- The proposal's layout, everything concurrent from the start, does not fit: the three suites
+  (24 test JVMs each) use 40-59 GB at their peak by themselves, and the OOM killer took g2c's
+  converter in both runs that started converters beside them (once with jrt-convert's too);
+  `suite-stage1` crashed in the first. So g2c and the Go chain wait for the three suites
+  (`converters` in `bin/gate`), and g2c no longer runs beside them either.
+- With that: `bin/gate --full` passes in **21m24s** (the bootstrap 1m31s; the suites on stages
+  2 and 1 3m37s and 3m36s, j2c 5m12s; then g2c 1m27s, `jrt-convert` 1m32s, `go-build` 2m58s,
+  `go-smoke` 31 s, `suite-go` 10m08s, the longest (`reducers` 345 s and `parse` 306 s of its
+  namespaces), `oracle-go` 5m22s). Memory used (`free`, sampled each second): at most 59 GB
+  in the suites' phase, as before; at most 26 GB once the converters and the Go checks run.
+  Before: about 7 minutes.
+
+arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours). The
+essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
+change is what the Go checks guard.
 
 ## Phase 2B: jrt's surface for the REPL
 

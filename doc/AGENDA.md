@@ -127,9 +127,15 @@ fallbacks of `arbace/core_classes.clj` are gone.
   `bin/arbace-go` builds static executables (58 MB amd64, 56 MB arm64). On amd64 the oracle
   passes 20,221 of 20,253 (the forms 10,075 of 10,077), Clojure's suite 18,781 of 18,806
   assertions (61 of 64 namespaces load).
-  - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
-    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`, and the
-    determinism issue at `polymorphism.clj:176` (identity-hash order).
+  - Done (2026-10-09, the user's decision): the step 5 amendments accepted and folded, renamed
+    M1-M8, X1-X4, S1-S8 (C2G-SPEC §16); B7's transcribed jdk26u parts kept, as LICENSE.md records.
+  - Done (2026-10-09, the user's decision): the Go checks in `bin/gate --full` (amd64): jrt-convert,
+    the Go build, its smoke test, Clojure's suite on it and the oracle against its known
+    mismatches (`bin/oracle check --expected`, `test/oracle/known-go-amd64.edn`, 32 cases);
+    `--full` now takes about 21 minutes.
+  - Done (2026-10-09, the user's decision): the determinism issue at `polymorphism.clj:176`: a
+    multimethod's ambiguity message names two classes in the order of their names
+    (VENDOR-NOTES.md, hand change 14), on the JVM as on Go.
   - Then: step 6 (the executables), step 7 (speed, D7), step 8 (the `.ae` rename), step 9 (the
     freeze).
 

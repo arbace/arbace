@@ -59,11 +59,14 @@ Prior art:
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2 and `bin/class-forms-tests` (about 4 minutes).
-  `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite` and the
-  g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`)
-  (about 7 minutes; it also trims Go's build cache of entries unused for a day): run it when the
-  class forms compiler, j2c or g2c change. Logs in
-  `.tmp/gate/`.
+  `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite`, the
+  g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`) and
+  the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
+  Clojure's suite on it (`test/arbace-go-results.edn`) and the oracle on it, against its known
+  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2c and the
+  Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
+  on Go the longest; it also trims Go's build cache of entries unused for a day): run it when
+  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`.
   - `arbace/j2c/`: the Java → class forms converter.
 
 ## Records
