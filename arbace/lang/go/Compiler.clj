@@ -37,20 +37,6 @@
                                                                         ^byte/1 bytecode]
     (throw (UnsupportedOperationException. "compile: the Go build writes no class files")))
 
-  ;; load-file: java.io.File is outside the Go build's world; the same path arithmetic on the
-  ;; name (an absolute path from the working directory, the name after the last /)
-  (method ^:public ^:static loadFile :throws [IOException] [^String file]
-    (let [f (FileInputStream. file)
-          abs (if (.startsWith file "/")
-                  file
-                  (java-str (System/getProperty "user.dir") "/" file))
-          slash (.lastIndexOf file "/")]
-      (try
-        (arbace.lang.Compiler/load (InputStreamReader. f RT/UTF8)
-                                   abs
-                                   (if (>= slash 0) (.substring file (unchecked-inc-int slash)) file))
-        (finally (.close f)))))
-
   ;; ---------------------------------------------------------------------------------------
   ;; The evaluator (doc/go/EVAL-PLAN.md, doc/go/EVAL-NOTES.md). Every Expr has evalIn(Frame), a
   ;; default method of the interface calling the node's own eval (right for the nodes that
