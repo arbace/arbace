@@ -243,7 +243,8 @@ core namespaces to Go forms.
 B1 nested-class variants, B2 erased packages, B3 the evaluator's classes in the `Compiler`
 variant, B4 `Dyn` as built (its API, `jrt.Dynamic`, `jrt.DefineDynamic`), B5 `FromFn` from
 c2g in `arbace/lang`, B6 natives in their class's package, B7 the root spec `CLASS$*`, B8
-`clj-fi-method` for classes from source.
+`clj-fi-method` for classes from source. Accepted 2026-10-09 and folded into C2G-SPEC as
+E1-E8, with the decisions of §9 that touch its §10 (C2G-SPEC §16).
 
 ## 9. Open questions, with recommendations
 
