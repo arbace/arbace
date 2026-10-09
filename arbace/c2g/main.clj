@@ -497,8 +497,6 @@
                            (str/join "\n" (for [s gen-lang] (out/form-text (list 'load (str "lang/" s)))))
                            "\n")))
             (write! (str prog-dir "/program.edn") "{:module \"arbace\" :go \"1.27\"}\n")
-            (when-let [after (:after opts)]
-              (after {:prog-dir prog-dir :T T :res res :world world}))
             (when (:program opts)
               (doseq [[p text] (:embedded opts)]
                 (write! (str prog-dir "/go/arbace/cmd/arbace/res/" p) text))
@@ -516,6 +514,9 @@
                       :when (.isFile f)
                       :let [rel (str (.relativize (.toPath (.getCanonicalFile (io/file mdir))) (.toPath (.getCanonicalFile f))))]]
                 (copy-file! f (str prog-dir "/" rel))))
+            ;; the caller's additions to the program root, once it is complete
+            (when-let [after (:after opts)]
+              (after {:prog-dir prog-dir :T T :res res :world world}))
             (let [report {:classes (count T) :reached (count (:reached res))
                           ;; the classes in the inputs, by Go package
                           :world (frequencies (map #(name (m/pkg %)) @(:order (:unit world))))
