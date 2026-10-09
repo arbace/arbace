@@ -887,3 +887,10 @@ decision (2026-10-08).
   `LocalDate.java` as a source of `TimeText`; the main session added `codec.clj`'s UTF-16 coders
   (after `sun.nio.cs.UnicodeDecoder`/`UnicodeEncoder`) and `string.clj`'s `indent`,
   `stripIndent`, `translateEscapes` (after `String`), recorded as ports by B7's rule, to be safe.
+
+## 2026-10-09: the `.ae` rename moves to the end of B1a
+
+- The user's decision: the `.ae` rename, still one self-contained change, is the last step before
+  the `arbace-for-golang` freeze, no longer right after step 5. B1-PLAN's steps: 6 the
+  executable, 7 speed, 8 the `.ae` rename (new), 9 the freeze (was 8). So steps 6 and 7 work on
+  the `.clj` names, and the rename lands once the Go build's shape is settled.

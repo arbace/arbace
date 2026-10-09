@@ -130,12 +130,13 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
     licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`, and the
     determinism issue at `polymorphism.clj:176` (identity-hash order).
-  - Then: the `.ae` rename; step 6 (the executables), step 7 (speed, D7), step 8 (the freeze).
+  - Then: step 6 (the executables), step 7 (speed, D7), step 8 (the `.ae` rename), step 9 (the
+    freeze).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`
-  considered and not taken: hard to type and script). One self-contained change after step 5
-  (phase 2, the user's timing) and before the `arbace-for-golang` freeze: loaders (`RT.load`, the compiler:
+  considered and not taken: hard to type and script). One self-contained change, B1a's step 8:
+  the last step before the `arbace-for-golang` freeze (the user's timing, 2026-10-09): loaders (`RT.load`, the compiler:
   `.ae` first, then `.clj`), the tools and their outputs (class forms build, j2c, g2c, c2g), `bin/`,
   `go/`, tests, the oracle, the docs; `bin/build-arbace` gives the frozen seed a `.clj` view of
   the sources for stage 1 (the seed stays as it is).
