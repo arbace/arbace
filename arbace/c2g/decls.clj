@@ -429,9 +429,13 @@
             (cond
               native
               (let [pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
-                    ;; in the class's own package: jrt's hand-written natives, or (for
-                    ;; arbace/lang) the evaluator's that c2g writes (c2g_dyn.go)
-                    f (symbol (str g "_" base "_native"))
+                    ;; jrt's hand-written native when jrt defines it (the JDK's, and the
+                    ;; natives of arbace/lang's variants, phase 2A); else in the class's own
+                    ;; package (arbace/lang's: the evaluator's that c2g writes, c2g_dyn.go)
+                    fname (str g "_" base "_native")
+                    f (if (contains? (:funcs (:jrt m/*w*)) fname)
+                        (m/jrt-sym pkg fname)
+                        (symbol fname))
                     call (apply list f (concat (when-not static ['t]) pn))]
                 [pn [(if (= "V" r) call (list 'return call))]])
               (and (:derived mm)

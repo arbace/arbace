@@ -675,3 +675,10 @@ decision (2026-10-08).
   interface kind; Clojure fn and line per frame in stack traces; ASM erased by package.
 - The user accepted all of c2g's proposed amendments so far (core A1-A8, part A P2A-1..4, part
   B B1-B8); they will be folded into C2G-SPEC together with parts C's and D's.
+- Merging B onto A broke the build of c2g's output: A's natives for its `RT` and `Reflector`
+  variants are hand-written in jrt, while B made natives calls into the class's own package
+  (B6). The main session reconciled them in `arbace.c2g.decls`: a native call is jrt's,
+  qualified, when jrt defines the function, else in the class's own package (where c2g writes
+  `Compiler$Dyn`'s). The spec fold states the same rule (P1 with E6). After the fix:
+  `bin/c2g-evalproof` as expected on both architectures; `bin/c2g-check` 4,957 of 5,013 steps on
+  each, 0 fail, 10 unavailable, 46 need core; `bin/gate --full` passed (7m58s).
