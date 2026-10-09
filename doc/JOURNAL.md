@@ -725,3 +725,5 @@ decision (2026-10-08).
 - Step 4 (c2g) is done: the runtime and the JDK closure translate and pass the oracle's class
   scripts except what needs `arbace.core` loaded. Proposed amendments D1-D7 and P2C-1..3 for
   the user.
+- The user accepted P2C-1..3 and D1-D6 (to be folded into C2G-SPEC) and put D7's performance
+  work (GOGC at start, reference arrays as one allocation) into step 7, after correctness.
