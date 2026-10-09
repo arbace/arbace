@@ -227,7 +227,7 @@ every change that can change it, and costs nothing on the others.
   `arbace.core` loads `core.clj` again from another namespace, and the boot `ns` macro sets
   `*ns*` while it expands, which the image did not replay: the `ns` event.)
 - `bin/arbace-go --smoke`: amd64 and arm64 (`qemu-aarch64`) pass.
-- `bin/jrt test` (amd64), `bin/c2g-evalproof` (amd64): JRT-EVALPROOF.
+- `bin/jrt test` (amd64) passes; `bin/c2g-evalproof` (amd64): as expected (31 forms).
 - `bin/gate` was not run: this step changes no source the bootstrap compiles (the Go build's
   variants `arbace/lang/go/` and c2g are read by c2g only), and by the user's rule (2026-10-09)
   `--full` is for the freeze.
