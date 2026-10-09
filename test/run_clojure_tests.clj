@@ -13,16 +13,19 @@
 ;;          :failing {test-name {:fail n :error n}}  ; per top-level deftest
 ;;          :load-error "message"}                   ; only if NS itself failed to load
 ;;       Unlike run_test.clj, a namespace that fails to load is reported instead of aborting.
-;;   generative DIR OUT
+;;   generative DIR OUT [NSLIST]
 ;;       What src/script/run_test_generative.clj does (clojure.test.generative.runner/-main on
 ;;       DIR), except that a namespace that fails to load is recorded instead of aborting the
-;;       run. Writes {:tests n :failures n :failing #{spec} :load-errors #{ns}} to OUT.
+;;       run; with NSLIST, the namespaces listed in that file instead of those found in DIR (the
+;;       Go build, which has no java.io.File for tools.namespace to search directories with). Writes {:tests n :failures n :failing #{spec} :load-errors #{ns}} to OUT.
 ;;   report OUT EXPECTED RESULTS NSS
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
 ;;       (shaped like EXPECTED) and compare them with EXPECTED. Exits 1 on any regression.
 ;;
-;; Like run_test.clj it sets java.awt.headless.
+;; Like run_test.clj it sets java.awt.headless. The run and generative modes also run on the Go
+;; build (bin/clojure-tests with CLOJURE_TESTS_GO), which has no java.io.File: they read and
+;; write files through FileInputStream and FileOutputStream only.
 
 (System/setProperty "java.awt.headless" "true")
 (require '[clojure.test :as t])
@@ -31,6 +34,9 @@
   (let [f (java.io.File. ^String f)]
     (when (.exists f)
       (read-string (slurp f)))))
+
+(defn- slurp-file [^String f] (slurp (java.io.FileInputStream. f) :encoding "UTF-8"))
+(defn- spit-file [^String f s] (spit (java.io.FileOutputStream. f) s :encoding "UTF-8"))
 
 (defn- try-require
   "Require ns-sym; on failure print the stack trace and return the error message."
@@ -52,7 +58,7 @@
       (symbol (str (ns-name ns)) (str name)))))
 
 (defn- run-ns [ns-sym out nslist]
-  (let [nss       (map symbol (re-seq #"\S+" (slurp nslist)))
+  (let [nss       (map symbol (re-seq #"\S+" (slurp-file nslist)))
         load-errs (into {} (for [n (distinct (concat nss [ns-sym]))
                                  :let [err (try-require n)]
                                  :when err]
@@ -69,7 +75,7 @@
                                                     (:type m) inc))
                                            (report m))]
                         (select-keys (t/run-tests ns-sym) [:test :pass :fail :error]))))]
-    (spit out (pr-str (assoc result :ns ns-sym :failing @failing)))
+    (spit-file out (pr-str (assoc result :ns ns-sym :failing @failing)))
     (shutdown-agents)
     (System/exit 0)))
 
@@ -77,12 +83,14 @@
   (require 'clojure.tools.namespace.find)
   ((resolve 'clojure.tools.namespace.find/find-namespaces-in-dir) (java.io.File. ^String dir)))
 
-(defn- run-generative [dir out]
+(defn- run-generative [dir out nslist]
   (require 'clojure.test.generative.runner)
   (let [config    (resolve 'clojure.test.generative.runner/config)
         get-tests (resolve 'clojure.test.generative.runner/get-tests)
         run-n     (resolve 'clojure.test.generative.runner/run-n)
-        nss       (find-namespaces dir)
+        nss       (if nslist
+                    (map symbol (re-seq #"\S+" (slurp-file nslist)))
+                    (find-namespaces dir))
         load-errs (set (filter try-require nss))
         loaded    (remove load-errs nss)
         tests     (mapcat get-tests (mapcat (comp vals ns-interns) loaded))
@@ -99,7 +107,7 @@
                    :iters (reduce + (keep :iter results))
                    :config cfg}]
       (prn summary)
-      (spit out (pr-str summary)))
+      (spit-file out (pr-str summary)))
     (shutdown-agents)
     (System/exit 0)))
 
@@ -186,5 +194,5 @@
                      (println n))
                    (shutdown-agents))
     "run"        (run-ns (symbol a) b c)
-    "generative" (run-generative a b)
+    "generative" (run-generative a b c)
     "report"     (report a b c d)))

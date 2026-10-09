@@ -107,6 +107,32 @@ where the text varies between runs or implementations without meaning: identity 
 `G__123`, the `$eval123` and `fn__123`-style counters in generated class and local names
 (`runner.clj`, `normalizers`). Nothing else is normalized.
 
+### Helpful NullPointerException messages (V11)
+
+HotSpot describes the null of an implicit `NullPointerException` (JEP 358): `Cannot invoke
+"String.length()" because "s" is null`, naming locals and parameters as the bytecode has them.
+The Go build's implicit `NullPointerException`s have a null message (accepted deviation V11). By
+the user's decision (2026-10-09) such an exception is compared by class only:
+
+- `record` (and `check`, on what the implementation printed) marks every exception chain entry
+  (`:ex`, `:print-ex`, `:throws`, `:error`) of class `java.lang.NullPointerException` whose
+  message is a helpful one with a third element: `[class message :helpful-npe]`. Helpful means
+  the whole message matches HotSpot's grammar (`runner.clj`, `helpful-npe-re`): one of the
+  failed actions of `NullPointerExceptions::print_NPE_failed_action` (`Cannot invoke "M"`,
+  `Cannot read field "F"`, `Cannot assign field "F"`, `Cannot load from T array`, `Cannot store
+  to T array`, `Cannot read the array length`, `Cannot throw exception`, `Cannot enter
+  synchronized block`, `Cannot exit synchronized block`), optionally followed by `because ... is
+  null`. An explicit `NullPointerException` (a message the code chose, or none) is not marked
+  and is compared as everything else.
+- `check` compares a marked entry by class only: when the expected chain and the actual one have
+  the same length, an actual entry at the position of a marked one, of the same class, counts
+  as equal whatever its message. A case that matches only so is counted, per file (`N by V11`)
+  and in the summary.
+
+The expected files hold 54 marked entries (52 forms, 2 class script steps). On the Go build
+(2026-10-09) the 52 forms all match by the rule; `bin/oracle check jvm` matches all cases with
+none of them needing it.
+
 ## Formats
 
 All files are read with the Clojure reader (not strict EDN). An expected file is
@@ -133,7 +159,8 @@ file whole.
 Case: `:id` (1, 2, ...), `:line`, `:form` (the text), then the result:
 - `:value` the `pr-str` of the value, `:class` its class name (`"nil"` for nil);
 - or `:ex`, the exception and its causes, each `[class message]` or `[class message
-  printed-ex-data]`;
+  printed-ex-data]`, or `[class message :helpful-npe]` (below, "Helpful NullPointerException
+  messages");
 - or `:print-ex`, when printing the value threw;
 - `:out`, `:err` what the form printed, when it printed something.
 
@@ -236,13 +263,15 @@ Everything recorded is deterministic; left out:
   loaders (`... in unnamed module of loader 'app'`, `module java.base of loader 'bootstrap'`),
   helpful `NullPointerException` messages name locals and parameters (`because "s" is null`,
   `"<parameter1>"`), and compiler exceptions carry spec's explain data. jrt either reproduces
-  them or the mismatches are listed and accepted case by case.
+  them or the mismatches are listed and accepted case by case; the helpful
+  `NullPointerException` messages are compared by class only (V11, above).
 - Class names recorded for values (`:class`, `:type`) are the JVM's (`java.lang.Long`,
   `arbace.lang.PersistentVector`, `user.R` for records, `user$evalN$fn__N` for fns): `class`
   in the Go build is expected to answer the same names for jrt's and c2g's classes.
 - Class scripts record the runtime types of results, among them anonymous classes
   (`arbace.lang.PersistentVector$2`, an iterator); c2g's names for them should match.
-- Comparison is of the printed records, so `-0.0` differs from `0.0` and `##NaN` matches itself.
+- Comparison is of the printed records (but for helpful `NullPointerException` messages,
+  above), so `-0.0` differs from `0.0` and `##NaN` matches itself.
 - The format cannot express, in class scripts: nested calls as arguments (bind them first),
   literal keywords, symbols or collections as arguments (build them with steps), a literal
   receiver, functions (so `LazySeq` and fn-taking methods are reached only through the forms

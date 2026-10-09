@@ -779,3 +779,23 @@ decision (2026-10-08).
   protocols checked); jrt's surface for the REPL (`Math`'s functions, `Calendar`/`Timestamp`/
   `Instant`, sequenced collections, charsets, the small items); Clojure's test suite on the Go
   build, with the oracle's NPE rule.
+
+## 2026-10-09: B1a step 5, phase 2C: the oracle's NPE rule; Clojure's suite on the Go build
+
+- Agent, `54c2623`, merged: the oracle marks a NullPointerException whose JVM message follows
+  HotSpot's helpful-NPE grammar and compares it by class only (deviation V11, the user's
+  decision); 54 entries re-marked, nothing else changed; `check jvm` stays 19,828/19,828; on the
+  Go build all 52 forms pass by the rule (forms 9,416 of 9,652, the whole oracle 19,562 of
+  19,828).
+- Clojure's suite on the Go build (`CLOJURE_TESTS_GO=... bin/clojure-tests`, each namespace in
+  its own Go process with the renamed suite on `ARBACE_PATH`; reference
+  `test/arbace-go-results.edn` with a cause per failing namespace): 46 of 64 namespaces load;
+  1,852 of 1,906 assertions pass; 40 namespaces pass as on the JVM; 19 skipped with reasons
+  (Java fixtures, gen-class, D6's cuts). Blocked mostly by jrt's surface (`java.util.Random`'s
+  init, missing `Unsafe.objectFieldOffset(Field)`, blocks 12,786 assertions; `Collectors`,
+  `URI`, `Math.sin`, `IntSupplier`, `CyclicBarrier`, `Semaphore`, `File`) and by `proxy` (1,319);
+  forwarded to the two running agents. Evaluator fixes on the way (method values' namespace,
+  `def`'s dynamic flag in embedded sources, `case`'s warning, `isBoxedMath` without
+  annotations). test.generative needs `Random` and `java.util.jar`. A full suite run takes
+  about 4.5 minutes at 16 processes (about 10 GB with `GOGC=400`). A proposal for
+  `bin/gate --full` is in EVAL-NOTES. `bin/gate` passed; `bin/oracle check jvm` passed.
