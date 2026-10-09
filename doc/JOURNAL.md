@@ -1167,3 +1167,17 @@ recommended:
 - At the user's decision the local branch `condy-item1-experiment` (`bdd773b`, the condy
   constants experiment, journal 2026-10-07) was deleted; this journal records what it tried
   and measured.
+
+## 2026-10-09: v2, a fix release: NaN comparisons
+
+- After the freeze, main's work on c2g (B1a step 4) found that the class forms compiler got
+  comparisons with NaN wrong: `arbace.classes.emit/emit-cond` chose `dcmpg`/`dcmpl` from the
+  comparison it jumps on, which is the negation when the code jumps past the true branch, so on
+  this branch every ordered comparison with NaN was true (`(< 1.0 ##NaN)`, `(>= ##NaN 1.0)`; `==`
+  was right). Clojure's test suite never checks this. At the user's decision, the one-line fix
+  and main's regression test `test/native/nan_test.clj` were brought to this branch as a fix
+  release, tagged `arbace-for-java-26-v2`; `arbace-for-java-26-v1` stays as it was.
+- The branch's gate, run locally: stages 1-3 identical (5,756 classes), the verifier clean,
+  native tests 49/2,847, Clojure's suite 20,750/20,750 on stages 1 and 2,
+  `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without regressions; the push runs
+  the branch's CI.
