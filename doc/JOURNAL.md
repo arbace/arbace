@@ -682,3 +682,24 @@ decision (2026-10-08).
   `Compiler$Dyn`'s). The spec fold states the same rule (P1 with E6). After the fix:
   `bin/c2g-evalproof` as expected on both architectures; `bin/c2g-check` 4,957 of 5,013 steps on
   each, 0 fail, 10 unavailable, 46 need core; `bin/gate --full` passed (7m58s).
+
+## 2026-10-09: B1a step 4, phase 2C: the JDK closure complete, jrt's streams and files
+
+- Agent, `5591868` .. `07f6c78`, merged (conflicts with phase 2B in `arbace.c2g.main`'s roots
+  and jrt's file list resolved as unions): all 64 of jrt's stand-ins are now translated from
+  jdk26u (31 more files in the closure; jrt's own Java for files and the standard streams in
+  `overlay/jdk/java.base/`, converted and checked like the JDK's; JDK Go-build variants in
+  `overlay/jdk/variants/`); `System.in`/`out`/`err` through the translated `PrintStream`, files
+  through the host; `String.CASE_INSENSITIVE_ORDER`; String's regex methods over the translated
+  `Pattern`. A class forms compiler bug fixed with a test: `resolve-class-sym` ignored source
+  imports of member classes (`CodePointTrie$Fast16`), so c2g's world now analyzes without
+  failures. A c2g bug fixed: a private method of a non-leaf class evaluated its receiver
+  twice. New oracle script `BigNumbers` (3,974 steps over BigInteger/BigDecimal across their
+  algorithm thresholds); `bin/c2g-regex` runs the regex corpus on the translated
+  `java.util.regex`.
+- Checked by the main session after the merge: `bin/c2g-check` 8,953 of 9,000 steps on each
+  architecture, 0 fail, 47 need core; `bin/c2g-regex` 1,204 of 1,233 cases (11,365 of 11,682
+  inputs; the rest need JDK resource data: CANON_EQ's normalizer, `\N{name}`);
+  `bin/c2g-evalproof` as expected; `bin/jrt test`; `bin/gate --full` passed (7m28s).
+- Proposed amendments P2C-1..3 (jrt's own Java and JDK variants under `overlay/jdk`; the jrt
+  members c2g writes; all stand-ins translated), for the user.
