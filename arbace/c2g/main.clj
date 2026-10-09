@@ -244,7 +244,10 @@
                opts)
         jdk (or (:jdk opts) ".tmp/jrt/conv")
         inputs (vec (concat
-                      (when (or (:lang opts) (not (:jdk opts))) [{:root "arbace" :dirs ["lang"]}])
+                      (when (or (:lang opts) (not (:jdk opts)))
+                        ;; --program: the Java API arbace.java.api.Clojure too (a class of
+                        ;; the runtime on the JVM; Clojure's suite calls it by reflection)
+                        [{:root "arbace" :dirs (if (:program opts) ["lang" "java/api"] ["lang"])}])
                       (when (or (:jdk opts) (not (:lang opts))) (when (.isDirectory (io/file jdk)) [{:root jdk :tree true}]))
                       (for [i (:inputs opts)] {:root i :tree true})))
         clj-files (fn [dir] (let [d (io/file dir)]

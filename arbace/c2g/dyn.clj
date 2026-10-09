@@ -299,6 +299,21 @@
                     ks)
       [(ctor-infos n)])))
 
+(defn- fn-field-native
+  "Compiler$Dyn.defineFnField: a fn class's field, the fn's i-th closed-over value, as the
+  compiled fn's field (EVAL-NOTES.md, \"Locals clearing\"); settable when not primitive. (Apart
+  from forms, whose constants would not fit in one class.)"
+  []
+  (list 'go/func (symbol (native-name "defineFnField" "(Ljava/lang/Class;Ljava/lang/String;ILjava/lang/Class;)V"))
+        [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'i 'int32) (tag 'ft '(* jrt/Class))]
+        '(let [info (.Info c)
+               k i
+               fi (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type ft :Modifiers 0
+                       :Get (fn ^any [^any o] (aget (.-A (.-F_closed (assert (* Compiler_EvalFn) o))) k)))]
+           (when (not (.IsPrimitive__Z ft))
+             (set! (.-Set fi) (fn [^any o ^any v] (.Store (.-F_closed (assert (* Compiler_EvalFn) o)) k v))))
+           (set! (.-Fields info) (append (.-Fields info) fi)))))
+
 (defn forms
   "The forms of c2g_dyn.go (package arbace/lang) for the translated classes T."
   [T]
@@ -508,6 +523,7 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                                             :Modifiers (bit-or jrt/AccPublic jrt/AccFinal)
                                             :Kind jrt/KindClass :Super super
                                             :Go "arbace/lang.Compiler_EvalFn (fn)"))))
+       (fn-field-native)
        '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
           (when (.IsArray__Z c)
             (return (+ (dynTypeName (.GetComponentType__Class c)) "[]")))
