@@ -1000,3 +1000,29 @@ decision (2026-10-08).
   with the nominal check; narrows E4) into §5.12; Y3 (`Semaphore` hand-written in jrt, AQS
   measured and not taken) into §8.4 and JAVA-SURFACE.md decision 4; Y4 (the harvest keeps
   `java_interop`'s proxy assertions) into ORACLE.md; all listed in C2G-SPEC §16.
+
+## 2026-10-09: B1a step 6, the executable: an image of prepared namespaces
+
+- Agent, branch `step6` (4 commits on `42552a0`), merged: measured first, start (4.18 s) was
+  macroexpansion and analysis, not reading (about 0.1 s), with GC at 60% of CPU. Now
+  `bin/arbace-go --build` runs the built executable once with `ARBACE_PREPARE`, requiring every
+  embedded namespace (about 32 s), and records per top-level form the analyzed `Expr` tree plus
+  the side effects of its analysis (deftype stubs and classes, `gen-interface`'s interfaces,
+  proxy classes, the boot `ns` macro's `*ns*`): an image of 3.8 MB, reproducible, the same for
+  both architectures, linked into the executables (`go/arbace/cmd/arbace/image.clj`, the type
+  table `image_types.go` from `bin/c2g --program`; `Compiler$Image` in the Compiler variant). At
+  run time `RT.load` replays an embedded source from the image. A class's hash comes from its
+  name (the image needs the same hashes in every run). `GOGC=400` during start unless `GOGC`
+  is set (a new `Main` variant). The smoke test adds a REPL session checked against the JVM's
+  transcript. Considered (EXEC-NOTES.md): pre-read forms, macroexpanded forms, a heap snapshot
+  (as Joker), Go code instead of data, lazy decoding.
+- Start to `-e nil` on amd64: 4.18 s → 0.32 s (JVM `bin/arbace` 0.17 s, Joker 1.10.0 under
+  0.01 s); arm64 under qemu 44 s → 5.2 s; size 58.4 → 63.5 MB (Joker 29 MB). The rest is mostly
+  each `ns`'s `refer` of `arbace.core`'s vars (step 7).
+- The class hash by name reordered `polymorphism.clj:176`'s message on the agent's branch; on
+  main, MultiFn's sort by class name (hand change 14) makes it moot: the case passes.
+- Main session on the merge: Go build, `--smoke`, the Go oracle 20,230 of 20,263 as recorded
+  (`--expected`), Clojure's suite on Go 19,251 of 19,280 with no regressions; start 0.35 s.
+- The user's decisions: amendments U1-U5 accepted (to fold); the smoke test joins the
+  essential `bin/gate` with the executable cached by a hash of its inputs (rebuilt only when
+  they change). Step 7b (the evaluator's closure compilation) can start.
