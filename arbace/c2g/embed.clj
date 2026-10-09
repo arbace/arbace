@@ -3,7 +3,8 @@
   doc/go/EVAL-NOTES.md, \"Loading\"), and the classes they name that are outside the closed
   world (registered as cut classes, so that imports and hints resolve).
 
-  The embedded tree is arbace/**/*.clj less the tools (the class forms compiler, j2c, g2c, c2g),
+  The embedded tree is arbace/**/*.clj less the tools (the class forms compiler's back end, j2c,
+  g2c, c2g),
   the runtime's class forms (arbace/lang, compiled into the program), ASM, and the namespaces the
   Go build leaves out (JAVA-SURFACE.md decision 6, B1-PLAN.md D6). The Go build's namespace
   variants, arbace/lang/go/ns/P.clj, replace arbace/P.clj; arbace/lang/go/ns/P.after.clj is
@@ -16,7 +17,10 @@
 
 (def excluded
   "Resource paths (prefixes) not embedded."
-  ["arbace/classes/" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
+  [;; of the class forms compiler, the analysis is embedded (doc/go/CLASSFORMS-REPL.md): not the
+   ;; bytecode back end and the tools around it
+   "arbace/classes/emit.clj" "arbace/classes/compiler.clj" "arbace/classes/shape.clj"
+   "arbace/classes/verify.clj" "arbace/classes/build.clj" "arbace/classes/boot.clj" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
    "arbace/asm.clj" "arbace/lang.clj" "arbace/java/api"
    ;; decision 6: processes, URLs, sockets, browsers
    "arbace/core/server.clj" "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"

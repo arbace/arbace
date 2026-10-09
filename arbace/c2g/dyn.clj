@@ -318,7 +318,9 @@ superinterfaces), and its methods by name and descriptor (all of them, for refle
 interfaces made at run time).\n"
           (struct ^{:tag (* jrt/Class)} Cls ^{:tag (slice IFn)} Slots
                   ^{:tag (map (* jrt/Class) bool)} Ifaces ^{:tag (map string IFn)} ByKey
-                  ^{:tag (map string int32)} SlotMap ^bool Proxy ^{:tag (map string string)} Own))
+                  ^{:tag (map string int32)} SlotMap ^bool Proxy ^{:tag (map string string)} Own
+                  ;; an interpreted class's CF$Klass (the class forms at the REPL, arbace.c2g.dyncf)
+                  ^any CF))
        '(go/type dynObject
           "dynObject is an object of a class made at run time: a Dyn, or a DynSub_C (a proxy of class C).\n"
           (interface (DynClassOf ^{:tag (* DynClass)} []) (DynFields ^{:tag (* (slice any))} [])
