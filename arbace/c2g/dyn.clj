@@ -104,6 +104,23 @@
              'f 't args)
       (list '.ApplyTo_ISeq__O 'f (list 'RT_Seq_O__ISeq (apply list 'jrt/RefArrayOf 'jrt/Object_class 't args))))))
 
+(defn- java-type-name
+  "The Java name of descriptor d (int, java.lang.Object, byte[])."
+  [d]
+  (cond (t/array? d) (str (java-type-name (t/elem-type d)) "[]")
+        (= 1 (count d)) ({"Z" "boolean" "B" "byte" "C" "char" "S" "short" "I" "int" "J" "long"
+                          "F" "float" "D" "double" "V" "void"} d)
+        :else (str/replace (t/desc->internal d) "/" ".")))
+
+(defn- abstract-text
+  "HotSpot's text of an unimplemented interface method, after the receiver class: the resolved
+  method's signature and its interface (the first of ifaces declaring it)."
+  [ifaces [name desc :as k]]
+  (let [[ps r] (t/parse-method-desc desc)
+        j (first (filter #(some (fn [[kk _]] (= kk k)) (m/vmethods %)) ifaces))]
+    (str "'abstract " (java-type-name r) " " name "(" (str/join ", " (map java-type-name ps)) ")'"
+         (when j (str " of interface " (str/replace j "/" "."))) ".")))
+
 (defn- method-form [ifaces i [name desc :as k]]
   (let [[ps r] (t/parse-method-desc desc)
         pn (vec (for [j (range (count ps))] (symbol (str "p" j))))
@@ -115,7 +132,7 @@
                (for [[j fsym] (defaults-for ifaces k)]
                  (list 'when (list '.DynImplements 't (m/class-sym :lang j "_class"))
                        (if (= "V" r) (list 'do (apply list fsym 't pn) '(return)) (list 'return (apply list fsym 't pn)))))
-               [(list 'panic (list 'dynAbstract 't (str name desc)))])]
+               [(list 'panic (list 'dynAbstract 't (abstract-text ifaces k)))])]
     (list 'go/method (symbol base) params
           (list 'let ['f (list 'aget (list '.-Slots (list '.-D 't)) i)]
                 (apply list 'when (list '== 'f nil) dflt)
@@ -168,7 +185,9 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                        '(case ["V"] (return nil))]))
              'r)
        '(go/func dynAbstract ^any [^{:tag (* Dyn)} t ^string m]
-          (jrt/Thrown (jrt/AbstractMethodError_New_String (jrt/Str (+ (.-Name (.Info (.-Cls (.-D t)))) "." m)))))
+          (jrt/Thrown (jrt/AbstractMethodError_New_String
+                        (jrt/Str (+ "Receiver class " (.-Name (.Info (.-Cls (.-D t))))
+                                    " does not define or inherit an implementation of the resolved method " m)))))
        '(go/method DynImplements ^bool [^{:tag (* Dyn)} t ^{:tag (* jrt/Class)} c]
           (aget (.-Ifaces (.-D t)) c))
        '(go/method Ref ^any [^{:tag (* Dyn)} t] (when (== t nil) (return nil)) t)
@@ -302,8 +321,26 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                                              (let [d (dynOf this)
                                                    impl (aget (.-ByKey (.-D d)) key)]
                                                (when (== impl nil)
-                                                 (panic (dynAbstract d (+ (.String name) (subslice key (len (.String name)))))))
+                                                 (panic (dynAbstract d (dynAbstractText c name ps ret))))
                                                (dynConvert ret (dynCall impl d args)))))))))
+       (list 'go/func (symbol (native-name "defineFnClass" "(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Class;"))
+             (with-meta [(tag 'name '(* jrt/String)) (tag 'super '(* jrt/Class))] {:tag '(* jrt/Class)})
+             '(jrt/DefineDynamic (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name))
+                                            :Modifiers (bit-or jrt/AccPublic jrt/AccFinal)
+                                            :Kind jrt/KindClass :Super super
+                                            :Go "arbace/lang.Compiler_EvalFn (fn)"))))
+       '(go/func dynTypeName "dynTypeName: Class.getTypeName (int, java.lang.Object, byte[])." ^string [^{:tag (* jrt/Class)} c]
+          (when (.IsArray__Z c)
+            (return (+ (dynTypeName (.GetComponentType__Class c)) "[]")))
+          (.String (.GetName__String c)))
+       '(go/func dynAbstractText
+          "dynAbstractText: HotSpot's text of an unimplemented method of an interface made at run time."
+          ^string [^{:tag (* jrt/Class)} c ^{:tag (* jrt/String)} name ^{:tag (slice (* jrt/Class))} ps ^{:tag (* jrt/Class)} ret]
+          (let [s (+ "'abstract " (dynTypeName ret) " " (.String name) "(")]
+            (range [i p ps]
+              (when (> i 0) (set! s (+ s ", ")))
+              (set! s (+ s (dynTypeName p))))
+            (+ s ")' of interface " (.-Name (.Info c)) ".")))
        '(go/func dynClassList
           "dynClassList: the classes of a Class[] (nil for null)."
           ^{:tag (slice (* jrt/Class))} [^{:tag (* jrt/RefArray)} a]

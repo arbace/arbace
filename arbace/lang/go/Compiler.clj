@@ -99,19 +99,20 @@
       ;; a seq (EVAL-PLAN.md, Q3: per-arity invoke methods are step 7's)
       (field ^:public ^:final ^FnExpr fe)
       (field ^:public ^:final ^Object/1 closed)
+      ;; the fn's class, named as the JVM names the fn's compiled class (arbace.core$map,
+      ;; user$eval12$fn__13), a subclass of EvalFn made at run time: getClass answers it (c2g's
+      ;; rule for a field c2g$class; EVAL-NOTES.md)
+      (field ^:public ^:final ^Class c2g$class)
 
       (constructor ^:public [this ^FnExpr fe ^Frame f]
         (set! (.-fe this) fe)
+        (set! (.-c2g$class this) (Evaluator/fnClass fe))
         (set! (.-closed this) (Evaluator/capture fe f)))
 
       (method ^:public getRequiredArity ^int [this] 0)
 
       (method ^:protected doInvoke [this args]
-        (Evaluator/invokeFn this (RT/seqToArray (RT/seq args))))
-
-      ;; as the JVM names a compiled fn's object: its class name (the fn's), @, its hash
-      (method ^:public toString ^String [this]
-        (java-str (.-name fe) "@" (Integer/toHexString (.hashCode this))))))
+        (Evaluator/invokeFn this (RT/seqToArray (RT/seq args))))))
 
   (c2g/add
     (defclass ^:public ^:static EvalMethod
@@ -174,6 +175,9 @@
       ;; descriptor
       (method ^:public ^:static ^:native addInterfaceMethod ^void [^Class c ^String name
                                                                    ^Class/1 params ^Class ret])
+
+      ;; the class of an evaluated fn: a subclass of super (EvalFn) named name, made at run time
+      (method ^:public ^:static ^:native defineFnClass ^Class [^String name ^Class super])
 
       (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
 
@@ -249,6 +253,14 @@
         (when (some? f)
           (set! (.-line f) line)
           (when (some? source) (set! (.-source f) source))))
+
+      ;; the class of fe's fns (cached on the FnExpr)
+      (method ^:public ^:static fnClass ^Class [^FnExpr fe]
+        (let [^:mutable c (.-evalClass fe)]
+          (when (nil? c)
+            (set! c (Dyn/defineFnClass (.-name fe) EvalFn))
+            (set! (.-evalClass fe) c))
+          c))
 
       ;; the locals objx closes over, in the order of its closes (cached on the ObjExpr)
       (method ^:public ^:static closes ^LocalBinding/1 [^ObjExpr objx]
@@ -332,12 +344,85 @@
           (identical? c Float/TYPE) (if (instance? Float v) v (Float/valueOf (RT/floatCast v)))
           :else v))
 
+      ;; the arguments of a resolved method or constructor as the compiled call passes them
+      ;; (MethodExpr.emitTypedArgs, HostExpr.emitUnboxArg): a primitive parameter's argument
+      ;; cast to Number (Boolean, Character) and converted by RT's checked casts, a reference
+      ;; parameter's cast to its class (a fn passed for a functional interface is left to
+      ;; Reflector's adapter): ClassCastException and NullPointerException as compiled code
+      ;; throws them. (*unchecked-math*'s unchecked casts are not distinguished: EVAL-NOTES.md.)
+      (method ^:public ^:static typedArgs ^Object/1 [^Class/1 ps ^Object/1 vs]
+        (loop [^int i 0]
+          (when (and (< i (alength ps)) (< i (alength vs)))
+            (let [p (aget ps i)
+                  v (aget vs i)]
+              (cond
+                (.isPrimitive p)
+                  (do
+                    (when (nil? v) (throw (NullPointerException.)))
+                    (aset vs i
+                          (cond
+                            (identical? p Boolean/TYPE) (cast Boolean v)
+                            (identical? p Character/TYPE) (cast Character v)
+                            :else (let [n (cast Number v)]
+                                    (cond
+                                      (identical? p Integer/TYPE) (Integer/valueOf (RT/intCast n))
+                                      (identical? p Long/TYPE) (Long/valueOf (RT/longCast n))
+                                      (identical? p Double/TYPE) (Double/valueOf (RT/doubleCast n))
+                                      (identical? p Float/TYPE) (Float/valueOf (RT/floatCast n))
+                                      (identical? p Short/TYPE) (Short/valueOf (RT/shortCast n))
+                                      (identical? p Byte/TYPE) (Byte/valueOf (RT/byteCast n))
+                                      :else n)))))
+                (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))) nil
+                :else (.cast p v)))
+            (recur (unchecked-inc-int i))))
+        vs)
+
       ;; a call of a reflected method or constructor, its exception unwrapped as compiled code
       ;; would have thrown it
       (method ^:public ^:static unwrap ^Throwable [^Throwable e]
         (if (and (instance? java.lang.reflect.InvocationTargetException e) (some? (.getCause e)))
             (.getCause e)
             e))
+
+      ;; a constant as the compiled class's static initializer makes it (ObjExpr.emitValue):
+      ;; collections rebuilt (a seq as a PersistentList, a vector, a map by RT.map, a hash set),
+      ;; their elements and metadata likewise; other values themselves
+      (method ^:public ^:static constant [v]
+        (cond
+          (nil? v) nil
+          (instance? Boolean v) (if (.booleanValue (cast Boolean v)) Boolean/TRUE Boolean/FALSE)
+          (or (instance? IRecord v) (instance? IType v)) v
+          (not (or (instance? IPersistentMap v) (instance? IPersistentVector v)
+                   (instance? PersistentHashSet v) (instance? ISeq v) (instance? IPersistentList v)))
+            v
+          :else
+            (let [r (cond
+                      (instance? IPersistentMap v)
+                        (let [^{:tag (ArrayList Object)} kvs (ArrayList.)]
+                          (for-each [^Map$Entry e (.entrySet (cast Map v))]
+                            (.add kvs (Evaluator/constant (.getKey e)))
+                            (.add kvs (Evaluator/constant (.getValue e))))
+                          (RT/map (.toArray kvs)))
+                      (instance? IPersistentVector v)
+                        (^[Object/1] RT/vector (Evaluator/constants (RT/toArray v)))
+                      (instance? PersistentHashSet v)
+                        (if (nil? (RT/seq v))
+                            PersistentHashSet/EMPTY
+                            (PersistentHashSet/create (Evaluator/constants (RT/toArray v))))
+                      :else
+                        (PersistentList/create (Arrays/asList (Evaluator/constants (RT/seqToArray (RT/seq v))))))
+                  m (when (instance? IObj v) (.meta (cast IObj v)))]
+              (if (> (RT/count m) 0)
+                  (.withMeta (cast IObj r)
+                             (cast IPersistentMap (Evaluator/constant (arbace.lang.Compiler/elideMeta m))))
+                  r))))
+
+      (method ^:static constants ^Object/1 [^Object/1 vs]
+        (loop [^int i 0]
+          (when (< i (alength vs))
+            (aset vs i (Evaluator/constant (aget vs i)))
+            (recur (unchecked-inc-int i))))
+        vs)
 
       ;; the value of e in frame f (nil: no frame, a top-level form)
       (method ^:public ^:static eval [^Expr e ^Frame f] (.evalIn e f))
@@ -363,7 +448,7 @@
           (when (and (nil? m) (some? (.-variadicMethod fe))
                      (>= n (.count (.-reqParms (.-variadicMethod fe)))))
             (set! m (.-variadicMethod fe)))
-          (when (nil? m) (throw (ArityException. n (arbace.lang.Compiler/demunge (.-name fe)))))
+          (when (nil? m) (throw (ArityException. n (.-name fe))))
           (let [f (Frame. (unchecked-add-int (.-maxLocal m) 2) fn m fe nil)
                 slots (.-slots f)
                 req (.-reqParms m)
@@ -464,7 +549,8 @@
                   (Evaluator/defineCtors c nie bs)
                   (Dyn/setStaticMethod c "getBasis" (new Class/1 0) IPersistentVector
                                        (anon AFn []
-                                         (method ^:public invoke [this] basis)))
+                                         (method ^:public invoke [this]
+                                           (Evaluator/constant basis))))
                   (when (> (.count (.-fields nie)) nh)
                     (Dyn/setStaticMethod c "create" (new Class/1 [IPersistentMap]) c
                                          (anon AFn []
@@ -589,6 +675,7 @@
   ;; has each (Evaluator.where's encoding)
   (c2g/add (field ^:public ^LocalBinding/1 evalCloses))
   (c2g/add (field ^:public ^int/1 evalWhere))
+  (c2g/add (field ^:public ^Class evalClass))
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (if (instance? FnExpr this)
@@ -813,7 +900,8 @@
                 (set! ms (LinkedList.))
                 (.add ms method)
                 (set! evalMethods ms))
-              (Reflector/invokeMatchingMethod methodName ms nil vs))
+              (Reflector/invokeMatchingMethod methodName ms nil
+                                              (Compiler$Evaluator/typedArgs (.getParameterTypes method) vs)))
             (Reflector/invokeStaticMethod c methodName vs))))))
 
 (c2g/variant Compiler$InstanceMethodExpr
@@ -827,11 +915,15 @@
         (cond
           (some? method)
             (let [^:mutable ms evalMethods]
+              ;; the compiled call's checkcast to the method's class (ClassCastException, not
+              ;; Method.invoke's IllegalArgumentException)
+              (.cast (.getDeclaringClass method) t)
               (when (nil? ms)
                 (set! ms (LinkedList.))
                 (.add ms method)
                 (set! evalMethods ms))
-              (Reflector/invokeMatchingMethod methodName ms t vs))
+              (Reflector/invokeMatchingMethod methodName ms t
+                                              (Compiler$Evaluator/typedArgs (.getParameterTypes method) vs)))
           (some? qualifyingClass)
             (Reflector/invokeInstanceMethodOfClass t qualifyingClass methodName vs)
           :else (Reflector/invokeInstanceMethod t methodName vs))))))
@@ -880,10 +972,34 @@
                         ctor
                         (.getConstructor dc (.getParameterTypes ctor)))]
               (try
-                (.newInstance k (Reflector/boxArgs (.getParameterTypes k) vs))
+                (.newInstance k (Reflector/boxArgs (.getParameterTypes k)
+                                                   (Compiler$Evaluator/typedArgs (.getParameterTypes k) vs)))
                 (catch Exception e
                   (throw (Util/sneakyThrow (Compiler$Evaluator/unwrap e))))))
             (Reflector/invokeConstructor dc vs))))))
+
+(c2g/variant Compiler$ConstantExpr
+  (c2g/add (field ^Object evalValue))
+  (c2g/add (field ^boolean evalMade))
+  (c2g/add
+    ;; the constant as the compiled code holds it, made once (Evaluator.constant)
+    (method ^:public evalIn [this ^Compiler$Frame f]
+      (when-not evalMade
+        (set! evalValue (Compiler$Evaluator/constant v))
+        (set! evalMade true))
+      evalValue)))
+
+(c2g/variant Compiler$EmptyExpr
+  (c2g/add
+    ;; the type's empty value, as the compiled code loads it (EmptyExpr.emit), so that two
+    ;; empty literals are identical
+    (method ^:public evalIn [this ^Compiler$Frame f]
+      (cond
+        (instance? IPersistentList coll) PersistentList/EMPTY
+        (instance? IPersistentVector coll) PersistentVector/EMPTY
+        (instance? IPersistentMap coll) PersistentArrayMap/EMPTY
+        (instance? IPersistentSet coll) PersistentHashSet/EMPTY
+        :else (throw (UnsupportedOperationException. "Unknown Collection type"))))))
 
 (c2g/variant Compiler$MetaExpr
   (c2g/add

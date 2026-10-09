@@ -388,7 +388,7 @@ gives it (\"arbace/lang.(*PersistentVector).ArrayFor_I__O1\", \"arbace/lang.Util
       (set! n (runtime/Callers (+ skip 1) pcs)))
     (subslice pcs _ n)))
 
-(go/type jframe (struct ^string goName ^string cls ^string method ^string file ^int line ^bool elide))
+(go/type jframe (struct ^string goName ^string cls ^string method ^string file ^int line ^bool elide ^bool refl))
 
 (go/func demangle
   "demangle: the Java frame of a Go function that c2g's table does not list. jrt's own
@@ -519,16 +519,41 @@ pushed.\n"
        (strings/Contains fn ".func")
        (not (strings/Contains fn ".func1.")) (not (strings/Contains fn ".func2."))))
 
+(go/func isEvalInterop
+  "isEvalInterop: whether fn is the evaluator's evaluation of a host call (a method, a
+constructor, a field), which it makes by reflection.\n"
+  ^bool [^string fn]
+  (or (strings/HasPrefix fn "arbace/lang.(*Compiler_StaticMethodExpr).EvalIn_")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_InstanceMethodExpr).EvalIn_")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_NewExpr).EvalIn_")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_InstanceFieldExpr).EvalIn_")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_AssignExpr).EvalIn_")))
+
+(go/func isReflection
+  "isReflection: whether fn is a reflective call's (Reflector, Method.invoke,
+Constructor.newInstance, Field.get and set).\n"
+  ^bool [^string fn]
+  (or (strings/HasPrefix fn "arbace/lang.Reflector_")
+      (strings/HasPrefix fn "arbace/jrt.(*Method).")
+      (strings/HasPrefix fn "arbace/jrt.(*Constructor).")
+      (strings/HasPrefix fn "arbace/jrt.(*Field).")))
+
 (go/func isEvalInternal
-  "isEvalInternal: whether fn is the evaluator's own (its walk, its fns' dispatch), not shown in
-stack traces.\n"
+  "isEvalInternal: whether fn is the evaluator's own (its walk, its fns' dispatch), or a member
+table's invoker (a function literal of a package's init: reflection's call), not shown in stack
+traces.\n"
   ^bool [^string fn]
   (or (strings/HasPrefix fn "arbace/lang.Compiler_Evaluator")
+      (strings/HasPrefix fn "arbace/lang.init.")
+      (strings/HasPrefix fn "arbace/jrt.init.")
       (strings/Contains fn ").EvalIn_")
       (strings/HasPrefix fn "arbace/lang.(*Compiler_EvalFn).")
       (strings/HasPrefix fn "arbace/lang.(*Compiler_EvalMethod).")
       (strings/HasPrefix fn "arbace/lang.(*RestFn).")
-      (strings/HasPrefix fn "arbace/lang.Compiler_Expr_")))
+      (strings/HasPrefix fn "arbace/lang.Compiler_Expr_")
+      ;; the dispatch of objects of classes made at run time (c2g_dyn.go)
+      (strings/HasPrefix fn "arbace/lang.dyn")
+      (strings/HasPrefix fn "arbace/lang.(*Dyn).")))
 
 (go/func isThrowableClass ^bool [^string name]
   (let [c (ForName name)]
@@ -571,6 +596,11 @@ of the function that called it.\n"
                   (set! file (.String (.-fileName e))))
                 (set! fs (append fs (lit jframe :cls (.String (.-declaringClass e)) :method (.String (.-methodName e))
                                          :file file :line (conv int (.-lineNumber e)))))))
+            ;; the evaluator's interop: compiled code calls the method directly, so the
+            ;; reflective call's frames (Reflector, Method.invoke) above it are not shown
+            (isEvalInterop (.-Function fr))
+            (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
+              (set! fs (subslice fs _ (- (len fs) 1))))
             (isEvalInternal (.-Function fr)) (do)
             (.-elide f) (do)
             ;; a forwarder: its callee is the implementation Impl_M of its method M
@@ -585,6 +615,7 @@ of the function that called it.\n"
             :else
             (do
               (set! top false)
+              (set! (.-refl f) (isReflection (.-Function fr)))
               (set! fs (append fs f))))))
       (let [a (NewRefArray StackTraceElement_class (conv int32 (len fs)))]
         (range [i f fs]

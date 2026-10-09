@@ -562,7 +562,14 @@
         cloneable (env/assignable? (str "L" n ";") "Ljava/lang/Cloneable;")]
     (remove nil?
             [(list 'go/method 'Ref (with-meta [recv] {:tag 'any}) (list 'when (list '== 't nil) (list 'return nil)) 't)
-             (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str g "_class")))
+             ;; a class with an instance field c2g$class (the evaluator's fns: one run-time class
+             ;; per fn, EVAL-NOTES.md) answers that class when it is set
+             (if-let [f (first (filter #(and (= "c2g$class" (:name %)) (not (m/static? %))) (class-fields n)))]
+               (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))})
+                     (list 'when (list '!= (list (symbol (str ".-" (nm/field-name (:name f)))) 't) nil)
+                           (list 'return (list (symbol (str ".-" (nm/field-name (:name f)))) 't)))
+                     (symbol (str g "_class")))
+               (list 'go/method 'GetClass__Class (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "Class"))}) (symbol (str g "_class"))))
              (when (= :object (:kind ts))
                (list 'go/method 'ToString__String (with-meta [recv] {:tag (list '* (m/jrt-sym pkg "String"))})
                      (list (m/jrt-sym pkg "Object_toString") 't)))
