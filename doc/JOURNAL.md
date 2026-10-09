@@ -607,3 +607,25 @@ decision (2026-10-08).
   `Numbers$DoubleOps`, `RT` and ASM's `GeneratorAdapter`, reported, not a failure).
 - The oracle's expectations, recorded from the buggy JVM, were re-recorded: 67 cases in 6 files
   changed, every one involving NaN. `bin/gate --full` passed (7m13s).
+
+## 2026-10-09: B1a step 4, phase 1: c2g's core
+
+- Agent, branch `c2g-core` (`36b5ba8` .. `1a23143`), merged: `arbace/c2g/` (11 namespaces,
+  about 5,000 lines: names, the scan of jrt's forms, the world analyzed exactly as the class
+  forms compiler does, the model, reachability with stubs, code, declarations, generated files
+  and tables), `bin/c2g`, `bin/c2g-check` (`test/c2g/check.clj`, fixtures), variants in
+  `arbace/lang/go/` (`RT` without loading `arbace.core`, `Compiler`), jrt additions (`vm`,
+  `natives`, `forkjoin`, `access`). Every analyzer node kind of C2G-SPEC §14 is translated but
+  `:fi-adapter` (stubbed for now) and serialization; the member, frame and class tables are
+  generated; 38 of jrt's 64 stand-ins are replaced by translated JDK classes. All of
+  `arbace.lang` translates (441 classes reached; 322 unused primitive `IFn` interfaces and a few
+  unreached classes left out) and builds for both architectures; about 48 s to translate, 26 s
+  to build, executables about 26 MB. Notes: `doc/go/C2G-NOTES.md`; amendments A1-A8 proposed;
+  the two C2G-SPEC corrections (§5.8, §7.9.5) made.
+- The agent's differential check found the NaN bug (previous entry). The main session reran
+  `bin/c2g-check` on main after the fix and the re-recording, both architectures: 4,938 of 5,005 on each
+  oracle steps pass (`NumbersCompare` 784 of 784 now), the rest wait for `arbace.core` loaded
+  in RT (printer, reader, vars: phase 2), a `Reflector` variant, and
+  `String.CASE_INSENSITIVE_ORDER`. `bin/c2g` now stops when `.tmp/jrt/conv` is missing (run
+  `bin/jrt-convert` first): on a checkout without it the JDK's types came out as `any` and the
+  Go did not build. `bin/gate` passed.
