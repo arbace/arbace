@@ -1739,3 +1739,62 @@ record components, type parameters, signers, `getResource*`, `toGenericString`).
   has the plain name).
 - `C2g_CastArray` throws `ClassCastException` with HotSpot's message (`jrt.ClassCast`), not
   `Class.cast`'s (`(longs (int-array [1]))`).
+
+# Semaphore (step 5 follow-up)
+
+Branch `smalls` (2026-10-09): `java.util.concurrent.Semaphore`, which Clojure's pprint tests
+need (`test_pretty.clj`'s `future-unfilled` blocks in `(.acquire (Semaphore. 0))`); without it
+the suite's `pprint` namespace did not load. Phase 2B had tried translating
+`AbstractQueuedSynchronizer` (EVAL-NOTES.md, "Phase 2B").
+
+**Why c2g left `AbstractQueuedSynchronizer$ConditionObject` untranslated.** jrt's
+`ReentrantLock_ConditionObject` (`locks.clj`) registers the JDK's name for a `ReentrantLock`'s
+conditions, `java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject`, so that
+`(class (.newCondition (ReentrantLock.)))` answers what the JVM answers. c2g's world therefore
+counted that class as jrt's (its scan of jrt's `ClassInfo` names) and did not translate it, but
+named its Go type by the name derived from the Java name, `AbstractQueuedSynchronizer_ConditionObject`,
+which nothing defines: AQS's public members that take a `ConditionObject` (`owns`, `hasWaiters`,
+`getWaitQueueLength`, `getWaitingThreads`, stubs since unreached) did not compile. Neither the
+closure nor the inner-class handling was at fault. The general fix is c2g's
+(`arbace.c2g.model/go-name`): a class jrt provides and c2g does not translate is named by the
+Go name jrt gives it (its class variable's name less `_class`). Eight other jrt classes
+register a JDK name under another Go name (`ThreadPoolExecutor` as `threadPool`,
+`AbstractStringBuilder` as `sbuf` ...); no translated code names them yet, so the output is
+otherwise unchanged (but for gensym counters). EVAL-NOTES.md's amendment Y1.
+
+**Decision: a hand-written `Semaphore`, not `AbstractQueuedSynchronizer` translated.** Measured
+with the fix, AQS, `AbstractOwnableSynchronizer` and `Semaphore` translated: the closure grows
+by 3 files, the program builds (58.59 MB), and `Semaphore` then fails at run time on jrt's
+missing `Unsafe.putIntOpaque`, `getAndBitwiseAndInt`, `weakCompareAndSetReference` (and
+`Unsafe.park`); `ConditionNode` is unavailable (`ForkJoinPool.ManagedBlocker`, not in jrt's
+pool); and c2g reports `AbstractQueuedSynchronizer$Node.waiter` as a two-word race field: AQS
+reads a node's `waiter` (a `Thread`, an interface value in Go) in `signalNext` while its owner
+clears it, a benign race in Java and a torn interface read in Go (C2G-SPEC §8.3). The AQS
+condition methods would also take jrt's `ReentrantLock` condition, a different class under the
+same name. jrt's locks are hand-written for these reasons (JAVA-SURFACE.md decision 4, phase
+2a's "Decisions"), and `Semaphore` joins them, as `CountDownLatch` did:
+
+- `executor.clj`: `Semaphore` (leaf; `Serializable`) as the locks are: the permits (an `int`,
+  possibly negative, as Java's) under a `sync.Mutex`; a thread that must wait takes the gate,
+  which every release opens, and tries again; `waiting` counts the waiters. `acquire(int)`,
+  `acquireUninterruptibly` (an interrupt leaves the status set), `tryAcquire` (now, or timed and
+  interruptible; a timeout of zero or less tries once, after the interrupt check, as
+  `tryAcquireSharedNanos`), `release(int)` (Java's `Error("Maximum permit count exceeded")` on
+  overflow), `availablePermits`, `drainPermits` (also of negative permits, as Java's),
+  `isFair`, `hasQueuedThreads`, `getQueueLength`, `toString` (`...[Permits = n]`); a negative
+  count throws `IllegalArgumentException`. Fairness is not kept (a fair semaphore behaves as a
+  non-fair one), as for `ReentrantLock`. In the manifest (`test/jrt/manifest.clj`; `bin/jrt
+  manifest` counts 18 of 21 JDK members): every public member; not the protected
+  `reducePermits` and `getQueuedThreads`.
+- Tests (`concurrent_test.clj`, `TestSemaphore`): the counts and messages, a negative start,
+  mutual exclusion of 8 threads over one permit (a plain counter, clean under `--race`), an
+  interrupted `acquire`, an `acquireUninterruptibly` that keeps the interrupt. `bin/jrt test`
+  passes on amd64 (and `--race`) and arm64.
+- Speed (`BenchmarkSemaphore`, amd64): 21 ns per uncontended acquire and release, against 17 ns
+  for `ReentrantLock`'s lock and unlock. The translated AQS would be a CAS on the state
+  uncontended, about the same; it was not measured further, as it does not run without the
+  `Unsafe` additions above.
+- Cost: the executable grows by about 30 KB (58.41 MB with `Semaphore` alone).
+
+With it and Dyn's hand-written interfaces (EVAL-NOTES.md, "Phase 2B follow-up"), the suite's
+`pprint` namespace loads and passes 470 of its 474 assertions.

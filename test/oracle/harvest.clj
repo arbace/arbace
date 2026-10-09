@@ -13,29 +13,37 @@
 
 ;; Test namespaces left out whole: concurrency and timing (agents, atoms' threads, parallel,
 ;; refs, server, futures), loading and compiling files or classes (compilation, genclass,
-;; ns_libs, main, repl, annotations, proxy, reflect, clearing, method_thunks, generated_*,
+;; ns_libs, main, repl, annotations, reflect, clearing, method_thunks, generated_*,
 ;; param_tags, java_interop), the test framework itself (test, test_fixtures, run_single_test),
 ;; I/O (streams, serialization, tap) and errors/rt (stack traces, warnings).
 (def excluded
   #{"agents" "annotations" "clearing" "compilation" "errors" "genclass" "generators"
     "generated_all_fi_adapters_in_let" "generated_functional_adapters_in_def"
     "generated_functional_adapters_in_def_requiring_reflection" "java_interop" "main"
-    "method_thunks" "ns_libs" "ns_libs_load_later" "parallel" "param_tags" "proxy" "reflect"
+    "method_thunks" "ns_libs" "ns_libs_load_later" "parallel" "param_tags" "reflect"
     "refs" "repl" "rt" "run_single_test" "serialization" "server" "streams" "tap" "test"
     "test_fixtures"})
 
 ;; Forms mentioning any of these symbols are left out: time, randomness, threads, the host,
-;; identity, exiting, the class forms and proxies (D6).
+;; identity, exiting, the class forms (D6). Proxies are in (the Go build has them over Dyn:
+;; C2G-SPEC §10.4, amendment X4).
 (def unsafe
   '#{System/exit System/currentTimeMillis System/nanoTime System/getProperty System/getenv
      System/identityHashCode System/gc Runtime/getRuntime Thread/sleep Thread. Thread
      shutdown-agents future future-call pmap pcalls pvalues agent send send-off send-via await
      await-for rand rand-int rand-nth shuffle random-sample random-uuid gensym time
      slurp spit delete-file io/file io/delete-file file-seq load load-file load-string require
-     use compile gen-class gen-interface proxy defclass definterface Object. java.util.Date.
+     use compile gen-class gen-interface defclass definterface Object. java.util.Date.
      Date. java.util.Random. Math/random add-tap remove-tap tap> System/setProperty
      with-redefs-fn alter-var-root set-validator! *compile-files* *compile-path*
      repeatedly locking promise deliver})
+
+(def proxy-forms
+  "Of the namespaces left out whole, the one whose forms naming proxies are harvested all the
+  same: java_interop holds the suite's proxy tests (the suite's proxy namespace,
+  proxy/examples.clj, only defines the classes they use)."
+  {"java_interop" '#{proxy proxy-super update-proxy get-proxy-class construct-proxy init-proxy
+                     proxy-mappings proxy-call-with-super}})
 
 (defn- read-all
   "The forms of a test file, read with reader conditionals allowed and any ::alias/name
@@ -87,10 +95,12 @@
     (= 'thrown-with-msg? (first a)) (let [body (drop 3 a)] (if (next body) [(cons 'do body)] body))
     :else [a]))
 
-(defn- unsafe? [form]
+(defn- naming? [syms form]
   (let [found (volatile! false)]
-    (walk/prewalk (fn [x] (when (and (symbol? x) (contains? unsafe x)) (vreset! found true)) x) form)
+    (walk/prewalk (fn [x] (when (and (symbol? x) (contains? syms x)) (vreset! found true)) x) form)
     @found))
+
+(defn- unsafe? [form] (naming? unsafe form))
 
 (defn- form-text
   "The form printed back as source (type hints and other metadata kept), or nil when it does
@@ -164,11 +174,12 @@
         tmp-dir (io/file runner/root ".tmp/oracle/harvest")]
     (doseq [^File f files
             :let [nm (str/replace (.getName f) #"\.cljc?$" "")]
-            :when (not (excluded nm))]
+            :when (or (not (excluded nm)) (proxy-forms nm))]
       (let [forms (read-all f)
             pre (vec (ns-preamble forms))
+            only (if (excluded nm) #(naming? (proxy-forms nm) %) (constantly true))
             texts (->> forms assertions (mapcat exprs)
-                       (remove unsafe?) (keep form-text) distinct vec)
+                       (filter only) (remove unsafe?) (keep form-text) distinct vec)
             header (str ";; Harvested by bin/oracle harvest (test/oracle/harvest.clj) from Clojure's test suite,\n"
                         ";; clojure/clojure 98d735fab02f337cee654cb0629bddc09883a75a test/clojure/test_clojure/"
                         (.getName f) ",\n;; renamed to arbace.* by bin/clojure-tests: the expressions of its assertions that are\n"

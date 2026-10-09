@@ -94,7 +94,15 @@
 ;; ---------------------------------------------------------------------------------------
 ;; classes
 
-(defn go-name [n] (nm/go-class-name n))
+(defn go-name
+  "The Go type name of class n: jrt's own name for a class jrt provides and c2g does not
+  translate (a jrt class may register a JDK name under another Go name: ReentrantLock's
+  condition is AbstractQueuedSynchronizer$ConditionObject), else the name derived from n."
+  [n]
+  (or (when *w*
+        (when-let [jc (get (:jrt-classes *w*) n)]
+          (when-not (translated? n) (:go jc))))
+      (nm/go-class-name n)))
 (defn pkg [n] (nm/pkg-of n))
 
 (defn abstract? [n] (has? (:flags (info n)) Opcodes/ACC_ABSTRACT))

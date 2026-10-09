@@ -48,13 +48,17 @@
 (defn- public? [n] (not (zero? (bit-and (:flags (m/info n)) Opcodes/ACC_PUBLIC))))
 
 (defn interfaces
-  "The interfaces Dyn implements: every public interface translated (not an annotation), with
-  every interface they extend that the world has."
+  "The interfaces Dyn implements: every public interface translated (not an annotation) or
+  hand-written in jrt with a cast function (Future: core's future-call reifies it; jrt's instance
+  checks of them make the nominal check, jrt.dynNominal), with every interface they extend that the world has."
   [T]
   (let [base (filter #(and (m/interface? %) (public? %)
                            (zero? (bit-and (:flags (m/info %)) Opcodes/ACC_ANNOTATION))
                            (not (m/reflected? %)))
-                     T)]
+                     (concat T (filter #(and (m/hand-written? %)
+                                            ;; those jrt casts to (a slot fn's result is cast)
+                                            (contains? (:funcs (:jrt m/*w*)) (str (m/go-name %) "_Cast")))
+                                      (sort (keys (:jrt-classes m/*w*))))))]
     (sort (distinct (concat base
                             (for [n base s (m/all-supertypes n)
                                   :when (and (not= s n) (m/interface? s) (m/in-world? s))]
