@@ -553,7 +553,9 @@ traces.\n"
       (strings/HasPrefix fn "arbace/lang.Compiler_Expr_")
       ;; the dispatch of objects of classes made at run time (c2g_dyn.go)
       (strings/HasPrefix fn "arbace/lang.dyn")
-      (strings/HasPrefix fn "arbace/lang.(*Dyn).")))
+      (strings/HasPrefix fn "arbace/lang.(*Dyn).")
+      ;; proxies of a class (DynSub_C)
+      (strings/HasPrefix fn "arbace/lang.(*DynSub_")))
 
 (go/func isThrowableClass ^bool [^string name]
   (let [c (ForName name)]

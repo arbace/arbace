@@ -1461,6 +1461,42 @@
     (when (not ok) (panic (ClassCast x NoClassDefFoundError_class)))
     v))
 
+;; ---- java.lang.ClassFormatError
+
+(go/type ClassFormatError (struct LinkageError))
+(go/var ClassFormatError_class
+  (Define (addr (lit ClassInfo :Name "java.lang.ClassFormatError" :Kind KindClass :Modifiers AccPublic
+                     :Super LinkageError_class :Go "arbace/jrt.ClassFormatError"))))
+(go/func ClassFormatError_New ^{:tag (* ClassFormatError)} []
+  (let [t (addr (lit ClassFormatError))] (.Ctor t) t))
+(go/method Ctor [^{:tag (* ClassFormatError)} t]
+  (.Ctor (.-LinkageError t) t))
+(go/func ClassFormatError_New_String ^{:tag (* ClassFormatError)} [^{:tag (* String)} s]
+  (let [t (addr (lit ClassFormatError))] (.Ctor_String t s) t))
+(go/method Ctor_String [^{:tag (* ClassFormatError)} t ^{:tag (* String)} s]
+  (.Ctor_String (.-LinkageError t) t s))
+(go/method Ref ^any [^{:tag (* ClassFormatError)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ClassFormatError)} t] ClassFormatError_class)
+(go/method Clone__O ^any [^{:tag (* ClassFormatError)} t] (panic (CloneNotSupported t)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* ClassFormatError)} t] (.Impl_ToString__String t t))
+(go/method GetMessage__String ^{:tag (* String)} [^{:tag (* ClassFormatError)} t] (.Impl_GetMessage__String t t))
+(go/method GetLocalizedMessage__String ^{:tag (* String)} [^{:tag (* ClassFormatError)} t] (.Impl_GetLocalizedMessage__String t t))
+(go/method GetCause__Throwable ^Throwable_I [^{:tag (* ClassFormatError)} t] (.Impl_GetCause__Throwable t t))
+(go/method InitCause_Throwable__Throwable ^Throwable_I [^{:tag (* ClassFormatError)} t ^Throwable_I c] (.Impl_InitCause_Throwable__Throwable t t c))
+(go/method SetCause_Throwable__V [^{:tag (* ClassFormatError)} t ^Throwable_I c] (.Impl_SetCause_Throwable__V t t c))
+(go/method FillInStackTrace__Throwable ^Throwable_I [^{:tag (* ClassFormatError)} t] (.Impl_FillInStackTrace__Throwable t t))
+(go/method GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [^{:tag (* ClassFormatError)} t] (.Impl_GetStackTrace__StackTraceElement1 t t))
+(go/method SetStackTrace_StackTraceElement1__V [^{:tag (* ClassFormatError)} t ^{:tag (* RefArray)} a] (.Impl_SetStackTrace_StackTraceElement1__V t t a))
+(go/method PrintStackTrace__V [^{:tag (* ClassFormatError)} t] (.Impl_PrintStackTrace__V t t))
+(go/method AddSuppressed_Throwable__V [^{:tag (* ClassFormatError)} t ^Throwable_I e] (.Impl_AddSuppressed_Throwable__V t t e))
+(go/method GetSuppressed__Throwable1 ^{:tag (* RefArray)} [^{:tag (* ClassFormatError)} t] (.Impl_GetSuppressed__Throwable1 t t))
+(go/func ClassFormatError_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ClassFormatError) x)] ok))
+(go/func ClassFormatError_Cast ^{:tag (* ClassFormatError)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* ClassFormatError) x)]
+    (when (not ok) (panic (ClassCast x ClassFormatError_class)))
+    v))
+
 ;; ---- java.lang.IncompatibleClassChangeError
 
 (go/type IncompatibleClassChangeError (struct LinkageError))
@@ -1870,6 +1906,7 @@
   (set! (.-IsInstance (.Info LinkageError_class)) LinkageError_InstanceOf)
   (set! (.-IsInstance (.Info ExceptionInInitializerError_class)) ExceptionInInitializerError_InstanceOf)
   (set! (.-IsInstance (.Info NoClassDefFoundError_class)) NoClassDefFoundError_InstanceOf)
+  (set! (.-IsInstance (.Info ClassFormatError_class)) ClassFormatError_InstanceOf)
   (set! (.-IsInstance (.Info IncompatibleClassChangeError_class)) IncompatibleClassChangeError_InstanceOf)
   (set! (.-IsInstance (.Info AbstractMethodError_class)) AbstractMethodError_InstanceOf)
   (set! (.-IsInstance (.Info VirtualMachineError_class)) VirtualMachineError_InstanceOf)

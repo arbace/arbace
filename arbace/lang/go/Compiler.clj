@@ -189,7 +189,17 @@
       ;; field i of a class made at run time is private (reflection does not find it)
       (method ^:public ^:static ^:native hideField ^void [^Class c ^int i])
 
-      (method ^:public ^:static ^:native setField ^void [o ^int i v])))
+      (method ^:public ^:static ^:native setField ^void [o ^int i v])
+
+      ;; proxy (arbace/lang/go/ns/core_proxy.clj): a class named name extending super (Object,
+      ;; or a class c2g gives a proxy type, arbace.c2g.dyn/proxy-supers) and implementing the
+      ;; interfaces, with super's constructors and one private field, the fn map (field 0). Its
+      ;; methods are set by setMethod; a method's fn answering superMarker makes the method
+      ;; run super's implementation
+      (method ^:public ^:static ^:native defineProxyClass ^Class [^String name ^Class super
+                                                                  ^Class/1 interfaces])
+
+      (method ^:public ^:static ^:native superMarker [])))
 
   (c2g/add
     (defclass ^:public ^:static Evaluator
@@ -496,7 +506,7 @@
           (when (and (nil? m) (some? vm) (>= n vreq))
             (set! m vm))
           (when (nil? m)
-            (throw (ArityException. (if (instance? Counted args) (RT/count args) n) (.-name fe))))
+            (throw (ArityException. (if (instance? Counted args) (RT/count args) (RT/boundedLength args 20)) (.-name fe))))
           (let [f (Frame. (unchecked-add-int (.-maxLocal m) 2) fn m fe nil)
                 slots (.-slots f)
                 req (.-reqParms m)
@@ -570,6 +580,28 @@
                 (Evaluator/result (.-retClass m) (.-body m) r))
               (finally (Evaluator/pop s f))))))
 
+      ;; a class's JVM descriptor (I, [Ljava/lang/String;, Ljava/lang/Object;)
+      (method ^:static descriptor ^String [^Class c]
+        (cond
+          (.isPrimitive c) (cond (identical? c Boolean/TYPE) "Z" (identical? c Byte/TYPE) "B"
+                                 (identical? c Character/TYPE) "C" (identical? c Short/TYPE) "S"
+                                 (identical? c Integer/TYPE) "I" (identical? c Long/TYPE) "J"
+                                 (identical? c Float/TYPE) "F" (identical? c Double/TYPE) "D"
+                                 :else "V")
+          (.isArray c) (.replace (.getName c) \. \/)
+          :else (java-str "L" (.replace (.getName c) \. \/) ";")))
+
+      ;; a method's JVM descriptor
+      (method ^:static signature ^String [^Class/1 ps ^Class ret]
+        (let [sb (StringBuilder. "(")]
+          (loop [^int i 0]
+            (when (< i (alength ps))
+              (.append sb (Evaluator/descriptor (aget ps i)))
+              (recur (unchecked-inc-int i))))
+          (.append sb ")")
+          (.append sb (Evaluator/descriptor ret))
+          (.toString sb)))
+
       ;; the parameter classes of a deftype's method
       (method ^:static paramClasses ^Class/1 [^NewInstanceMethod m]
         (let [ps (.-argLocals m)
@@ -607,12 +639,18 @@
                 (when (.isMutable nie (aget bs i)) (Dyn/hideField c i))
                 (recur (unchecked-inc-int i))))
             (when meta (Dyn/hideField c (alength bs)))
-            ;; methods, with every covariant return they answer to
-            (loop [s (RT/seq (.-methods nie))]
+            ;; methods, with every covariant return they answer to; a method defined twice
+            ;; is the JVM's ClassFormatError when it loads the class
+            (loop [s (RT/seq (.-methods nie)) seen (java.util.HashSet.)]
               (when (some? s)
                 (let [m (cast NewInstanceMethod (.first s))
                       ps (Evaluator/paramClasses m)
-                      impl (EvalMethod. nie m)]
+                      impl (EvalMethod. nie m)
+                      sig (Evaluator/signature ps (.-retClass m))]
+                  (when-not (.add seen (java-str (.-name m) sig))
+                    (throw (ClassFormatError.
+                             (java-str "Duplicate method name \"" (.-name m) "\" with signature \"" sig
+                                       "\" in class file " (.replace (.-name nie) \. \/)))))
                   (Dyn/setMethod c (.-name m) ps (.-retClass m) impl)
                   (when (some? (.-covariants nie))
                     (let [cvs (cast java.util.Set
@@ -621,7 +659,7 @@
                       (when (some? cvs)
                         (for-each [^Class rc cvs]
                           (Dyn/setMethod c (.-name m) ps rc impl)))))
-                  (recur (.next s)))))
+                  (recur (.next s) seen))))
             (if (.isDeftype nie)
                 (let [nh (.count (.-hintedFields nie))
                       basis (.-hintedFields nie)]
@@ -1049,8 +1087,18 @@
           (.assignIn (cast LocalBindingExpr target) f (.evalIn val f))
         (instance? InstanceFieldExpr target)
           (let [ife (cast InstanceFieldExpr target)
-                t (.evalIn (.-target ife) f)]
-            (Reflector/setInstanceField t (.-fieldName ife) (.evalIn val f)))
+                t (.evalIn (.-target ife) f)
+                tc (.-targetClass ife)]
+            (if (and (some? tc) (some? (.-field ife))
+                     (not (identical? (Compiler$Evaluator/destub tc) tc)))
+                ;; a field of the type being defined, in its methods ((set! (.x this) v)):
+                ;; the object's field, mutable fields being private to reflection
+                (let [v (.evalIn val f)]
+                  (Compiler$Evaluator/checkCast (Compiler$Evaluator/destub tc) t)
+                  (when (nil? t) (throw (NullPointerException.)))
+                  (Compiler$Dyn/setField t (Compiler$Evaluator/fieldIndex tc (.-fieldName ife)) v)
+                  v)
+                (Reflector/setInstanceField t (.-fieldName ife) (.evalIn val f))))
         (instance? StaticFieldExpr target)
           (.assignIn (cast StaticFieldExpr target) f (.evalIn val f))
         :else (.evalAssign target val)))))

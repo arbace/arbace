@@ -1,6 +1,6 @@
 ;; The Go build's arbace/main.clj (doc/go/EVAL-NOTES.md, "Namespace variants"):
 ;; - the REPL makes no DynamicClassLoader for the thread (one loader, C2G-SPEC §10.3);
-;; - an error report is printed with prn, not pprint (whose writers are proxies, D6), into a
+;; - an error report is printed with prn, not pprint (loading pprint takes about 8 s), into a
 ;;   file of java.io.tmpdir written through FileOutputStream (java.nio's Files is cut, D6).
 ["(.setContextClassLoader (Thread/currentThread) (arbace.lang.DynamicClassLoader. cl))"
  "(.setContextClassLoader (Thread/currentThread) cl)"

@@ -12,7 +12,7 @@ Under `test/oracle/`:
 
 | part | sources | what | size |
 |---|---|---|---|
-| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 6,473 forms, 13 files |
+| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 6,898 forms, 14 files |
 | forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,179 forms, 28 files |
 | classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 4,969 steps, 17 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
@@ -30,7 +30,10 @@ literal and collection, `*print-length*`, `*print-level*`, `*print-meta*`, `*pri
 `*read-eval*`, `arbace.edn`, reader errors), `hashing`, `sorting`, `inst` (`#inst`, `#uuid`,
 `arbace.instant`), `collections`, `seqs` (laziness and chunking made visible by side effects,
 transducers), `destructuring_macros`, `polymorphism` (multimethods and hierarchies, protocols,
-records, `deftype`, `reify`; no `defclass`, `gen-class` or `proxy`, D6), `state_errors` (dynamic
+records, `deftype`, `reify`; no `defclass` or `gen-class`, D6), `types` (types made at run
+time: `definterface`, protocols on host types and nil, records as maps, mutable and primitive
+fields, `IFn` and collection implementations, `proxy`, `bean`; EVAL-NOTES.md phase 2A),
+`state_errors` (dynamic
 vars and `binding`, atoms, refs, delays, exceptions and their messages, metadata, namespaces,
 keywords and symbols, the regex functions, `eval`).
 
@@ -216,7 +219,7 @@ Everything recorded is deterministic; left out:
 - Identity: identity hashes and the printing of objects without value semantics (fns, atoms,
   transients, arrays, `PersistentQueue`'s `#object` form, regex patterns' hashes, `deftype`s
   without `hashCode`); what remains in messages and `#object[...]` is normalized (above).
-- The class forms (`defclass`), `gen-class`, `proxy` (D6), and loading or compiling files.
+- The class forms (`defclass`), `gen-class` (D6), and loading or compiling files.
 - In the harvest, whole test namespaces: `agents`, `annotations`, `clearing`, `compilation`,
   `errors`, `genclass`, `generators`, the `generated_*` adapters, `java_interop`, `main`,
   `method_thunks`, `ns_libs`, `parallel`, `param_tags`, `proxy`, `reflect`, `refs`, `repl`, `rt`,
