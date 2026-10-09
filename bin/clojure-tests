@@ -4,9 +4,11 @@
 # test/baseline-results.edn (in rename mode, against Arbace: test/arbace-results.edn). Writes
 # only under .tmp/clojure-tests/.
 #
-# Usage: bin/clojure-tests [-j JOBS] [--no-generative] [NAMESPACE...]
+# Usage: bin/clojure-tests [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
 #   -j JOBS          parallel test JVMs (default: number of CPUs)
 #   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
+#   --generative     run it; the default but with CLOJURE_TESTS_GO, whose build cannot load
+#                    test.generative's runner yet (java.util.Random, java.util.jar)
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
 # Environment:
 #   CLOJURE_SRC             class path of the Clojure under test: its Java classes and .clj
@@ -25,6 +27,20 @@
 #                           bin/lib/tools.bash, which needs bin/build-arbace's target/stage2),
 #                           into RUN/suite and .tmp/clojure-tests/lib-arbace/.
 #                           The test namespaces keep their names, so the reference applies.
+#   CLOJURE_TESTS_GO        the Go build (B1a, doc/go/EVAL-NOTES.md, "Phase 2C"): the command that
+#                           runs it, e.g. target/arbace-go/amd64/arbace or
+#                           "qemu-aarch64 target/arbace-go/arm64/arbace". Implies rename mode; the
+#                           test namespaces (step 5) and test.generative (step 6) run on it, each
+#                           in its own process, the renamed suite and test libraries on ARBACE_PATH;
+#                           listing and reporting run on the JVM Arbace of CLOJURE_SRC (default
+#                           target/stage2). Steps 3 and 4 are skipped: the Go build loads no class
+#                           files, so the AOT fixtures load from source and the Java fixtures
+#                           (test/java) do not exist; the namespaces needing them are :skipped in
+#                           its reference, test/arbace-go-results.edn (the default
+#                           CLOJURE_TESTS_EXPECTED; CLOJURE_TESTS_RUN defaults to go). Each
+#                           process loads every test namespace first, as upstream does: about
+#                           a minute; GOGC defaults to 400 for them (half the CPU time of the
+#                           default 100, about 650 MB resident each instead of 300)
 #   CLOJURE_TESTS_PRECOMPILED  1: the Clojure under test already holds its namespaces
 #                           AOT-compiled with direct linking, as a release jar does (Arbace's
 #                           stages, bin/build-arbace); step 3 is skipped and the suite runs
@@ -49,6 +65,14 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 base=$root/.tmp/clojure-tests
+go_exe=${CLOJURE_TESTS_GO:-}
+if [ -n "$go_exe" ]; then
+  CLOJURE_TESTS_RENAME=arbace
+  CLOJURE_TESTS_PRECOMPILED=1
+  : "${CLOJURE_TESTS_RUN:=go}" "${CLOJURE_TESTS_EXPECTED:=$root/test/arbace-go-results.edn}"
+  : "${CLOJURE_SRC:=$root/target/stage2:$root}"
+  export CLOJURE_TESTS_GO CLOJURE_TESTS_RENAME CLOJURE_TESTS_PRECOMPILED
+fi
 run=${CLOJURE_TESTS_RUN:-baseline}
 work=$base/$run
 src=$work/clojure
@@ -121,6 +145,14 @@ libcp() {
 # Upstream's test class path: maven.test.classpath (the test libraries), target/test-classes,
 # test, then the build (here: the AOT classes, then the Clojure under test).
 test_cp() { echo "$(libcp)$suite/target/test-classes:$suite/test:$work/classes:$clojure_src"; }
+# The Go build's ARBACE_PATH: the test libraries, then the suite's sources.
+go_path() { local cp; cp=$(libcp); echo "$cp$suite/test"; }
+# go_run TIMEOUT ARG...: the Go build, in the suite, on the suite's ARBACE_PATH
+go_run() {
+  local t=$1; shift
+  # shellcheck disable=SC2086
+  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} timeout "$t" $go_exe "$@")
+}
 
 # The names of the Clojure under test, renamed in rename mode (computed once, passed on to the
 # --run-one processes).
@@ -140,6 +172,13 @@ if [ "${1:-}" = "--run-one" ]; then
   ns=$2
   cd "$suite"
   status=0
+  if [ -n "$go_exe" ]; then
+    start=$(date +%s%N)
+    go_run "$timeout_s" "$runner" run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" \
+      > "$work/out/$ns.log" 2>&1 || status=$?
+    printf '%-62s exit %s %6d ms\n' "$ns" "$status" $(( ($(date +%s%N) - start) / 1000000 )) | tee "$work/out/$ns.time"
+    exit 0
+  fi
   timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" $main_class "$runner" \
     run "$ns" "$work/out/$ns.edn" "$work/namespaces.txt" > "$work/out/$ns.log" 2>&1 || status=$?
   printf '%-62s exit %s\n' "$ns" "$status"
@@ -148,11 +187,13 @@ fi
 
 jobs=$(nproc)
 generative=1
+[ -n "$go_exe" ] && generative=0
 only=()
 while [ $# -gt 0 ]; do
   case $1 in
     -j) jobs=$2; shift 2 ;;
     --no-generative) generative=0; shift ;;
+    --generative) generative=1; shift ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) only+=("$1"); shift ;;
   esac
@@ -231,6 +272,9 @@ else
 fi
 
 # 4. fixtures
+if [ -n "$go_exe" ]; then
+  step "[$run] no fixtures to compile: the Go build loads no class files"
+else
 step "[$run] compile the test fixtures into $suite/target/test-classes"
 # shellcheck disable=SC2046
 javac -nowarn -g --release 17 -encoding UTF-8 -cp "$work/classes:$clojure_src" \
@@ -240,6 +284,7 @@ javac -nowarn -g --release 17 -encoding UTF-8 -cp "$work/classes:$clojure_src" \
 (cd "$suite" && java -cp "$(test_cp)" -D$path_prop=target/test-classes \
   "${jvm_props[@]}" $compile_class $fixture_nss $extra_fixture_nss) >> "$work/fixtures.log" 2>&1 \
   || { cat "$work/fixtures.log"; exit 1; }
+fi
 
 # 5. test
 rm -rf "${work:?}/out"
@@ -250,7 +295,7 @@ if [ ${#only[@]} -gt 0 ]; then
 else
   cp "$work/namespaces.txt" "$work/selected.txt"
 fi
-step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)"
+step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)$([ -n "$go_exe" ] && echo ", on $go_exe")"
 export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s \
   CLOJURE_TESTS_RENAME=$rename
 xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
@@ -259,9 +304,16 @@ xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$'
 if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
   step "[$run] run the test.generative specs for ${gen_msec}ms (log in $work/out/generative.log)"
   status=0
+  if [ -n "$go_exe" ]; then
+    # test.generative's run time: its runner reads the property, which the Go build cannot be
+    # given on its command line
+    go_run "$timeout_s" -e "(System/setProperty \"clojure.test.generative.msec\" \"$gen_msec\")" \
+      "$runner" generative test "$work/out/generative.edn" "$work/namespaces.txt" > "$work/out/generative.log" 2>&1 || status=$?
+  else
   (cd "$suite" && timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" \
     -Dclojure.test.generative.msec="$gen_msec" $main_class "$runner" \
     generative test "$work/out/generative.edn") > "$work/out/generative.log" 2>&1 || status=$?
+  fi
   [ $status = 0 ] || echo "test.generative exit $status"
 fi
 

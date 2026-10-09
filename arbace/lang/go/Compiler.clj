@@ -138,11 +138,7 @@
     (defclass ^:public ^:static EvalState
       ;; one thread's evaluator: the innermost frame and the depth (C2G-SPEC §10.5, §10.7)
       (field ^:public ^Frame top)
-      (field ^:public ^int depth)
-      ;; loading one of the program's embedded namespaces, which the JVM build loads
-      ;; AOT-compiled: a top-level def's constant metadata and value are made as the compiled
-      ;; namespace's class makes them (EVAL-NOTES.md, phase 2B: :arglists)
-      (field ^:public ^boolean aot)))
+      (field ^:public ^int depth)))
 
   (c2g/add
     (defclass ^:public ^:static Dyn
@@ -193,7 +189,21 @@
       ;; field i of a class made at run time is private (reflection does not find it)
       (method ^:public ^:static ^:native hideField ^void [^Class c ^int i])
 
-      (method ^:public ^:static ^:native setField ^void [o ^int i v])))
+      (method ^:public ^:static ^:native setField ^void [o ^int i v])
+
+      ;; proxy (arbace/lang/go/ns/core_proxy.clj): a class named name extending super (Object,
+      ;; or a class c2g gives a proxy type, arbace.c2g.dyn/proxy-supers) and implementing the
+      ;; interfaces, with super's constructors and one private field, the fn map (field 0). Its
+      ;; methods are set by setMethod; a method's fn answering superMarker makes the method
+      ;; run super's implementation
+      (method ^:public ^:static ^:native defineProxyClass ^Class [^String name ^Class super
+                                                                  ^Class/1 interfaces])
+
+      (method ^:public ^:static ^:native superMarker [])
+
+      ;; a proxy's superclass methods that reflection does not list (the protected ones of
+      ;; jrt's classes: ThreadLocal.initialValue) and that have no fn: (factory name) is theirs
+      (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory])))
 
   (c2g/add
     (defclass ^:public ^:static Evaluator
@@ -205,6 +215,10 @@
       (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
 
       (field ^:static ^:final ^ThreadLocal STATE (ThreadLocal.))
+
+      ;; true while RT.load evaluates a source embedded in the program: the namespaces the
+      ;; JVM ships AOT-compiled, whose top-level defs run as emitted (DefExpr.eval)
+      (field ^:public ^:static ^:final ^Var EMBEDDED_LOAD (.setDynamic (Var/create false)))
 
       (static-initializer
         ;; stack traces: jrt asks for the evaluated frames when an exception is made
@@ -504,7 +518,7 @@
           (when (and (nil? m) (some? vm) (>= n vreq))
             (set! m vm))
           (when (nil? m)
-            (throw (ArityException. (if (instance? Counted args) (RT/count args) n) (.-name fe))))
+            (throw (ArityException. (if (instance? Counted args) (RT/count args) (RT/boundedLength args 20)) (.-name fe))))
           (let [f (Frame. (unchecked-add-int (.-maxLocal m) 2) fn m fe nil)
                 slots (.-slots f)
                 req (.-reqParms m)
@@ -578,6 +592,28 @@
                 (Evaluator/result (.-retClass m) (.-body m) r))
               (finally (Evaluator/pop s f))))))
 
+      ;; a class's JVM descriptor (I, [Ljava/lang/String;, Ljava/lang/Object;)
+      (method ^:static descriptor ^String [^Class c]
+        (cond
+          (.isPrimitive c) (cond (identical? c Boolean/TYPE) "Z" (identical? c Byte/TYPE) "B"
+                                 (identical? c Character/TYPE) "C" (identical? c Short/TYPE) "S"
+                                 (identical? c Integer/TYPE) "I" (identical? c Long/TYPE) "J"
+                                 (identical? c Float/TYPE) "F" (identical? c Double/TYPE) "D"
+                                 :else "V")
+          (.isArray c) (.replace (.getName c) \. \/)
+          :else (java-str "L" (.replace (.getName c) \. \/) ";")))
+
+      ;; a method's JVM descriptor
+      (method ^:static signature ^String [^Class/1 ps ^Class ret]
+        (let [sb (StringBuilder. "(")]
+          (loop [^int i 0]
+            (when (< i (alength ps))
+              (.append sb (Evaluator/descriptor (aget ps i)))
+              (recur (unchecked-inc-int i))))
+          (.append sb ")")
+          (.append sb (Evaluator/descriptor ret))
+          (.toString sb)))
+
       ;; the parameter classes of a deftype's method
       (method ^:static paramClasses ^Class/1 [^NewInstanceMethod m]
         (let [ps (.-argLocals m)
@@ -615,12 +651,18 @@
                 (when (.isMutable nie (aget bs i)) (Dyn/hideField c i))
                 (recur (unchecked-inc-int i))))
             (when meta (Dyn/hideField c (alength bs)))
-            ;; methods, with every covariant return they answer to
-            (loop [s (RT/seq (.-methods nie))]
+            ;; methods, with every covariant return they answer to; a method defined twice
+            ;; is the JVM's ClassFormatError when it loads the class
+            (loop [s (RT/seq (.-methods nie)) seen (java.util.HashSet.)]
               (when (some? s)
                 (let [m (cast NewInstanceMethod (.first s))
                       ps (Evaluator/paramClasses m)
-                      impl (EvalMethod. nie m)]
+                      impl (EvalMethod. nie m)
+                      sig (Evaluator/signature ps (.-retClass m))]
+                  (when-not (.add seen (java-str (.-name m) sig))
+                    (throw (ClassFormatError.
+                             (java-str "Duplicate method name \"" (.-name m) "\" with signature \"" sig
+                                       "\" in class file " (.replace (.-name nie) \. \/)))))
                   (Dyn/setMethod c (.-name m) ps (.-retClass m) impl)
                   (when (some? (.-covariants nie))
                     (let [cvs (cast java.util.Set
@@ -629,7 +671,7 @@
                       (when (some? cvs)
                         (for-each [^Class rc cvs]
                           (Dyn/setMethod c (.-name m) ps rc impl)))))
-                  (recur (.next s)))))
+                  (recur (.next s) seen))))
             (if (.isDeftype nie)
                 (let [nh (.count (.-hintedFields nie))
                       basis (.-hintedFields nie)]
@@ -996,7 +1038,60 @@
         (Compiler$Evaluator/at f line source)
         (.invoke (.-k kw) t)))))
 
+(c2g/variant Compiler$QualifiedMethodExpr
+  ;; A method value (Class/method) is a fn the JVM analyzes when it emits the enclosing code
+  ;; (buildThunk), so in the namespace being compiled. Its eval analyzes when it runs: in the
+  ;; namespace recorded at analysis, once (the thunk's FnExpr is kept)
+  (c2g/add (field ^Namespace evalNs))
+  (c2g/add (field ^Compiler$FnExpr evalThunk))
+
+  (constructor ^:public [this ^Class methodClass ^Symbol sym ^StaticFieldExpr fieldOL]
+    (set! c methodClass)
+    (set! methodSymbol sym)
+    (set! tagClass
+          (when (some? (arbace.lang.Compiler/tagOf sym))
+            (HostExpr/tagToClass (arbace.lang.Compiler/tagOf sym))))
+    (set! hintedSig (arbace.lang.Compiler/tagsToClasses (arbace.lang.Compiler/paramTagsOf sym)))
+    (cond
+      (.startsWith (.-name sym) ".")
+        (do (set! kind Compiler$QualifiedMethodExpr$MethodKind/INSTANCE)
+            (set! methodName (.substring (.-name sym) 1)))
+      (.equals (.-name sym) "new")
+        (do (set! kind Compiler$QualifiedMethodExpr$MethodKind/CTOR) (set! methodName (.-name sym)))
+      :else (do (set! kind Compiler$QualifiedMethodExpr$MethodKind/STATIC) (set! methodName (.-name sym))))
+    (set! fieldOverload fieldOL)
+    (set! evalNs (cast Namespace (.deref RT/CURRENT_NS))))
+
+  (method ^:public eval [this]
+    (if (.preferOverloadedField this)
+        (.eval fieldOverload)
+        (let [^:mutable t evalThunk]
+          (when (nil? t)
+            (Var/pushThreadBindings (^[Object/1] RT/map RT/CURRENT_NS evalNs))
+            (try
+              (set! t (Compiler$QualifiedMethodExpr/buildThunk C/EVAL this))
+              (finally (Var/popThreadBindings)))
+            (set! evalThunk t))
+          (.eval t)))))
+
 (c2g/variant Compiler$StaticMethodExpr
+  ;; *unchecked-math* :warn-on-boxed: jrt's reflection has no annotations. The methods of
+  ;; Numbers marked ^{WarnBoxedMath false}, by name (each name's overloads are all marked)
+  (method ^:public ^:static isBoxedMath ^boolean [^java.lang.reflect.Method m]
+    (let [c (.getDeclaringClass m)]
+      (when (.equals c Numbers)
+        (when (.contains (java.util.Arrays/asList
+                           (new String/1 ["boolean_array" "booleans" "byte_array" "bytes" "char_array"
+                                          "chars" "double_array" "doubles" "float_array" "floats"
+                                          "hasheq" "hasheqFrom" "int_array" "ints" "long_array" "longs"
+                                          "rationalize" "reduceBigInt" "short_array" "shorts"
+                                          "toBigDecimal" "toBigInt" "toBigInteger" "toRatio"]))
+                         (.getName m))
+          (return false))
+        (let [argTypes (.getParameterTypes m)]
+          (for-each [^Class argType argTypes]
+            (when (or (.equals argType Object) (.equals argType Number)) (return true)))))
+      false))
   (c2g/add
     (field ^List evalMethods))
   (c2g/add
@@ -1074,37 +1169,55 @@
           (.assignIn (cast LocalBindingExpr target) f (.evalIn val f))
         (instance? InstanceFieldExpr target)
           (let [ife (cast InstanceFieldExpr target)
-                t (.evalIn (.-target ife) f)]
-            (Reflector/setInstanceField t (.-fieldName ife) (.evalIn val f)))
+                t (.evalIn (.-target ife) f)
+                tc (.-targetClass ife)]
+            (if (and (some? tc) (some? (.-field ife))
+                     (not (identical? (Compiler$Evaluator/destub tc) tc)))
+                ;; a field of the type being defined, in its methods ((set! (.x this) v)):
+                ;; the object's field, mutable fields being private to reflection
+                (let [v (.evalIn val f)]
+                  (Compiler$Evaluator/checkCast (Compiler$Evaluator/destub tc) t)
+                  (when (nil? t) (throw (NullPointerException.)))
+                  (Compiler$Dyn/setField t (Compiler$Evaluator/fieldIndex tc (.-fieldName ife)) v)
+                  v)
+                (Reflector/setInstanceField t (.-fieldName ife) (.evalIn val f))))
         (instance? StaticFieldExpr target)
           (.assignIn (cast StaticFieldExpr target) f (.evalIn val f))
         :else (.evalAssign target val)))))
 
 (c2g/variant Compiler$DefExpr
-  ;; DefExpr.eval, the top-level def; while an embedded namespace loads (EvalState.aot), a
-  ;; constant value or metadata is the AOT-compiled namespace's (emitValue: a seq built by a
-  ;; macro, such as defn's :arglists, is a PersistentList), as the JVM build loads core
+  ;; a top-level def: DefExpr.eval, but in a source embedded in the program (AOT-compiled on the
+  ;; JVM) a def without ^:dynamic leaves the var's dynamic flag as it is, as DefExpr.emit does
+  ;; (core_print's print-initialized redefines core's dynamic one), and a constant value or
+  ;; metadata is the AOT-compiled namespace's (emitValue: a seq built by a macro, such as defn's
+  ;; :arglists, is a PersistentList). The order stays eval's: emit's (meta, then bindRoot,
+  ;; which drops :macro) is for code already macroexpanded
   (method ^:public eval [this]
     (try
-      (let [aot (.-aot (Compiler$Evaluator/state))]
+      (let [aot (RT/booleanCast (.deref Compiler$Evaluator/EMBEDDED_LOAD))]
         (when initProvided
           (.bindRoot var (if (and aot (instance? Compiler$ConstantExpr init)) (.evalIn init nil) (.eval init))))
         (when (some? meta)
           (.setMeta var (cast IPersistentMap (if (and aot (instance? Compiler$ConstantExpr meta))
                                                  (.evalIn meta nil)
                                                  (.eval meta)))))
-        (.setDynamic var isDynamic))
+        (if (or isDynamic (not aot))
+            (.setDynamic var isDynamic)
+            var))
       (catch Throwable e
-        (if (not (instance? Compiler$CompilerException e))
-            (throw (Compiler$CompilerException. source line column arbace.lang.Compiler/DEF
-                                                Compiler$CompilerException/PHASE_EXECUTION e))
-            (throw (cast Compiler$CompilerException e))))))
+        (if (not (instance? CompilerException e))
+            (throw (CompilerException. source line column arbace.lang.Compiler/DEF
+                                       CompilerException/PHASE_EXECUTION e))
+            (throw (cast CompilerException e))))))
+
   (c2g/add
+    ;; a def inside a fn runs as DefExpr.emit compiles it
     (method ^:public evalIn [this ^Compiler$Frame f]
-      (when initProvided (.bindRoot var (.evalIn init f)))
+      (when isDynamic (.setDynamic var true))
       (when (some? meta)
         (.setMeta var (cast IPersistentMap (.evalIn meta f))))
-      (.setDynamic var isDynamic))))
+      (when initProvided (.bindRoot var (.evalIn init f)))
+      var)))
 
 (c2g/variant Compiler$NewExpr
   (c2g/add
@@ -1197,6 +1310,48 @@
         (.applyTo (cast IFn (.deref STR_VAR)) (RT/seq vs))))))
 
 (c2g/variant Compiler$CaseExpr
+  ;; CaseExpr's constructor, as in Compiler.clj, then the warning of emitExprForInts
+  (constructor ^:public [this ^int line ^int column ^LocalBindingExpr expr ^int shift ^int mask
+                         ^int low ^int high ^Expr defaultExpr
+                         ^{:tag (SortedMap Integer Expr)} tests
+                         ^{:tag (HashMap Integer Expr)} thens ^Keyword switchType
+                         ^Keyword testType ^{:tag (Set Integer)} skipCheck]
+    (set! (.-expr this) expr)
+    (set! (.-shift this) shift)
+    (set! (.-mask this) mask)
+    (set! (.-low this) low)
+    (set! (.-high this) high)
+    (set! (.-defaultExpr this) defaultExpr)
+    (set! (.-tests this) tests)
+    (set! (.-thens this) thens)
+    (set! (.-line this) line)
+    (set! (.-column this) column)
+    (when (and (not (identical? switchType compactKey)) (not (identical? switchType sparseKey)))
+      (throw (IllegalArgumentException. (java-str "Unexpected switch type: " switchType))))
+    (set! (.-switchType this) switchType)
+    (when (and (and (not (identical? testType intKey)) (not (identical? testType hashEquivKey)))
+               (not (identical? testType hashIdentityKey)))
+      (throw (IllegalArgumentException. (java-str "Unexpected test type: " switchType))))
+    (set! (.-testType this) testType)
+    (set! (.-skipCheck this) skipCheck)
+    (let [^{:tag (Collection Expr)} returns (ArrayList. (.values thens))]
+      (.add returns defaultExpr)
+      (set! (.-returnType this) (arbace.lang.Compiler/maybeJavaClass returns))
+      (when (and (> (RT/count skipCheck) 0) (RT/booleanCast (.deref RT/WARN_ON_REFLECTION)))
+        (.format
+          (RT/errPrintWriter)
+          "Performance warning, %s:%d:%d - hash collision of some case test constants; if selected, those entries will be tested sequentially.\n"
+          (new Object/1 [(.deref SOURCE_PATH) line column]))))
+    ;; emitExprForInts' warning, which the JVM prints when it emits the case (the Go build
+    ;; emits nothing): at analysis, after the constructor's own
+    (when (and (identical? testType intKey)
+               (nil? (arbace.lang.Compiler/maybePrimitiveType expr))
+               (RT/booleanCast (.deref RT/WARN_ON_REFLECTION)))
+      (.format
+        (RT/errPrintWriter)
+        "Performance warning, %s:%d:%d - case has int tests, but tested expression is not primitive.\n"
+        (new Object/1 [(.deref SOURCE_PATH) line column]))))
+
   (c2g/add
     ;; CaseExpr.doEmit's switch: the key's then when its test holds, else the default
     (method ^:public evalIn [this ^Compiler$Frame f]

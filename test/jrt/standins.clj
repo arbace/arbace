@@ -51,6 +51,8 @@
    ["LinkageError" "Error" :nonleaf :n :s :st]
    ["ExceptionInInitializerError" "LinkageError" :leaf :eiie-n :eiie-s :eiie-t]
    ["NoClassDefFoundError" "LinkageError" :leaf :n :s]
+   ;; the evaluator (EVAL-NOTES.md, phase 2A): a deftype or reify defining a method twice
+   ["ClassFormatError" "LinkageError" :leaf :n :s]
    ["IncompatibleClassChangeError" "LinkageError" :nonleaf :n :s]
    ["AbstractMethodError" "IncompatibleClassChangeError" :leaf :n :s]
    ["VirtualMachineError" "Error" :abstract :n :s :st :t]

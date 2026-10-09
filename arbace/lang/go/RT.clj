@@ -118,15 +118,15 @@
         (some? ins)
           (let [slash (.lastIndexOf scriptfile \/)
                 file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
-            (let [t0 (System/nanoTime)
-                  st (arbace.lang.Compiler$Evaluator/state)
-                  aot (.-aot st)]
-              ;; an embedded namespace is one the JVM build loads AOT-compiled (DefExpr.eval)
-              (set! (.-aot st) (instance? java.io.ByteArrayInputStream ins))
+            (let [t0 (System/nanoTime)]
+              ;; the embedded sources are the namespaces the JVM ships AOT-compiled
+              (Var/pushThreadBindings
+                (^[Object/1] RT/map Compiler$Evaluator/EMBEDDED_LOAD
+                                    (Boolean/valueOf (instance? java.io.ByteArrayInputStream ins))))
               (try
                 (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
                 (finally
-                  (set! (.-aot st) aot)
+                  (Var/popThreadBindings)
                   (.close ins)
                   ;; ARBACE_LOAD_TIMES: each source's load time on stderr (EVAL-NOTES.md)
                   (when (some? (System/getenv "ARBACE_LOAD_TIMES"))

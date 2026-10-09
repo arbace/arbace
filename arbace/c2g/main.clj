@@ -303,7 +303,7 @@
                                                          ;; (C2G-SPEC §10.6, EVAL-PLAN.md Q2)
                                                          (when (:program opts) (filter a/decl (sort @(:order a/*unit*))))))
                                ;; what the evaluator's Dyn (c2g_dyn.go) calls
-                               (when (a/decl dyn/api-class) (dyn/roots))
+                               (when (a/decl dyn/api-class) (concat (dyn/roots) (dyn/proxy-roots)))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
                                (when streams?
                                  [["jdk/internal/jrt/StandardStreams" "in" "()Ljava/io/InputStream;"]

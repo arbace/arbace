@@ -779,3 +779,43 @@ decision (2026-10-08).
   protocols checked); jrt's surface for the REPL (`Math`'s functions, `Calendar`/`Timestamp`/
   `Instant`, sequenced collections, charsets, the small items); Clojure's test suite on the Go
   build, with the oracle's NPE rule.
+
+## 2026-10-09: B1a step 5, phase 2C: the oracle's NPE rule; Clojure's suite on the Go build
+
+- Agent, `54c2623`, merged: the oracle marks a NullPointerException whose JVM message follows
+  HotSpot's helpful-NPE grammar and compares it by class only (deviation V11, the user's
+  decision); 54 entries re-marked, nothing else changed; `check jvm` stays 19,828/19,828; on the
+  Go build all 52 forms pass by the rule (forms 9,416 of 9,652, the whole oracle 19,562 of
+  19,828).
+- Clojure's suite on the Go build (`CLOJURE_TESTS_GO=... bin/clojure-tests`, each namespace in
+  its own Go process with the renamed suite on `ARBACE_PATH`; reference
+  `test/arbace-go-results.edn` with a cause per failing namespace): 46 of 64 namespaces load;
+  1,852 of 1,906 assertions pass; 40 namespaces pass as on the JVM; 19 skipped with reasons
+  (Java fixtures, gen-class, D6's cuts). Blocked mostly by jrt's surface (`java.util.Random`'s
+  init, missing `Unsafe.objectFieldOffset(Field)`, blocks 12,786 assertions; `Collectors`,
+  `URI`, `Math.sin`, `IntSupplier`, `CyclicBarrier`, `Semaphore`, `File`) and by `proxy` (1,319);
+  forwarded to the two running agents. Evaluator fixes on the way (method values' namespace,
+  `def`'s dynamic flag in embedded sources, `case`'s warning, `isBoxedMath` without
+  annotations). test.generative needs `Random` and `java.util.jar`. A full suite run takes
+  about 4.5 minutes at 16 processes (about 10 GB with `GOGC=400`). A proposal for
+  `bin/gate --full` is in EVAL-NOTES. `bin/gate` passed; `bin/oracle check jvm` passed.
+
+## 2026-10-09: B1a step 5, phase 2A: proxy over Dyn; run-time types checked
+
+- Agent, `605b2b3` .. `f2bc564`, merged: `proxy` over `Dyn`, as the user decided (a proxy of
+  `Object` is a `Dyn`; for the listed proxyable classes, `Writer`, `Reader`, `PushbackReader`,
+  `InputStream`, `OutputStream`, `APersistentMap` and jrt's `ThreadLocal`, c2g writes a
+  `DynSub_C` that embeds C, dispatching each method to its slot's fn or to C's), upstream's
+  `proxy` macros with only `generate-proxy` replaced, `bean` by reflection; pprint and
+  `cl-format` work (pprint loads in about 7.9 s on the evaluator, so the REPL does not require it
+  at start). Evaluator fixes: a method defined twice is a `ClassFormatError`, `(set! (.x this) v)`
+  in deftype methods, arity counting as `AFn.applyToHelper`. New oracle file
+  `test/oracle/forms/types.clj` (425 forms on run-time types: deftype, defrecord, reify,
+  protocols, mutable and primitive fields, `Object` overrides, proxy, bean, pprint).
+- Results: forms 9,871 of 10,077 on amd64 and arm64, file for file; the whole oracle on Go
+  20,017 of 20,253; Clojure's suite on Go 1,874 assertions passing (from 1,852), the test.check
+  namespaces now stopping at `Math/exp` (phase 2B's). Executables about 4 MB larger (41.6 MB
+  amd64). Main session: `bin/gate` passed; `bin/oracle check jvm` 20,253 of 20,253.
+- A determinism issue to fix: `polymorphism.clj:176` names two ambiguous interfaces in an order
+  that comes from identity hashes of `Class` objects; classes made while `core_proxy` loads
+  shift them. Proposed amendments A1-A4 (EVAL-NOTES).
