@@ -2514,6 +2514,7 @@ On the branch `go-juc` after merging main (2026-10-10), amd64:
 |---|---|
 | `bin/jrt-convert` | 532 files, all compiled to javac's class shapes (528 identical, the 4 known differences) |
 | `bin/c2g --program` | 2,479 classes, 21,973 methods reached; 45 constant `VarHandle`s on 40 fields |
+| `bin/c2g-check -- --program` (amd64) | 9,022 of 9,022 steps; the new fixture `FxVarHandles` (every access mode on fields and array elements, fences, the arrays' exceptions, contention) 12 of 12 |
 | `bin/jrt test` (amd64, `--race`, arm64 under `qemu-aarch64`) | pass; new: `TestVarHandles`, `TestForkJoinExecutorService`, `TestLockSupportBlocker` |
 | the oracle's new `forms/concurrency.clj`, 247 cases | the JVM 247 of 247 (recorded twice, identical); Go 247 of 247 |
 | `bin/oracle check ... --expected test/oracle/known-go-amd64.edn` | 21,430 of 21,435; the 3 `nextProbablePrime` cases now pass (`ThreadLocalRandom`) and leave the reference, the 5 others as known |
