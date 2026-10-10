@@ -96,13 +96,18 @@ zero); which one woke it.\n"
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.locks.Condition" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Condition"))))
 
-(go/func Lock_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Lock x)] ok))
+(go/func Lock_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Lock x)] (dynNominal x Lock_class ok)))
 (go/func Lock_Cast ^Lock [^any x]
   (when (== x nil) (return nil))
   (let [(values v ok) (assert Lock x)]
-    (when (not ok) (panic (ClassCast x Lock_class)))
+    (when (not (dynNominal x Lock_class ok)) (panic (ClassCast x Lock_class)))
     v))
-(go/func Condition_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Condition x)] ok))
+(go/func Condition_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Condition x)] (dynNominal x Condition_class ok)))
+(go/func Condition_Cast ^Condition [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Condition x)]
+    (when (not (dynNominal x Condition_class ok)) (panic (ClassCast x Condition_class)))
+    v))
 
 ;; ---------------------------------------------------------------------------------------
 ;; ReentrantLock

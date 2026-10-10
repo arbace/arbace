@@ -894,3 +894,177 @@ decision (2026-10-08).
   the `arbace-for-golang` freeze, no longer right after step 5. B1-PLAN's steps: 6 the
   executable, 7 speed, 8 the `.ae` rename (new), 9 the freeze (was 8). So steps 6 and 7 work on
   the `.clj` names, and the rename lands once the Go build's shape is settled.
+
+## 2026-10-09: a multimethod's ambiguity message names classes in name order
+
+- The oracle case `test/oracle/forms/polymorphism.clj:176`, `(class-ambig "s")` with methods for
+  `Comparable` and `java.io.Serializable`, throws "Multiple methods ... match dispatch value:
+  class java.lang.String -> A and B, and neither is preferred", A and B in the order of
+  `MultiFn`'s method table, a hash map keyed by the classes, whose hashes are identity hashes:
+  the order varied between runs and between the JVM and Go builds (it matched on Go by luck).
+- The user's decision: name the two in the order of their class names, in Arbace's source.
+  Done in `MultiFn.findAndCacheBestMethod` (`arbace/lang/MultiFn.clj`): when both dispatch
+  values are classes they are ordered by `Class.getName`; other dispatch values (keywords and
+  the like, which hash by value) keep the table's order, so no other message changes.
+  Recorded as hand change 14 in `doc/VENDOR-NOTES.md`. Considered: ordering any two values by
+  their printed form (changes the keyword cases' messages for no gain); keeping the method
+  table sorted (it needs an order over any dispatch value, and only the message needs one).
+- Re-recorded with `bin/oracle record forms/polymorphism`: only case 169 (line 176) changed,
+  now "... -> interface java.io.Serializable and interface java.lang.Comparable, ...".
+  `bin/oracle check jvm` passes 20,253 of 20,253; the Go build (amd64) gives the same message,
+  and its oracle run still mismatches only its 32 known cases. The bootstrap passes (stage 2 =
+  stage 3).
+
+## 2026-10-09: the Go checks in `bin/gate --full`
+
+- The user's decision (2026-10-09): the proposal of `doc/go/EVAL-NOTES.md` ("For the gate"),
+  amd64 only; the essential `bin/gate` unchanged. `bin/gate --full` gains a chain: `bin/jrt-convert`,
+  `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, then concurrently `--smoke`, Clojure's suite on
+  the Go build (`CLOJURE_TESTS_GO`, `-j 12`, against `test/arbace-go-results.edn`) and the oracle
+  on it. Each step logs to `.tmp/gate/NAME.log` and has its summary line (`jrt-convert`,
+  `go-build`, `go-smoke`, `suite-go`, `oracle-go`); a step after a failed one reports "not run".
+- The oracle gains `bin/oracle check IMPL --expected FILE` (`test/oracle/runner.clj`,
+  `check-known`): it passes when the set of mismatching cases (named `file:line` for forms,
+  `file:index` for class scripts and regex) equals the reference's, over the files run, and
+  names the new mismatches and the newly passing cases otherwise. `--write-expected FILE`
+  rewrites the reference, keeping the reasons of cases still recorded (new ones get a
+  placeholder reason). Considered: counting mismatches only (a fix hiding a regression would
+  pass); comparing whole records (a reference as large as the expected files, rewritten on
+  every message change). The reference `test/oracle/known-go-amd64.edn`, read with `read`:
+  main's 32 mismatches in five groups with reasons and where they are documented (`deftype
+  Foo/2`'s error source; the `StringBuilder` identity hash; the JVM's recorded `dcmpg` bug; 5
+  `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's resource data). The gate runs it
+  with `--timeout 900`: the reducers file takes about 285 s of the default 300 on Go.
+- Memory: the first two runs with the chain concurrent from the start failed: the OOM killer
+  took g2c's converter (12 GB heap) both times, once with jrt-convert's beside it, and the suite
+  on stage 1 crashed once; the three suites alone (24 JVMs each) reach 40-59 GB. Also found:
+  `suite-go` ran the executable by a relative path, which `bin/clojure-tests` does not resolve
+  (exit 127); it is passed absolute. So g2c and the Go chain now start, concurrently, when the
+  three suites (stages 1 and 2, j2c's) are done. Considered: starting them when the stage suites
+  are done, beside j2c's suite (passed in 22m02s, but peaked at 55 of 62 GB, which the
+  morning's 46 GB host would not have held); chaining g2c before jrt-convert (longer, the Go
+  suite being the long pole anyway).
+- `bin/gate --full` passes in 21m24s (was about 7 minutes): bootstrap 1m31s, suites 3m37s and
+  3m36s, j2c 5m12s, then g2c 1m27s, jrt-convert 1m32s, go-build 2m58s, go-smoke 31 s,
+  suite-go 10m08s (18,781 of 18,806 assertions, no regressions), oracle-go 5m22s (20,221 of
+  20,253, the 32 as recorded). Memory used at most 59 GB in the suites' phase (as without the
+  Go checks), at most 26 GB after. Docs: CLAUDE.md, `bin/gate`'s header, `bin/oracle`'s usage,
+  ORACLE.md (the option and the format), EVAL-NOTES.md (proposal -> done).
+
+## 2026-10-09: Semaphore in jrt; proxy forms in the oracle; the regex cases analysed
+
+- Agent, `a8352a8` (branch `smalls`), merged:
+  - c2g named a class that jrt provides and c2g does not translate by its Java name; jrt's
+    `ReentrantLock_ConditionObject` registers as `AbstractQueuedSynchronizer$ConditionObject`, so
+    translated code named an undefined Go type. Now such a class takes the Go name jrt registers
+    (`arbace/c2g/model.clj`, `go-name`).
+  - `Semaphore` hand-written in jrt (`go/arbace/jrt/executor.clj`), like jrt's locks: the full
+    public API, Java's messages, no fairness (as `ReentrantLock`); 21 ns an uncontended
+    acquire/release. Considered and measured: `AbstractQueuedSynchronizer` translated: it builds
+    but needs `Unsafe`'s `putIntOpaque`, `getAndBitwiseAndInt`, `weakCompareAndSetReference`,
+    `park`, and its `Node.waiter` is a racy two-word field in Go.
+  - `Dyn` (reify, deftype) also implements jrt's hand-written interfaces that have a cast function
+    (`Future`, `ExecutorService`, `Executor`, `Lock`, `Condition`), with a nominal check
+    (`jrt.dynNominal`): on main `(instance? java.util.concurrent.Future (future 1))` was false.
+  - The harvester keeps `java_interop`'s assertions that name proxy functions (new file
+    `test/oracle/forms/harvest/java_interop.clj`, 10 cases); the suite's `proxy/` directory only
+    defines classes.
+  - Results: Clojure's suite on Go 19,251 of 19,280 assertions (62 of 64 namespaces load; pprint
+    470 of 474, its 4 errors a proxy of `java.io.BufferedWriter`, a leaf class in c2g).
+  - Analysed, not done: the 5 `\N{name}` regex cases (`uniName.dat`, zlib) and the 24 `CANON_EQ`
+    ones (`java.text.Normalizer`, ICU data through `java.nio` buffers). Amendments Y1-Y4 proposed
+    (EVAL-NOTES, "Phase 2B follow-up").
+- Main session: the one new Go mismatch, `java_interop.clj:14` (a proxy serialized through
+  `ObjectOutputStream`, cut by D6), added to `test/oracle/known-go-amd64.edn` with its reason.
+  `bin/oracle check jvm` (agent) 20,263 of 20,263; Go (main) 20,230 of 20,263, as recorded.
+- The user's decisions: do both regex groups, `\N{name}` and `CANON_EQ` (agent, branch
+  `regex-res`), and pprint's 4 errors, a proxy of `BufferedWriter` (agent, branch `pprint-bw`).
+  `bin/gate` passed on the merge (3m55s).
+
+## 2026-10-09: feature completion of the Go build; the gate until the freeze
+
+- The user's decisions: until the `arbace-for-golang` freeze, `bin/gate --full` is not run (it
+  runs at the freeze); changes are checked by short targeted tests, the essential `bin/gate` when
+  the bootstrapped sources change. The work focuses on the Go build's features and speed, with
+  more agents. Started alongside step 6, step 7a, the regex resources and pprint's proxy:
+  class forms in the Go build's REPL (B1-PLAN had a first REPL without them); `java.io.File` and
+  the file system, and sockets with the socket REPL (`arbace.core.server`), both reversing parts
+  of D6; the suite's last failures (`clearing`, `api`, `transducers`' time) with periodic arm64
+  checks.
+
+## 2026-10-09: amendments Y1-Y4 accepted and folded
+
+- The user accepted the small items' amendments Y1-Y4 (EVAL-NOTES.md, "Phase 2B follow-up"),
+  folded by the main session: Y1 (c2g names a jrt-provided class by jrt's registered Go name)
+  into C2G-SPEC §4.4; Y2 (`Dyn` implements jrt's hand-written interfaces with a cast function,
+  with the nominal check; narrows E4) into §5.12; Y3 (`Semaphore` hand-written in jrt, AQS
+  measured and not taken) into §8.4 and JAVA-SURFACE.md decision 4; Y4 (the harvest keeps
+  `java_interop`'s proxy assertions) into ORACLE.md; all listed in C2G-SPEC §16.
+
+## 2026-10-09: B1a step 6, the executable: an image of prepared namespaces
+
+- Agent, branch `step6` (4 commits on `42552a0`), merged: measured first, start (4.18 s) was
+  macroexpansion and analysis, not reading (about 0.1 s), with GC at 60% of CPU. Now
+  `bin/arbace-go --build` runs the built executable once with `ARBACE_PREPARE`, requiring every
+  embedded namespace (about 32 s), and records per top-level form the analyzed `Expr` tree plus
+  the side effects of its analysis (deftype stubs and classes, `gen-interface`'s interfaces,
+  proxy classes, the boot `ns` macro's `*ns*`): an image of 3.8 MB, reproducible, the same for
+  both architectures, linked into the executables (`go/arbace/cmd/arbace/image.clj`, the type
+  table `image_types.go` from `bin/c2g --program`; `Compiler$Image` in the Compiler variant). At
+  run time `RT.load` replays an embedded source from the image. A class's hash comes from its
+  name (the image needs the same hashes in every run). `GOGC=400` during start unless `GOGC`
+  is set (a new `Main` variant). The smoke test adds a REPL session checked against the JVM's
+  transcript. Considered (EXEC-NOTES.md): pre-read forms, macroexpanded forms, a heap snapshot
+  (as Joker), Go code instead of data, lazy decoding.
+- Start to `-e nil` on amd64: 4.18 s → 0.32 s (JVM `bin/arbace` 0.17 s, Joker 1.10.0 under
+  0.01 s); arm64 under qemu 44 s → 5.2 s; size 58.4 → 63.5 MB (Joker 29 MB). The rest is mostly
+  each `ns`'s `refer` of `arbace.core`'s vars (step 7).
+- The class hash by name reordered `polymorphism.clj:176`'s message on the agent's branch; on
+  main, MultiFn's sort by class name (hand change 14) makes it moot: the case passes.
+- Main session on the merge: Go build, `--smoke`, the Go oracle 20,230 of 20,263 as recorded
+  (`--expected`), Clojure's suite on Go 19,251 of 19,280 with no regressions; start 0.35 s.
+- The user's decisions: amendments U1-U5 accepted (to fold); the smoke test joins the
+  essential `bin/gate` with the executable cached by a hash of its inputs (rebuilt only when
+  they change). Step 7b (the evaluator's closure compilation) can start.
+
+## 2026-10-09: a proxy of BufferedWriter; pprint passes on Go
+
+- Agent, branch `pprint-bw` (`38cd59a`, `88aaca9`), merged: c2g's proxy list moves to
+  `arbace.c2g.model` and gains `java/io/BufferedWriter`; a translated non-final class on it is
+  not a leaf (its `DynSub_C` extends it), while hand-written classes keep jrt's leafness. 13 new
+  forms at the end of `test/oracle/forms/types.clj` (proxy-super, buffering, prn, pprint and
+  cl-format through a proxied BufferedWriter, a write after close). The suite's pprint namespace
+  passes 474 of 474; the suite on Go 19,255 of 19,280. Executable +981 KB. Amendment Z1
+  proposed (EVAL-NOTES.md).
+- Main session on the merge (over step 6): Go build, `--smoke`, the Go oracle's forms 10,097 of
+  10,100 as recorded, Clojure's suite on Go with no regressions.
+
+## 2026-10-09: step 6's follow-up: the smoke test in the essential gate; U1-U5 folded
+
+- Agent, branch `step6` (`2ed50fd`, `e380a5e`, `e9f296b`), merged: `bin/gate` runs a check `go`
+  (`bin/arbace-go --gate`, not with `--full`) beside the suite on stage 2 and the class forms
+  tests: the smoke test on amd64 of an executable cached in `.tmp/arbace-go-gate`, keyed by a
+  SHA-256 of `arbace/`, `go/`, `overlay/`, `bin/lib/`, the Java surface, the seed's hash, the
+  build's scripts and the toolchains (TamaGo's VERSION, `java -version`, jdk26u's commit). A miss
+  runs `bin/jrt-convert`'s steps sources, generate, convert and the amd64 build with the image.
+  Measured: the essential gate 3m38s on a hit, about 7 minutes on a miss (the check itself 5m13s
+  to 5m37s). Alternative considered: always building (the user chose the cache). CLAUDE.md's
+  gate paragraph describes it.
+- Amendments U1-U5 folded: C2G-SPEC §5.8 (a class's hash from its name), §10.3 (the prepared
+  namespaces), §10.6 (the main package and jrt's hooks), §13.4 (`GOGC` at start), §16; B1-PLAN
+  (step 6 done, the cached check, a D7 note); EVAL-PLAN §2.7; EXEC-NOTES.
+- Correction to the step 6 entries: while cleaning up after the pprint merge the main session
+  force-removed this agent's worktree while it worked, losing its uncommitted edits; the
+  worktree was recreated on the branch and the agent redid them. Worktrees are now removed only
+  after their agent has reported and stopped.
+- Main session on the merge: scripts only and docs; the agent's two essential gate runs (a miss
+  and a hit) passed with no regressions; `--full` not run, by the user's policy until the freeze.
+
+## 2026-10-10: amendment Z1 accepted and folded
+
+- The user accepted Z1 (EVAL-NOTES.md, "Proxies of BufferedWriter"): a translated, non-final
+  class on c2g's proxy list is not a leaf, since its `DynSub_C` subclasses it; the list lives in
+  `arbace.c2g.model/proxy-supers` and includes `java.io.BufferedWriter`. Folded into C2G-SPEC
+  §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
+  considered: keeping leafness a condition on the list (a listed class must already be
+  non-leaf), which excluded BufferedWriter.

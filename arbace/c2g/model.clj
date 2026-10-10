@@ -94,7 +94,15 @@
 ;; ---------------------------------------------------------------------------------------
 ;; classes
 
-(defn go-name [n] (nm/go-class-name n))
+(defn go-name
+  "The Go type name of class n: jrt's own name for a class jrt provides and c2g does not
+  translate (a jrt class may register a JDK name under another Go name: ReentrantLock's
+  condition is AbstractQueuedSynchronizer$ConditionObject), else the name derived from n."
+  [n]
+  (or (when *w*
+        (when-let [jc (get (:jrt-classes *w*) n)]
+          (when-not (translated? n) (:go jc))))
+      (nm/go-class-name n)))
 (defn pkg [n] (nm/pkg-of n))
 
 (defn abstract? [n] (has? (:flags (info n)) Opcodes/ACC_ABSTRACT))
@@ -116,15 +124,30 @@
                                 (if s (update m s (fnil conj #{}) c) m)))
                             {} (concat (T) (keys (:jrt-classes w))))))))))
 
+(def proxy-supers
+  "The classes besides Object that a proxy may extend in the Go build (§5.12, arbace.c2g.dyn):
+  each gets a Go type DynSub_C, a subclass of C in the world, so a translated class of the list
+  is not a leaf (§5.3)."
+  ["java/io/Writer" "java/io/Reader" "java/io/PushbackReader" "java/io/InputStream"
+   "java/io/OutputStream" "arbace/lang/APersistentMap"
+   ;; pprint's tests count the flushes of a proxy of BufferedWriter
+   "java/io/BufferedWriter"
+   ;; jrt's hand-written ThreadLocal (test.check's random, arbace.instant on the JVM)
+   "java/lang/ThreadLocal"])
+
+(def ^:private proxy-super? (set proxy-supers))
+
 (defn leaf?
   "Is class n a leaf (§5.3): its values are *C pointers. Interfaces are not; jrt's classes are
-  leaves when jrt gives them no class interface C_I."
+  leaves when jrt gives them no class interface C_I; a translated class of proxy-supers is not
+  (its DynSub_C extends it)."
   [n]
   (cond
     (= n "java/lang/Object") false
     (interface? n) false
     (hand-written? n) (not (contains? (:types (:jrt *w*)) (str (go-name n) "_I")))
-    :else (and (not (abstract? n)) (empty? (subclasses n)))))
+    :else (and (not (abstract? n)) (empty? (subclasses n))
+               (not (and (proxy-super? n) (not (final? n)))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Go types (§5.1)

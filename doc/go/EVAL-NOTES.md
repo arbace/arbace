@@ -541,7 +541,9 @@ method-defined-twice failure before), `proxy.examples` loads; `data-structures-i
 mismatch in the existing files, `polymorphism.clj:176` (`class-ambig`), names the two ambiguous
 interfaces in the other order: the order is that of a hash map keyed by `Class` objects, whose
 hashes are identity hashes, which the classes made while `core_proxy` loads shift (it passed by
-the same luck before). Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
+the same luck before). Fixed afterwards (2026-10-09, the user's decision): two classes are
+named in the order of their names (VENDOR-NOTES.md, hand change 14), on the JVM as on Go, and
+the case re-recorded. Clojure's suite on the Go build (`ARBACE_PATH` the renamed suite):
 `protocols` 196 of 196 (195 before the duplicate-method fix), `printer` 74 of 74 (`bean`),
 `transients` 35 of 35, and `java_interop`'s proxy tests (`test-proxy-chain`, `test-bases`,
 `test-supers`, `test-proxy-abstract-super`, `test-iterable-bean`, `test-set!`) pass;
@@ -725,24 +727,41 @@ MB resident), with `GOGC=400` 56 s and 89 s of CPU (650 MB), with `GOMAXPROCS=4`
 The runner sets `GOGC=400` for its processes unless `GOGC` is set: 16 processes need about 10
 GB. Start-up work (part 4: pre-read or pre-analyzed namespaces) would shorten every process.
 
-### For the gate (proposal; `bin/gate` unchanged)
+### For the gate (done, 2026-10-09; `bin/gate` unchanged)
 
-`bin/gate --full`, concurrently with its other checks (they take about 6.5 minutes), one chain:
+The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each step its own log in
+`.tmp/gate/` and line in the summary), concurrently with g2c's round trips once the three suites
+(stages 1 and 2, j2c's) are done:
 
-1. `bin/jrt-convert` (about 70 s), then `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`
-   (c2g and the Go build: a few minutes, the Go cache warm);
-2. then concurrently: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` (seconds);
-   `CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12` against
-   `test/arbace-go-results.edn` (about 5 minutes, about 8 GB); and the oracle on the Go build
-   (`bin/oracle check 'target/arbace-go/amd64/arbace -'`, about 1 minute), once its known
-   mismatches are recorded in a reference as the suite's are (today `check` fails on any
-   mismatch: 266 on the Go build; a `--expected FILE` option comparing the set of mismatching
-   cases would make it a gate check).
+1. `jrt-convert`: `bin/jrt-convert`, then `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go
+   --build` (c2g and the Go build, the Go cache warm);
+2. then concurrently: `go-smoke` (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`); `suite-go`
+   (`CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12`, against
+   `test/arbace-go-results.edn`); and `oracle-go` (`bin/oracle check 'target/arbace-go/amd64/arbace
+   -' --timeout 900 --expected test/oracle/known-go-amd64.edn`).
 
-That makes `--full` about 11 to 12 minutes and adds about 20 GB at its peak beside the g2c round
-trips; arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours).
-The essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
-change is what the Go checks guard (as `--full` is run for compiler, j2c and g2c changes).
+The oracle's new `--expected FILE` (ORACLE.md) passes when the mismatching cases are exactly
+those of the reference, `test/oracle/known-go-amd64.edn`: the 32 of main at `4284edc`, in five
+groups with their reasons (`deftype Foo/2`'s error source, the `StringBuilder` identity hash, the
+JVM's recorded `dcmpg` bug, 5 `\N{name}` and 24 `CANON_EQ` regex cases needing the JDK's
+resource data); `--write-expected FILE` rewrites it. The timeout is 900 s, not 300: the reducers
+file takes about 285 s on the Go build. Measured (64 cores; the host's memory read 46 GB in the morning, 62-64 GB in the afternoon):
+
+- The proposal's layout, everything concurrent from the start, does not fit: the three suites
+  (24 test JVMs each) use 40-59 GB at their peak by themselves, and the OOM killer took g2c's
+  converter in both runs that started converters beside them (once with jrt-convert's too);
+  `suite-stage1` crashed in the first. So g2c and the Go chain wait for the three suites
+  (`converters` in `bin/gate`), and g2c no longer runs beside them either.
+- With that: `bin/gate --full` passes in **21m24s** (the bootstrap 1m31s; the suites on stages
+  2 and 1 3m37s and 3m36s, j2c 5m12s; then g2c 1m27s, `jrt-convert` 1m32s, `go-build` 2m58s,
+  `go-smoke` 31 s, `suite-go` 10m08s, the longest (`reducers` 345 s and `parse` 306 s of its
+  namespaces), `oracle-go` 5m22s). Memory used (`free`, sampled each second): at most 59 GB
+  in the suites' phase, as before; at most 26 GB once the converters and the Go checks run.
+  Before: about 7 minutes.
+
+arm64 (qemu) stays out of the gate (the smoke test there takes minutes, the suite hours). The
+essential gate stays as it is: the Go build depends on nothing it checks, and a c2g or jrt
+change is what the Go checks guard.
 
 ## Phase 2B: jrt's surface for the REPL
 
@@ -862,6 +881,144 @@ transcribed code under its license. JRT-NOTES.md's W1-W4 ("Dates") are B1, B2, B
   variables are bounded as the subclass bounds them when bridges are computed. *Accepted
   2026-10-09, folded into classes/SPEC.md §6 (the derived bridges; not §9) as
   COMPILER-NOTES.md's amendment 15, S8 in C2G-SPEC §16.*
+
+## Phase 2B follow-up: Semaphore, Dyn's jrt interfaces, the proxy harvest
+
+Branch `smalls` (2026-10-09), three small items left by phase 2B.
+
+**`Semaphore`** (JRT-NOTES.md, "Semaphore"): why c2g left `AbstractQueuedSynchronizer$ConditionObject`
+untranslated (jrt registers that JDK name for `ReentrantLock`'s conditions under another Go
+name, and c2g named the type by the derived name: fixed in c2g, amendment Y1), and the decision
+for a hand-written `Semaphore` in jrt over the translated AQS (amendment Y3).
+
+**Dyn implements jrt's hand-written interfaces** (`arbace/c2g/dyn.clj`, `interfaces`). With
+`Semaphore` the pprint tests loaded but `(future-cancel f)` threw `ClassCastException`:
+`future-call` reifies `java.util.concurrent.Future`, an interface jrt hand-writes, and Dyn had
+the methods of the translated interfaces only, so a reify of `Future` was not a Go `jrt.Future`
+(`(instance? java.util.concurrent.Future (future 1))` was false on main). Dyn now also
+implements jrt's public hand-written interfaces that jrt can cast to (a `C_Cast` function: a
+slot fn's result is cast): `Future`, `ExecutorService` (with `Executor`), `Lock`, `Condition`
+(jrt gains `Condition_Cast`); not `ThreadFactory`, `Member`, `InvocationHandler`, which have
+none; 549 interfaces and 1,029 methods
+(were 542 and 996), the executable about 200 KB larger. The Go assertion to such an interface
+now succeeds for every Dyn, so jrt's `C_InstanceOf` and `C_Cast` of its hand-written interfaces
+make the nominal check c2g's make for the translated ones (`jrt.dynNominal`: a Dyn's class
+must implement the interface). Amendment Y2.
+
+**The oracle's harvest takes the forms naming `proxy`** (ORACLE.md, "Exclusions"): the suite's
+proxy tests are in `java_interop.clj`, a namespace the harvest leaves out whole; it now keeps
+that namespace's assertions naming the proxy functions: `forms/harvest/java_interop.clj`, 3
+forms after its preamble (the rest use the tests' locals or `proxy.examples`). Recorded alone
+(`bin/oracle record harvest/java_interop`; the other harvest files unchanged: a full harvest
+only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendment Y4.
+
+### Results
+
+- **The pprint namespace loads** on the Go build: 58 tests, 474 assertions, 470 pass, 4 errors:
+  the four `flush-underlying` tests make a proxy of `java.io.BufferedWriter`, which is not one
+  of c2g's proxy superclasses (`dyn/proxy-supers`): a proxy superclass must not be a leaf
+  (§5.3), and `BufferedWriter` is one in the closed world (no subclass); adding it means making
+  it a non-leaf class (its values `BufferedWriter_I`), not done. **Clojure's suite** (amd64):
+  646 tests, 19,280 assertions, 19,251 pass, 19 fail, 10 errors (were 588, 18,806, 18,781, 19,
+  6); 62 of 64 namespaces load (were 61). `test/arbace-go-results.edn` is updated; with it,
+  `bin/clojure-tests` reports no regression. (In one full run `math` was killed by the kernel's
+  OOM killer while other agents' builds ran; alone it passes as recorded.)
+- **The oracle**: `bin/oracle check jvm` 20,263 of 20,263. The Go build (amd64): 20,230 of
+  20,263 (was 20,221 of 20,253): the 10 new cases, 9 matching; the new mismatch serializes a
+  proxy (`java.io.ObjectOutputStream`, D6). The other 32 are unchanged.
+- **Checks**: `bin/gate` passes; `bin/jrt test` on amd64 (and `--race` for the locks and
+  `Semaphore`) and arm64.
+
+### The regex cases that need the JDK's data (not done)
+
+29 of the oracle's regex cases fail on the Go build for want of JDK resource data:
+
+- **5 cases, `\N{name}`** (`basics.clj` 45-47, `errors.clj` 108-109): `Character.codePointOf`
+  reads `java/lang/uniName.dat` (177 KB, zlib-compressed) through
+  `java.util.zip.InflaterInputStream`, which is not in the closed world (its `Inflater` is
+  native zlib). Needed: the file embedded among the executable's resources (they hold text
+  only: `embed/sources`), and a Go-build variant of `CharacterName`'s constructor reading it
+  through a native inflate over Go's `compress/zlib` (as `UUID.md5` is native). About a day's
+  small work; it also gives the REPL `Character/getName` and `Character/codePointOf`. Worth it.
+- **24 cases, `CANON_EQ`** (`unicode.clj` 161-195): `Pattern` normalizes with
+  `java.text.Normalizer` (NFD), not in the world. Tried: with `java/text/Normalizer` and
+  `jdk/internal/icu/text/NormalizerBase` in the closure, c2g finds the ICU loader
+  (`ICUBinary`, `NormalizerImpl.load`, `CodePointTrie.fromBinary`) needing `java.nio.ByteBuffer`,
+  `IntBuffer` and `Buffer` (the JDK generates them from templates; none is in the world),
+  `UCharacterIterator`, `UTF16`, `UCharacterProperty`, `java.text.CharacterIterator`, and
+  `Normalizer`'s Go name collides with another class (a rename entry); then `nfc.nrm` (36 KB)
+  embedded as a resource. java.nio's buffers are the large part. Alternatives: a Go-build
+  variant of `NormalizerImpl.load` over a `byte[]`, or a hand-written NFD over Go's tables
+  (Go's std has none exported: `golang.org/x/text/unicode/norm` is vendored inside std, and
+  its Unicode version, 15.0, is older than JDK 26's). Several days for one flag Clojure code
+  rarely uses: not worth it now; to report to the user.
+
+### Proposed amendments (for the user's review)
+
+- **Y1 (C2G-SPEC §4.4, Names)** c2g names a class jrt provides, and does not translate, by the
+  Go name jrt registers for it (the class variable's name less `_class`), which may differ from
+  the name derived from the Java name (`ReentrantLock_ConditionObject` for
+  `AbstractQueuedSynchronizer$ConditionObject`).
+- **Y2 (C2G-SPEC §5.12, Dynamic objects)** Dyn implements, besides the translated public
+  interfaces, jrt's public hand-written interfaces that have a cast function; jrt's instance
+  checks and casts of its hand-written interfaces make the nominal check (`jrt.dynNominal`).
+- **Y3 (C2G-SPEC §8.4; JAVA-SURFACE.md decision 4)** `java.util.concurrent.Semaphore` is
+  hand-written in jrt, as the locks are, not `AbstractQueuedSynchronizer` translated (which needs
+  `Unsafe` additions and has a two-word race on `Node.waiter`); fairness is not kept.
+- **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
+  name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
+
+Accepted by the user (2026-10-09) and folded: Y1 C2G-SPEC §4.4, Y2 §5.12, Y3 §8.4 and
+JAVA-SURFACE.md decision 4, Y4 ORACLE.md (Exclusions); listed in C2G-SPEC §16.
+
+## Proxies of BufferedWriter: pprint passes
+
+Branch `pprint-bw` (2026-10-09). The last 4 errors of the suite's `pprint` namespace (the
+`flush-underlying` tests) made a proxy of `java.io.BufferedWriter` that counts its flushes
+(`(proxy [java.io.BufferedWriter] [o] (flush [] (proxy-super flush) (swap! n inc)))`), and
+`BufferedWriter` was not one of c2g's proxy superclasses: a class of `proxy-supers` had to be
+non-leaf already, and `BufferedWriter` is a leaf of the closed world (nothing extends it).
+
+**The general way: a class of `proxy-supers` is not a leaf.** Its `DynSub_C` extends it, so it has
+a subclass in the program, and leafness (§5.3) now counts it: `model/leaf?` answers false for a
+translated, non-final class of the list, which moves from `arbace.c2g.dyn` to `arbace.c2g.model`
+(`m/proxy-supers`; `dyn/proxy-supers` refers to it) and gains `java/io/BufferedWriter`. A listed
+class then gets its class interface `C_I`, its values are `C_I` wherever the static type is `C`,
+its methods split into `Impl_` and dispatch methods, and c2g writes `DynSub_C` over it with no
+other change: the rule a class must be non-leaf to be listed becomes a consequence of being
+listed. (A hand-written class stays as jrt declares it: `ThreadLocal` is non-leaf in jrt.) For
+`BufferedWriter` the change touches its own file, `PrintStream` (which holds one) and the class
+table; `DynSub_BufferedWriter` has 1,039 methods, as the other `DynSub_C`.
+
+**Behaviour as on the JVM.** The oracle's `forms/types.clj` gains 13 forms (appended, so the
+other cases keep their lines): a `BufferedWriter` proxy whose `flush` calls `proxy-super` and
+counts, buffering (nothing reaches the underlying writer before a flush), `newLine` and
+`write(String, int, int)`, `instance?` and the superclass, `prn` with `*flush-on-newline*` true
+and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer over it) and
+`cl-format` with a case directive through it, a proxy overriding `write` that calls
+`proxy-super` with another string (the buffer size given to the constructor), and a write after
+`close` (`IOException` "Stream closed"). All 438 cases of the file match on the Go build.
+
+### Results
+
+- **Clojure's suite** (amd64): `pprint` 58 tests, 474 of 474 (was 470, 4 errors). The whole
+  suite: 646 tests, 19,280 assertions, 19,255 pass, 19 fail, 6 errors (were 19,251, 19, 10);
+  58 namespaces pass as on the JVM. `test/arbace-go-results.edn` updated; no regression.
+- **Executable size** (amd64, built from the same tree with and without the change): 58,603,950
+  to 59,584,911 bytes, +981 KB (+1.7%): `DynSub_BufferedWriter` and `BufferedWriter`'s split.
+- **The oracle**: `bin/oracle check jvm` 20,276 of 20,276. The Go build (amd64): 20,243 of
+  20,276 (the 13 new cases match); the 33 mismatches are those `known-go-amd64.edn` records.
+- **Checks**: `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt test` (amd64) passes.
+  The change is in c2g only (not compiled by the bootstrap), so `bin/gate` was not needed.
+
+### Proposed amendments (for the user's review)
+
+- **Z1 (C2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A translated, non-final class of `proxy-supers` is not a leaf:
+  its `DynSub_C` is a subclass in the program, so leafness counts it (it was a condition on the
+  list, now a consequence of it; X1's "leafness stays a property of the closed world" reads: of
+  the closed world and the proxy types c2g adds to it). The list moves to
+  `arbace.c2g.model/proxy-supers` and gains `java.io.BufferedWriter` (pprint's tests); §5.12's
+  "a proxy of a leaf class throws (`BufferedWriter` ...)" keeps `BitSet` as its example.
 
 ## Sources
 

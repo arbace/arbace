@@ -158,11 +158,17 @@
                 (when (or (nil? bestEntry) (.dominates this ch (.getKey e) (.getKey bestEntry)))
                   (set! bestEntry e))
                 (when-not (.dominates this ch (.getKey bestEntry) (.getKey e))
-                  (throw
-                    (IllegalArgumentException.
-                      (String/format
-                        "Multiple methods in multimethod '%s' match dispatch value: %s -> %s and %s, and neither is preferred"
-                        (new Object/1 [name dispatchVal (.getKey e) (.getKey bestEntry)]))))))))
+                  ;; two classes are named in the order of their names, not the method table's
+                  ;; (which follows their identity hashes), so that the message is deterministic
+                  (let [k1 (.getKey e)
+                        k2 (.getKey bestEntry)
+                        swap (and (instance? Class k1) (instance? Class k2)
+                                  (> (.compareTo (.getName (cast Class k1)) (.getName (cast Class k2))) 0))]
+                    (throw
+                      (IllegalArgumentException.
+                        (String/format
+                          "Multiple methods in multimethod '%s' match dispatch value: %s -> %s and %s, and neither is preferred"
+                          (new Object/1 [name dispatchVal (if swap k2 k1) (if swap k1 k2)])))))))))
           (if (nil? bestEntry)
               (do
                 (set! bestValue (.valAt methodTable defaultDispatchVal))

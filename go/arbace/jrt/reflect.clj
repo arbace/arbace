@@ -172,7 +172,7 @@ as Catch does) in InvocationTargetException, as Method.invoke and Constructor.ne
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Member" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Member"))))
 
-(go/func Member_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Member x)] ok))
+(go/func Member_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Member x)] (dynNominal x Member_class ok)))
 
 (go/type AccessibleObject_I
   "AccessibleObject_I is java.lang.reflect.AccessibleObject's class interface.\n"
@@ -579,7 +579,7 @@ Method.invoke converts arguments (IllegalArgumentException with the JVM's messag
 (go/var InvocationHandler_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.InvocationHandler" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.InvocationHandler"))))
-(go/func InvocationHandler_InstanceOf ^bool [^any x] (let [(values _ ok) (assert InvocationHandler x)] ok))
+(go/func InvocationHandler_InstanceOf ^bool [^any x] (let [(values _ ok) (assert InvocationHandler x)] (dynNominal x InvocationHandler_class ok)))
 
 (go/var Proxy_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Proxy" :Kind KindClass

@@ -2430,4 +2430,45 @@
     (lit (slice CtorInfo)
         (lit CtorInfo :Params (lit (slice (* Class)) Prim_int) :Modifiers 0x1
          :New (fn ^any [^{:tag (slice any)} args] (CountDownLatch_New_I (assert int32 (aget args 0)))))))
+  ;; java.util.concurrent.Semaphore
+  (set! (.-Methods (.Info Semaphore_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "acquire" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Acquire__V (assert (* Semaphore) this)) nil))
+        (lit MethodInfo :Name "acquire" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Acquire_I__V (assert (* Semaphore) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "acquireUninterruptibly" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AcquireUninterruptibly__V (assert (* Semaphore) this)) nil))
+        (lit MethodInfo :Name "acquireUninterruptibly" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AcquireUninterruptibly_I__V (assert (* Semaphore) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "availablePermits" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.AvailablePermits__I (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "drainPermits" :Params nil :Return Prim_int :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.DrainPermits__I (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "getQueueLength" :Params nil :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetQueueLength__I (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "hasQueuedThreads" :Params nil :Return Prim_boolean :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HasQueuedThreads__Z (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "isFair" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsFair__Z (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "release" :Params nil :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Release__V (assert (* Semaphore) this)) nil))
+        (lit MethodInfo :Name "release" :Params (lit (slice (* Class)) Prim_int) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Release_I__V (assert (* Semaphore) this) (assert int32 (aget args 0))) nil))
+        (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToString__String (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "tryAcquire" :Params (lit (slice (* Class)) Prim_int Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryAcquire_I_J_TimeUnit__Z (assert (* Semaphore) this) (assert int32 (aget args 0)) (assert int64 (aget args 1)) ((inst As (* TimeUnit)) (aget args 2)))))
+        (lit MethodInfo :Name "tryAcquire" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryAcquire__Z (assert (* Semaphore) this))))
+        (lit MethodInfo :Name "tryAcquire" :Params (lit (slice (* Class)) Prim_int) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryAcquire_I__Z (assert (* Semaphore) this) (assert int32 (aget args 0)))))
+        (lit MethodInfo :Name "tryAcquire" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryAcquire_J_TimeUnit__Z (assert (* Semaphore) this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))))
+  (set! (.-Ctors (.Info Semaphore_class))
+    (lit (slice CtorInfo)
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_int) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Semaphore_New_I (assert int32 (aget args 0)))))
+        (lit CtorInfo :Params (lit (slice (* Class)) Prim_int Prim_boolean) :Modifiers 0x1
+         :New (fn ^any [^{:tag (slice any)} args] (Semaphore_New_I_Z (assert int32 (aget args 0)) (assert bool (aget args 1)))))))
 )

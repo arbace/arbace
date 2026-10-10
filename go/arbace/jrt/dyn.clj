@@ -14,6 +14,18 @@ its class implements the interface c (directly or through its superinterfaces).\
   (interface
     (DynImplements ^bool [^{:tag (* Class)} c])))
 
+(go/func dynNominal
+  "dynNominal is the nominal check of jrt's hand-written interfaces (as c2g's instanceof and
+checkcast make it for the translated ones): ok, the Go assertion's result, unless x is an
+object of a class made at run time (Dyn implements every interface of the world), whose class
+must implement c.\n"
+  ^bool [^any x ^{:tag (* Class)} c ^bool ok]
+  (when ok
+    (let [(values d dyn) (assert Dynamic x)]
+      (when dyn
+        (return (.DynImplements d c)))))
+  ok)
+
 (go/var ^{:tag (map (* Class) bool)
           :doc "dynamicClasses are the classes DefineDynamic made (under registryMu).\n"}
   dynamicClasses (make (map (* Class) bool)))
@@ -24,6 +36,7 @@ Class object. Unlike Define, it may replace a class DefineDynamic made before un
 name (deftype evaluated again at the REPL); a class of the closed world cannot be replaced.\n"
   ^{:tag (* Class)} [^{:tag (* ClassInfo)} info]
   (let [c (addr (lit Class :info info))]
+    (presetClassHash c (.-Name info))
     (.Lock registryMu)
     (let [old (aget registry (.-Name info))]
       (when (and (!= old nil) (not (aget dynamicClasses old)))

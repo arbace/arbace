@@ -127,11 +127,24 @@ fallbacks of `arbace/core_classes.clj` are gone.
   `bin/arbace-go` builds static executables (58 MB amd64, 56 MB arm64). On amd64 the oracle
   passes 20,221 of 20,253 (the forms 10,075 of 10,077), Clojure's suite 18,781 of 18,806
   assertions (61 of 64 namespaces load).
-  - To decide: the step 5 amendments (V1-V8 accepted, to fold; A1-A4, B1-B8 open, with B7 the
-    licensing of transcribed jdk26u parts), the Go checks in `bin/gate --full`, and the
-    determinism issue at `polymorphism.clj:176` (identity-hash order).
-  - Then: step 6 (the executables), step 7 (speed, D7), step 8 (the `.ae` rename), step 9 (the
-    freeze).
+  - Done (2026-10-09, the user's decision): the step 5 amendments accepted and folded, renamed
+    M1-M8, X1-X4, S1-S8 (C2G-SPEC §16); B7's transcribed jdk26u parts kept, as LICENSE.md records.
+  - Done (2026-10-09, the user's decision): the Go checks in `bin/gate --full` (amd64): jrt-convert,
+    the Go build, its smoke test, Clojure's suite on it and the oracle against its known
+    mismatches (`bin/oracle check --expected`, `test/oracle/known-go-amd64.edn`, 32 cases);
+    `--full` now takes about 21 minutes.
+  - Done (2026-10-09, the user's decision): the determinism issue at `polymorphism.clj:176`: a
+    multimethod's ambiguity message names two classes in the order of their names
+    (VENDOR-NOTES.md, hand change 14), on the JVM as on Go.
+  - Step 6 done (2026-10-09): the executable with an image of the prepared core namespaces (start
+    4.2 s → 0.35 s, [go/EXEC-NOTES.md](go/EXEC-NOTES.md)); amendments U1-U5 accepted and folded;
+    the essential `bin/gate` smoke-tests the Go executable, cached by a hash of its inputs
+    (seconds on a hit, about 5 minutes beside the suite on a miss).
+  - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
+    compilation), and feature completion: class forms in the REPL, `java.io.File`, sockets and
+    the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
+    (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
+  - Then: step 8 (the `.ae` rename), step 9 (the freeze, with `bin/gate --full`).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`
