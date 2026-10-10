@@ -146,6 +146,10 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Done (2026-10-10): the suite's last failures (EVAL-NOTES.md, SL1-SL7): Clojure's suite on Go
     19,506 of 19,506 assertions (65 namespaces, `java.io` waits for sockets; 20 skipped, by D6,
     the Java fixtures and `seq-and-transducer`'s time); test.generative runs on Go.
+  - Done (2026-10-10): step 7 (7a runtime, 7b the evaluator's closure compilation; D7 closed),
+    sockets and the socket REPL, regex resources, class forms at the REPL, java.util completed
+    (JAVA-BASE.md), the monitor race. Clojure's suite on Go 19,628 of 19,632 (66 namespaces);
+    the Go oracle as recorded (8 known mismatches).
   - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
     compilation), and feature completion: class forms in the REPL, sockets and
     the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1

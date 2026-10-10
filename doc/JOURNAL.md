@@ -1206,3 +1206,35 @@ decision (2026-10-08).
   namespaces fail cleanly without their modules; the break handler degrades. Hand changes
   (VENDOR-NOTES), done on `apk26` first; `bin/arbace-image`'s default modules: `java.base`, plus
   `ARBACE_IMAGE_MODULES`.
+
+## 2026-10-10: main gains sockets, regex resources, class forms, java.util, step 7a, the monitor fix
+
+- Merged into main after step 7b (in this order): `go-net` (sockets and the socket REPL;
+  NT1-NT5), `regex-res` (`\N{name}`, `CANON_EQ`, the JDK's resource data embedded; RD1-RD5),
+  `cf-repl` (class forms at the REPL; CF1-CF6), the java.base assessment (`jbase` `b3cfd60`:
+  `bin/jrt-coverage`, `doc/go/JAVA-BASE.md`), `suite-last`'s folds and per-namespace timeouts,
+  step 7b's folds, `monfix`, `jbase` (java.util completed; JB1-JB5), `step7a` (O1, O2, O4-O7),
+  `cf-repl`'s fixes. Conflicts (main session): jrt's file lists, c2g's rename table and
+  `main.clj`'s embedding (`:embedded-data` and `generics.edn`), `jrt_sources.clj`'s lists,
+  `natives.clj`, and the spec documents' §16 entries (each kept).
+- The monitor race (`monfix` `f0db06d`): test.generative deadlocked on Go after step 7b (about
+  65 goroutines on jrt's `monMu`, none holding it). `monitorExit` freed a monitor, released its
+  mutex and then called `tryDeflate`; meanwhile another thread could take, exit and deflate it
+  and the object be locked again, so the late `tryDeflate` reset another thread's lock (mutual
+  exclusion lost) and freed the index twice; a header then named a missing monitor,
+  `lookupMonitor` dereferenced nil under `monMu`, and `jrt.Catch` made it a Java
+  NullPointerException a Java `catch` swallowed, leaving `monMu` locked. Fixed: `tryDeflate`
+  deflates only the live monitor; every `monMu` section unlocks by `defer`; a missing monitor
+  is a Go bug panic. Two regression tests (a deterministic replay, a contention test).
+- Class forms broke twice on the combined tree, both fixed by the cf-repl agent: step 6's
+  image recorded a proxy event before `defineProxyClass` succeeded (a proxy the Go build cannot
+  make was replayed at load; `0fb2b35`); the evaluator resolves some hints at run time in the
+  current `*ns*`, so `arbace.classes.interp`'s imported short names failed from `user` (full
+  names now, `0b2b2f4`; the evaluator should resolve such tags at analysis, as the JVM does: an
+  open item); step 7a's header flag for objects made at run time was not set on interpreted
+  classes' objects (`81a6ffc`).
+- Checks on the merged tree (the cf-repl agent's, on `81a6ffc`, which differs from main only
+  in the journal, agenda and B1-PLAN): smoke; the Go oracle 21,180 of 21,188, the 8 recorded
+  mismatches; Clojure's suite on Go 19,628 of 19,632 assertions, 66 namespaces all loading, 4
+  errors (`java.io`'s class loader cases), test.generative 26 of 26, no regressions. Before it,
+  the main session's essential `bin/gate` on `48ba45c` passed (8m39s).
