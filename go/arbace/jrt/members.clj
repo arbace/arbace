@@ -3,7 +3,8 @@
 ;; modifiers as one string, and their functions (invokers, constructors, field accessors) as
 ;; slices that Go initializes statically. The table is decoded into the ClassInfo's Methods,
 ;; Ctors and Fields the first time reflection reads them (EnsureMembers), not at the program's
-;; start: the per-class code that built the tables at initialization was about 3 MB.
+;; start; a member's function is a closure over its class's dispatch function and its index
+;; (one function per class and kind, a switch, instead of one closure per member).
 (in-ns 'go.arbace.jrt)
 
 (go/file "members.go"
@@ -11,18 +12,18 @@
 
 (go/type MemberTable
   "MemberTable is a class's members as c2g writes them. Data holds one line per member, in the
-order of the function slices: \"M mods name desc\" (a method: Invoke), \"C mods desc\" (a
-constructor: New), \"F mods name desc\" (a field: Get, and Set when not final); the
-descriptors name classes by their binary names (\"(ILjava.lang.String;)V\"). A nil function is
-a member that does not exist in Go (its descriptor names a class outside the closed world), or
-any member of a cut class (Cut): it throws UnsupportedOperationException (EVAL-NOTES.md, \"Cut
-classes\").\n"
+numbering of its kind in the dispatch functions: \"M mods name desc\" (a method: Invoke),
+\"C mods desc\" (a constructor: New), \"F mods name desc\" (a field: Get and Set), \"G ...\" (a
+field without Set); the descriptors name classes by their binary names
+(\"(ILjava.lang.String;)V\"). Lower case (m, c, f) is a member without a function: one that
+does not exist in Go (its descriptor names a class outside the closed world), or any member of
+a cut class (Cut): it throws UnsupportedOperationException (EVAL-NOTES.md, \"Cut classes\").\n"
   (struct ^string Data
           ^{:tag bool :doc "a cut class's table (its members throw, named without descriptors)\n"} Cut
-          ^{:tag (slice (func [any (slice any)] [any]))} Invoke
-          ^{:tag (slice (func [(slice any)] [any]))} New
-          ^{:tag (slice (func [any] [any]))} Get
-          ^{:tag (slice (func [any any]))} Set
+          ^{:tag (func [int32 any (slice any)] [any])} Invoke
+          ^{:tag (func [int32 (slice any)] [any])} New
+          ^{:tag (func [int32 any] [any])} Get
+          ^{:tag (func [int32 any any])} Set
           ^{:tag sync/Once} once))
 
 (go/func EnsureMembers
@@ -72,38 +73,50 @@ C.name<descriptor> (C.<init><descriptor>), or for a cut class C.name and C's con
     (Thrown (UnsupportedOperationException_New_String (Str (+ what " is not in the Go build"))))))
 
 (go/func decodeMembers [^{:tag (* ClassInfo)} info ^{:tag (* MemberTable)} t]
-  (let [mi 0 ci 0 fi 0]
+  (let [mi (conv int32 0) ci (conv int32 0) fi (conv int32 0)]
     (range [_ line (strings/Split (.-Data t) "\n")]
       (when (== line "")
         (continue))
       (let [parts (strings/Split line " ")
             (values mods _) (strconv/Atoi (subslice (aget parts 0) 1))]
         (switch (aget line 0)
-          (case [\M]
+          (case [\M \m]
             (let [name (aget parts 1)
                   desc (aget parts 2)
                   (values ps r) (descParams desc)
-                  f (aget (.-Invoke t) mi)]
-              (when (== f nil)
+                  k mi
+                  d (.-Invoke t)
+                  ^{:tag (func [any (slice any)] [any])} f nil]
+              (if (== (aget line 0) \M)
+                (set! f (fn ^any [^any this ^{:tag (slice any)} args] (return (d k this args))))
                 (set! f (fn ^any [^any this ^{:tag (slice any)} args] (panic (absentMember t info name desc)))))
               (set! (.-Methods info) (append (.-Methods info)
                                              (lit MethodInfo :Name name :Params ps :Return r :Modifiers (conv int32 mods) :Invoke f)))
               (inc! mi)))
-          (case [\C]
+          (case [\C \c]
             (let [desc (aget parts 1)
                   (values ps _) (descParams desc)
-                  f (aget (.-New t) ci)]
-              (when (== f nil)
+                  k ci
+                  d (.-New t)
+                  ^{:tag (func [(slice any)] [any])} f nil]
+              (if (== (aget line 0) \C)
+                (set! f (fn ^any [^{:tag (slice any)} args] (return (d k args))))
                 (set! f (fn ^any [^{:tag (slice any)} args] (panic (absentMember t info "<init>" desc)))))
               (set! (.-Ctors info) (append (.-Ctors info) (lit CtorInfo :Params ps :Modifiers (conv int32 mods) :New f)))
               (inc! ci)))
-          (case [\F]
+          (case [\F \G \f]
             (let [name (aget parts 1)
-                  g (aget (.-Get t) fi)]
-              (when (== g nil)
-                (set! g (fn ^any [^any o] (panic (absentMember t info name "")))))
+                  k fi
+                  dg (.-Get t)
+                  ds (.-Set t)
+                  ^{:tag (func [any] [any])} g nil
+                  ^{:tag (func [any any])} st nil]
+              (if (== (aget line 0) \f)
+                (set! g (fn ^any [^any o] (panic (absentMember t info name ""))))
+                (set! g (fn ^any [^any o] (return (dg k o)))))
+              (when (== (aget line 0) \F)
+                (set! st (fn [^any o ^any v] (ds k o v))))
               (set! (.-Fields info) (append (.-Fields info)
                                             (lit FieldInfo :Name name :Type (descClass (aget parts 2))
-                                                 :Modifiers (conv int32 mods)
-                                                 :Get g :Set (aget (.-Set t) fi))))
+                                                 :Modifiers (conv int32 mods) :Get g :Set st)))
               (inc! fi))))))))
