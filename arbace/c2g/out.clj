@@ -808,6 +808,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                            (contains? (:vars (:jrt m/*w*)) (str (m/go-name n) "_class"))))
               (if (= n "java/lang/Object") (m/jrt-sym pkg "Object_class") (m/class-sym pkg n "_class"))))))
 
+(defn- cut-constant
+  "The Go value of field fd of a cut class when it is a constant (static final, of a primitive
+  type or String: its ConstantValue, read by reflection), else nil: cut classes' constants are
+  readable (ASM's Opcodes in the class forms compiler's analysis, doc/go/CLASSFORMS-REPL.md)."
+  [pkg ^java.lang.reflect.Field fd]
+  (let [mods (.getModifiers fd)
+        t (.getType fd)]
+    (when (and (java.lang.reflect.Modifier/isStatic mods) (java.lang.reflect.Modifier/isFinal mods)
+               (or (.isPrimitive t) (= t String)))
+      (when-let [v (try (.get fd nil) (catch Throwable _ nil))]
+        (condp = t
+          Integer/TYPE (list 'conv 'int32 (long v))
+          Long/TYPE (list 'conv 'int64 (long v))
+          Short/TYPE (list 'conv 'int16 (long v))
+          Byte/TYPE (list 'conv 'int8 (long v))
+          Character/TYPE (list 'conv 'uint16 (long (int (char v))))
+          Boolean/TYPE (boolean v)
+          String (list (m/jrt-sym pkg "Str") v)
+          nil)))))
+
 (defn cut-table-forms
   "The member tables of the cut classes of pkg (C2G-SPEC §4.1, D6; doc/go/EVAL-NOTES.md): their
   public members as the JVM reports them, whose types the Go build can name, each throwing
@@ -841,7 +861,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     :when t]
                                 (list 'lit (m/jrt-sym pkg "FieldInfo") :Name (.getName fd) :Type t :Modifiers (.getModifiers fd)
                                       :Get (list 'fn (with-meta [(with-meta 'o {:tag 'any})] {:tag 'any})
-                                                 (stub (str (.getName c) "." (.getName fd))))))
+                                                 (if-let [k (cut-constant pkg fd)]
+                                                   k
+                                                   (stub (str (.getName c) "." (.getName fd)))))))
                            ks (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))
                                     :let [ps (map texpr (.getParameterTypes k))]
                                     :when (every? some? ps)]
