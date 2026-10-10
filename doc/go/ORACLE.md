@@ -50,7 +50,11 @@ vectors of class forms of the class forms compiler's tests, each defined by `def
 `java_util` (java.util's plain Java added for the Go build: primitive and parallel sorts,
 natural-order and serializable comparators, `SortedSet` views, `TreeMap`'s sorted copies,
 `BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, the random streams;
-JAVA-BASE.md, "java.util completed").
+JAVA-BASE.md, "java.util completed"), and `concurrency` (java.util.concurrent from Clojure: the
+concurrent collections and queues, the synchronizers, `CompletableFuture`, the executors and
+scheduled executors, the atomic arrays, adders and accumulators, `StampedLock`, `LockSupport`,
+`ThreadLocalRandom`; threads meet through joins, latches and timed waits; JRT-NOTES.md,
+"Concurrency").
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),

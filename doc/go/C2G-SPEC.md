@@ -1556,6 +1556,9 @@ writes the converted value instead (`4294967288`). The prototype of §15 met thi
 - Exhaustive switches carry the converter's explicit `MatchException` default (classes/SPEC.md
   §5.8).
 
+An enum `switch` whose enum class is outside the closed world switches on an operation-level
+stub (`C2g_Missing[int32]`), its arms kept for Go's flow analysis (proposed amendment JC2).
+
 ### 7.9 Exceptions
 
 #### 7.9.1 Throwing
@@ -1898,7 +1901,10 @@ this only matters for racy publication, which the race detector also finds.
     the status 1; then it waits for the non-daemon threads (`jrt.WaitNonDaemon()`), runs the
     shutdown hooks as the JVM's `DestroyJavaVM` does (amendment FS5, accepted 2026-10-10:
     before, only `System.exit` ran them, so `deleteOnExit` did not delete at a normal end) and
-    returns the status (`System.exit` ends the process before).
+    returns the status (`System.exit` ends the process before). It also keeps a ticker pending
+    for the program's life, so that Go's run time never ends a program whose threads all wait
+    forever with "all goroutines are asleep - deadlock!": it waits, as the JVM does (proposed
+    amendment JC9, JRT-NOTES.md, "Concurrency").
   - `jrt.Go(name, f func()) *jrt.Thread` starts a Go function as a daemon jrt thread;
     `jrt.RunnableOf(f func())` is a `Runnable` of a Go function; `Thread_defaultHandler` holds
     the default uncaught exception handler.
@@ -1921,7 +1927,13 @@ this only matters for racy publication, which the race detector also finds.
   accepted 2026-10-09: the full public API with Java's messages, fairness not kept, as for
   `ReentrantLock`; `AbstractQueuedSynchronizer` translated was measured and not taken: it needs
   `Unsafe` additions and has a two-word race on `Node.waiter`, §8.3); `ConcurrentHashMap` and the blocking
-  queues are translated over `Unsafe`'s compare-and-set (§9.2).
+  queues are translated over `Unsafe`'s compare-and-set (§9.2). *Proposed amendments JC5, JC6
+  (JRT-NOTES.md, "Concurrency"):* the executors (`ThreadPoolExecutor`,
+  `ScheduledThreadPoolExecutor`, `FutureTask`, `Executors`, `ExecutorService` over a stand-in) are
+  translated from jdk26u and jrt's hand-written pools go; `AbstractQueuedSynchronizer` is
+  translated for their workers, `Node.waiter` and the exclusive owner volatile by variants, while
+  jrt's `ReentrantLock`, `ReentrantReadWriteLock`, `Semaphore` and `CountDownLatch` stay
+  hand-written; the rest of `java.util.concurrent` is translated over §8.5's `VarHandle`s.
 - **The fork-join pool** (amendment S5, accepted 2026-10-09; it reverses the cut of
   `ForkJoinPool` under D6, JAVA-SURFACE.md "What the cut leaves out") is jrt's hand-written
   `ForkJoinTask` (non-leaf, §5.3) and `ForkJoinPool` (`forkjoin.clj`), with the JDK's semantics
@@ -1940,6 +1952,76 @@ this only matters for racy publication, which the race detector also finds.
   and its type word, and a `runtime.AddCleanup` on the referent enqueues it on its
   `ReferenceQueue`. A `SoftReference` holds its referent strongly and is cleared only by
   `clear()` (V12).
+
+### 8.5 VarHandles
+
+(Proposed amendment JC1, for the user's review; [JRT-NOTES.md](JRT-NOTES.md),
+"Concurrency".) `java.lang.invoke` is not in the Go build (§12), but JDK 26's concurrent classes
+do their atomic work through `VarHandle`s, and always in one shape: a class makes its handles
+once, in its static initializer, into `static final` fields, and uses them only through those
+fields, as receivers of the handles' access modes:
+
+```java
+private static final VarHandle NEXT;      // in a static initializer:
+NEXT = MethodHandles.lookup().findVarHandle(Node.class, "next", Node.class);
+private static final VarHandle AA = MethodHandles.arrayElementVarHandle(Object[].class);
+...
+NEXT.compareAndSet(p, null, newNode)      // javac: invokevirtual VarHandle.compareAndSet
+                                          //   (LNode;LNode;LNode;)Z, a polymorphic signature
+```
+
+c2g compiles them statically (`arbace.c2g.vh`):
+
+- **The constant handles.** c2g reads every class's static initializer (field initializers
+  included) for stores into `static final VarHandle` fields of the class whose value is
+  `findVarHandle(C.class, "f", T.class)` on any lookup, `MhUtil.findVarHandle(lookup, "f",
+  T.class)` (the class of the code that made the lookup, the initializer's class) or
+  `MhUtil.findVarHandle(lookup, C.class, "f", T.class)`, or
+  `MethodHandles.arrayElementVarHandle(T[].class)`. The class arguments may be class literals,
+  `Integer.TYPE` and its kin, or final locals bound to them; the field `f` must be an instance
+  field of `C` or a superclass whose type is `T`, as `findVarHandle` requires. Each such field
+  is a **constant handle**: on a field `C.f`, or on the elements of arrays of type `T[]`.
+- **The initializers.** The stores of constant handles are dropped with their values (§4.1's
+  rule for a static initializer's store into a field of a type outside the world), so the
+  lookups never run; `MethodHandles.lookup()` itself, bound to a local before them, is a `nil`
+  of no use.
+- **The access modes.** A call of an access mode on a constant handle (`get`, `set`,
+  `compareAndSet`, `compareAndExchange`, `getAndSet`, `getAndAdd`, `getAndBitwiseOr`/`And`/`Xor`
+  and their `Volatile`, `Acquire`, `Release`, `Opaque`, `Plain` and weak variants) is the
+  atomic operation on the field of the receiver (the call's first argument) or on the array
+  element (the first two). The arguments are converted to the field's (the component's) type
+  as the handle converts them (a checked cast when their static type is not assignable), and
+  the result to the call's descriptor type (the JVM's `checkcast` after a polymorphic call).
+  `VarHandle`'s static fences are `jrt.VhFence()`, an atomic operation.
+- **Fields a handle names are volatile in Go.** Their Go type is the volatile representation
+  of §8.2 (`atomic.Int32`, `atomic.Pointer[T]`, `jrt.Volatile[T]` ...) whether or not Java
+  declares them `volatile`, and every access to them, plain or by the handle, is atomic:
+  `ConcurrentSkipListMap`'s `Node.next` and `val` are plain fields the JDK reads plainly and
+  writes by its handles; a two-word interface value read while a handle writes it would tear
+  (§8.3). Plain accesses become sequentially consistent ones: stronger than Java, correct.
+- **The operations**, per volatile representation: `get` is `Load` (narrowing the `int32`
+  of a `byte`, `short` or `char`, a float's bits back), `set` is `Store`, `compareAndSet` is
+  `CompareAndSwap` (a float's or double's bits compared, as the JVM's handles compare them;
+  `Volatile`'s `CompareAndSet`, by identity), `getAndSet` is `Swap`, `getAndBitwiseOr` and
+  `And` of an `int` or `long` are the atomic types' `Or` and `And` (Go 1.23); the others are
+  jrt's functions: `VhCmpXchg{Int32,Int64,Uint32,Uint64,Bool,Ptr,Vol}`,
+  `VhGetAndAdd{Int32,Int64,Float32,Float64}`, `VhGetAndXor{Int32,Int64}`,
+  `VhGetAnd{Or,And,Xor}Bool`. Array handles call `Vh{Int,Long,Ref}Array{Get,Set,Cas,CmpXchg,Swap}`
+  and, for `int[]` and `long[]`, `...GetAndAdd`, `GetAndOr`, `GetAndAnd`, `GetAndXor`: int
+  and long elements by `sync/atomic` on the slice element, reference elements (`any` slots)
+  under the striped locks of `Unsafe`'s reference slots (§9.2), with Java's
+  `NullPointerException`, `ArrayIndexOutOfBoundsException` and `ArrayStoreException`.
+- **Memory order.** Go's atomics are sequentially consistent, so every access mode is the
+  volatile one; a weak compare-and-set never fails spuriously. Java allows both.
+- **Not compiled.** A handle that is not a constant handle (passed around, made outside a
+  static initializer, `findStaticVarHandle`, `byteArrayViewVarHandle`), an access mode on
+  element types other than `int`, `long` and references, and `getAndAdd` on `boolean` or
+  `byte`/`short`/`char` fields are operation-level stubs (§4.1) that name this section.
+- **Reachability** (§4.1) follows the access modes into the field's class and the
+  arguments' classes, not into `java.lang.invoke`.
+- As with `Unsafe` (§9.2), plain reads of an array's reference elements that race with a
+  handle's writes of them are two-word races; the JDK's classes access such arrays only through
+  their handles (`AtomicReferenceArray`, `Exchanger`'s arena).
 
 ## 9. The boundary to jrt
 

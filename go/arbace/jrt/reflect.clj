@@ -1057,7 +1057,11 @@ registry's class (the loader is not consulted), initialized when asked.\n"
                       :Super Object_class :Go "arbace/jrt.ThrowableTracer")))]
   [Utils_class
    (Define (addr (lit ClassInfo :Name "jdk.internal.foreign.Utils" :Kind KindClass :Modifiers (bit-or AccPublic AccFinal)
-                      :Super Object_class :Go "arbace/jrt.Utils")))])
+                      :Super Object_class :Go "arbace/jrt.Utils")))]
+  ;; LockSupport (JRT-NOTES.md, "Concurrency"): before, the REPL knew it as a name only
+  [LockSupport_class
+   (Define (addr (lit ClassInfo :Name "java.util.concurrent.locks.LockSupport" :Kind KindClass
+                      :Modifiers (bit-or AccPublic AccFinal) :Super Object_class :Go "arbace/jrt.LockSupport")))])
 
 ;; Math's and StrictMath's constants (static final fields, §6.1)
 (go/const

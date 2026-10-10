@@ -13,7 +13,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "forkjoin.go"
-  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"]])
+  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"] [time "time"]])
 
 (go/type ForkJoinTask_I "ForkJoinTask_I is java.util.concurrent.ForkJoinTask's class interface.\n"
   (interface Object_I Future Serializable
@@ -33,7 +33,10 @@
     (CompleteExceptionally_Throwable__V [^Throwable_I ex])
     (TryUnfork__Z ^bool [])
     (QuietlyComplete__V [])
-    (TrySetThrown_Throwable__Z ^bool [^Throwable_I ex])))
+    (TrySetThrown_Throwable__Z ^bool [^Throwable_I ex])
+    (GetForkJoinTaskTag__S ^int16 [])
+    (SetForkJoinTaskTag_S__S ^int16 [^int16 v])
+    (CompareAndSetForkJoinTaskTag_S_S__Z ^bool [^int16 e ^int16 v])))
 
 (go/type ForkJoinTask
   "ForkJoinTask is java.util.concurrent.ForkJoinTask's struct: the task's state (fjNew, then
@@ -44,7 +47,8 @@ and the channel its waiters receive from (made by the first waiter, closed when 
           ^Throwable_I exc
           ^bool cancelled
           ^{:tag sync/Mutex} mu
-          ^{:tag (chan (struct))} doneCh))
+          ^{:tag (chan (struct))} doneCh
+          ^{:tag atomic/Int32 :doc "the task's tag (getForkJoinTaskTag; CompletableFuture's claims)\n"} tag))
 
 (go/const
   [^{:tag int32 :val 0} fjNew iota]
@@ -60,6 +64,23 @@ and the channel its waiters receive from (made by the first waiter, closed when 
 (go/method Ctor "Ctor is ForkJoinTask().\n" [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this])
 (go/method Self_ForkJoinTask ^{:tag (* ForkJoinTask)} [^{:tag (* ForkJoinTask)} t] t)
 (go/method Is_Future [^{:tag (* ForkJoinTask)} t])
+(go/method GetForkJoinTaskTag__S "GetForkJoinTaskTag__S is the final getForkJoinTaskTag.\n"
+  ^int16 [^{:tag (* ForkJoinTask)} t]
+  (conv int16 (.Load (.-tag t))))
+(go/method SetForkJoinTaskTag_S__S "SetForkJoinTaskTag_S__S is setForkJoinTaskTag: the previous tag.\n"
+  ^int16 [^{:tag (* ForkJoinTask)} t ^int16 v]
+  (conv int16 (.Swap (.-tag t) (conv int32 v))))
+(go/method CompareAndSetForkJoinTaskTag_S_S__Z
+  "CompareAndSetForkJoinTaskTag_S_S__Z is compareAndSetForkJoinTaskTag (CompletableFuture's
+claim of a completion).\n"
+  ^bool [^{:tag (* ForkJoinTask)} t ^int16 e ^int16 v]
+  (.CompareAndSwap (.-tag t) (conv int32 e) (conv int32 v)))
+(go/method Impl_ResultNow__O "Impl_ResultNow__O is resultNow: Future's default (JDK 19).\n"
+  ^any [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this] (Future_ResultNow__O this))
+(go/method Impl_ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
+  (Future_ExceptionNow__Throwable this))
+(go/method Impl_State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
+  (Future_State__Future_State this))
 (go/method Is_Serializable [^{:tag (* ForkJoinTask)} t])
 
 (go/method tryRun
@@ -324,6 +345,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedCallable)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedCallable)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t] ForkJoinTask_AdaptedCallable_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t]
@@ -346,6 +370,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedRunnable)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedRunnable)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] ForkJoinTask_AdaptedRunnable_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t]
@@ -368,6 +395,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] ForkJoinTask_AdaptedRunnableAction_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t]
@@ -380,17 +410,59 @@ checked exception wrapped in a RuntimeException.\n"
 (go/type ForkJoinPool
   "ForkJoinPool is java.util.concurrent.ForkJoinPool: its parallelism, the slots of the
 workers forked tasks may start (parallelism - 1: the thread that forks works too), its
-workers' name prefix and count, whether it was shut down.\n"
+workers' name prefix and count, whether it was shut down, its running workers (for
+termination: done is closed when the pool is shut down with none running).\n"
   (struct Object
           ^int32 parallelism
           ^{:tag (chan (struct))} slots
           ^string prefix
           ^{:tag atomic/Int64} workers
-          ^{:tag atomic/Bool} shutdown))
+          ^{:tag atomic/Bool} shutdown
+          ^{:tag sync/Mutex} mu
+          ^int64 running
+          ^{:tag (chan (struct))} done
+          ^bool terminated))
 
 (go/var ForkJoinPool_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.ForkJoinPool" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.ForkJoinPool"))))
+                     :Modifiers AccPublic :Super Object_class
+                     :Interfaces (lit (slice (* Class)) ExecutorService_class)
+                     :Go "arbace/jrt.ForkJoinPool"))))
+
+;; ---------------------------------------------------------------------------------------
+;; ForkJoinPool.ManagedBlocker and managedBlock (JC7)
+
+(go/type ForkJoinPool_ManagedBlocker
+  "ForkJoinPool_ManagedBlocker is java.util.concurrent.ForkJoinPool$ManagedBlocker.\n"
+  (interface Object_I
+    (Is_ForkJoinPool_ManagedBlocker [])
+    (Block__Z ^bool [])
+    (IsReleasable__Z ^bool [])))
+
+(go/var ForkJoinPool_ManagedBlocker_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ForkJoinPool$ManagedBlocker" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccStatic AccInterface AccAbstract)
+                     :Declaring ForkJoinPool_class :Simple "ManagedBlocker"
+                     :Go "arbace/jrt.ForkJoinPool_ManagedBlocker"))))
+
+(go/func ForkJoinPool_ManagedBlocker_InstanceOf ^bool [^any x]
+  (let [(values _ ok) (assert ForkJoinPool_ManagedBlocker x)] (dynNominal x ForkJoinPool_ManagedBlocker_class ok)))
+
+(go/func ForkJoinPool_ManagedBlocker_Cast ^ForkJoinPool_ManagedBlocker [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert ForkJoinPool_ManagedBlocker x)]
+    (when (not (dynNominal x ForkJoinPool_ManagedBlocker_class ok)) (panic (ClassCast x ForkJoinPool_ManagedBlocker_class)))
+    v))
+
+(go/func ForkJoinPool_ManagedBlock_ForkJoinPool_ManagedBlocker__V
+  "ForkJoinPool_ManagedBlock_ForkJoinPool_ManagedBlocker__V is ForkJoinPool.managedBlock: the
+blocker's block until it is releasable, as the JDK does in a thread that is not a pool's
+worker. jrt's workers need no compensation: a forked task finds no free worker and runs in the
+forking thread, a task given from outside always gets a worker of its own (C2G-SPEC §8.4).\n"
+  [^ForkJoinPool_ManagedBlocker b]
+  (when (== b nil)
+    (panic (NPE)))
+  (while (and (not (.IsReleasable__Z b)) (not (.Block__Z b)))))
 
 (go/var ^{:tag atomic/Int64 :doc "poolIds numbers the pools (ForkJoinPool-N-worker-M).\n"} poolIds)
 
@@ -420,6 +492,14 @@ workers' name prefix and count, whether it was shut down.\n"
                                                           "ForkJoinPool.commonPool-worker-"))))
   commonPool)
 
+(go/func ForkJoinPool_AsyncCommonPool__ForkJoinPool
+  "ForkJoinPool_AsyncCommonPool__ForkJoinPool is the package-private asyncCommonPool
+(CompletableFuture's default executor): the common pool, whose parallelism is at least 1 and
+whose tasks given from outside each get a worker (§8.4), so asynchronous tasks never run in
+the caller.\n"
+  ^{:tag (* ForkJoinPool)} []
+  (ForkJoinPool_CommonPool__ForkJoinPool))
+
 (go/func ForkJoinPool_GetCommonPoolParallelism__I
   "ForkJoinPool_GetCommonPoolParallelism__I is getCommonPoolParallelism: the processors less
 one, at least 1, as the JVM's common pool has it.\n"
@@ -436,9 +516,13 @@ one, at least 1, as the JVM's common pool has it.\n"
 (go/method startWorker
   "startWorker runs the task in a new worker thread of the pool (a daemon), then calls done.\n"
   [^{:tag (* ForkJoinPool)} p ^ForkJoinTask_I task ^{:tag (func [])} done]
+  (.Lock (.-mu p))
+  (inc! (.-running p))
+  (.Unlock (.-mu p))
   (let [name (Str (+ (.-prefix p) (strconv/FormatInt (.Add (.-workers p) 1) 10)))
         t (Thread_New_Runnable_String
             (RunnableOf (fn []
+                          (defer (.workerDone p))
                           (defer (done))
                           (.runForked (.Self_ForkJoinTask task) task)))
             name)]
@@ -494,14 +578,126 @@ worker of the pool, the caller waiting for its result.\n"
 (go/method Shutdown__V "Shutdown__V is shutdown: no new tasks (the common pool is never shut down).\n"
   [^{:tag (* ForkJoinPool)} p]
   (when (!= p commonPool)
-    (.Store (.-shutdown p) true)))
+    (.Store (.-shutdown p) true)
+    (.Lock (.-mu p))
+    (.checkTerminated p)
+    (.Unlock (.-mu p))))
 (go/method IsShutdown__Z ^bool [^{:tag (* ForkJoinPool)} p] (.Load (.-shutdown p)))
+
+;; ---- termination and the ExecutorService API (JC7)
+
+(go/method workerDone "workerDone is a worker's end: the pool may terminate.\n" [^{:tag (* ForkJoinPool)} p]
+  (.Lock (.-mu p))
+  (dec! (.-running p))
+  (.checkTerminated p)
+  (.Unlock (.-mu p)))
+
+(go/method checkTerminated
+  "checkTerminated ends the pool when it is shut down with no worker running (mu held).\n"
+  [^{:tag (* ForkJoinPool)} p]
+  (when (and (.Load (.-shutdown p)) (== (.-running p) 0) (not (.-terminated p)))
+    (set! (.-terminated p) true)
+    (when (!= (.-done p) nil)
+      (close (.-done p)))))
+
+(go/method IsTerminated__Z "IsTerminated__Z is isTerminated: shut down, no worker running.\n"
+  ^bool [^{:tag (* ForkJoinPool)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (.-terminated p))
+
+(go/method IsQuiescent__Z "IsQuiescent__Z is isQuiescent: no worker running.\n"
+  ^bool [^{:tag (* ForkJoinPool)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (== (.-running p) 0))
+
+(go/method AwaitTermination_J_TimeUnit__Z
+  "AwaitTermination_J_TimeUnit__Z is awaitTermination: true once the pool terminates, false
+when the time passes first; the common pool, never shut down, waits for quiescence as the
+JDK's does (awaitQuiescence) and answers false.\n"
+  ^bool [^{:tag (* ForkJoinPool)} p ^int64 timeout ^{:tag (* TimeUnit)} unit]
+  (let [nanos (.ToNanos_J__J (NN unit) timeout)
+        deadline (time/Now)]
+    (set! deadline (.Add deadline (conv time/Duration nanos)))
+    (when (== p commonPool)
+      (while (not (.IsQuiescent__Z p))
+        (when (.After (time/Now) deadline)
+          (return false))
+        (Thread_Sleep_J__V 1))
+      (return false))
+    (.Lock (.-mu p))
+    (when (.-terminated p)
+      (.Unlock (.-mu p))
+      (return true))
+    (when (== (.-done p) nil)
+      (set! (.-done p) (make (chan (struct)))))
+    (let [done (.-done p)]
+      (.Unlock (.-mu p))
+      (when (<= nanos 0)
+        (return false))
+      (let [tm (time/NewTimer (conv time/Duration nanos))
+            me (CurrentThread)]
+        (defer (.Stop tm))
+        (select
+          (case (<! done) (return true))
+          (case (<! (.-intr me)) (panic (InterruptedException_New)))
+          (case (<! (.-C tm)) (return false)))))))
+
+(go/method Close__V "Close__V is close(): shutdown, then waiting for termination (not the common pool).\n"
+  [^{:tag (* ForkJoinPool)} p]
+  (when (== p commonPool)
+    (return))
+  (.Shutdown__V p)
+  (while (not (.AwaitTermination_J_TimeUnit__Z p 1 TimeUnit_DAYS))))
+
+(go/method Execute_Runnable__V
+  "Execute_Runnable__V is execute(Runnable): a ForkJoinTask as itself, another Runnable adapted
+(its exception goes to the worker's uncaught-exception handler, as the JDK's
+RunnableExecuteAction does).\n"
+  [^{:tag (* ForkJoinPool)} p ^Runnable r]
+  (when (== r nil)
+    (panic (NPE)))
+  (let [(values t ok) (assert ForkJoinTask_I r)]
+    (when ok
+      (.Execute_ForkJoinTask__V p t)
+      (return)))
+  (.Execute_ForkJoinTask__V p (ForkJoinTask_Adapt_Runnable__ForkJoinTask
+                                (RunnableOf (fn [] (let [exc (runCatching (fn [] (.Run__V r)))]
+                                                     (when (!= exc nil)
+                                                       (let [me (CurrentThread)]
+                                                         (.dispatchUncaught me exc)))))))))
+
+(go/method Submit_Callable__Future "Submit_Callable__Future is submit(Callable): the adapted task.\n"
+  ^Future [^{:tag (* ForkJoinPool)} p ^Callable c]
+  (when (== c nil) (panic (NPE)))
+  (let [t (ForkJoinTask_Adapt_Callable__ForkJoinTask c)]
+    (.Execute_ForkJoinTask__V p t)
+    t))
+(go/method Submit_Runnable__Future ^Future [^{:tag (* ForkJoinPool)} p ^Runnable r]
+  (when (== r nil) (panic (NPE)))
+  (let [(values ft ok) (assert ForkJoinTask_I r)]
+    (when ok
+      (.Execute_ForkJoinTask__V p ft)
+      (return ft)))
+  (let [t (ForkJoinTask_Adapt_Runnable__ForkJoinTask r)]
+    (.Execute_ForkJoinTask__V p t)
+    t))
+(go/method Submit_Runnable_O__Future ^Future [^{:tag (* ForkJoinPool)} p ^Runnable r ^any result]
+  (when (== r nil) (panic (NPE)))
+  (let [t (ForkJoinTask_Adapt_Runnable_O__ForkJoinTask r result)]
+    (.Execute_ForkJoinTask__V p t)
+    t))
+(go/method Is_Executor [^{:tag (* ForkJoinPool)} p])
+(go/method Is_ExecutorService [^{:tag (* ForkJoinPool)} p])
+(go/method Is_AutoCloseable "Is_AutoCloseable: ExecutorService is an AutoCloseable (JDK 19).\n" [^{:tag (* ForkJoinPool)} p])
 
 (go/func ForkJoinPool_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ForkJoinPool) x)] ok))
 
 (go/func init []
   (set! (.-IsInstance (.Info ForkJoinTask_class)) ForkJoinTask_InstanceOf)
-  (set! (.-IsInstance (.Info ForkJoinPool_class)) ForkJoinPool_InstanceOf))
+  (set! (.-IsInstance (.Info ForkJoinPool_class)) ForkJoinPool_InstanceOf)
+  (set! (.-IsInstance (.Info ForkJoinPool_ManagedBlocker_class)) ForkJoinPool_ManagedBlocker_InstanceOf))
 
 (go/method Ref ^any [^{:tag (* ForkJoinPool)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinPool)} t] ForkJoinPool_class)

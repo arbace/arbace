@@ -37,6 +37,7 @@
             [arbace.c2g.reach :as r]
             [arbace.c2g.access :as acc]
             [arbace.c2g.code :as c]
+            [arbace.c2g.vh :as vh]
             [arbace.c2g.decls :as d]
             [arbace.c2g.out :as out]
             [arbace.c2g.dyn :as dyn]
@@ -309,6 +310,8 @@
         ci-order? (jrt-java? "jdk/internal/jrt/CaseInsensitiveComparator")
         ;; String's regex methods over the translated java.util.regex (out/support-forms)
         regex? (jrt-java? "java/util/regex/Pattern")
+        ;; ForkJoinPool's ExecutorService methods over translated types (out/fjp-support-forms)
+        fjp-support? (and (jrt-java? out/fjp-support-class) (jrt-java? "java/util/concurrent/ExecutorService"))
         scan (cond-> scan
                formatter? (update :funcs into ["String_Format_String_O1__String" "String_Format_Locale_String_O1__String"])
                formatter? (update-in [:methods "String"] (fnil conj #{}) "Formatted_O1__String")
@@ -324,11 +327,17 @@
                streams? (update :vars into ["System_in" "System_out" "System_err"])
                streams? (update :funcs into ["System_SetIn_InputStream__V" "System_SetOut_PrintStream__V" "System_SetErr_PrintStream__V"])
                ci-order? (update :vars conj "String_CASE_INSENSITIVE_ORDER")
-               regex? (update-in [:methods "String"] (fnil into #{}) (map first out/string-regex-methods)))
+               regex? (update-in [:methods "String"] (fnil into #{}) (map first out/string-regex-methods))
+               fjp-support? (update-in [:methods "ForkJoinPool"] (fnil into #{})
+                                       (map (fn [[n d]] (nm/method-base n d)) out/fjp-support-methods)))
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
-                 :erased (:erased world)}
+                 :erased (:erased world)
+                 ;; the constant VarHandles of the world and the fields they name (§8.5)
+                 :vh (vh/handles @(:order a/*unit*))}
+            _ (println (str "c2g: " (count (:handles (:vh wst))) " constant VarHandles, on "
+                            (count (:fields (:vh wst))) " fields"))
             t1 (now)
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))
                                                          ;; --program: the REPL's world, every public
@@ -354,6 +363,8 @@
                                   ["java/util/regex/Matcher" "replaceFirst" "(Ljava/lang/String;)Ljava/lang/String;"]])
                                (when ci-order?
                                  [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
+                               (when fjp-support?
+                                 (map out/fjp-support-key out/fjp-support-methods))
                                ;; c2g's support for the REPL's reflection (out/support-forms)
                                (when (contains? @(:compile-set world) "java/util/Optional")
                                  [["java/util/Optional" "of" "(Ljava/lang/Object;)Ljava/util/Optional;"]])

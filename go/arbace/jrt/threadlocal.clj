@@ -1,9 +1,8 @@
-;; jrt: ThreadLocal, InheritableThreadLocal and ThreadLocalRandom's probes over the current
+;; jrt: ThreadLocal and InheritableThreadLocal over the current
 ;; Thread (C2G-SPEC §8.4; doc/go/JRT-NOTES.md, phase 2a).
 (in-ns 'go.arbace.jrt)
 
-(go/file "threadlocal.go"
-  :imports [[atomic "sync/atomic"]])
+(go/file "threadlocal.go")
 
 ;; ---------------------------------------------------------------------------------------
 ;; ThreadLocal (non-leaf: Var's dynamic bindings subclass it for initialValue, withInitial's
@@ -160,46 +159,12 @@ InheritableThreadLocal has child values).\n"
     (and ok (.-inheritable (.Self_ThreadLocal v)))))
 
 ;; ---------------------------------------------------------------------------------------
-;; ThreadLocalRandom's probes (ConcurrentHashMap's counter cells): per thread, in the Thread
-;; (ThreadLocalRandom.current() waits for the translated Random, its superclass)
-
-(go/var ^{:tag atomic/Int32} probeGenerator)
-(go/var ^{:tag atomic/Int64} seeder)
-
-(go/func ThreadLocalRandom_LocalInit__V
-  "ThreadLocalRandom_LocalInit__V is ThreadLocalRandom.localInit: the current thread's probe
-(never 0) and seed, as Java's.\n"
-  []
-  (let [p (.Add probeGenerator -1640531527)]
-    (when (== p 0)
-      (set! p 1))
-    (let [s (mix64 (.Add seeder -4942790177534073029))
-          t (CurrentThread)]
-      (set! (.-seed t) s)
-      (set! (.-probe t) p))))
-
-(go/func ThreadLocalRandom_GetProbe__I
-  "ThreadLocalRandom_GetProbe__I is ThreadLocalRandom.getProbe: 0 until localInit.\n"
-  ^int32 []
-  (.-probe (CurrentThread)))
-
-(go/func ThreadLocalRandom_AdvanceProbe_I__I
-  "ThreadLocalRandom_AdvanceProbe_I__I is ThreadLocalRandom.advanceProbe: a xorshift step.\n"
-  ^int32 [^int32 probe]
-  (set! probe bit-xor (<< probe 13))
-  (set! probe bit-xor (conv int32 (>> (conv uint32 probe) 17)))
-  (set! probe bit-xor (<< probe 5))
-  (set! (.-probe (CurrentThread)) probe)
-  probe)
-
-(go/func mix64 ^int64 [^int64 z]
-  (let [u (conv uint64 z)]
-    (set! u (* (bit-xor u (>> u 33)) 0xff51afd7ed558ccd))
-    (set! u (* (bit-xor u (>> u 33)) 0xc4ceb9fe1a85ec53))
-    (conv int64 (bit-xor u (>> u 33)))))
+;; ThreadLocalRandom is translated (doc/go/JRT-NOTES.md, "Concurrency", JC4): its seed, probe
+;; and secondary seed live in the Thread's fields F_threadLocalRandomSeed,
+;; F_threadLocalRandomProbe and F_threadLocalRandomSecondarySeed, which it reaches through
+;; Unsafe as on the JVM (Thread's Go type is registered for objectFieldOffset, thread.clj).
 
 (go/func init []
-  (.Store seeder 0x5DEECE66D)
   (set! (.-IsInstance (.Info ThreadLocal_class)) ThreadLocal_InstanceOf)
   (set! (.-IsInstance (.Info ThreadLocal_SuppliedThreadLocal_class))
         (fn ^bool [^any x] (let [(values _ ok) (assert (* ThreadLocal_SuppliedThreadLocal) x)] ok)))

@@ -144,7 +144,9 @@
    ;; phase 2a: threads, concurrency, Unsafe, the VM's services
    ["java.lang.Thread" ["java.lang.Runnable"] true]
    ["java.lang.Thread$UncaughtExceptionHandler" [] false]
-   ["java.lang.Thread$Builder$OfVirtual" [] false]
+   ["java.lang.Thread$State" [] false]
+   ["java.lang.Thread$Builder" [] false]
+   ["java.lang.Thread$Builder$OfVirtual" ["java.lang.Thread$Builder"] false]
    ["java.lang.ThreadLocal" [] true]
    ["java.lang.InheritableThreadLocal" [] false]
    ["java.lang.Runtime" [] false]
@@ -166,17 +168,17 @@
    ["java.util.concurrent.locks.LockSupport" [] false]
    ["java.util.concurrent.ThreadFactory" [] false]
    ["java.util.concurrent.Executor" [] false]
-   ["java.util.concurrent.ExecutorService" ["java.util.concurrent.Executor"] false]
-   ["java.util.concurrent.Executors" [] false]
+   ;; ExecutorService (a stand-in), Executors, FutureTask and ThreadLocalRandom are translated
+   ;; (JRT-NOTES.md, "Concurrency")
    ["java.util.concurrent.Future" [] false]
-   ["java.util.concurrent.FutureTask" ["java.lang.Runnable" "java.util.concurrent.Future"] false]
-   ;; step 5 phase 2B: the fork-join pool (reducers' fold)
+   ["java.util.concurrent.Future$State" [] false]
+   ;; step 5 phase 2B: the fork-join pool (reducers' fold), an ExecutorService since JC7
    ["java.util.concurrent.ForkJoinTask" ["java.util.concurrent.Future" "java.io.Serializable"] true]
-   ["java.util.concurrent.ForkJoinPool" [] false]
+   ["java.util.concurrent.ForkJoinPool" ["java.util.concurrent.ExecutorService"] false]
+   ["java.util.concurrent.ForkJoinPool$ManagedBlocker" [] false]
    ["java.util.concurrent.CountDownLatch" [] false]
    ;; Clojure's pprint tests (a future blocked in acquire)
-   ["java.util.concurrent.Semaphore" ["java.io.Serializable"] false]
-   ["java.util.concurrent.ThreadLocalRandom" [] false]])
+   ["java.util.concurrent.Semaphore" ["java.io.Serializable"] false]])
 
 (def promotable
   {"java.lang.Enum" #{"name()Ljava/lang/String;" "ordinal()I" "hashCode()I" "equals(Ljava/lang/Object;)Z"}

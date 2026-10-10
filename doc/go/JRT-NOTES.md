@@ -2688,3 +2688,212 @@ transcribed in part: `sun/util/locale/provider/LocaleProviderAdapter.java`,
 `src/java.base/share/classes/java/time/format/ZoneName.java.template`;
 `src/java.base/share/legal/cldr.md`. The JDK build's outputs compared against:
 `build/linux-x86_64-server-release/support/gensrc/java.base/` and `jdk/lib/tzdb.dat`.
+
+# Concurrency: the rest of java.util.concurrent
+
+The user's decision of 2026-10-10 (branch `go-juc`): the rest of `java.util.concurrent` in the Go
+build, as far as is sound, with c2g compiling `VarHandle`s; and the end of a program whose
+agents were never shut down. Before, the Go build had 29 of the package's 81 API classes
+(JAVA-BASE.md): `ConcurrentHashMap`, the array and linked blocking queues, `CyclicBarrier`,
+`CountedCompleter` translated, and jrt's hand-written executors, `FutureTask`, `ForkJoinPool`,
+latches, semaphores, locks and four atomics.
+
+## What was done
+
+**c2g compiles `VarHandle`s statically** (C2G-SPEC §8.5, amendment JC1; `arbace/c2g/vh.clj`).
+JDK 26's concurrent classes make their handles once, in static initializers, into `static final`
+fields (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`,
+`MhUtil.findVarHandle`, `MethodHandles.arrayElementVarHandle(T[].class)`), and only call access
+modes on those fields. c2g reads the initializers into a table of constant handles (37 in the
+world first, on 33 fields), drops their stores and lookups (`java.lang.invoke` stays outside the
+world), and translates each access-mode call on a constant handle into the atomic operation on
+the field or array element; the fields a handle names get the volatile representation (§8.2)
+whether Java declares them volatile or not, so plain accesses to them are atomic too
+(`ConcurrentSkipListMap`'s `Node.next` and `val` are plain fields written by handles). The
+operations c2g cannot write as the atomic types' own methods are jrt's (`varhandle.clj`:
+`VhCmpXchg*`, `VhGetAndAdd*`, `VhGetAndXor*`, the boolean bitwise modes, and the `int[]`,
+`long[]` and reference array elements, the last under `Unsafe`'s striped locks). The generated
+code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
+`(.CompareAndSwap (.-F_next p) nil newNode)` on an `atomic.Pointer[ConcurrentLinkedQueue_Node]`.
+
+**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/g2c/jrt_sources.clj`):
+`ConcurrentLinkedQueue`, `ConcurrentLinkedDeque`, `ConcurrentSkipListMap`,
+`ConcurrentSkipListSet`, `CopyOnWriteArrayList`, `CopyOnWriteArraySet`, `LinkedBlockingDeque`,
+`PriorityBlockingQueue`, `DelayQueue`, `SynchronousQueue`, `LinkedTransferQueue`, `Exchanger`,
+`Phaser`, `CompletableFuture`, `ThreadPoolExecutor`, `ScheduledThreadPoolExecutor`,
+`AbstractExecutorService`, `FutureTask`, `Executors`, `ExecutorCompletionService`,
+`ThreadLocalRandom` (with `RandomSupport`), `AtomicReferenceArray`, `AtomicIntegerArray`,
+`AtomicLongArray`, `Striped64`, `LongAdder`, `DoubleAdder`, `LongAccumulator`,
+`DoubleAccumulator`, `AtomicStampedReference`, `AtomicMarkableReference`, `StampedLock`,
+`AbstractQueuedSynchronizer` (`ThreadPoolExecutor`'s workers), `AbstractOwnableSynchronizer`,
+and the interfaces they implement (`BlockingDeque`, `TransferQueue`, `ConcurrentNavigableMap`,
+`Delayed`, `CompletionStage`, `RunnableFuture`, `ScheduledExecutorService`, `ScheduledFuture`,
+`RunnableScheduledFuture`, `RejectedExecutionHandler`, `CompletionService`, `ReadWriteLock`),
+`CompletionException`, and of `java.util` `PriorityQueue` (`DelayQueue`'s) and `SortedSet`
+(`ConcurrentSkipListSet`'s views; both also on `java.util`'s list of gaps, JAVA-BASE.md).
+
+**jrt's hand-written executors and `FutureTask` are gone** (JC5): `Executors`,
+`ThreadPoolExecutor`, `ScheduledThreadPoolExecutor` and `FutureTask` are the JDK's, so
+`shutdownNow`, `invokeAll`, `invokeAny`, the pool's sizes and counters, rejection policies and
+scheduled tasks behave as on the JVM, and Arbace's agents run on the JDK's pools.
+`ExecutorService` is translated too, all its methods with it: jrt keeps a stand-in of it
+(`standin_executor.clj`) for its own build, and its `ForkJoinPool` implements the translated
+interface, the methods jrt cannot name (`shutdownNow`, `invokeAll`, `invokeAny`: their types are
+`List` and `Collection`) given by c2g as Go methods calling jrt's own Java
+`jdk.internal.jrt.ForkJoinPools` (`c2g_support`, `out/fjp-support-forms`). jrt keeps the other
+interfaces (`Executor`, `Future` with JDK 19's `resultNow`, `exceptionNow`, `state` and the enum
+`Future.State`, `ThreadFactory`). jrt's own
+Java for what jdk26u's code reaches beyond the world: `jdk.internal.vm.SharedThreadContainer`
+(`ThreadPoolExecutor`'s container: starts threads, keeps nothing),
+`jdk.internal.jrt.ThreadPerTaskExecutor` (`newThreadPerTaskExecutor`,
+`newVirtualThreadPerTaskExecutor`: jdk26u's is a thread container), `jdk.internal.jrt.Delays`
+(`CompletableFuture`'s delays), `java.util.concurrent.ThreadLocalRandomProbes` (`Striped64`'s
+probe). Variants (`overlay/jdk/variants/`): `Executors` (the thread-per-task executor,
+`newWorkStealingPool` over jrt's `ForkJoinPool(int)`, `DefaultThreadFactory` without
+`ThreadGroup`, `AutoShutdownDelegatedExecutorService` without its `Cleaner`), `CompletableFuture`
+(`orTimeout`, `completeOnTimeout`, `delayedExecutor` through `Delays`),
+`AbstractQueuedSynchronizer$Node` and `AbstractOwnableSynchronizer` (the waiter and the owner
+volatile, JC6), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` and
+`ForkJoinWorkerThread` (no offsets of the thread-local maps, which are jrt's Go maps: without it
+`ForkJoinWorkerThread` failed to initialize, and with it every wait of `LinkedTransferQueue` and
+`SynchronousQueue`, which ask its static `hasKnownQueuedWork`).
+
+**`ThreadLocalRandom` translated** (JC4): jrt's `Thread` has the JDK's fields
+`F_threadLocalRandomSeed`, `F_threadLocalRandomProbe` and `F_threadLocalRandomSecondarySeed`
+and registers its Go type for `Unsafe.objectFieldOffset`, so the JDK's class reads and writes
+them as on the JVM; jrt's hand-written probes are gone. `ThreadLocalRandom.current()`, its
+bounded and stream methods (`RandomSupport`) work.
+
+**jrt's additions**: `ForkJoinPool` is an `ExecutorService` (`execute(Runnable)`, the three
+`submit`s, `isTerminated`, `awaitTermination`, `close`, `isQuiescent`), with
+`ForkJoinPool.ManagedBlocker`, `managedBlock` and the package-private `asyncCommonPool`
+(`CompletableFuture`'s default executor), and `ForkJoinTask`'s tags (`getForkJoinTaskTag`,
+`setForkJoinTaskTag`, `compareAndSetForkJoinTaskTag`: `CompletableFuture`'s claims) (JC7);
+`LockSupport` keeps the blocker (`getBlocker`, `setCurrentBlocker`, `parkUntil(Object, long)`) and
+has a class object (the REPL knew it as a name only); `Thread.getState` with `Thread.State`
+(`ThreadPoolExecutor.addWorker` checks it; jrt tells `NEW`, `RUNNABLE` and `TERMINATED` only) and
+`Thread.Builder` (`Executors.newVirtualThreadPerTaskExecutor` calls `factory()` on it) (JC8);
+`Unsafe` has `weakCompareAndSetReference`, `getAndBitwiseAndInt`, `putIntOpaque`,
+`getLongOpaque`, `storeStoreFence`, `park` and `unpark` (`AbstractQueuedSynchronizer`,
+`StampedLock`).
+
+**A program that never shuts its agents down** (JC9). Agents' `send` runs on a fixed pool whose
+workers, non-daemon threads, wait forever for tasks; without `shutdown-agents` the JVM waits
+for them forever after main, and the Go build waited too, until Go's run time found every
+goroutine asleep and ended the process with "fatal error: all goroutines are asleep -
+deadlock!" (exit status 2). `send-off` and `future` run on a cached pool whose idle workers end
+after 60 s, after which the JVM and the Go build both exit normally. `jrt.RunMain` now starts,
+once, a goroutine waiting on an hourly ticker: Go's deadlock check never fires while a timer is
+pending, so a Go program whose threads all wait forever waits forever, as the JVM does.
+
+**Found on the way** (JC2): a `switch` over an enum whose class is outside the closed world
+(`FutureTask.resultNow` switching on `Future.State` before jrt had it) made Go that does not
+build (`NN(C2g_Missing[any](...)).F_ordinal`); c2g now switches on an operation-level stub
+(`C2g_Missing[int32]`), keeping the arms for Go's flow analysis, as for any operation outside
+the world (C2G-SPEC §4.1, §7.8).
+
+## Decisions
+
+- **Handles compiled, not interpreted.** A `VarHandle` could be a jrt object over `Unsafe`'s
+  field table, its access modes called with boxed arguments; c2g compiles them instead, since
+  the JDK makes every handle a constant of a static initializer: no boxing, no table lookup, the
+  same code one would write in Go, and the fields' Go types tell the operations. Handles that
+  are not such constants stay operation-level stubs (none in the translated classes).
+- **Plain fields a handle names are volatile in Go.** The JDK mixes plain reads with handle
+  writes (`ConcurrentSkipListMap`); in Go a two-word interface read racing with a write tears
+  (C2G-SPEC §8.3). Making them atomic is stronger than Java and costs a `Volatile` box per store
+  of an interface-typed field; the alternative, per-class variants, would have changed jdk26u's
+  code by hand in a dozen classes.
+- **The executors translated, jrt's dropped.** jdk26u's `ThreadPoolExecutor`,
+  `ScheduledThreadPoolExecutor`, `FutureTask`, `Executors` and `ExecutorService` replace jrt's
+  hand-written pools (6 of `ThreadPoolExecutor`'s 38 members, no `shutdownNow`, `invokeAll`,
+  scheduling): the JDK's semantics, by the user's preference for translation. Their cost is
+  `AbstractQueuedSynchronizer` translated (the workers' locks), which C2G-SPEC §8.4 had measured
+  and not taken for jrt's locks; it is taken here with its waiter and owner volatile (JC6), and
+  jrt's `ReentrantLock`, `ReentrantReadWriteLock`, `Semaphore` and `CountDownLatch` stay
+  hand-written: Arbace's runtime takes `ReentrantLock` on every `LazySeq` and `Delay`, and the
+  JDK's would allocate a `Volatile` box for its owner on every acquisition.
+- **`ForkJoinPool` stays jrt's** (C2G-SPEC §8.4, S5): jdk26u's is work stealing over `Unsafe`
+  and the VM's thread internals (4,400 lines); jrt's gains the `ExecutorService` API,
+  `managedBlock` and the tags `CompletableFuture` uses (JC7), and `CompletableFuture`'s delays run
+  on threads of their own (`Delays`) instead of the pool's `DelayScheduler`.
+- **`ThreadLocalRandom` translated over the Thread's fields** (JC4) rather than hand-written: its
+  bounded and stream methods are `RandomSupport`'s, plain Java.
+- **Main's end waits forever when its threads do** (JC9), as the JVM: hanging is the JVM's
+  answer to a program whose non-daemon threads never end (`send` without `shutdown-agents`), and
+  a crash with Go's goroutine dump was the Go build's own. The keep-alive ticker is started by
+  `RunMain` only, so jrt's Go tests still see Go's deadlock check.
+- **Not done**: the field updaters (`AtomicIntegerFieldUpdater` and its kin: reflection on a
+  class's declared fields and `Unsafe.objectFieldOffset(Field)`; Clojure code reaches them only
+  with a Java class of its own, whose fields on Go are a `deftype`'s or a `defclass`'s at the
+  REPL, which have no Go struct fields); `StructuredTaskScope` (a preview API over
+  `ScopedValue`); `Thread.getState`'s `BLOCKED`, `WAITING` and `TIMED_WAITING` (jrt does not
+  track them); `newSingleThreadExecutor`'s shutdown when it becomes unreachable (the JDK's
+  `Cleaner`); `ForkJoinPool`'s work stealing, `ForkJoinWorkerThread`s and its other 130 members.
+
+## Results
+
+On the branch `go-juc` after merging main (2026-10-10), amd64:
+
+| check | result |
+|---|---|
+| `bin/jrt-convert` | 532 files, all compiled to javac's class shapes (528 identical, the 4 known differences) |
+| `bin/c2g --program` | 2,479 classes, 21,973 methods reached; 45 constant `VarHandle`s on 40 fields |
+| `bin/c2g-check -- --program` (amd64) | 9,022 of 9,022 steps; the new fixture `FxVarHandles` (every access mode on fields and array elements, fences, the arrays' exceptions, contention) 12 of 12 |
+| `bin/jrt test` (amd64, `--race`, arm64 under `qemu-aarch64`) | pass; new: `TestVarHandles`, `TestForkJoinExecutorService`, `TestLockSupportBlocker` |
+| the oracle's new `forms/concurrency.clj`, 247 cases | the JVM 247 of 247 (recorded twice, identical); Go 247 of 247 |
+| `bin/oracle check ... --expected test/oracle/known-go-amd64.edn` | 21,430 of 21,435; the 3 `nextProbablePrime` cases now pass (`ThreadLocalRandom`) and leave the reference, the 5 others as known |
+| Clojure's suite on Go | 19,628 of 19,632 assertions, 0 failures, 4 errors, as main; test.generative 26 specs, 0 failures; no regressions |
+| `bin/arbace-go --smoke` | pass, with the three new checks of main's end |
+| size, amd64 | 95.66 MB against main's 88.25 MB (main at `70e6701`): +7.4 MB |
+
+Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure; before: main after `jbase`):
+
+| | classes in Go | members provided | before |
+|---|---:|---:|---:|
+| `java.util.concurrent` | 72 of 81 | 1,104 of 1,199 (92.1%) | 29 of 81, 325 (27.1%) |
+| `java.util.concurrent.atomic` | 13 of 16 | 259 of 319 (81.2%) | 4, 108 (33.9%) |
+| `java.util.concurrent.locks` | 14 of 14 | 170 of 201 (84.6%) | 8, 65 (32.3%) |
+| the family together | 99 of 111 | 1,533 of 1,719 (89.2%) | 41, 498 (29.0%) |
+
+What is left of the family: the field updaters, `StructuredTaskScope` and its kin, and
+`ForkJoinPool`'s members beyond jrt's (its work-stealing internals, `ForkJoinWorkerThreadFactory`).
+
+## Amendments (JC), for the user's review
+
+- **JC1 (C2G-SPEC §8.5, new) VarHandles compiled statically**: constant handles read from
+  static initializers, access modes as atomic operations on the field or element, fields named
+  by a handle volatile in Go, fences, `MethodHandles.lookup()` a `nil`; `arbace.c2g.vh`, jrt's
+  `varhandle.clj`.
+- **JC2 (C2G-SPEC §7.8) A `switch` over an enum outside the closed world** switches on an
+  operation-level stub (above).
+- **JC3 (JRT-SOURCES.md, the closure) The concurrent classes**: `concurrent-sources` in
+  `test/g2c/jrt_sources.clj` (the list above, with `PriorityQueue`, `SortedSet` and
+  `RandomSupport`), jrt's own Java `ThreadPerTaskExecutor`, `Delays`, `ForkJoinPools`,
+  `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above.
+- **JC4 (C2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
+  three random fields as `F_` fields and registers its Go type for `Unsafe.objectFieldOffset`;
+  jrt's hand-written probes go.
+- **JC5 (C2G-SPEC §8.4) The executors translated**: jrt's hand-written pools, `FutureTask` and
+  `Executors` go; `ExecutorService` is translated over a stand-in (C2G-SPEC §4.3), and c2g gives
+  jrt's `ForkJoinPool` its `shutdownNow`, `invokeAll`, `invokeAny` through jrt's Java
+  (`out/fjp-support-forms`, §11).
+- **JC6 (C2G-SPEC §8.3, §8.4) `AbstractQueuedSynchronizer` translated**, its
+  `AbstractQueuedLongSynchronizer` too, with `Node.waiter` and
+  `AbstractOwnableSynchronizer.exclusiveOwnerThread` volatile by variants (§8.3's cure for a
+  two-word field read by other threads); this revises §8.4's "measured and not taken" for the
+  executors' workers, while jrt's locks stay hand-written.
+- **JC7 (C2G-SPEC §8.4, the fork-join pool) jrt's `ForkJoinPool` an `ExecutorService`**, with
+  `ManagedBlocker`, `managedBlock`, `asyncCommonPool`, `isQuiescent`, termination, and
+  `ForkJoinTask`'s tags; `CompletableFuture`'s delays on jrt's `Delays`.
+- **JC8 (C2G-SPEC §11, jrt's API) Additions to jrt's hand-written classes**: `Thread.State` and
+  `getState` (three of its six states), `Thread.Builder`, `Future.State` and `Future`'s JDK 19
+  defaults, `LockSupport`'s blockers and class object, `Unsafe`'s `weakCompareAndSetReference`,
+  `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`, `storeStoreFence`, `park`, `unpark`,
+  and the casts of the new types.
+- **JC9 (C2G-SPEC §8.4, `RunMain`) No Go deadlock crash at main's end**: `RunMain` keeps a
+  ticker pending for the program's life, so a program whose threads all wait forever waits, as
+  on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,
+  agents without and with `shutdown-agents`).
+- **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
+  what the executable is built from (it changes the conversion, but the key did not see it).
