@@ -75,6 +75,21 @@ completed explicitly (quietlyComplete, tryComplete).\n"
       (.finish t exc)))
   true)
 
+(go/method runForked
+  "runForked runs a forked task: as tryRun, and also when the task was run before without
+completing (a CountedCompleter whose exec returned false), as the JDK's doExec runs any task
+not yet done: CountedCompleters fork such a task again to continue it (ArrayPrefixHelpers'
+cumulation, amendment JB4).\n"
+  [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
+  (when (.tryRun t this)
+    (return))
+  (when (!= (.Load (.-state t)) fjRunning)
+    (return))
+  (let [^bool completed false
+        exc (runCatching (fn [] (set! completed (.Exec__Z this))))]
+    (when (or completed (!= exc nil))
+      (.finish t exc))))
+
 (go/method finish "finish completes the task with exc (nil: normally) and releases its waiters;
 it reports false, doing nothing, when the task was done already.\n"
   ^bool [^{:tag (* ForkJoinTask)} t ^Throwable_I exc]
@@ -425,7 +440,7 @@ one, at least 1, as the JVM's common pool has it.\n"
         t (Thread_New_Runnable_String
             (RunnableOf (fn []
                           (defer (done))
-                          (.tryRun (.Self_ForkJoinTask task) task)))
+                          (.runForked (.Self_ForkJoinTask task) task)))
             name)]
     (set! (.-fjPool t) p)
     (.Store (.-daemon t) true)
@@ -436,7 +451,7 @@ one, at least 1, as the JVM's common pool has it.\n"
 runs it at once.\n"
   [^{:tag (* ForkJoinPool)} p ^ForkJoinTask_I task]
   (when (== (.-slots p) nil)
-    (.tryRun (.Self_ForkJoinTask task) task)
+    (.runForked (.Self_ForkJoinTask task) task)
     (return))
   (select
     (case (>! (.-slots p) (lit (struct)))
@@ -444,7 +459,7 @@ runs it at once.\n"
     (default
       ;; no worker free: the forking thread runs it now (a CountedCompleter's children are
       ;; never joined, so leaving them to a joiner could leave them unrun)
-      (.tryRun (.Self_ForkJoinTask task) task))))
+      (.runForked (.Self_ForkJoinTask task) task))))
 
 (go/method checkOpen [^{:tag (* ForkJoinPool)} p ^ForkJoinTask_I task]
   (nnIface task)

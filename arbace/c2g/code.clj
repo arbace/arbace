@@ -1775,11 +1775,24 @@
         [ps r] (t/parse-method-desc (:desc sam))]
     {:sam sam :ps ps :r r}))
 
+(defn lambda-markers
+  "The marker interfaces of a lambda or method reference whose target is an intersection
+  (\"(& Comparator Serializable)\": LambdaMetafactory's altMetafactory makes its class implement
+  them; amendment JB5): Serializable when serializable, and the other markers, those in the
+  world that the interface does not already extend, sorted."
+  [node]
+  (vec (sort (distinct (filter #(and (m/in-world? %)
+                                     (not (env/assignable? (str "L" (:fi node) ";") (str "L" % ";"))))
+                               (concat (when (:serializable node) ["java/io/Serializable"])
+                                       (:markers node)))))))
+
 (defn adapter-sym
-  "The adapter type F_Fn of functional interface fi, recorded for generation in fi's package."
-  [fi]
-  (swap! (:lambdas *pkgstate*) conj fi)
-  (m/class-sym (pkg) fi "_Fn"))
+  "The adapter type F_Fn of functional interface fi, recorded for generation in fi's package;
+  with marker interfaces, the adapter F_Fn_M1_..._Mn that also implements them (JB5)."
+  ([fi] (adapter-sym fi []))
+  ([fi markers]
+   (swap! (:lambdas *pkgstate*) conj (if (seq markers) (into [fi] markers) fi))
+   (m/class-sym (pkg) fi (apply str "_Fn" (map #(str "_" (m/go-name %)) markers)))))
 
 (defn- convert-ref-or-prim
   "Converts Go value x of Java type from to Java type to, as LambdaMetafactory adapts:
@@ -1816,7 +1829,7 @@
                     (concat (list 'fn (cond-> (with-meta (vec (map (fn [s d] (tag s (gotype d))) psyms ps)) {})
                                         (not= "V" r) (vary-meta assoc :tag (gotype r))))
                             body)))))]
-    (v (list 'addr (list 'lit (adapter-sym fi) :Fn fnf)) (str "L" fi ";") :nn true)))
+    (v (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf)) (str "L" fi ";") :nn true)))
 
 (defn fi-adapter-val
   "Clojure's adapter of an argument to a functional interface parameter (Compiler's
@@ -1883,5 +1896,5 @@
                     (if (= "V" r)
                       [(callf)]
                       [(list 'return (convert-ref-or-prim (callf) ret-d r))]))]
-    (v (list 'addr (list 'lit (adapter-sym fi) :Fn fnf)) (str "L" fi ";") :nn true)))
+    (v (list 'addr (list 'lit (adapter-sym fi (lambda-markers node)) :Fn fnf)) (str "L" fi ";") :nn true)))
 

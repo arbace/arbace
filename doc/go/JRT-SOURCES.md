@@ -275,6 +275,15 @@ more with the JDK's resource data (below). Besides the measured closure (`test/g
   heap classes `HeapByteBuffer`, `HeapCharBuffer`, `HeapIntBuffer`, the views
   `ByteBufferAsCharBufferB`/`L` and `ByteBufferAsIntBufferB`/`L`, and
   `jdk.internal.misc.ScopedMemoryAccess`: KIND `gensrc`, made by the `generate` step below.
+- **java.util** (`util-sources`; amendment JB1, accepted 2026-10-10; JAVA-BASE.md, "java.util
+  completed"): 25 files, first those whose absence made translated members throw
+  (`DualPivotQuicksort`, `ArraysParallelSortHelpers`, `ArrayPrefixHelpers`: `Arrays`'
+  primitive and parallel sorts and `parallelPrefix`; `Comparators`: the natural-order
+  comparators; `SortedSet`; `jdk.internal.util.random.RandomSupport`; `java.math.BitSieve`),
+  then java.util's plain Java (`BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`,
+  `Base64`, `SplittableRandom`, the event classes, `Observable`, and seven exceptions and
+  constants). With them `bin/jrt-convert` translates **414 files** (all 414 compiled to
+  javac's class shapes; 410 identical, the 4 known differences).
 
 ## The JDK's resource data (2026-10-09)
 
