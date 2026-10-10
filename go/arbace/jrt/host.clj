@@ -4,7 +4,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "host.go"
-  :imports [[bytes "bytes"] [zlib "compress/zlib"] [rand "crypto/rand"] [errors "errors"] [io "io"] [fs "io/fs"] [os "os"]
+  :imports [[bytes "bytes"] [zlib "compress/zlib"] [errors "errors"] [io "io"] [fs "io/fs"] [os "os"]
             [runtime "runtime"] [strings "strings"] [sync "sync"] [time "time"]])
 
 (go/type Host
@@ -88,7 +88,6 @@ embedded resources.\n"
 (go/method Environ ^{:tag (slice string)} [^OSHost h] (os/Environ))
 (go/method Args ^{:tag (slice string)} [^OSHost h] os/Args)
 (go/method NumCPU ^int [^OSHost h] (runtime/NumCPU))
-(go/method RandomBytes [^OSHost h ^{:tag (slice byte)} b] (rand/Read b))
 (go/method Resource
   "Resource is an embedded resource: the file name, else name.z inflated (c2g writes the
 resources a zlib stream makes a quarter smaller so: amendment SZ2).\n"
