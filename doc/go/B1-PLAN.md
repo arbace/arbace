@@ -121,8 +121,11 @@ pinned by commit, or vendored) is decided then.
   `HostSocketImpl` and the host's optional `NetHost`, and `arbace.core.server` (the socket REPL,
   `prepl`, `io-prepl`, `remote-prepl`) is in the executable, its servers started from the
   `arbace.server.*` properties (from `JAVA_TOOL_OPTIONS`) as on the JVM (C2G-SPEC §4.1, §9.4,
-  §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class`, `defclass` at the REPL and JVM interop
-  beyond the closed world stay out.
+  §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class` and JVM interop beyond the closed world
+  stay out.
+  **Reversed for `defclass` (2026-10-10, amendment CF3):** `defclass` and the code forms work at
+  the REPL, analyzed by the embedded class forms compiler and interpreted
+  ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md), C2G-SPEC §10.4).
 
 (D3, how Arbace depends on go-whim, moves to B1b.)
 

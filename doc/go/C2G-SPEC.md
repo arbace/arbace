@@ -343,6 +343,11 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   methods and constructors that do not exist in Go (`RT.toUrl`, `FileInputStream(File)`),
   throwing. Code naming them analyzes, as on the JVM, and fails when it runs (D6's "names exist
   and throw"; `arbace.c2g.embed`, `out/*absent-members*`).
+- **A cut class's constants are readable** (amendment CF1, accepted 2026-10-10). In a cut
+  class's member table, a static final field of a primitive type or `String` with a constant
+  value answers that value (read by reflection when c2g runs) instead of throwing; its other
+  members still throw. The class forms' analysis reads ASM's `Opcodes` this way
+  (CLASSFORMS-REPL.md; `arbace.c2g.out/cut-constant`).
 
 ### 4.2 Go packages
 
@@ -1153,6 +1158,21 @@ at run time that defines a method twice with one descriptor (`(reify java.util.L
 name "size" with signature "()I" in class file ...") from `Evaluator.defineType` when it is
 made, which the analyzer wraps in `CompilerException` as on the JVM. `ClassFormatError` is a jrt
 stand-in (§4.3).
+
+**Interpreted classes and the superclasses of the world** (amendment CF4, accepted 2026-10-10;
+CLASSFORMS-REPL.md §2.3). `DynClass` gains a field `CF`, the `Compiler$CF$Klass` of a class of
+class forms made at the REPL (nil for `deftype`, `reify`, `proxy`). The DynSub types are made for
+`arbace.c2g.dyn/class-supers` too (`Throwable`, `Exception`, `RuntimeException`, `Error`,
+`IllegalArgumentException`, `IllegalStateException`, `Enum`, `Record`, `AFn`; a leaf, such as
+`UnsupportedOperationException`, cannot have one), so these classes can be proxied as well. An
+interpreted class extending one of `sub-supers` (or an interpreted class that does) has DynSub_C
+objects: c2g writes for each C, in `c2g_cf.go`, its allocation without a constructor
+(`dynCfNew_C`: C's initialization, then the object), C's constructors on an allocated object
+(`dynCfCtors_C`, by descriptor: the interpreted constructor's super call) and C's implementations
+of its virtual methods (`dynCfSupers_C`, by name and descriptor: `super.m()`). The natives of
+`Compiler$CFGo` (`defineClass`, `alloc`, `klassOf`, `setMethod` with the members' modifiers and a
+virtual member table entry, `addCtor`, `addField`, `addStatic`, `canExtend`, `superCtor`,
+`superCall`, `setEnum`, `setOuter`) are `arbace.c2g.dyncf`'s.
 
 Functions (`fn*`) need no dynamic type: they are instances of ordinary evaluator classes (§10.2).
 
@@ -2177,6 +2197,22 @@ Since files are in the world (amendment FS6, accepted 2026-10-10), the error rep
 temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
 variant: `load-file` is the JVM's, with `File`'s absolute path and name.
 
+**The class forms' analysis** (amendment CF2, accepted 2026-10-10; CLASSFORMS-REPL.md). The
+embedded tree holds the class forms compiler's analysis (`arbace/classes/types`, `env`, `parse`,
+`lower`, `analyze`; not `emit`, `compiler`, `shape`, `verify`, `build`, `boot`), with namespace
+variants in `arbace/lang/go/ns/classes/`: `types.subst.clj` (the runtime's package name),
+`env.subst.clj` (a `HashMap` for reflection's cache; the constructors jrt's reflection does not
+list), `analyze.subst.clj` (ASM's `TypeReference` and the world's generic signatures from
+`arbace.classes.go`; no source path lookup), `native.subst.clj` (the classes interpreted:
+`arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.clj` and
+`interp.clj`. `Compiler.classForms`' variant loads them on the first class form without
+checking the macros' specs, as the JVM loads them compiled.
+
+**The world's generic signatures** (amendment CF5, accepted 2026-10-10). `--program` also
+embeds `arbace/classes/generics.edn`: the generic view (`class-generics`) of the world's interfaces
+and of the classes an interpreted class can extend, and the constructors of abstract ones, which
+jrt's reflection does not have and javac's bridges need (`arbace.c2g.dyncf/generics-text`).
+
 ### 10.4 Types made at run time
 
 `deftype`, `defrecord` and `reify` create a `jrt.Class` at run time (name, `Object` as
@@ -2211,6 +2247,16 @@ found by reflection as `java.beans.Introspector` finds them (`java.beans` is not
 build). Not provided: proxies of leaf classes and of classes outside §5.12's list,
 serialization of proxies, and methods of more than 18 parameters (the JVM calls super for them;
 here the fn is called).
+
+**Class forms at the REPL** (amendment CF3, accepted 2026-10-10; it reverses D6 for `defclass`
+and the code forms, B1-PLAN.md; `gen-class` stays out). `defclass` and the code forms (SPEC
+§9.5) are analyzed by the embedded analysis (§10.3) and interpreted (CLASSFORMS-REPL.md):
+`arbace.classes.native`'s boundary is kept, `compile-and-load!` is `arbace.classes.interp`'s,
+which builds from the analyzed nodes trees of the interpreter's nodes (`Compiler$CF`, class forms
+in the `Compiler` variant `arbace/lang/go/ClassForms.clj`, translated), one per method, and
+makes the classes through the host `Compiler$CFGo` (§5.12, amendment CF4): classes made at run
+time whose objects are `Dyn` (DynSub_C for a superclass of the world, `Compiler$CF$FnObj` for a
+Clojure fn's class), their members in the member tables and `Dyn`'s slots.
 
 ### 10.5 Recursion depth
 
@@ -3529,6 +3575,14 @@ RD3 jrt's own `InflaterInputStream` over Go's zlib: §4.1. RD4 generated sources
 measured closure's and the resource data, made as the JDK build makes them and compared with its
 output: §4.1, JRT-SOURCES.md. RD5 the rename table's `Sun_Normalizer`: §4.4. With them, fixed
 (not amended): §6.2's benign initialization counts a static read in a `switch` arm.
+
+**Class forms at the REPL** (CLASSFORMS-REPL.md; accepted by the user 2026-10-10): CF1 a cut
+class's constants readable: §4.1. CF2 the class forms' analysis embedded, with its namespace
+variants, loaded without spec checks: §10.3. CF3 class forms at the REPL interpreted: §10.4,
+B1-PLAN.md D6. CF4 `DynClass.CF`, the DynSub types of `class-supers`, the natives of
+`Compiler$CFGo`: §5.12. CF5 `generics.edn` embedded: §10.3. CF6 the oracle's `defclass` forms:
+ORACLE.md. CF3 reverses D6 for `defclass`; CF4 extends X1 (the classes a proxy may extend gain
+`class-supers`).
 
 Each with a recommendation, which the text above follows, for the user's review.
 
