@@ -1311,3 +1311,14 @@ decision (2026-10-08).
   tagged `arbace-for-java-26-v3` (`71ffc9f`), then the APKBUILD bumped to the tag (`ec49a67`);
   both pushed (the user's decisions: merge and tag v3, the name `arbace-java26`, Temurin
   26.0.2.1 as the build JDK, publishing later).
+
+## 2026-10-10: the .ae rename after the freeze; rlwrap in the Go executable
+
+- The user's decision: the `.ae` rename is no longer B1a's step 8, the last before the freeze;
+  it is the first task right after the `arbace-for-golang` freeze. The freeze becomes step 8.
+  B1-PLAN and the agenda updated. The frozen branch then keeps `.clj` sources, as
+  `arbace-for-java-26` does.
+- The user's decision: the Go executable runs its interactive REPL under `rlwrap` when stdin is
+  a terminal (as Alpine's `clj` and the JVM package's `arb`). An agent designs and builds it
+  (branch `gorl`): only for the interactive REPL, with a marker against re-wrapping and a way to
+  turn it off.

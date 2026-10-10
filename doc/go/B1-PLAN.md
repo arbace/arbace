@@ -75,8 +75,11 @@ the pace of the class forms and g2c work, rough, growing with the step number.
 | **5 The evaluator** | `Compiler`'s analyser through c2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch) | `arbace/core.clj` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
 | **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM `bin/arbace` and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
 | **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable | benchmarks (`bin/arbace-bench`'s workload) against the JVM Arbace; the suite still passes | open |
-| **8 The `.ae` rename** | Arbace's sources move from `.clj` to `.ae`, as one self-contained change (the user's decision, 2026-10-09: the last step before the freeze; AGENDA.md) | `bin/gate --full`; the oracle and the suite on both builds as before | 1 |
-| **9 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26` | the user's confirmation | 1 |
+| **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26` | the user's confirmation | 1 |
+
+The `.ae` rename (Arbace's sources from `.clj` to `.ae`, one self-contained change; the user's
+decision of 2026-10-09) was step 8, the last before the freeze; the user moved it on 2026-10-10 to
+right after the freeze, as the first task (AGENDA.md).
 
 Rough total: 25-43 days.
 
