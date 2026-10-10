@@ -27,9 +27,10 @@ can be repeated. Prior art: [Clojure](https://github.com/clojure/clojure),
 
 The branch `arbace-for-java-26` preserves the final state of Arbace on the JVM, binary
 compatible with the Java ecosystem, before main leaves the JVM behind. Its releases are tags:
-`arbace-for-java-26-v1` (the freeze), `-v2` (a fix: comparisons with NaN) and `-v3` (for the
+`arbace-for-java-26-v1` (the freeze), `-v2` (a fix: comparisons with NaN), `-v3` (for the
 server side: the runtime image holds `java.base` and `jdk.unsupported` only, `bean` and `#inst`
-need nothing else, and an Alpine package). Use the newest. [doc/FREEZE.md](doc/FREEZE.md)
+need nothing else, and an Alpine package) and `-v4` (fixes: `reduce` without an initial value
+over an eduction, `iteration` or a `reify` of `IReduceInit`; `bean`'s keys in name order). Use the newest. [doc/FREEZE.md](doc/FREEZE.md)
 describes what the branch holds, how to build, run and verify it, and its known limits.
 
 ```sh

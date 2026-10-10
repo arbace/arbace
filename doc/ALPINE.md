@@ -61,6 +61,14 @@ tag, `pkgrel=1`. `arbace-java26-3-r1.apk` (x86_64): 31 MiB, installed 98 MiB, 21
 fresh root; every check of `bin/alpine-package` passes (start 190 ms with the cache, 622 ms
 without); `arb` under a pseudo-terminal evaluates and recalls history (the up arrow).
 
+## Release v4 (4-r0)
+
+`arbace-for-java-26-v4` (2026-10-10): the APKBUILD's `pkgver=4`, `pkgrel=0`, the tag's tarball
+pinned (`bin/alpine-package --checksum`). `arbace-java26-4-r0.apk` (x86_64): 31 MiB, installed 98
+MiB, 21 packages in a fresh root; every check passes (start 190 ms with the cache, 610 ms
+without); in it `(reduce + (eduction (map inc) (range 10)))` is 55 and `bean`'s keys come in
+name order. aarch64 not rebuilt (the same sources apart from the two fixes).
+
 ## Decisions
 
 **Name: `arbace-java26`.** Arbace's main line leaves the JVM; a later standalone package can

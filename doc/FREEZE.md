@@ -18,7 +18,9 @@ ordered comparison with NaN was true); `arbace-for-java-26-v3` (2026-10-10), for
 the runtime image holds `java.base` and `jdk.unsupported` only, `bean` finds properties by
 reflection, `#inst` needs only `java.base`, the desktop and XML namespaces fail cleanly without
 their modules (VENDOR-NOTES.md, hand changes 14-16), and the Alpine package (`dist/alpine/`,
-ALPINE.md). Use the newest tag.
+ALPINE.md); `arbace-for-java-26-v4` (2026-10-10), fixes: `reduce` without an initial value over a
+reducible implementing `IReduceInit` but not `IReduce` (hand change 17), `bean`'s keys in name
+order. Use the newest tag.
 
 ## What the branch holds
 

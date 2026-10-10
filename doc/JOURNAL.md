@@ -1288,3 +1288,7 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   2, test.generative 27/27), `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without
   regressions; on the image, with and without its cache: 55 for the eduction, 45 for
   `iteration`, `bean`'s URI keys sorted. Not released.
+- Released `arbace-for-java-26-v4` (`d83d628`, the user's decision): the `reduce` fix and
+  `bean`'s key order. The APKBUILD moves to v4 (`arbace-java26-4-r0`): built and checked with
+  `bin/alpine-package` (31 MiB; start 190 ms with the cache), the two fixes checked in the
+  installed package. README and FREEZE.md name v4.
