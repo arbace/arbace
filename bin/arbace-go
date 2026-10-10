@@ -10,6 +10,9 @@
 #        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
 #                                      forms, doc/go/EXEC-NOTES.md) with the built executables
 #                                      and link them again with it
+#        bin/arbace-go --gate          the essential bin/gate's check: --smoke on amd64, on the
+#                                      executable cached in .tmp/arbace-go-gate and built again
+#                                      only when what it is built from changed (gate_key)
 #        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
 #                                      error's exit status, for each of $ARBACE_GO_ARCHES
 # Environment:
@@ -180,7 +183,48 @@ EOF
   return $status
 }
 
+# gate_key: the hash of what the executable is built from: Arbace's sources (the runtime's
+# class forms and their Go variants, the embedded namespaces, c2g, j2c, g2c, the class forms
+# compiler), jrt's forms and the overlays, the measured Java surface, the scripts of the build,
+# the seed, and the toolchains (Go, the JDK and jdk26u's checkout that bin/jrt-convert reads)
+gate_key() {
+  (cd "$root" && {
+    find arbace go overlay bin/lib -type f | sort
+    printf '%s\n' doc/go/java-surface.edn seed/arbace-seed.jar.sha256 bin/arbace-go bin/c2g bin/g2c \
+      bin/j2c bin/jrt bin/jrt-convert bin/arbace bin/build-arbace
+  } | xargs sha256sum
+    cat "${G2C_GOROOT:-/root/tamago-go}/VERSION"
+    java -version 2>&1
+    git -C "${JDK:-/root/jdk26u}" rev-parse HEAD 2>/dev/null) | sha256sum | cut -c1-64
+}
+
+# gate: the smoke test of the essential bin/gate (amd64) on the executable cached under
+# .tmp/arbace-go-gate, built again only when gate_key changed: bin/jrt-convert's conversion
+# (its steps sources, generate, convert: what bin/c2g reads), then --build for amd64. Needs
+# bin/build-arbace first. A hit takes seconds; a miss about 5 minutes
+gate() {
+  local cache=$root/.tmp/arbace-go-gate key t0
+  t0=$(date +%s)
+  key=$(gate_key)
+  if [ -x "$cache/amd64/arbace" ] && [ "$(cat "$cache/key" 2>/dev/null)" = "$key" ]; then
+    echo "arbace-go: the cached executable (its inputs unchanged, key ${key:0:12})"
+  else
+    echo "arbace-go: building the executable (key ${key:0:12})"
+    rm -rf "$cache"
+    (cd "$root" && JRT_STEPS=sources,generate,convert bin/jrt-convert) > "$dir.jrt-convert.log" 2>&1 \
+      || { tail -20 "$dir.jrt-convert.log"; echo "arbace-go: bin/jrt-convert failed ($dir.jrt-convert.log)"; return 1; }
+    echo "   jrt-convert: $(since "$t0")"
+    arches=amd64 build 2>&1 || return 1
+    mkdir -p "$cache/amd64"
+    cp "$dir/amd64/arbace" "$cache/amd64/arbace"
+    echo "$key" > "$cache/key"
+    echo "   built in $(since "$t0")"
+  fi
+  dir=$cache arches=amd64 smoke
+}
+
 case ${1:-} in
+  --gate) gate ;;
   --build) build ;;
   --image) image ;;
   --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;

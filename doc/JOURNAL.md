@@ -1026,3 +1026,45 @@ decision (2026-10-08).
 - The user's decisions: amendments U1-U5 accepted (to fold); the smoke test joins the
   essential `bin/gate` with the executable cached by a hash of its inputs (rebuilt only when
   they change). Step 7b (the evaluator's closure compilation) can start.
+
+## 2026-10-09: a proxy of BufferedWriter; pprint passes on Go
+
+- Agent, branch `pprint-bw` (`38cd59a`, `88aaca9`), merged: c2g's proxy list moves to
+  `arbace.c2g.model` and gains `java/io/BufferedWriter`; a translated non-final class on it is
+  not a leaf (its `DynSub_C` extends it), while hand-written classes keep jrt's leafness. 13 new
+  forms at the end of `test/oracle/forms/types.clj` (proxy-super, buffering, prn, pprint and
+  cl-format through a proxied BufferedWriter, a write after close). The suite's pprint namespace
+  passes 474 of 474; the suite on Go 19,255 of 19,280. Executable +981 KB. Amendment Z1
+  proposed (EVAL-NOTES.md).
+- Main session on the merge (over step 6): Go build, `--smoke`, the Go oracle's forms 10,097 of
+  10,100 as recorded, Clojure's suite on Go with no regressions.
+
+## 2026-10-09: step 6's follow-up: the smoke test in the essential gate; U1-U5 folded
+
+- Agent, branch `step6` (`2ed50fd`, `e380a5e`, `e9f296b`), merged: `bin/gate` runs a check `go`
+  (`bin/arbace-go --gate`, not with `--full`) beside the suite on stage 2 and the class forms
+  tests: the smoke test on amd64 of an executable cached in `.tmp/arbace-go-gate`, keyed by a
+  SHA-256 of `arbace/`, `go/`, `overlay/`, `bin/lib/`, the Java surface, the seed's hash, the
+  build's scripts and the toolchains (TamaGo's VERSION, `java -version`, jdk26u's commit). A miss
+  runs `bin/jrt-convert`'s steps sources, generate, convert and the amd64 build with the image.
+  Measured: the essential gate 3m38s on a hit, about 7 minutes on a miss (the check itself 5m13s
+  to 5m37s). Alternative considered: always building (the user chose the cache). CLAUDE.md's
+  gate paragraph describes it.
+- Amendments U1-U5 folded: C2G-SPEC §5.8 (a class's hash from its name), §10.3 (the prepared
+  namespaces), §10.6 (the main package and jrt's hooks), §13.4 (`GOGC` at start), §16; B1-PLAN
+  (step 6 done, the cached check, a D7 note); EVAL-PLAN §2.7; EXEC-NOTES.
+- Correction to the step 6 entries: while cleaning up after the pprint merge the main session
+  force-removed this agent's worktree while it worked, losing its uncommitted edits; the
+  worktree was recreated on the branch and the agent redid them. Worktrees are now removed only
+  after their agent has reported and stopped.
+- Main session on the merge: scripts only and docs; the agent's two essential gate runs (a miss
+  and a hit) passed with no regressions; `--full` not run, by the user's policy until the freeze.
+
+## 2026-10-10: amendment Z1 accepted and folded
+
+- The user accepted Z1 (EVAL-NOTES.md, "Proxies of BufferedWriter"): a translated, non-final
+  class on c2g's proxy list is not a leaf, since its `DynSub_C` subclasses it; the list lives in
+  `arbace.c2g.model/proxy-supers` and includes `java.io.BufferedWriter`. Folded into C2G-SPEC
+  §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
+  considered: keeping leafness a condition on the list (a listed class must already be
+  non-leaf), which excluded BufferedWriter.

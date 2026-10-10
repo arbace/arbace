@@ -647,9 +647,11 @@ expressions. This is class hierarchy analysis over the closed world (principle 4
 because nothing can subclass a class at run time in B1a (deftype and reify implement
 interfaces only, §5.12; `gen-class` is cut, D6) but a proxy of a class of a fixed list, which
 c2g provides for ahead of time with a Go type per class (§5.12, amendment X1, accepted
-2026-10-09): a class the list names must be non-leaf already, and a proxy of a leaf class
-throws. A class made non-leaf by a later change changes the Go type of its uses, which c2g
-recomputes as a whole.
+2026-10-09): a translated, non-final class the list names is not a leaf, since its `DynSub_C`
+is a subclass in the program (amendment Z1, accepted 2026-10-10: leafness counts the proxy types
+c2g adds to the closed world; hand-written classes keep jrt's leafness), and a proxy of a leaf
+class throws. A class made non-leaf by a later change changes the Go type of its uses, which
+c2g recomputes as a whole.
 
 A hand-written class whose Java superclass is translated embeds that superclass's struct once
 it exists. Until then it embeds `jrt.Object` and has the superclass's methods itself:
@@ -793,6 +795,12 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   (Correction, 2026-10-08, to follow jrt: the hash comes from one global atomic sequence
   mixed by a 32-bit finalizer, 31 bits and never 0, not from a per-thread xorshift sequence
   as HotSpot's; V3 permits it, the values differing from the JVM's anyway.)
+  **A class's identity hash** (amendment U2, accepted 2026-10-09) is its name's
+  `String.hashCode`, 31 bits and never 0, set when the `Class` is made (`jrt.presetClassHash`:
+  `Define`, `DefineDynamic`, the primitive and array classes), so that classes hash alike in
+  every run of the program: the image of prepared namespaces (§10.3) keeps the layout of its
+  hashed collections keyed by classes, and orders over such collections are the same in every
+  run.
 - `wait`, `notify`, `notifyAll` are jrt functions on the header (§8.1); `finalize` is not used
   (V8).
 - **`new Object()`** (lock objects, sentinels) is `(jrt/Object_New)`, of Go type `any`: a
@@ -1050,9 +1058,10 @@ replaces the type-word compare):
 **Proxies of a class: `DynSub_C`** (amendment X1, accepted 2026-10-09). A proxy of `Object` is
 a `Dyn`. A proxy of a class `C` must be a Go value of `C_I`, since translated code uses it as a
 `C` (`(PrintWriter. w)` over a proxy of `Writer`), so for each class of a fixed list,
-`arbace.c2g.dyn/proxy-supers` (`java.io.Writer`, `Reader`, `PushbackReader`, `InputStream`,
-`OutputStream`, `arbace.lang.APersistentMap`, and jrt's hand-written `ThreadLocal`; each must be
-translated or hand-written, in the world, not final and not a leaf), c2g writes a Go type
+`arbace.c2g.model/proxy-supers` (`java.io.Writer`, `Reader`, `PushbackReader`, `InputStream`,
+`OutputStream`, `BufferedWriter` (pprint's tests), `arbace.lang.APersistentMap`, and jrt's
+hand-written `ThreadLocal`; each must be translated or hand-written, in the world and not
+final; a translated one is non-leaf by being listed, amendment Z1), c2g writes a Go type
 **`DynSub_C`** in `c2g_dyn.go`:
 
 - a struct embedding `C`'s struct (so `Self_C`, `C`'s fields and its `Impl_` methods are
@@ -1077,7 +1086,7 @@ such as `ThreadLocal.initialValue`, the fn `(factory name)`). `setMethod` on a p
 that has a slot sets only the slot, so reflection through `C`'s member reaches the Go method
 and `proxy-super`'s reflective call runs `C`'s implementation. The natives work on both kinds of
 object through the Go interface `dynObject`. A proxy of a class outside the list, or of a leaf
-class (`BufferedWriter`, `BitSet`: making them non-leaf would change every use), throws
+class (`BitSet`: making it non-leaf would change every use), throws
 `UnsupportedOperationException` "proxy of C is not in the Go build" when evaluated, so code
 naming it loads. Each `DynSub_C` has about 650 methods; the seven add about 4 MB to the
 executable. jrt's stack traces leave out their dispatch frames as they do `Dyn`'s.
@@ -2034,6 +2043,26 @@ embedded sources, then in the directories of the environment variable `ARBACE_PA
 path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
 the same places. RT's initialization loads `arbace.core` when the program has its sources.
 
+**Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
+image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
+image holds replays it instead of reading and analyzing it (`Compiler$Image`, in the `Compiler`
+variant): for each *unit* (a top-level form, or each form of a top-level `do`, as
+`Compiler.eval` splits them) it decodes the `Expr` tree the analysis made, makes again the
+*events* of that analysis (deftype's stub and class, `gen-interface`'s interfaces and methods,
+`proxy`'s class, the boot `ns` macro's `*ns*`), and evaluates the tree as `Compiler.eval` does.
+Evaluation is unchanged; only the analysis is skipped, as for the JVM's AOT-compiled namespaces.
+The image is recorded by the program itself, run once with `ARBACE_PREPARE=FILE` requiring every
+embedded namespace (`bin/arbace-go --build`): `Compiler.load` hands each top-level form of an
+embedded source to `Compiler$Image.evalUnit`, which records the unit between its analysis and
+its evaluation, with the events gathered while the analysis runs (`genclass.clj` and
+`core_proxy.clj` report theirs, the `RT` variant's boot `ns` macro its own). Objects are encoded
+by Go's reflection over the program's struct types, by name (`Var`, `Keyword`, `Namespace`,
+`Class`, members), by value (strings, boxes, arrays, patterns) or as the canonical empty
+collections and `Compiler`'s constant nodes; the graph keeps its sharing and the objects their
+identity hashes; fields only the bytecode back end reads (`ObjExpr.src`, the clearing paths) are
+not encoded. A load from source (`ARBACE_PATH`, `load-file`, a program without an image,
+`ARBACE_NO_IMAGE`) is as before.
+
 **Namespace variants** (amendment M1, accepted 2026-10-09). The Go build's differences in the
 namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds the sources:
 `P.clj` replaces `arbace/P.clj`, `P.after.clj` is appended to it, and `P.subst.clj`, a vector of
@@ -2116,6 +2145,16 @@ JVM prints it, with class forms lines (§7.9.6), and the status is 1. Measured: 
 namespaces' sources (§10.3, amendment M5) and registers the classes they name outside the world
 (§4.1, M3), and the program loads `arbace.core` and runs `arbace.main` (`bin/arbace-go`;
 EVAL-NOTES.md).
+
+**The main package's files** (amendment U3, accepted 2026-10-09). Besides `main.go` and the
+embedded sources (`res/`), `--program` writes `image.go` (the image's encoding, hand-written Go
+forms `go/arbace/cmd/arbace/image.clj`, copied), `image_types.go` (generated: every exported,
+non-generic struct type of `arbace/lang` and `arbace/jrt`, registered by name for decoding) and an
+empty `image.bin`, embedded as a string (`//go:embed image.bin`), which `bin/arbace-go --build`
+replaces with the prepared image before linking the executables again. `main` installs the image
+(`setupImage`) before `Main.main` and writes it after, when preparing (`finishImage`); jrt reaches
+it through `jrt.ImageHooks` (`jrt.Image`), which `Compiler$Image`'s natives call. A variant of
+`Main` tells the image when `arbace.main` is loaded (`Compiler$Image.started`).
 
 **The REPL's world** (EVAL-PLAN Q2, decided 2026-10-09; amendment P2): what the REPL can name
 is the closed world, and it reaches members by reflection, which reachability does not follow
@@ -2391,7 +2430,11 @@ inlining across interface calls. The work planned, in jrt:
 - **arrays of references as one allocation** (the slots in the array's own object), or with
   8-byte slots (§13.2's thin pointers).
 
-Neither changes what c2g writes; step 7 decides them with its own measurements.
+Neither changes what c2g writes; step 7 decides them with its own measurements. **The start's
+collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the program starts, until
+`Main.main` has loaded `arbace.main`, the main package runs the collector at `GOGC=400` unless
+`GOGC` is set (0.32 s against 0.41 s to `-e nil` on amd64), then sets it back; the running
+program's setting stays step 7's.
 
 ### 13.5 Floating point
 
@@ -3335,6 +3378,19 @@ Y1 c2g names a jrt-provided class by jrt's registered Go name: §4.4. Y2 `Dyn` i
 hand-written interfaces with a cast function, with the nominal check: §5.12. Y3 `Semaphore`
 hand-written in jrt: §8.4, JAVA-SURFACE.md decision 4. Y4 the harvest keeps `java_interop`'s
 proxy assertions: ORACLE.md. Y2 narrows E4's "hand-written jrt interfaces are not covered".
+
+**Step 6** (EXEC-NOTES.md, the executable; accepted by the user 2026-10-09): U1 the image of
+prepared namespaces, replayed by `RT.load`: §10.3. U2 a class's identity hash is its name's:
+§5.8. U3 the main package's files and `jrt.ImageHooks`: §10.6. U4 the start's collector:
+§13.4's step 7 plan (D7). U5 the executable's smoke test in the essential `bin/gate`, on an
+executable cached by a hash of its inputs: B1-PLAN.md, "Checks". U1 refines M5's `RT.load`
+(an embedded source is replayed when the image holds it); U2 refines §5.8's identity hash for
+`Class` objects.
+
+**Proxies of BufferedWriter** (EVAL-NOTES.md, "Proxies of BufferedWriter"; accepted by the user
+2026-10-10): Z1 a translated, non-final class of `proxy-supers` is not a leaf, and the list moves
+to `arbace.c2g.model` and gains `java.io.BufferedWriter`: §5.3, §5.12. Z1 refines X1 (leafness
+is a property of the closed world and of the proxy types c2g adds to it).
 
 Each with a recommendation, which the text above follows, for the user's review.
 

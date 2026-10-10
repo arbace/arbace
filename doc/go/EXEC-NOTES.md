@@ -186,7 +186,7 @@ transcript (`bin/arbace` gives the same, but for the number of the `eval` class 
 message): reading and printing, multi-line input, `doc`, an error that the REPL reports and goes
 on after, `*1`, `*2`, `*3` and `*e`, and the end of input ending the REPL with status 0.
 
-## A smoke test in the essential gate (proposal; `bin/gate` unchanged)
+## The smoke test in the essential gate
 
 The smoke test itself is fast: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke` takes 3.5 s. Getting
 an executable is not. After the bootstrap, the chain is `bin/jrt-convert` (about 95 s; its output
@@ -210,17 +210,39 @@ rule given, `bin/gate` is not changed. Options for the user:
 Recommended: 2, with 3's checks in `--full`: the essential gate then tests the executable on
 every change that can change it, and costs nothing on the others.
 
+**As built** (the user's decision, 2026-10-09: option 2; amendment U5). The essential gate's
+check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 and the class
+forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
+the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
+`doc/go/java-surface.edn`, the seed's hash and the scripts of the build (`bin/arbace-go`, `c2g`,
+`g2c`, `j2c`, `jrt`, `jrt-convert`, `arbace`, `build-arbace`), and of the toolchains (TamaGo's
+`VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
+that key, it smoke-tests `.tmp/arbace-go-gate/amd64/arbace` (`--smoke` on amd64); otherwise it
+runs `bin/jrt-convert`'s steps `sources,generate,convert` (what `bin/c2g` reads: the javac
+comparison, the check and the report are `--full`'s) and `--build` for amd64, copies the
+executable and the key into the cache, and smoke-tests it. Measured on this machine (shared):
+
+| | the check `go` | the essential gate |
+|---|---:|---:|
+| a miss | 5m13s and 5m37s (built in 310 s, 334 s) | 6m46s, 7m06s |
+| a hit | 0m04s | 3m38s |
+| before (no check `go`) | | about 4m20s |
+
+At the first miss the machine's peak memory use was 25 GB of 62 (the suite's 24 JVMs, the class
+forms tests, and the build's JVMs and `go build` beside them); during the second pair of runs,
+with other agents' work beside, it reached 40 GB, 6 GB left available.
 ## Results
 
-- **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`): 20,220 of 20,253 (main:
-  20,221). The forms corpus 10,074 of 10,077: besides main's two (`deftype Foo/2`'s error source,
+- **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`), on this branch before
+  the merge: 20,220 of 20,253 (main then: 20,221). The forms corpus 10,074 of 10,077: besides main's two (`deftype Foo/2`'s error source,
   the `StringBuilder`'s identity hash), `polymorphism.clj:176`: `class-ambig`'s message names
   `java.io.Serializable` before `java.lang.Comparable`, where the JVM's names them in the other
   order. The order is that of a hash map keyed by the two classes (the multimethod's method
   table); main passed it by the luck of identity hashes (EVAL-NOTES.md, phase 2A), and with
   classes hashed by their names (amendment U2, which the image needs) the order is now fixed,
   and not the JVM's. The class scripts 8,942 of 8,943 and the regex corpus 1,204 of 1,233, as on
-  main.
+  main. Merged into main (`bc586b1`) with `MultiFn`'s order by class name (`ac8b971`), the case
+  passes there: the message no longer depends on a hash.
 - **Clojure's suite on Go** (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 16`): 18,781 of 18,806
   assertions (588 tests; 19 failures, 6 errors), 61 of 64 namespaces load: no regression
   against `test/arbace-go-results.edn`. (A first run found one: a library requiring
@@ -255,9 +277,10 @@ Chosen: pre-analyzed units with their events (like Joker's packed linter forms, 
 start), because evaluation stays exactly what a load from source does and the image is
 independent of the architecture and of the environment at build time.
 
-## Proposed amendments (for the user's review)
+## Amendments
 
-Numbered U (a letter not used in `doc/`).
+Numbered U (a letter not used in `doc/`). All accepted by the user on 2026-10-09 and folded
+into their home documents, as noted under each.
 
 - **U1 (EVAL-PLAN §2.7, C2G-SPEC §10.3) The image of prepared namespaces.** `RT.load` of a
   source embedded in the program replays it from the program's image (its units: the analyzed
@@ -266,25 +289,32 @@ Numbered U (a letter not used in `doc/`).
   links the executables again with it; `Compiler$Image` in the `Compiler` variant, the variants of
   `RT` (`load`, the boot `ns` macro's event) and `Main` (`started`), `genclass.clj` and
   `core_proxy.clj` recording their classes. A load from source is unchanged. (B1-PLAN's step 6
-  said "pre-read or pre-analysed": pre-analysed, measured above.)
+  said "pre-read or pre-analysed": pre-analysed, measured above.) *Accepted 2026-10-09, folded
+  into C2G-SPEC §10.3 and §16, EVAL-PLAN §2.7, B1-PLAN's step 6.*
 - **U2 (C2G-SPEC §5.8; jrt) A class's identity hash is its name's** `String.hashCode` (31 bits,
   never 0), set when the `Class` is made (`jrt.presetClassHash`: `Define`, `DefineDynamic`, the
   primitive and array classes), instead of the next value of the global sequence. Hashed
   collections keyed by classes keep their layout in the image, and `(hash SomeClass)` and such
-  orders are the same in every run (the AGENDA's "determinism issue"). Consequence: the oracle's
-  `polymorphism.clj:176` mismatches in every run; proposed: record it as a known difference
-  (the order of an identity-hashed map is not the JVM's to reproduce), as the
-  `StringBuilder`'s identity hash is.
-- **U3 (C2G-SPEC §10.6, BUILD.md "The program's layout") The main package's files**: besides
+  orders are the same in every run (the AGENDA's "determinism issue"). Consequence on this
+  branch: the oracle's `polymorphism.clj:176` mismatched in every run. *Accepted 2026-10-09,
+  folded into C2G-SPEC §5.8 and §16.* The case is moot since main's `ac8b971`: `MultiFn` names
+  two ambiguous classes in the order of their names, on both builds, so the message no longer
+  depends on any hash and `polymorphism.clj:176` passes (re-recorded there).
+- **U3 (C2G-SPEC §10.6) The main package's files**: besides
   `main.go` and `res/`, `image.go` (hand-written forms, `go/arbace/cmd/arbace/image.clj`, copied
   by `bin/c2g --program`), `image_types.go` (generated: every exported non-generic struct type of
   `arbace/lang` and `arbace/jrt`, by name) and the embedded `image.bin`; jrt's `ImageHooks`, set
-  by the main package, through which `Compiler$Image`'s natives reach it.
+  by the main package, through which `Compiler$Image`'s natives reach it. *Accepted 2026-10-09,
+  folded into C2G-SPEC §10.6 and §16.*
 - **U4 (D7, for step 7) The start's collector**: `GOGC=400` while the program starts, unless
   `GOGC` is set, back to the previous value when `Main.main` has loaded `arbace.main`.
+  *Accepted 2026-10-09, folded into C2G-SPEC §13.4 (step 7's plan, D7) and §16, and B1-PLAN's
+  "Checks" paragraph (D7).*
 - **U5 (B1-PLAN, "Checks") The smoke test and the gate**: the smoke test gains the REPL session;
   its place in `bin/gate` is the user's choice among the options above (recommended: a cached
-  executable in the essential gate).
+  executable in the essential gate). *Accepted 2026-10-09 with option 2 (the user's decision):
+  implemented as the essential gate's check `go` ("The smoke test in the essential gate"
+  above), folded into B1-PLAN's "Checks", C2G-SPEC §16 and CLAUDE.md.*
 
 ## Sources
 
