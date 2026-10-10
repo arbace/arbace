@@ -1167,3 +1167,10 @@ decision (2026-10-08).
   mismatches), found before pushing. Local main was reset to the pushed `5ced273`; the cf-repl and
   jbase merges are kept on the local branch `main-cf-pending` (`8ace8b1`) until the class forms
   agent fixes the cause.
+
+## 2026-10-10: the Go freeze's tag gets a -v1 suffix
+
+- The user's decision: the tag of the B1a freeze is `arbace-for-go1.27.1-v1` (was
+  `arbace-for-go1.27.1`), as the JVM freeze's `arbace-for-java-26-v1`/`-v2`: fixes on the same
+  Go toolchain are released as `-v2`, `-v3`..., and the name before the suffix still names the
+  exact toolchain. The branch stays `arbace-for-golang`. B1-PLAN and the agenda updated.

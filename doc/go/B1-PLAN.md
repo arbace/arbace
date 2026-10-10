@@ -14,7 +14,8 @@ accordingly:
   B1a is a milestone that ends with a freeze, as the JVM state was frozen on
   `arbace-for-java-26`: a well-known branch and tag, advertised in the docs (the user's intent,
   2026-10-08). Proposed names (the user, 2026-10-08): the branch `arbace-for-golang`, the tag
-  `arbace-for-go1.27.1` after the pinned Go toolchain. It includes `linux/arm64`: Go cross-compiles the same
+  `arbace-for-go1.27.1-v1` after the pinned Go toolchain, with `-v2`... for fix releases on the
+  same toolchain, as `arbace-for-java-26-v1`/`-v2` (the user, 2026-10-10). It includes `linux/arm64`: Go cross-compiles the same
   program, and the arm64 executable is tested here under QEMU's user-mode emulation
   (`qemu-aarch64`).
 - **B1b (later): the box.** The same program built with TamaGo (`GOOS=tamago`) on go-whim's

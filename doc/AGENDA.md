@@ -113,7 +113,7 @@ fallbacks of `arbace/core_classes.clj` are gone.
   (TamaGo, arm64) later as B1b. Decided: c2g + jrt, an evaluator first, Java's UTF-16 strings,
   a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
   B1a ends with a freeze (a branch and tag, as for Java 26; proposed branch
-  `arbace-for-golang`, tag `arbace-for-go1.27.1`) and includes `linux/arm64`, tested
+  `arbace-for-golang`, tag `arbace-for-go1.27.1-v1`) and includes `linux/arm64`, tested
   under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
   static executables for both). Step 1 done: the Java surface measured
   ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Step 2 done: the c2g spec
