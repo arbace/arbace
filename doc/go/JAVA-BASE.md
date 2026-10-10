@@ -200,7 +200,7 @@ processes (`Process`, `ProcessBuilder`, its `Redirect`, 21), class loading and r
   JDK 26's Unicode tables, the exceptions and errors of `java.lang`; `java.math` whole;
   `java.util`'s collections (lists, sets, maps, deques, `Hashtable`/`Vector`/`Stack`,
   `IdentityHashMap`, `EnumSet`/`EnumMap`, the sequenced and immutable collections),
-  `Arrays`, `Collections`, `Objects`, `Optional*`, `Formatter`, `Properties`, `Random`,
+  `Arrays` (but its primitive sorts), `Collections`, `Objects`, `Optional*`, `Formatter`, `Properties`, `Random`,
   `UUID`, `HexFormat`, `StringJoiner`, `Spliterators`; `java.util.stream` and
   `java.util.function` whole; `java.util.regex` (D5); `java.util.random`'s
   `RandomGenerator`; in `java.util.concurrent`: `ConcurrentHashMap`, `ArrayBlockingQueue`,
