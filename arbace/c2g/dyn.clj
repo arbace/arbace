@@ -310,6 +310,20 @@
                     ks)
       [(ctor-infos n)])))
 
+(def ^:private dyn-call-fast
+  "dynCall's call of a method of up to 3 arguments: the fn's invoke of that arity, without a seq
+  (the evaluator's methods, EvalMethod.invoke: doc/go/SPEED-NOTES.md, \"The evaluator\"). (A def
+  of its own: forms is at the JVM's limit of a method's size.)"
+  '(go/func dynCallFast
+     "dynCallFast calls a method's fn of up to 3 arguments with the object and the arguments,
+boxed, through its invoke of that arity.\n"
+     ^any [^IFn impl ^any this ^{:tag (slice any)} args]
+     (switch (len args)
+       (case [0] (return (.Invoke_O__O impl this)))
+       (case [1] (return (.Invoke_O_O__O impl this (jrt/Box (aget args 0)))))
+       (case [2] (return (.Invoke_O_O_O__O impl this (jrt/Box (aget args 0)) (jrt/Box (aget args 1))))))
+     (.Invoke_O_O_O_O__O impl this (jrt/Box (aget args 0)) (jrt/Box (aget args 1)) (jrt/Box (aget args 2)))))
+
 (defn- fn-field-native
   "Compiler$Dyn.defineFnField: a fn class's field, the fn's i-th closed-over value, as the
   compiled fn's field (EVAL-NOTES.md, \"Locals clearing\"); settable when not primitive. (Apart
@@ -567,10 +581,12 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
               (range [_ x (.-A a)]
                 (set! ps (append ps (assert (* jrt/Class) x)))))
             ps))
+       dyn-call-fast
        '(go/func dynCall
           "dynCall calls a method's fn with the object (none for a static method) and the
 arguments, boxed.\n"
           ^any [^IFn impl ^any this ^{:tag (slice any)} args]
+          (when (and (!= this nil) (<= (len args) 3)) (return (dynCallFast impl this args)))
           (let [^{:tag (slice any)} a nil]
             (when (!= this nil)
               (set! a (append a this)))

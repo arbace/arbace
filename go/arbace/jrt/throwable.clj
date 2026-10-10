@@ -523,7 +523,8 @@ pushed.\n"
   "isEvalInterop: whether fn is the evaluator's evaluation of a host call (a method, a
 constructor, a field), which it makes by reflection.\n"
   ^bool [^string fn]
-  (or (strings/HasPrefix fn "arbace/lang.(*Compiler_StaticMethodExpr).EvalIn_")
+  (or (strings/HasPrefix fn "arbace/lang.(*Compiler_CodeHost")
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_StaticMethodExpr).EvalIn_")
       (strings/HasPrefix fn "arbace/lang.(*Compiler_InstanceMethodExpr).EvalIn_")
       (strings/HasPrefix fn "arbace/lang.(*Compiler_NewExpr).EvalIn_")
       (strings/HasPrefix fn "arbace/lang.(*Compiler_InstanceFieldExpr).EvalIn_")
@@ -544,6 +545,11 @@ table's invoker (a function literal of a package's init: reflection's call), not
 traces.\n"
   ^bool [^string fn]
   (or (strings/HasPrefix fn "arbace/lang.Compiler_Evaluator")
+      ;; the closure compiler's nodes and run-time helpers (CompilerCode.clj)
+      (strings/HasPrefix fn "arbace/lang.(*Compiler_Code")
+      (strings/HasPrefix fn "arbace/lang.Compiler_Code")
+      (strings/HasPrefix fn "arbace/jrt.Compiler_CodeRun_")
+      (strings/HasPrefix fn "arbace/jrt.directArgs")
       (strings/HasPrefix fn "arbace/lang.init.")
       (strings/HasPrefix fn "arbace/jrt.init.")
       (strings/Contains fn ").EvalIn_")

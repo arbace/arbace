@@ -22,8 +22,9 @@
    "arbace/classes/emit.clj" "arbace/classes/compiler.clj" "arbace/classes/shape.clj"
    "arbace/classes/verify.clj" "arbace/classes/build.clj" "arbace/classes/boot.clj" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
    "arbace/asm.clj" "arbace/lang.clj" "arbace/java/api"
-   ;; decision 6: processes, URLs, sockets, browsers
-   "arbace/core/server.clj" "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
+   ;; decision 6: processes, URLs, browsers (sockets, arbace.core.server, are in since
+   ;; 2026-10-09: JRT-NOTES.md, "Sockets")
+   "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
    "arbace/java/process.clj" "arbace/java/shell.clj" "arbace/java/browse" "arbace/java/javadoc.clj"
    ;; D6: Swing, SAX
    "arbace/inspector.clj" "arbace/xml.clj"])
@@ -164,6 +165,21 @@
                               (not (in-world? tn)))]
                tn)]
     (sort (distinct (concat cands more)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The JDK's resource data
+
+(defn data
+  "The resource data the executable embeds besides the sources (JRT-NOTES.md, \"The JDK's
+  resource data\"): the files under dir (bin/jrt-convert's .tmp/jrt/data: uniName.dat, ICU's
+  normalization data), {resource-path File}, sorted; empty when dir does not exist."
+  [dir]
+  (let [base (io/file dir)]
+    (into (sorted-map)
+          (when (.isDirectory base)
+            (for [^File f (file-seq base)
+                  :when (.isFile f)]
+              [(str/replace (str (.relativize (.toPath base) (.toPath f))) File/separator "/") f])))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; The image of prepared namespaces (doc/go/EXEC-NOTES.md): its encoding is hand-written forms

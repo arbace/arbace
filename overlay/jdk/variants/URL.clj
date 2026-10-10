@@ -6,9 +6,8 @@
 ;; world). The static initializer that hands URL's handler to the JDK's other packages
 ;; (SharedSecrets' JavaNetURLAccess, jrt's lacks it) is gone, and so are the static fields of
 ;; the lookup's ScopedValue and of serialization (ObjectStreamField), outside the world.
-;; URLStreamHandler's hashCode and hostsEqual compare host names: the host's address
-;; (InetAddress, a name lookup) is outside the world, so they answer as the JDK does for a host
-;; that does not resolve (for file: URLs, whose host is empty, exactly as the JDK).
+;; (URLStreamHandler's hashCode and hostsEqual, which resolve the host through InetAddress, are
+;; the JDK's since InetAddress is in the world: JRT-NOTES.md, "Sockets".)
 ;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.net)
 
@@ -27,26 +26,3 @@
       "http" (return (sun.net.www.protocol.http.Handler.))
       "https" (return (sun.net.www.protocol.https.Handler.)))
     nil))
-
-(c2g/variant URLStreamHandler
-  (method ^:protected hashCode ^int [this ^URL u]
-    (let [^:mutable ^int h 0
-          protocol (.getProtocol u)]
-      (when (some? protocol) (set! h (unchecked-add-int h (.hashCode protocol))))
-      (let [host (.getHost u)]
-        (when (some? host)
-          (set! h (unchecked-add-int h (.hashCode (.toLowerCase host java.util.Locale/ROOT)))))
-        (let [file (.getFile u)]
-          (when (some? file) (set! h (unchecked-add-int h (.hashCode file))))
-          (if (== (.getPort u) -1)
-              (set! h (unchecked-add-int h (.getDefaultPort this)))
-              (set! h (unchecked-add-int h (.getPort u))))
-          (let [ref (.getRef u)]
-            (when (some? ref) (set! h (unchecked-add-int h (.hashCode ref))))
-            h)))))
-
-  (method ^:protected hostsEqual ^boolean [this ^URL u1 ^URL u2]
-    (cond
-      (and (some? (.getHost u1)) (some? (.getHost u2)))
-        (.equalsIgnoreCase (.getHost u1) (.getHost u2))
-      :else (and (nil? (.getHost u1)) (nil? (.getHost u2))))))
