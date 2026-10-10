@@ -70,7 +70,7 @@ The freeze waits for the user's confirmation: have the gate pass on the final ma
 creates and pushes the branch `arbace-for-java-26` and the tag `arbace-for-java-26-v1`. The
 README's "Arbace for Java 26" section advertising them is on main already.
 
-## Alpine package and the base image (branch `apk26`, not released)
+## Alpine package and the base image (v3)
 
 - `bin/arbace-image` makes images of `java.base` and `jdk.unsupported` only (the user's
   decision, 2026-10-10); `bean`, `#inst` and the optional namespaces were adapted
@@ -79,8 +79,8 @@ README's "Arbace for Java 26" section advertising them is on main already.
   aarch64: that image (Temurin 26 jlink'ed, the jar, the AOT cache) in `/usr/lib/arbace-java26`,
   `/usr/bin/arbace`, `-doc`. `bin/alpine-package [--arch aarch64]` builds and tests it here
   ([ALPINE.md](ALPINE.md)).
-- Open, for the user: merging it into the branch, a release (e.g. `arbace-for-java-26-v3`,
-  after which the package's patches go away) and where the packages are published.
+- Released as `arbace-for-java-26-v3` (2026-10-10); the APKBUILD builds `arbace-java26-3-r0`
+  from it. Open: where the packages are published (a kept signing key, a repository).
 
 ## Later
 

@@ -7,13 +7,8 @@ JDK 26 (`java.base` and `jdk.unsupported`), Arbace's jar and its JDK AOT cache. 
 package (Alpine edge has openjdk21 and openjdk25, no 26).
 
 - `APKBUILD`: package `arbace-java26`, version `$pkgver` = the release tag's number
-  (`arbace-for-java-26-v2` is `2`), for x86_64 and aarch64.
+  (`arbace-for-java-26-v3` is `3`), for x86_64 and aarch64.
 - `arbace.sh`: `/usr/bin/arbace`, which runs the image's launcher.
-- `base-image.patch`, `launcher-aot-mtime.patch`: the branch `apk26`'s changes to the tag v2
-  (they go away with the next tag): the image of `java.base` and `jdk.unsupported` only, with
-  `bean`, `#inst` and the optional namespaces adapted (doc/VENDOR-NOTES.md, hand changes 14-16);
-  the launcher takes the AOT cache when it is not older than the jar (apk installs every file
-  with the same mtime).
 
 Build and test it here, with a throwaway key and all abuild state under `.tmp/alpine/`:
 

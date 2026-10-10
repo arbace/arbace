@@ -25,8 +25,7 @@ everything else is optional, used when the runtime has it (a full JDK, or an ima
 `ARBACE_IMAGE_MODULES`). Before, `bin/arbace-image` took the modules `jdeps --print-module-deps`
 found in the jar and added `jdk.unsupported.desktop`: ten modules with `java.desktop`,
 `java.sql`, `java.xml` and what they require. What needed them, and what changed on the branch
-(`doc/VENDOR-NOTES.md`, hand changes 14 to 16; the package applies them to the tag v2 as
-`base-image.patch`):
+(`doc/VENDOR-NOTES.md`, hand changes 14 to 16; released in `arbace-for-java-26-v3`):
 
 - `java.desktop`: `bean` used `java.beans.Introspector`; it now finds the properties by
   reflection with the Introspector's rules (checked against it on 77 classes, 583 properties:
@@ -59,7 +58,7 @@ time). Alternative: `arbace` with `pkgver=26.2` (Java feature, release); rejecte
 version clash with a future `arbace`.
 
 **Version: the tag's number.** Releases are tags `arbace-for-java-26-vN`; `pkgver=N`
-(`arbace-for-java-26-v2` is `2-r0`). A fix release `-v2.1` would be `2.1`, still a valid apk
+(`arbace-for-java-26-v3` is `3-r0`). A fix release `-v3.1` would be `3.1`, still a valid apk
 version and ordered after `2`. A change of the bundled JDK (a newer Temurin 26.0.x) with the same
 tag is a rebuild: `pkgrel` + 1, as Alpine bumps `pkgrel` when a dependency changes.
 
@@ -68,7 +67,8 @@ tag is a rebuild: `pkgrel` + 1, as Alpine bumps `pkgrel` when a dependency chang
 `arbace-java26-$pkgver.tar.gz` (abuild refuses `v2.tar.gz`-style names), top directory
 `arbace-arbace-for-java-26-v$pkgver`. GitHub makes it with `git archive` and GNU `gzip -n`
 (level 6): `git archive --format=tar --prefix=arbace-<tag>/ <tag> | gzip -n` reproduces it byte
-for byte (checked for v2: sha512 `2db89aad…`, the same as the download). So the checksum of a
+for byte (checked for v2, sha512 `2db89aad…`, and v3, `ecd20b98…`, each the same as the
+download). So the checksum of a
 release is known before (and without) downloading it, and `bin/alpine-package` builds offline
 from the local tag. For a new tag: bump `pkgver`, `pkgrel=0`, run `bin/alpine-package
 --checksum` (it downloads or makes the tarball and rewrites the sums). The APKBUILD cannot pin
@@ -119,7 +119,7 @@ every package).
 ```
 /usr/bin/arbace                                exec /usr/lib/arbace-java26/bin/arbace "$@"
 /usr/lib/arbace-java26/                        the image, as bin/arbace-image made it
-  bin/arbace, bin/java, bin/keytool            the launcher (bin/arbace, patched), the JVM
+  bin/arbace, bin/java, bin/keytool            the launcher (bin/arbace of the tag), the JVM
   lib/modules, lib/server/libjvm.so, ...       the jlink'ed JDK: java.base, jdk.unsupported
   lib/arbace/arbace.jar, lib/arbace/arbace.aot Arbace and its AOT cache
   legal/                                       the JDK's notices, legal/arbace/LICENSE.md
@@ -144,9 +144,8 @@ file in `/usr/lib` works for every user. Two things stood in the way, both from 
   by time, and the cache applies after the move to `/usr/lib/arbace-java26` (the JVM matches
   the class path by its common prefix with the run-time image, as `bin/arbace-image` relies on).
 - The launcher used the cache only when it was newer than the jar (`-nt`); with equal mtimes
-  it never was. `launcher-aot-mtime.patch` makes it "not older than the jar"; the JVM's own
-  check still guards against a wrong cache. The branch's `bin/arbace` has the change, so the
-  patch goes away with the next tag.
+  it never was. Since v3 it is "not older than the jar" (v2 needed a patch); the JVM's own
+  check still guards against a wrong cache.
 
 `check()` runs the image with `-XX:AOTMode=on`, which fails rather than run without the cache,
 and the test of the installed package does the same.
@@ -188,9 +187,20 @@ throwaway public key in that root's `/etc/apk/keys` only) and runs it there with
 
 ## Results (x86_64)
 
-`bin/alpine-package` on the development machine (64 cores, shared, Alpine edge, abuild
-3.18.0_rc7), from the tag `arbace-for-java-26-v2` (its tarball made locally, sha512 equal to
-GitHub's) with the two patches:
+The release `arbace-for-java-26-v3` (tag `7aaedeb` on commit `71ffc9f`, pushed 2026-10-10)
+holds the base image and the launcher change, so the APKBUILD is `pkgver=3`, `pkgrel=0`, with
+no patches. Its source, `https://github.com/arbace/arbace/archive/refs/tags/arbace-for-java-26-v3.tar.gz`,
+has sha512 `ecd20b985bc9eb59…` three ways: the download, `git archive | gzip -n` of the tag,
+and the tarball `bin/alpine-package` made. Built from it on the development machine (64 cores,
+shared, Alpine edge, abuild 3.18.0_rc7):
+
+- `arbace-java26-3-r0.apk`: 33,432,584 bytes (31.9 MiB), installed 98 MiB; `-doc` 204,468
+  bytes. `abuild -F` 1 min 52 s. Depends `bash`, `so:libc.musl-x86_64.so.1`. In a fresh root
+  with no Java package: `-e`, the REPL, the cache required, all the base-image checks below;
+  start 198 ms with the cache, 600 ms without.
+
+Before the release, v2 with the two patches that v3 now contains (`base-image.patch`,
+`launcher-aot-mtime.patch`, since removed), measured in detail:
 
 - `abuild -F`: 1 min 52 s (once the heavy-run lock was free), most of it the bootstrap (stages
   1-3 identical at 5,780 classes, the verifier clean, native tests 49/2,847, the jar equal to
@@ -233,7 +243,8 @@ loads.
 
 ## aarch64
 
-Made here, by emulation. Neither jlink nor the AOT cache can be made for aarch64 from x86_64
+Made here, by emulation, from v2 with the two patches (the same files as v3; not rebuilt for v3,
+37 minutes of emulation for an identical jar and image). Neither jlink nor the AOT cache can be made for aarch64 from x86_64
 (Temurin's JDK has no jmods to cross-link with, and the cache must be trained by the target's
 JVM), so the whole package is built as an aarch64 builder would build it: `bin/alpine-package
 --arch aarch64` unpacks Alpine edge's aarch64 minirootfs (`alpine-minirootfs-20260805-aarch64`,
@@ -265,23 +276,16 @@ For releases, a native aarch64 builder is better than 37 minutes of emulation: f
 
 ## For the user
 
-Decisions left to the user:
+Decided and open:
 
-- **Merge and release.** The packaging is on the branch `apk26` (from `arbace-for-java-26`),
-  not merged, not tagged, not pushed. Merging it into `arbace-for-java-26` and tagging
-  (e.g. `arbace-for-java-26-v3`) would ship the base image and the launcher fix in the tag;
-  the APKBUILD then moves to `pkgver=3` (`bin/alpine-package --checksum`) and drops both
-  patches.
-- **The name and version**: `arbace-java26`, `pkgver` = the tag's number (alternatives above).
-- **The JDK**: Temurin binaries as a pinned source (chosen), or an `openjdk26` APKBUILD built from
-  jdk26u for aports-grade from-source builds.
-- **Where to publish**: the packages are signed with a throwaway key in `.tmp/alpine/abuild/`.
+- **Released**: `arbace-for-java-26-v3`; the name `arbace-java26` with `pkgver` = the tag's
+  number and Temurin 26.0.2.1 as the build JDK were accepted (2026-10-10).
+- **Where to publish** (decided later): the packages are signed with a throwaway key in `.tmp/alpine/abuild/`.
   A real repository needs a kept key (its public half published for `/etc/apk/keys`) and a
   place to serve `arbace/<arch>/APKINDEX.tar.gz` (e.g. GitHub release assets or Pages). For
   aports itself, the prebuilt JDK would have to become an `openjdk26` package first.
 - **aarch64 release builds**: emulation here works but takes 37 minutes (see above); a native
   aarch64 builder is the better home, e.g. an `alpine:edge` container on GitHub's
   `ubuntu-24.04-arm` runners, running the same `abuild`.
-- **The base image** (`java.base,jdk.unsupported`) is on the branch with hand changes 14-16;
-  the package applies them to v2 as `base-image.patch` until a tag holds them. Main gets the same
-  changes separately.
+- **The base image** is in v3; main gets the same changes separately (there as hand changes
+  15-17, main having its own 14).

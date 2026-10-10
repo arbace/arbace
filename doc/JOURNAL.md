@@ -1236,3 +1236,13 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   byte the x86_64 one (and the development JDK's); `arbace-java26-2-r0.apk` 31.1 MiB, installed
   96 MiB, tested in an aarch64 root under qemu. A first attempt with the ten-module image failed
   at dependency tracing (`libasound.so.2` for `java.desktop`'s `libjsound.so`).
+- Release (the user's decisions, 2026-10-10): the merge, the tag, the name `arbace-java26` with
+  `pkgver` = the tag's number, Temurin 26.0.2.1 as the build JDK; publishing later, the
+  throwaway key kept. The coordinator fast-forwarded `arbace-for-java-26` to `71ffc9f` and
+  pushed the annotated tag `arbace-for-java-26-v3` (`7aaedeb`). The APKBUILD moved to
+  `pkgver=3`, `pkgrel=0`, without patches; the source's sha512 `ecd20b98…` is the same from
+  GitHub's archive URL, from `git archive | gzip -n` of the tag and from `bin/alpine-package`.
+  `arbace-java26-3-r0.apk` (x86_64): 33,432,584 bytes, installed 98 MiB, depends `bash` and
+  musl; built in 1 min 52 s and passing every check in a fresh root (start 198 ms with the
+  cache, 600 ms without). aarch64 was not rebuilt (same sources as the tested v2-plus-patches
+  build).
