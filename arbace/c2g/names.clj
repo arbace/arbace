@@ -71,8 +71,15 @@
    "java/sql/Date" "Sql_Date"
    ;; java.util.Tripwire's twin in java.util.stream (step 5 phase 2B, streams)
    "java/util/stream/Tripwire" "Stream_Tripwire"
-   ;; java.net.Proxy (outside the world, a cut class: Socket(Proxy)) against jrt's
-   ;; java.lang.reflect.Proxy (JRT-NOTES.md, "Sockets")
+   ;; java.net.URLConnection's subclass in sun.net.www, and the URL handlers, all named Handler
+   ;; (JRT-NOTES.md, "Files")
+   "sun/net/www/URLConnection" "Www_URLConnection"
+   "sun/net/www/protocol/file/Handler" "File_Handler"
+   "sun/net/www/protocol/http/Handler" "Http_Handler"
+   "sun/net/www/protocol/https/Handler" "Https_Handler"
+   "sun/net/www/protocol/jar/Handler" "Jar_Handler"
+   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members and
+   ;; Socket(Proxy) name (JRT-NOTES.md, "Files", "Sockets")
    "java/net/Proxy" "Net_Proxy"})
 
 (defn go-class-name

@@ -72,6 +72,16 @@ covers what.
   `Inet6AddressImpl.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below); the rest of those files is Arbace's own.
+- `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds
+  code transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
+  (`src/java.base/unix/classes/sun/nio/fs/UnixPath.java`: the path operations, its header names
+  them), and `go/arbace/jrt/filesystem.clj` jrt's Go forms following
+  `src/java.base/unix/native/libjava/canonicalize_md.c` (`JDK_Canonicalize`) and `path_util.c`
+  (`collapse`) and the results of `UnixFileSystem_md.c`: Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
+  below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other
+  files of the change (`Path.java`, `Files.java`, the variants) are written from the documented
+  APIs, as the overlay's other files.
 - `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

@@ -208,8 +208,8 @@ the translated Properties).\n"
   (.Exit (CurrentHost) (conv int status)))
 
 (go/method AddShutdownHook_Thread__V
-  "AddShutdownHook_Thread__V is Runtime.addShutdownHook: the hook runs at System.exit (not
-when main returns: RunMain's caller exits).\n"
+  "AddShutdownHook_Thread__V is Runtime.addShutdownHook: the hook runs at System.exit, or when
+RunMain's main and the non-daemon threads have ended.\n"
   [^{:tag (* Runtime)} r ^Thread_I hook]
   (let [t (.Self_Thread (nnIface hook))]
     (when (!= (.Load (.-state t)) threadNew)
