@@ -246,9 +246,11 @@
                  "ConcurrentSkipListSet" "ConcurrentNavigableMap" "CopyOnWriteArrayList"
                  "CopyOnWriteArraySet" "LinkedBlockingDeque" "BlockingDeque" "PriorityBlockingQueue"
                  "DelayQueue" "Delayed" "SynchronousQueue" "LinkedTransferQueue" "TransferQueue"])
-           ;; the synchronizers and CompletableFuture
+           ;; the synchronizers and CompletableFuture; RecursiveAction; the reactive streams'
+           ;; interfaces and their publisher
            (map #(str "java/util/concurrent/" % ".java")
-                ["Exchanger" "Phaser" "CompletableFuture" "CompletionStage" "CompletionException"])
+                ["Exchanger" "Phaser" "CompletableFuture" "CompletionStage" "CompletionException"
+                 "RecursiveAction" "Flow" "SubmissionPublisher"])
            ;; the atomic arrays, the adders and accumulators, the stamped and markable references
            (map #(str "java/util/concurrent/atomic/" % ".java")
                 ["AtomicReferenceArray" "AtomicIntegerArray" "AtomicLongArray" "Striped64" "LongAdder"
@@ -273,7 +275,7 @@
                  "Executors" "RejectedExecutionHandler" "ExecutorCompletionService" "CompletionService"
                  "RunnableFuture" "ScheduledExecutorService" "ScheduledFuture" "RunnableScheduledFuture"])
            (map #(str "java/util/concurrent/locks/" % ".java")
-                ["AbstractQueuedSynchronizer" "AbstractOwnableSynchronizer"])))))
+                ["AbstractQueuedSynchronizer" "AbstractOwnableSynchronizer" "AbstractQueuedLongSynchronizer"])))))
 
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
