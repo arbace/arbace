@@ -1868,7 +1868,9 @@ as grown".
 | `InetAddress` | the static initializers without the native library, `SharedSecrets` and the native `init`; IPv4 and IPv6 availability from the host; the built-in resolver only (no `ServiceLoader`); the cache a map of `CachedLookup`s expiring as the JVM's default policy without a security manager (30 s, failures 10 s), checked when used (the JVM's `ConcurrentSkipListSet` of expiries is outside the world), without the one-lookup-per-host lock; `PlatformResolver` without `Blocker` |
 | `Inet4Address`, `Inet6Address` | no native `init`; `Inet6Address(String, byte[])` without `NetworkInterface` (outside the world: null in the JDK there); `Inet6AddressHolder.getHostAddress` without the scope's interface (a dropped field) |
 | `Inet4AddressImpl`, `Inet6AddressImpl` | the natives over `HostNet`; `isReachable` throws `UnsupportedOperationException`; the loopback address without asking `NetworkInterface` whether it is bound |
-| `jdk.internal.util.Exceptions` | `jdk.includeInExceptions` from the system property, defaulting to JDK 26's `java.security` value `hostInfoExclSocket` (security properties are not in the Go build) |
+| `jdk.internal.util.Exceptions` | `jdk.includeInExceptions` from the system property, defaulting to JDK 26's `java.security` value `hostInfoExclSocket` (security properties are not in the Go build); merged with go-file's variant of the same class, which took the default alone |
+| `IPAddressUtil` | `parseBsdLiteralV4` walks the text by an index instead of a `java.nio.CharBuffer` (outside the world): IPv4 literal checks, `ofPosixLiteral` |
+| `URLStreamHandler` (go-file's `URL.clj`) | its `hashCode` and `hostsEqual` variants, which compared host names while `InetAddress` was outside the world, are removed: the JDK's code, resolving the host, as on the JVM |
 
 `java.net.Proxy` stays outside the world, a cut class named `Net_Proxy` in Go (c2g's rename
 table: jrt's `java.lang.reflect.Proxy` is `Proxy`). `NetworkInterface`, `URL`, `Proxy`, the
@@ -1882,9 +1884,11 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   table entry when `Properties` is translated; `Properties` came with `Hashtable` and
   `Dictionary` (its superclasses, added).
 - **The servers' start.** The JVM's `RT.doInit` requires `arbace.core.server` and calls
-  `start-servers` with `System.getProperties()`. The Go build's (`arbace/lang/go/RT.clj`) does
-  the same, but requires `arbace.core.server` only when an `arbace.server.*` property exists:
-  loading it costs about 0.5 s of the executable's 4.7 s start today (amendment NT1).
+  `start-servers` with `System.getProperties()`; so does the Go build's
+  (`arbace/lang/go/RT.clj`), through the reflection tables for `getProperties`. With step 6's
+  image of prepared namespaces the load costs about 20 ms (0.36 s against 0.38 s for `-e` with
+  and without a `require` of it; from the sources it took 0.5 s of 4.7 s, and a first version
+  loaded it only when a server was asked for).
 - **Where the properties come from.** The Go executable has no `java` launcher to take `-D`
   options. jrt reads **`JAVA_TOOL_OPTIONS`**, as the JVM does at its start: its `-Dname=value`
   options become system properties (`tooloptions.clj`, split as HotSpot's
@@ -1925,11 +1929,9 @@ RESULTS-SIZE
 
 ## Proposed amendments (for the user's review)
 
-- **NT1** (RT.doInit): the Go build loads `arbace.core.server` at start only when an
-  `arbace.server.*` property asks for a server, where the JVM always loads it (about 0.5 s of
-  the evaluator's start today). Code that calls `arbace.core.server/...` without requiring it
-  works on the JVM only. *Recommended: keep until step 6's image of prepared namespaces makes
-  the load cheap, then load it always, as the JVM.*
+- **NT1** (RT.doInit, C2G-SPEC §10): the Go build's `RT.doInit` loads `arbace.core.server`
+  and starts the servers of the `arbace.server.*` properties as the JVM's does (the comment of
+  the Go variant said it had no socket server). *Recommended: accept.*
 - **NT2** (system properties): `JAVA_TOOL_OPTIONS`' `-D` options are the Go executable's system
   properties (the JVM's mechanism, the same text for both builds); no "Picked up" line is
   printed. Leading `-Dname=value` arguments of the executable, as the `java` launcher takes

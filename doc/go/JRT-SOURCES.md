@@ -241,11 +241,11 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   `Inet4Address`, `Inet6Address`, `InetAddressImpl`, `Inet4AddressImpl`, `Inet6AddressImpl`,
   `SocketOptions`, `SocketOption`, `StandardSocketOptions`, the exceptions `SocketException`,
   `BindException`, `ConnectException`, `NoRouteToHostException`, `UnknownHostException`,
-  `SocketTimeoutException`, and `spi/InetAddressResolver`), `java/io/InterruptedIOException`,
-  `sun/net/PlatformSocketImpl`, `sun/net/util/IPAddressUtil`, `jdk/internal/util/Exceptions`,
-  and `java/util/Hashtable` and `Dictionary` (`Properties`' superclasses, for
-  `System.getProperties()`), all of jdk26u at `baf63fb`: with jrt's two new Java files below,
-  `bin/jrt-convert` translates 370 files, all compiled to javac's shapes but the 4 known.
+  `SocketTimeoutException`, and `spi/InetAddressResolver`), `java/io/InterruptedIOException`
+  and `sun/net/PlatformSocketImpl`, of jdk26u at `baf63fb` (`IPAddressUtil`,
+  `jdk.internal.util.Exceptions` and `Hashtable`, which `System.getProperties()`'s `Properties`
+  extends, came with the files' `file-sources`, below). With both, `bin/jrt-convert` translates
+  415 Java files, all compiled to javac's shapes (411 identical, the 4 known differences).
 - **Other modules' files** (amendment S2, accepted 2026-10-09; C2G-SPEC §16):
   `added-module-sources` lists files of `src/MODULE/share/classes` (paths relative to jdk26u),
   `java.sql.Timestamp` and `java.sql.Date`, which `bin/jrt-convert` copies into java.base's
