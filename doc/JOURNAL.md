@@ -1438,3 +1438,12 @@ decision (2026-10-08).
   `bin/arbace-image`; a new section "The Go executable" (what it is, its numbers, what it leaves
   out, the coming freeze, how to build and run it), which becomes "Arbace for Golang" at the
   freeze; the documentation list gains doc/go/; the licences beyond EPL-1.0.
+- The user's decision: after the freeze, Arbace gets its own version. The REPL's banner says
+  `Arbace <describe> (<short hash>)` in place of `Clojure 1.13.0-master-SNAPSHOT`;
+  `*arbace-version*` and `(arbace-version)` hold `git describe --tags --always --dirty`, the full
+  commit and the dirty flag. In a checkout from git; in a tarball (the Alpine APKBUILD's GitHub
+  archive) from a file filled by `git archive` through `export-subst` (`$Format:%H$`,
+  `$Format:%(describe)$`), deterministic per commit. The Go program takes it as a constant (Go's
+  `-buildvcs` does not apply: the program builds from a generated directory), the jar as a
+  resource, as Clojure's `version.properties`. `*clojure-version*` stays 1.13 for the libraries
+  that test it. On the agenda after the `.ae` rename.

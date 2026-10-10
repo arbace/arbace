@@ -167,8 +167,14 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - After the freeze (the user, 2026-10-10): the `.ae` rename; then c2a, a Clojure → Arbace
     translator (first the mechanical renames `clojure.*` → `arbace.*` that `arbace.j2c.rename`
     does today, later whatever the dialects' divergence needs), and the tools renamed to name
-    Arbace as their target: j2c → j2a, g2c → g2a, and c2g → a2g if it is still needed; then the
-    focus is TamaGo, B1b (the box). Not to be done: XML (SAX), `gen-class`, Java serialization: they stay out of the Go build
+    Arbace as their target: j2c → j2a, g2c → g2a, and c2g → a2g if it is still needed; Arbace's
+    own version: the REPL's banner says `Arbace <git describe> (<short hash>)` instead of
+    `Clojure 1.13.0-master-SNAPSHOT`, with `*arbace-version*`/`(arbace-version)` holding the
+    describe, the full commit and whether the tree was dirty (from `git describe --tags --always
+    --dirty` in a checkout; from a file `git archive` fills through `export-subst` in a tarball);
+    written as a constant into the Go program and a resource into the jar (stage 2 = stage 3
+    still holds); `*clojure-version*` stays, for libraries; then the focus is TamaGo, B1b (the
+    box). Not to be done: XML (SAX), `gen-class`, Java serialization: they stay out of the Go build
     for good (D6). AOT of namespaces to Go is not scheduled.
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
