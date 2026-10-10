@@ -279,7 +279,7 @@ Everything recorded is deterministic; left out:
   user's decision reversing D6 for it (C2G-SPEC §10.4), and `forms/types.clj` checks it (proxies
   of `Object`, of interfaces, of `Writer`, `PushbackReader`, `InputStream` and `OutputStream`,
   `proxy-super`, `update-proxy`, `bean`, pprint's writers). The harvest takes the forms naming
-  `proxy` too (since 2026-10-09; before, `harvest.clj`'s `excluded` and `unsafe` left them out,
+  `proxy` too (amendment Y4, accepted 2026-10-09; C2G-SPEC §16; since 2026-10-09; before, `harvest.clj`'s `excluded` and `unsafe` left them out,
   from when D6 cut it): the suite's proxy tests are in `java_interop.clj` (its `proxy`
   directory only defines the AOT-compiled classes they use), a namespace left out whole, of
   which the harvest keeps the assertions naming `proxy`, `proxy-super`, `update-proxy`,

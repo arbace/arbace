@@ -6,7 +6,7 @@
 (go/package jrt
   :path "arbace/jrt"
   :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "dyn.go"
-          "enum.go" "executor.go" "fdlibm.go" "files.go" "forkjoin.go" "host.go" "locale.go" "locks.go" "math.go" "monitor.go"
+          "enum.go" "executor.go" "fdlibm.go" "files.go" "forkjoin.go" "host.go" "image.go" "locale.go" "locks.go" "math.go" "monitor.go"
           "natives.go" "net.go" "numconv.go" "object.go" "reference.go" "reflect.go" "reflect_array.go"
           "reflect_tables.go" "standin_character.go" "standin_lang.go" "standin_reflect.go"
           "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "thread.go" "threadid.go"
@@ -30,6 +30,7 @@
 (load "jrt/files")
 (load "jrt/forkjoin")
 (load "jrt/host")
+(load "jrt/image")
 (load "jrt/locale")
 (load "jrt/locks")
 (load "jrt/math")
