@@ -74,6 +74,17 @@ the Go frame jrt replaces by the Clojure frame (`isEvalCall`); the `Compiler_Cod
 internal to jrt's mapping, and `CodeHost*` frames hide reflective frames above them, as the
 `EvalIn` frames of the host nodes did (`go/arbace/jrt/throwable.clj`).
 
+**With the suite's last fixes** (main at `5ced273`, EVAL-NOTES.md, SL1 and SL2): the compiled
+paths clear locals as `evalIn` does: a use the analyzer marks `shouldClear` (and the local
+`canBeCleared`, not primitive) reads and clears its slot (`CodeLocalClear`), or in a `^:once` fn
+its closed-over value (`CodeClosedClear`); a fn's or reify's closed-over values are read through
+its `closesExprs`, so their last uses clear too; a local in a `do`'s statement position is
+neither read nor cleared. Hinted calls of methods not listed for `CodeOpN` take
+`Evaluator.invokeResolved` (its invoker directly) when `Evaluator.directOk`, else Reflector, as
+`evalIn` does; the closure compiler's own `call` native is gone (constructors keep
+`Compiler_CodeRun_Construct`). Clojure's `clearing` namespace passes 31 of 31; the benchmarks
+move within the noise.
+
 **The image (step 6)** keeps storing the analyzed `Expr` trees; methods are compiled lazily, at
 their first call, not when the image is replayed: most of core's 1,262 fns are not called at
 start, and code that runs once (the `ns` forms' `refer`, top-level defs) is compiled once
@@ -141,6 +152,9 @@ settings are part a's (D7).
   --expected test/oracle/known-go-amd64.edn`): 20,566 of 20,600, the 34 recorded mismatches, 0
   new, 0 now passing (main merged at `b20b577`, with `java.io.File`; before that merge 20,243 of
   20,276, the 33 then recorded).
+- After merging main at `5ced273` (suite-last): the oracle 20,566 of 20,600, as recorded;
+  Clojure's suite on Go 19,506 of 19,506 assertions (664 tests, `clearing` 31 of 31), no
+  regressions; smoke and `bin/c2g-evalproof` pass.
 - Clojure's suite on Go (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 12`): 19,379 of 19,398
   assertions (646 tests, 0 errors), no regressions against `test/arbace-go-results.edn` (before
   that merge 19,255 of 19,280); `transducers` alone (not skipped) 108 of 108.
