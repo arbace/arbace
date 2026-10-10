@@ -1089,3 +1089,11 @@ decision (2026-10-08).
   takes from the resolved address); Clojure's suite on Go 19,379 of 19,398 assertions, 19
   failures, 0 errors (`method-thunks`, `reader`, `sequences` and `pprint` pass), no regressions.
   `java.io` still fails to load on `ServerSocket` (the sockets agent).
+
+## 2026-10-10: amendments FS1-FS7 accepted and folded
+
+- The user accepted FS1-FS7 (JRT-NOTES.md, "Files"). The agent folded them (`ef9e0c6`): FS1
+  JRT-SOURCES.md (the `unix` source kind); FS2 stays a decision in JRT-NOTES.md, referred to
+  from C2G-SPEC §4.1; FS3 C2G-SPEC §9.4 (an optional `HostFS`); FS4 §4.4's rename table; FS5
+  §8.4 (`RunMain` runs the shutdown hooks); FS6 §4.1 (files in the closed world) and §10.3
+  (namespace variants); FS7 LICENSE.md, kept. C2G-SPEC §16 has a "Files" entry.

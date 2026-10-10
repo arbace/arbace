@@ -141,7 +141,7 @@ fallbacks of `arbace/core_classes.clj` are gone.
     the essential `bin/gate` smoke-tests the Go executable, cached by a hash of its inputs
     (seconds on a hit, about 5 minutes beside the suite on a miss).
   - Done (2026-10-10): `java.io.File`, the file system, `java.net.URL` for `file:` and a small
-    `java.nio.file` (JRT-NOTES.md "Files", amendments FS1-FS7 to review); Clojure's suite on Go
+    `java.nio.file` (JRT-NOTES.md "Files", amendments FS1-FS7 accepted and folded); Clojure's suite on Go
     19,379 of 19,398 assertions, 0 errors.
   - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
     compilation), and feature completion: class forms in the REPL, sockets and
