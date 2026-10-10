@@ -113,7 +113,7 @@ fallbacks of `arbace/core_classes.clj` are gone.
   (TamaGo, arm64) later as B1b. Decided: c2g + jrt, an evaluator first, Java's UTF-16 strings,
   a port of `java.util.regex`, a first REPL without the class forms, `gen-class`, `proxy`.
   B1a ends with a freeze (a branch and tag, as for Java 26; proposed branch
-  `arbace-for-golang`, tag `arbace-for-go1.27.1`) and includes `linux/arm64`, tested
+  `arbace-for-golang`, tag `arbace-for-go1.27.1-v1`) and includes `linux/arm64`, tested
   under `qemu-aarch64`. Step 0 done (the round trip for linux/amd64 and arm64; `bin/g2c build`,
   static executables for both). Step 1 done: the Java surface measured
   ([go/JAVA-SURFACE.md](go/JAVA-SURFACE.md)), its seven decisions taken. Step 2 done: the c2g spec
@@ -146,10 +146,16 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Done (2026-10-10): the suite's last failures (EVAL-NOTES.md, SL1-SL7): Clojure's suite on Go
     19,506 of 19,506 assertions (65 namespaces, `java.io` waits for sockets; 20 skipped, by D6,
     the Java fixtures and `seq-and-transducer`'s time); test.generative runs on Go.
+  - Done (2026-10-10): step 7 (7a runtime, 7b the evaluator's closure compilation; D7 closed),
+    sockets and the socket REPL, regex resources, class forms at the REPL, java.util completed
+    (JAVA-BASE.md), the monitor race. Clojure's suite on Go 19,628 of 19,632 (66 namespaces);
+    the Go oracle as recorded (8 known mismatches).
   - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
     compilation), and feature completion: class forms in the REPL, sockets and
     the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
     (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
+  - The jlinked images become headless (the user, 2026-10-10): no java.desktop; with the Alpine
+    package work, then main's `bin/arbace-image`.
   - Before the freeze: an assessment of how much of `java.base` jrt implements (the user's
     request, an agent; `doc/go/JAVA-BASE.md`); SL3's per-namespace timeouts once step 7 lands;
     the agents-without-`shutdown-agents` deadlock found by step 7a.

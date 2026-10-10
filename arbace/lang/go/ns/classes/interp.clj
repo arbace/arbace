@@ -46,10 +46,10 @@
 (defn klass
   "The Klass of internal name n when n is an interpreted class (of this compilation, or defined
   earlier and still the class of that name), else nil."
-  ^Compiler$CF$Klass [n]
+  ^arbace.lang.Compiler$CF$Klass [n]
   (when (string? n)
     (or (get *klasses* n)
-        (when-let [^Compiler$CF$Klass k (get @registry n)]
+        (when-let [^arbace.lang.Compiler$CF$Klass k (get @registry n)]
           ;; on Go the name may have been taken by a class made since (deftype); on the JVM's
           ;; test host there are no Class objects
           (if (or (nil? (.-cls k)) (identical? (.-cls k) (env/load-class n))) k nil)))))
@@ -68,7 +68,7 @@
         (keyword? ty) \L
         :else (let [c (.charAt ^String ty 0)] (if (or (= c \L) (= c \[)) \L c))))
 
-(defn kind [ty] (Compiler$CF$Rt/kind (char (tc ty))))
+(defn kind [ty] (arbace.lang.Compiler$CF$Rt/kind (char (tc ty))))
 
 (def ^:private prim-classes
   {"I" Integer/TYPE "J" Long/TYPE "S" Short/TYPE "B" Byte/TYPE "C" Character/TYPE
@@ -121,10 +121,10 @@
 
 (declare node coerce)
 
-(defn ^Compiler$CF$Node konst [ty v] (Compiler$CF$Const. (char (tc ty)) v))
+(defn ^arbace.lang.Compiler$CF$Node konst [ty v] (arbace.lang.Compiler$CF$Const. (char (tc ty)) v))
 
 (defn nodes ^"[Larbace.lang.Compiler$CF$Node;" [xs]
-  (into-array Compiler$CF$Node xs))
+  (into-array arbace.lang.Compiler$CF$Node xs))
 
 (defn- target-code [id rec?] (+ (* 2 id) (if rec? 1 0)))
 
@@ -133,25 +133,25 @@
 (defn instance-fields
   "The instance fields of interpreted class n in order: [{:name :desc :flags :owner}], its
   superclasses' first; then the hidden ones (this$0, val$x)."
-  [^Compiler$CF$Klass k]
+  [^arbace.lang.Compiler$CF$Klass k]
   (:fields (.-info k)))
 
 (defn field-index
   "The index of field `fname` of interpreted class k (or of an interpreted superclass), or nil."
-  [^Compiler$CF$Klass k fname]
+  [^arbace.lang.Compiler$CF$Klass k fname]
   (loop [k k]
     (when k
       (if-let [i (get (:field-index (.-info k)) fname)]
         i
         (recur (.-sup k))))))
 
-(defn static-index [^Compiler$CF$Klass k fname]
+(defn static-index [^arbace.lang.Compiler$CF$Klass k fname]
   (get (:static-index (.-info k)) fname))
 
 (defn- find-static
   "[Klass index] of static field fname as seen from interpreted class k (its own, its
   superclasses', its interfaces'), or nil."
-  [^Compiler$CF$Klass k fname]
+  [^arbace.lang.Compiler$CF$Klass k fname]
   (when k
     (if-let [i (static-index k fname)]
       [k i]
@@ -183,7 +183,7 @@
     (or (when-let [sc (.-superClass k)] (find-method sc mname desc))
         (some #(find-method % mname desc) (seq (.-interfaces k)))
         (when (.-sup k) (real-method (.-iname (.-sup k)) mname desc))
-        (some #(real-method (.-iname ^Compiler$CF$Klass %) mname desc) (seq (.-ifaces k))))
+        (some #(real-method (.-iname ^arbace.lang.Compiler$CF$Klass %) mname desc) (seq (.-ifaces k))))
     (when-let [c (env/load-class owner)]
       (find-method c mname desc))))
 
@@ -203,15 +203,15 @@
   [ctx b]
   (let [ty (:type b)]
     (if-let [[_ i] (get @(:slots ctx) (:id b))]
-      (Compiler$CF$Local. (char (tc ty)) (int i))
+      (arbace.lang.Compiler$CF$Local. (char (tc ty)) (int i))
       (if (or (:receiver b) (:slot0 b))
         (if (neg? (:self ctx))
           (fail (str "No receiver here: " (:sym b)))
-          (Compiler$CF$Local. \L (int (:self ctx))))
+          (arbace.lang.Compiler$CF$Local. \L (int (:self ctx))))
         (let [k (:klass ctx)
               i (when k (get (:capture-index (.-info k)) (:id b)))]
           (if (and i (>= (:self ctx) 0))
-            (Compiler$CF$SelfField. (char (tc ty)) (int (:self ctx)) (int i))
+            (arbace.lang.Compiler$CF$SelfField. (char (tc ty)) (int (:self ctx)) (int i))
             (fail (str "Local not available here: " (:sym b)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -220,15 +220,15 @@
 (defn convert
   "Node n (of type from) as a value of type `to`, converted as the JVM converts: primitive
   widening and narrowing, boxing by the value's own type, unboxing a wrapper."
-  [^Compiler$CF$Node n from to]
+  [^arbace.lang.Compiler$CF$Node n from to]
   (let [from (a/value-type from)]
     (cond
       (or (= from :none) (= from to) (= to "V") (nil? to) (= from :null)) n
       (and (t/prim? from) (t/prim? to))
-      (if (= (tc from) (tc to)) n (Compiler$CF$Conv. (char (tc to)) (char (tc from)) n))
-      (t/prim? from) (Compiler$CF$Boxing. (char (tc from)) n)
+      (if (= (tc from) (tc to)) n (arbace.lang.Compiler$CF$Conv. (char (tc to)) (char (tc from)) n))
+      (t/prim? from) (arbace.lang.Compiler$CF$Boxing. (char (tc from)) n)
       (t/prim? to) (let [w (get t/unbox-of from)]
-                     (Compiler$CF$Unbox. (char (tc to)) (char (if w (tc w) \L)) n))
+                     (arbace.lang.Compiler$CF$Unbox. (char (tc to)) (char (if w (tc w) \L)) n))
       :else n)))
 
 (defn coerce
@@ -241,19 +241,19 @@
 (defn value-convert
   "Node n of type from as type to, also by checkcast and by unboxing from a non-wrapper
   (method references, bridges: LambdaMetafactory's and javac's adaptations)."
-  [^Compiler$CF$Node n from to]
+  [^arbace.lang.Compiler$CF$Node n from to]
   (cond
     (or (= from to) (= to "V")) n
     (and (t/prim? from) (t/prim? to)) (convert n from to)
-    (t/prim? from) (let [b (Compiler$CF$Boxing. (char (tc from)) n)]
+    (t/prim? from) (let [b (arbace.lang.Compiler$CF$Boxing. (char (tc from)) n)]
                      (if (#{"Ljava/lang/Object;" (t/internal->desc (t/box-of from))} to)
                        b
-                       (Compiler$CF$CheckCast. (desc->class to) (klass (t/desc->internal to)) b)))
+                       (arbace.lang.Compiler$CF$CheckCast. (desc->class to) (klass (t/desc->internal to)) b)))
     (t/prim? to) (let [w (t/internal->desc (t/box-of to))
-                       n (if (= from w) n (Compiler$CF$CheckCast. (desc->class w) nil n))]
-                   (Compiler$CF$Unbox. (char (tc to)) (char (tc to)) n))
+                       n (if (= from w) n (arbace.lang.Compiler$CF$CheckCast. (desc->class w) nil n))]
+                   (arbace.lang.Compiler$CF$Unbox. (char (tc to)) (char (tc to)) n))
     (or (= to "Ljava/lang/Object;") (and (string? from) (env/assignable? from to))) n
-    :else (Compiler$CF$CheckCast. (desc->class to) (when (t/class-desc? to) (klass (t/desc->internal to))) n)))
+    :else (arbace.lang.Compiler$CF$CheckCast. (desc->class to) (when (t/class-desc? to) (klass (t/desc->internal to))) n)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the nodes
@@ -270,7 +270,7 @@
 
 (defn node
   "The interpreter's node of analyzed node an."
-  ^Compiler$CF$Node [ctx an]
+  ^arbace.lang.Compiler$CF$Node [ctx an]
   (build-op ctx an))
 
 (defmethod build-op :default [ctx an]
@@ -287,7 +287,7 @@
 (defmethod build-op :set-local [ctx an]
   (let [b (:b an)
         [_ i] (or (get @(:slots ctx) (:id b)) (fail (str "set! of a local not in this frame: " (:sym b))))]
-    (Compiler$CF$SetLocal. (char (tc (:type b))) (int i) (coerce ctx (:val an) (:type b)))))
+    (arbace.lang.Compiler$CF$SetLocal. (char (tc (:type b))) (int i) (coerce ctx (:val an) (:type b)))))
 
 (defn- this0-index
   "The index of the this$0 field of interpreted class c."
@@ -299,11 +299,11 @@
 (defmethod build-op :this-path [ctx an]
   (if (neg? (:self ctx))
     (fail "No receiver for an outer instance here")
-    (Compiler$CF$OuterPath. (Compiler$CF$Local. \L (int (:self ctx)))
+    (arbace.lang.Compiler$CF$OuterPath. (arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))
                             (int-array (map this0-index (:path an))))))
 
 (defmethod build-op :outer-param-path [ctx an]
-  (Compiler$CF$OuterPath. (node ctx (:base an)) (int-array (map this0-index (:path an)))))
+  (arbace.lang.Compiler$CF$OuterPath. (node ctx (:base an)) (int-array (map this0-index (:path an)))))
 
 (defmethod build-op :class-lit [ctx an]
   (konst "Ljava/lang/Class;" (let [d (:class an)]
@@ -315,18 +315,18 @@
   (convert (node ctx (:expr an)) (:from an) (:to an)))
 
 (defmethod build-op :null-checked [ctx an]
-  (Compiler$CF$NullChecked. (node ctx (:expr an))))
+  (arbace.lang.Compiler$CF$NullChecked. (node ctx (:expr an))))
 
 (defmethod build-op :cast [ctx an]
   (let [e (node ctx (:expr an))]
     (if (= :none (:type (:expr an)))
       e
       (let [d (:class an)]
-        (Compiler$CF$CheckCast. (desc->class d) (when (t/class-desc? d) (klass (t/desc->internal d))) e)))))
+        (arbace.lang.Compiler$CF$CheckCast. (desc->class d) (when (t/class-desc? d) (klass (t/desc->internal d))) e)))))
 
 (defmethod build-op :instance? [ctx an]
   (let [d (:class an)]
-    (Compiler$CF$IsInst. (desc->class d) (when (t/class-desc? d) (klass (t/desc->internal d)))
+    (arbace.lang.Compiler$CF$IsInst. (desc->class d) (when (t/class-desc? d) (klass (t/desc->internal d)))
                              (node ctx (:expr an)))))
 
 (defmethod build-op :arith [ctx an]
@@ -335,27 +335,27 @@
         op (int (or (arith-ops o) (fail (str "arith " o))))
         [x y] args]
     (case (tc ty)
-      (\F \D) (Compiler$CF$ArithD. (char (tc ty)) op (coerce ctx x ty) (when y (coerce ctx y ty)))
-      (\I \J) (Compiler$CF$ArithJ. (char (tc ty)) op (boolean (= family :exact))
+      (\F \D) (arbace.lang.Compiler$CF$ArithD. (char (tc ty)) op (coerce ctx x ty) (when y (coerce ctx y ty)))
+      (\I \J) (arbace.lang.Compiler$CF$ArithJ. (char (tc ty)) op (boolean (= family :exact))
                                    (coerce ctx x ty)
                                    (when y (if (#{:shl :shr :ushr} o) (node ctx y) (coerce ctx y ty))))
       (fail (str "arith of type " ty)))))
 
 (defmethod build-op :compare [ctx an]
   (let [{:keys [cmp t args]} an]
-    (Compiler$CF$Cmp. (int (cmp-ops cmp)) (boolean (#{"F" "D"} t))
+    (arbace.lang.Compiler$CF$Cmp. (int (cmp-ops cmp)) (boolean (#{"F" "D"} t))
                       (coerce ctx (first args) t) (coerce ctx (second args) t))))
 
-(defmethod build-op :not [ctx an] (Compiler$CF$Test. 0 (node ctx (:expr an)) nil))
-(defmethod build-op :nil? [ctx an] (Compiler$CF$Test. 1 (node ctx (:expr an)) nil))
+(defmethod build-op :not [ctx an] (arbace.lang.Compiler$CF$Test. 0 (node ctx (:expr an)) nil))
+(defmethod build-op :nil? [ctx an] (arbace.lang.Compiler$CF$Test. 1 (node ctx (:expr an)) nil))
 (defmethod build-op :identical? [ctx an]
-  (Compiler$CF$Test. 2 (node ctx (first (:args an))) (node ctx (second (:args an)))))
+  (arbace.lang.Compiler$CF$Test. 2 (node ctx (first (:args an))) (node ctx (second (:args an)))))
 (defmethod build-op :bool= [ctx an]
-  (Compiler$CF$Test. 3 (coerce ctx (first (:args an)) "Z") (coerce ctx (second (:args an)) "Z")))
+  (arbace.lang.Compiler$CF$Test. 3 (coerce ctx (first (:args an)) "Z") (coerce ctx (second (:args an)) "Z")))
 
 (defn- and-or [ctx an or?]
   (let [ty (vt an)]
-    (Compiler$CF$AndOr. (char (tc ty)) (boolean or?)
+    (arbace.lang.Compiler$CF$AndOr. (char (tc ty)) (boolean or?)
                         (nodes (map #(if (= "Z" ty) (node ctx %) (coerce ctx % ty)) (:args an))))))
 
 (defmethod build-op :and [ctx an] (and-or ctx an false))
@@ -364,10 +364,10 @@
 (defmethod build-op :if [ctx an]
   (let [ty (vt an)
         branch (fn [b] (if (#{:none :null} ty) (node ctx b) (coerce ctx b ty)))]
-    (Compiler$CF$If. (char (tc ty)) (node ctx (:test an)) (branch (:then an)) (branch (:else an)))))
+    (arbace.lang.Compiler$CF$If. (char (tc ty)) (node ctx (:test an)) (branch (:then an)) (branch (:else an)))))
 
 (defmethod build-op :do [ctx an]
-  (Compiler$CF$Do. (char (tc (vt an))) (nodes (map #(node ctx %) (:statements an))) (node ctx (:ret an))))
+  (arbace.lang.Compiler$CF$Do. (char (tc (vt an))) (nodes (map #(node ctx %) (:statements an))) (node ctx (:ret an))))
 
 (defn- let-node [ctx an loop?]
   (let [ty (vt an)
@@ -390,7 +390,7 @@
                          :type ty})
               ctx)
         body (node ctx (:body an))]
-    (Compiler$CF$Let. (char (tc ty)) (int-array (map first parts)) (char-array (map second parts))
+    (arbace.lang.Compiler$CF$Let. (char (tc ty)) (int-array (map first parts)) (char-array (map second parts))
                       (nodes (map #(nth % 2) parts)) body
                       (int (if loop? (target-code tid false) 0))
                       (int (if loop? (target-code tid true) 0)))))
@@ -402,31 +402,31 @@
   (let [ty (vt an)
         tid (:id (:target an))
         ctx (assoc-in ctx [:targets tid] {:brk (target-code tid false) :type ty})]
-    (Compiler$CF$Labeled. (char (tc ty)) (node ctx (:body an)) (int (target-code tid false)))))
+    (arbace.lang.Compiler$CF$Labeled. (char (tc ty)) (node ctx (:body an)) (int (target-code tid false)))))
 
 (defmethod build-op :break [ctx an]
   (let [tg (or (get (:targets ctx) (:id (:target an))) (fail "break target not in scope"))
         ty (:type tg)
         v (:val an)]
     (cond
-      (#{:none "V"} ty) (Compiler$CF$Jump. (int (:brk tg)) \V (when v (node ctx v)))
-      (= :null ty) (Compiler$CF$Jump. (int (:brk tg)) \L (when v (node ctx v)))
-      :else (Compiler$CF$Jump. (int (:brk tg)) (char (kind ty)) (when v (coerce ctx v ty))))))
+      (#{:none "V"} ty) (arbace.lang.Compiler$CF$Jump. (int (:brk tg)) \V (when v (node ctx v)))
+      (= :null ty) (arbace.lang.Compiler$CF$Jump. (int (:brk tg)) \L (when v (node ctx v)))
+      :else (arbace.lang.Compiler$CF$Jump. (int (:brk tg)) (char (kind ty)) (when v (coerce ctx v ty))))))
 
 (defmethod build-op :recur [ctx an]
   (let [tg (or (get (:targets ctx) (:id (:target an))) (fail "recur target not in scope"))
         args (:args an)]
-    (Compiler$CF$Recur. (int (:rec tg)) (int-array (:slots tg)) (char-array (:kinds tg))
+    (arbace.lang.Compiler$CF$Recur. (int (:rec tg)) (int-array (:slots tg)) (char-array (:kinds tg))
                         (nodes (map (fn [a ty] (coerce ctx a ty)) args (:types tg))))))
 
 (defmethod build-op :return [ctx an]
   (let [ret (:ret ctx)
         v (:val an)]
     (if (= ret "V")
-      (Compiler$CF$Jump. Compiler$CF$Rt/RETURN \V (when v (node ctx v)))
-      (Compiler$CF$Jump. Compiler$CF$Rt/RETURN (char (kind ret)) (coerce ctx v ret)))))
+      (arbace.lang.Compiler$CF$Jump. arbace.lang.Compiler$CF$Rt/RETURN \V (when v (node ctx v)))
+      (arbace.lang.Compiler$CF$Jump. arbace.lang.Compiler$CF$Rt/RETURN (char (kind ret)) (coerce ctx v ret)))))
 
-(defmethod build-op :throw [ctx an] (Compiler$CF$Throw. (node ctx (:expr an))))
+(defmethod build-op :throw [ctx an] (arbace.lang.Compiler$CF$Throw. (node ctx (:expr an))))
 
 (defmethod build-op :try [ctx an]
   (let [ty (vt an)
@@ -438,9 +438,9 @@
         slots (mapv (fn [c] (bind! ctx (:b c))) catches)
         handlers (mapv (fn [c] (conv (:body c))) catches)
         flat (for [[ci c] (map-indexed vector catches) cn (:classes c)] [ci cn])]
-    (Compiler$CF$Try. (char (tc ty)) body
+    (arbace.lang.Compiler$CF$Try. (char (tc ty)) body
                       (into-array Class (map (fn [[_ cn]] (if (klass cn) nil (internal->class cn))) flat))
-                      (into-array Compiler$CF$Klass (map (fn [[_ cn]] (klass cn)) flat))
+                      (into-array arbace.lang.Compiler$CF$Klass (map (fn [[_ cn]] (klass cn)) flat))
                       (int-array (map first flat))
                       (int-array slots)
                       (nodes handlers)
@@ -449,7 +449,7 @@
 
 (defmethod build-op :monitor [ctx an]
   (let [ty (vt an)]
-    (Compiler$CF$Monitor. (char (tc ty)) (node ctx (:lock an)) (node ctx (:body an)))))
+    (arbace.lang.Compiler$CF$Monitor. (char (tc ty)) (node ctx (:lock an)) (node ctx (:body an)))))
 
 (defmethod build-op :assert [ctx an]
   ;; $assertionsDisabled: assertions are off unless enabled (java -ea), as on the JVM by default
@@ -466,7 +466,7 @@
 (defn method-of
   "The Meth of interpreted class k declaring or inheriting method key (non-virtual lookup:
   its own, then its superclasses', then its interfaces' defaults and statics)."
-  ^Compiler$CF$Meth [^Compiler$CF$Klass k key]
+  ^arbace.lang.Compiler$CF$Meth [^arbace.lang.Compiler$CF$Klass k key]
   (when k
     (or (.declared k key)
         (method-of (.-sup k) key)
@@ -479,39 +479,39 @@
         k (when-not (t/array? owner) (klass owner))]
     (cond
       (:array-clone an)
-      (let [n (Compiler$CF$ArrayClone. (node ctx target))]
+      (let [n (arbace.lang.Compiler$CF$ArrayClone. (node ctx target))]
         (if (:no-cast an) n
-            (let [d (or (:cast-to an) owner)] (Compiler$CF$CheckCast. (desc->class d) nil n))))
+            (let [d (or (:cast-to an) owner)] (arbace.lang.Compiler$CF$CheckCast. (desc->class d) nil n))))
 
       (= kind :static)
       (if k
-        (Compiler$CF$CallI. (char (tc ty)) (or (method-of k key) (fail (str "No method " key " in " owner)))
+        (arbace.lang.Compiler$CF$CallI. (char (tc ty)) (or (method-of k key) (fail (str "No method " key " in " owner)))
                             nil (arg-nodes ctx args desc))
-        (Compiler$CF$CallR. (char (tc ty)) (or (real-method owner name desc) (fail (str "No method " owner "." key)))
+        (arbace.lang.Compiler$CF$CallR. (char (tc ty)) (or (real-method owner name desc) (fail (str "No method " owner "." key)))
                             nil (arg-nodes ctx args desc) (ptypes desc)))
 
       (= kind :special)
       (let [tn (coerce ctx target (if (t/array? owner) owner (t/internal->desc owner)))]
         (cond
           (and k (method-of k key))
-          (Compiler$CF$CallI. (char (tc ty)) (method-of k key) tn (arg-nodes ctx args desc))
+          (arbace.lang.Compiler$CF$CallI. (char (tc ty)) (method-of k key) tn (arg-nodes ctx args desc))
           (and (#{"toString" "hashCode" "equals"} name)
                (= (real-method owner name desc) (find-method Object name desc)))
-          (Compiler$CF$ObjectCall. (char (tc ty)) name tn (when (seq args) (coerce ctx (first args) "Ljava/lang/Object;")))
+          (arbace.lang.Compiler$CF$ObjectCall. (char (tc ty)) name tn (when (seq args) (coerce ctx (first args) "Ljava/lang/Object;")))
           :else
           ;; a method of the nearest superclass of the world (super.m())
           (let [c (loop [k k] (if k (if (.-sup k) (recur (.-sup k)) (.-superClass k)) (internal->class owner)))]
-            (Compiler$CF$SuperCall. (char (tc ty)) c key tn (arg-nodes ctx args desc) (ptypes desc)))))
+            (arbace.lang.Compiler$CF$SuperCall. (char (tc ty)) c key tn (arg-nodes ctx args desc) (ptypes desc)))))
 
       :else
       (let [tt (a/value-type (:type target))
             tn (coerce ctx target (if (t/array? tt) tt (t/internal->desc owner)))
             rm (real-method owner name desc)]
         (if (or k (nil? rm) true)
-          (Compiler$CF$CallV. (char (tc ty)) key rm tn (arg-nodes ctx args desc) (ptypes desc))
-          (Compiler$CF$CallR. (char (tc ty)) rm tn (arg-nodes ctx args desc) (ptypes desc)))))))
+          (arbace.lang.Compiler$CF$CallV. (char (tc ty)) key rm tn (arg-nodes ctx args desc) (ptypes desc))
+          (arbace.lang.Compiler$CF$CallR. (char (tc ty)) rm tn (arg-nodes ctx args desc) (ptypes desc)))))))
 
-(defn- ctor-meth [^Compiler$CF$Klass k desc]
+(defn- ctor-meth [^arbace.lang.Compiler$CF$Klass k desc]
   (or (.get (.-ctors k) desc) (fail (str "No constructor " desc " in " (.-name k)))))
 
 (defn- implicit-fields
@@ -539,7 +539,7 @@
         (:super-outer an) [[i (node ctx (:super-outer an))]]
         (:super-outer-is-outer d) (when (:outer an) [[i (node ctx (:outer an))]])
         (:super-outer-path d) (when (:outer an)
-                                [[i (Compiler$CF$OuterPath. (node ctx (:outer an))
+                                [[i (arbace.lang.Compiler$CF$OuterPath. (node ctx (:outer an))
                                                             (int-array (map this0-index (:super-outer-path d))))]])
         :else nil))))
 
@@ -549,7 +549,7 @@
         k (klass cn)]
     (if k
       (let [xs (vec (concat (implicit-fields ctx cn (:outer an)) (super-outer-fields ctx cn an)))]
-        (Compiler$CF$NewI. k (ctor-meth k (:desc m))
+        (arbace.lang.Compiler$CF$NewI. k (ctor-meth k (:desc m))
                            (nodes (concat (when-let [ec (:enum-const an)]
                                             [(konst "Ljava/lang/String;" (:name ec)) (konst "I" (int (:ordinal ec)))])
                                           (arg-nodes ctx (:args an) (:desc m))))
@@ -566,9 +566,9 @@
                           (fail (str "No constructor " (:desc m) " of " cn)))))]
         (if (nil? ctor)
           ;; jrt's MatchException has no member table: Rt/matchException
-          (Compiler$CF$CallR. \L (find-method Compiler$CF$Rt "matchException" "(Ljava/lang/String;Ljava/lang/Throwable;)Ljava/lang/RuntimeException;")
+          (arbace.lang.Compiler$CF$CallR. \L (find-method arbace.lang.Compiler$CF$Rt "matchException" "(Ljava/lang/String;Ljava/lang/Throwable;)Ljava/lang/RuntimeException;")
                               nil (nodes (map (fn [a ty] (coerce ctx a ty)) (:args an) ps)) (char-array [\L \L]))
-        (Compiler$CF$NewR. ctor
+        (arbace.lang.Compiler$CF$NewR. ctor
                            (nodes (concat (when outer? [(node ctx (:outer an))])
                                           (map (fn [a ty] (coerce ctx a ty)) (:args an) ps)))
                            (char-array (map tc real))))))))
@@ -595,8 +595,8 @@
       (= fname "$assertionsDisabled") (konst "Z" true)
       (klass owner) (let [[sk i] (or (find-static (klass owner) fname)
                                      (fail (str "No static field " fname " in " owner)))]
-                      (Compiler$CF$GetStatic. (char (tc ty)) sk (int i)))
-      :else (Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
+                      (arbace.lang.Compiler$CF$GetStatic. (char (tc ty)) sk (int i)))
+      :else (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                                     (fail (str "No field " owner "." fname)))
                                  nil nil))))
 
@@ -607,8 +607,8 @@
         ty (:desc f)]
     (if (klass owner)
       (let [[sk i] (or (find-static (klass owner) fname) (fail (str "No static field " fname " in " owner)))]
-        (Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty)))
-      (Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
+        (arbace.lang.Compiler$CF$SetStatic. (char (tc ty)) sk (int i) (coerce ctx (:val an) ty)))
+      (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) fname)
                                               (fail (str "No field " owner "." fname)))
                            nil (coerce ctx (:val an) ty)))))
 
@@ -618,9 +618,9 @@
         ty (:desc f)
         tn (coerce ctx (:target an) (t/internal->desc owner))]
     (if-let [k (klass owner)]
-      (Compiler$CF$GetField. (char (tc ty)) tn (int (or (field-index k (:name f))
+      (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int (or (field-index k (:name f))
                                                         (fail (str "No field " (:name f) " in " owner)))))
-      (Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) (:name f))
+      (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) (:name f))
                                               (fail (str "No field " owner "." (:name f))))
                            tn nil))))
 
@@ -631,26 +631,26 @@
         tn (coerce ctx (:target an) (t/internal->desc owner))
         v (coerce ctx (:val an) ty)]
     (if-let [k (klass owner)]
-      (Compiler$CF$SetField. (char (tc ty)) tn (int (or (field-index k (:name f))
+      (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int (or (field-index k (:name f))
                                                         (fail (str "No field " (:name f) " in " owner))))
                              v)
       (let [fd (or (find-field (internal->class owner) (:name f)) (fail (str "No field " owner "." (:name f))))]
-        (Compiler$CF$FieldR. (char (tc ty)) fd tn v)))))
+        (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn v)))))
 
 (defmethod build-op :var-deref [ctx an]
   (let [f (:field an)
         v (clj-const-value (:owner f) (:name f))]
     (if (instance? arbace.lang.Var v)
-      (Compiler$CF$VarDeref. v)
+      (arbace.lang.Compiler$CF$VarDeref. v)
       (fail (str "No var for " (:name f))))))
 
 (defmethod build-op :var-invoke [ctx an]
   (let [f (:field an)
         v (clj-const-value (:owner f) (:name f))]
-    (Compiler$CF$VarInvoke. v (nodes (map #(coerce ctx % "Ljava/lang/Object;") (:args an))))))
+    (arbace.lang.Compiler$CF$VarInvoke. v (nodes (map #(coerce ctx % "Ljava/lang/Object;") (:args an))))))
 
 (defmethod build-op :fi-adapter [ctx an]
-  (Compiler$CF$FiAdapter. (desc->class (:type an)) (node ctx (:expr an))))
+  (arbace.lang.Compiler$CF$FiAdapter. (desc->class (:type an)) (node ctx (:expr an))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; arrays, strings
@@ -659,24 +659,24 @@
   (let [d (:type an)
         dims (:dims an)
         comp (nth (iterate t/elem-type d) (count dims))]
-    (Compiler$CF$NewArray. (desc->class comp) (nodes (map #(coerce ctx % "I") dims)))))
+    (arbace.lang.Compiler$CF$NewArray. (desc->class comp) (nodes (map #(coerce ctx % "I") dims)))))
 
 (defmethod build-op :array-init [ctx an]
   (let [et (t/elem-type (:type an))]
-    (Compiler$CF$ArrayInit. (desc->class et) (char (tc et)) (nodes (map #(coerce ctx % et) (:elems an))))))
+    (arbace.lang.Compiler$CF$ArrayInit. (desc->class et) (char (tc et)) (nodes (map #(coerce ctx % et) (:elems an))))))
 
 (defmethod build-op :aget [ctx an]
-  (Compiler$CF$Aget. (char (tc (:type an))) (node ctx (:array an)) (coerce ctx (:index an) "I")))
+  (arbace.lang.Compiler$CF$Aget. (char (tc (:type an))) (node ctx (:array an)) (coerce ctx (:index an) "I")))
 
 (defmethod build-op :aset [ctx an]
   (let [et (:type an)]
-    (Compiler$CF$Aset. (char (tc et)) (node ctx (:array an)) (coerce ctx (:index an) "I") (coerce ctx (:val an) et))))
+    (arbace.lang.Compiler$CF$Aset. (char (tc et)) (node ctx (:array an)) (coerce ctx (:index an) "I") (coerce ctx (:val an) et))))
 
-(defmethod build-op :alength [ctx an] (Compiler$CF$Alength. (node ctx (:array an))))
+(defmethod build-op :alength [ctx an] (arbace.lang.Compiler$CF$Alength. (node ctx (:array an))))
 
 (defmethod build-op :java-str [ctx an]
   (let [parts (:parts an)]
-    (Compiler$CF$JavaStr. (into-array String (map (fn [p] (cond (:node p) nil
+    (arbace.lang.Compiler$CF$JavaStr. (into-array String (map (fn [p] (cond (:node p) nil
                                                                 (contains? p :tag-const) (str (:tag-const p))
                                                                 :else (:literal p)))
                                                   parts))
@@ -698,7 +698,7 @@
         ctx2 (assoc-in ctx [:targets tid] {:brk (target-code tid false) :rec (target-code tid true)
                                            :slots [] :kinds [] :types [] :type :null})]
     ;; the iterator variant evaluates (:iterator an), the hidden it slot holds the iterator
-    (Compiler$CF$ForEach. (char (tc (vt an))) coll array? (int arr) (int len) (int i) elem (int slot)
+    (arbace.lang.Compiler$CF$ForEach. (char (tc (vt an))) coll array? (int arr) (int len) (int i) elem (int slot)
                           (char (kind (:type b))) (node ctx2 (:body an))
                           (int (target-code tid false)) (int (target-code tid true)))))
 
@@ -711,15 +711,15 @@
   (let [owner (:owner acc)
         key (str (:name acc) (:desc acc))
         ty (subs (:desc acc) 2)
-        target (Compiler$CF$Local. \L (int slot))]
+        target (arbace.lang.Compiler$CF$Local. \L (int slot))]
     (if-let [k (klass owner)]
-      (Compiler$CF$CallI. (char (tc ty)) (or (method-of k key) (fail (str "No accessor " key))) target (nodes []))
-      (Compiler$CF$CallR. (char (tc ty)) (real-method owner (:name acc) (:desc acc)) target (nodes []) (char-array [])))))
+      (arbace.lang.Compiler$CF$CallI. (char (tc ty)) (or (method-of k key) (fail (str "No accessor " key))) target (nodes []))
+      (arbace.lang.Compiler$CF$CallR. (char (tc ty)) (real-method owner (:name acc) (:desc acc)) target (nodes []) (char-array [])))))
 
 (defn pattern
   "The Pat of pattern p."
-  ^Compiler$CF$Pat [ctx p]
-  (let [pt (Compiler$CF$Pat.)
+  ^arbace.lang.Compiler$CF$Pat [ctx p]
+  (let [pt (arbace.lang.Compiler$CF$Pat.)
         cd (:class p)]
     (set! (.-test pt) (boolean (:test p)))
     (when (t/class-desc? cd)
@@ -733,7 +733,7 @@
       :record (let [s (slot! ctx "Ljava/lang/Object;")]
                 (set! (.-slot pt) (int s))
                 (set! (.-accessors pt) (nodes (map #(accessor-node ctx (:accessor %) s) (:comps p))))
-                (set! (.-comps pt) (into-array Compiler$CF$Pat (map #(pattern ctx (:pattern %)) (:comps p))))))
+                (set! (.-comps pt) (into-array arbace.lang.Compiler$CF$Pat (map #(pattern ctx (:pattern %)) (:comps p))))))
     pt))
 
 (defmethod build-op :if-instance [ctx an]
@@ -741,7 +741,7 @@
         e (node ctx (:expr an))
         pt (pattern ctx (:pattern an))
         br (fn [b] (if (#{:none :null "V"} ty) (node ctx b) (coerce ctx b ty)))]
-    (Compiler$CF$IfInstance. (char (tc ty)) e pt (br (:then an)) (br (:else an)))))
+    (arbace.lang.Compiler$CF$IfInstance. (char (tc ty)) e pt (br (:then an)) (br (:else an)))))
 
 (defmethod build-op :switch [ctx an]
   (let [ty (vt an)
@@ -767,9 +767,9 @@
     (let [pats (when (= kind :pattern) (mapv (fn [[_ l]] (when (:pattern l) (pattern ctx (:pattern l)))) labels))
           guards (when (= kind :pattern) (mapv (fn [[ci _]] (when-let [g (:guard (nth cases ci))] (node ctx g))) labels))
           arms (mapv (fn [c] (arm (:body c))) cases)]
-      (Compiler$CF$Switch. (char (tc ty)) (int (case kind :int 0 :string 1 :enum 2 :pattern 3)) sel
+      (arbace.lang.Compiler$CF$Switch. (char (tc ty)) (int (case kind :int 0 :string 1 :enum 2 :pattern 3)) sel
                            (nodes arms) (when-let [d (:default an)] (arm d)) keys (int null-arm) (int dflt-arm)
-                           (into-array Compiler$CF$Pat (or pats []))
+                           (into-array arbace.lang.Compiler$CF$Pat (or pats []))
                            (object-array (map (fn [[_ l]] (cond (:enum l) (str (:enum l))
                                                                 (contains? l :const) (let [v (:const l)] (if (char? v) (Integer/valueOf (int v)) v))
                                                                 :else nil))
@@ -786,27 +786,27 @@
 (def ^:private ACC_ABSTRACT 0x0400)
 (def ^:private ACC_INTERFACE 0x0200)
 
-(defn host ^arbace.lang.Compiler$CF$Host [] Compiler$CF$Rt/HOST)
+(defn host ^arbace.lang.Compiler$CF$Host [] arbace.lang.Compiler$CF$Rt/HOST)
 
 (declare build-method! lambda-klass)
 
 (defn- meth-of
   "A Meth of klass k for method entry m of declaration d."
-  [^Compiler$CF$Klass k d m]
-  (let [mt (Compiler$CF$Meth. k (:name m) (:desc m) (int (:flags m)))
+  [^arbace.lang.Compiler$CF$Klass k d m]
+  (let [mt (arbace.lang.Compiler$CF$Meth. k (:name m) (:desc m) (int (:flags m)))
         [ps r] (t/parse-method-desc (:desc m))]
     (set! (.-ret mt) (char (tc (if (= "<init>" (:name m)) "V" r))))
     (set! (.-ptypes mt) (char-array (map tc ps)))
     (set! (.-builder mt) (fn [mt] (build-method! k d m mt)))
     mt))
 
-(defn- zero-of [desc] (Compiler$CF$Rt/zero (char (tc desc))))
+(defn- zero-of [desc] (arbace.lang.Compiler$CF$Rt/zero (char (tc desc))))
 
 (defn- make-klass
   "The Klass of class n of the compilation (members still to come)."
   [n]
   (let [d (a/decl n)
-        k (Compiler$CF$Klass. (str/replace n "/" "."))]
+        k (arbace.lang.Compiler$CF$Klass. (str/replace n "/" "."))]
     (set! (.-iname k) n)
     (set! (.-flags k) (int (:flags d)))
     (set! (.-iface k) (has? (:flags d) ACC_INTERFACE))
@@ -816,7 +816,7 @@
 
 (defn- layout!
   "Superclass and interfaces, the field layout, statics and methods of k (class n)."
-  [^Compiler$CF$Klass k n]
+  [^arbace.lang.Compiler$CF$Klass k n]
   (let [d (a/decl n)
         st @(:state d)
         sup (:super d)
@@ -826,7 +826,7 @@
       (fail (str "The Go build's class forms cannot extend " (str/replace sup "/" ".") " yet")))
     (set! (.-sup k) sk)
     (set! (.-superClass k) (when (and sup (not sk)) (internal->class sup)))
-    (set! (.-ifaces k) (into-array Compiler$CF$Klass (keep klass (:interfaces d))))
+    (set! (.-ifaces k) (into-array arbace.lang.Compiler$CF$Klass (keep klass (:interfaces d))))
     (set! (.-interfaces k) (into-array Class (map internal->class (remove klass (:interfaces d)))))
     (let [base (if sk (.-nfields sk) 0)
           own (vec (remove #(has? (:flags %) ACC_STATIC) (:fields d)))
@@ -843,7 +843,7 @@
                                                (let [c (when (:const f) (env/const-value f))]
                                                  (if (some? c)
                                                    (if (t/prim? (:desc f))
-                                                     (Compiler$CF$Rt/box (char (tc (:desc f)))
+                                                     (arbace.lang.Compiler$CF$Rt/box (char (tc (:desc f)))
                                                                          (long (cond (char? c) (int c) (boolean? c) (if c 1 0)
                                                                                      (instance? Number c) (if (#{"F" "D"} (:desc f)) 0 (long c))
                                                                                      :else 0)))
@@ -854,7 +854,7 @@
       (doseq [[i f] (map-indexed vector statics)
               :let [c (when (:const f) (env/const-value f))]
               :when (and (some? c) (#{"F" "D"} (:desc f)))]
-        (aset ^objects (.-statics k) i (Compiler$CF$Rt/boxD (char (tc (:desc f))) (double c))))
+        (aset ^objects (.-statics k) i (arbace.lang.Compiler$CF$Rt/boxD (char (tc (:desc f))) (double c))))
       (set! (.-info k)
             {:decl n
              :fields (vec (map (fn [nm ds] {:name nm :desc ds}) names descs))
@@ -874,15 +874,15 @@
 (defn- vtable!
   "The virtual methods of k: its superclass's, its interfaces' defaults (when nothing else
   gives them), then its own non-static, non-private methods."
-  [^Compiler$CF$Klass k]
+  [^arbace.lang.Compiler$CF$Klass k]
   (let [vt (.-vtable k)]
     (when-let [sk (.-sup k)] (.putAll vt (.-vtable sk)))
-    (doseq [^Compiler$CF$Klass i (.-ifaces k)
-            [key ^Compiler$CF$Meth m] (.-vtable i)]
+    (doseq [^arbace.lang.Compiler$CF$Klass i (.-ifaces k)
+            [key ^arbace.lang.Compiler$CF$Meth m] (.-vtable i)]
       (when-not (and (.containsKey vt key)
-                     (not (has? (.-flags ^Compiler$CF$Meth (.get vt key)) ACC_ABSTRACT)))
+                     (not (has? (.-flags ^arbace.lang.Compiler$CF$Meth (.get vt key)) ACC_ABSTRACT)))
         (.put vt key m)))
-    (doseq [[key ^Compiler$CF$Meth m] (.-methods k)]
+    (doseq [[key ^arbace.lang.Compiler$CF$Meth m] (.-methods k)]
       (when-not (has? (.-flags m) (bit-or ACC_STATIC ACC_PRIVATE))
         (.put vt key m)))))
 
@@ -902,20 +902,20 @@
         i (slot! ctx "Ljava/lang/Object;")]
     (assoc ctx :self i)))
 
-(defn- params! [ctx ^Compiler$CF$Meth mt bs]
+(defn- params! [ctx ^arbace.lang.Compiler$CF$Meth mt bs]
   (let [slots (mapv #(bind! ctx %) bs)]
     (set! (.-pslots mt) (int-array slots))
     (set! (.-ptypes mt) (char-array (map #(tc (:type %)) bs)))))
 
-(defn- finish! [ctx ^Compiler$CF$Meth mt body]
+(defn- finish! [ctx ^arbace.lang.Compiler$CF$Meth mt body]
   (set! (.-self mt) (int (:self ctx)))
   (set! (.-nr mt) (int @(:nr ctx)))
   (set! (.-np mt) (int @(:np ctx)))
   (set! (.-body mt) body))
 
-(defn- record-op-node [^Compiler$CF$Klass k d m self]
+(defn- record-op-node [^arbace.lang.Compiler$CF$Klass k d m self]
   (let [comps (:components d)]
-    (Compiler$CF$RecordOp. (char (tc (second (t/parse-method-desc (:desc m)))))
+    (arbace.lang.Compiler$CF$RecordOp. (char (tc (second (t/parse-method-desc (:desc m)))))
                            (case (:name m) "equals" 0 "hashCode" 1 2)
                            k (int self)
                            (into-array String (map :name comps))
@@ -924,7 +924,7 @@
 
 (defn- derived-body
   "The body of derived method m (bridges, record members)."
-  [ctx ^Compiler$CF$Klass k d m]
+  [ctx ^arbace.lang.Compiler$CF$Klass k d m]
   (let [self (:self ctx)
         [bps br] (t/parse-method-desc (:desc m))]
     (case (:derived m)
@@ -932,19 +932,19 @@
       (let [target (:bridge-of m)
             [tps tr] (t/parse-method-desc (:desc target))
             slots (vec (for [p bps] (slot! ctx p)))
-            args (map (fn [s bp tp] (value-convert (Compiler$CF$Local. (char (tc bp)) (int s)) bp tp)) slots bps tps)
-            this-node (Compiler$CF$Local. \L (int self))
+            args (map (fn [s bp tp] (value-convert (arbace.lang.Compiler$CF$Local. (char (tc bp)) (int s)) bp tp)) slots bps tps)
+            this-node (arbace.lang.Compiler$CF$Local. \L (int self))
             tk (klass (:owner target))
             key (str (:name m) (:desc target))
             call (if (:special m)
-                   (Compiler$CF$CallI. (char (tc tr)) (or (method-of (or tk (.-sup k)) key) (fail (str "No bridge target " key)))
+                   (arbace.lang.Compiler$CF$CallI. (char (tc tr)) (or (method-of (or tk (.-sup k)) key) (fail (str "No bridge target " key)))
                                        this-node (nodes args))
-                   (Compiler$CF$CallV. (char (tc tr)) key (real-method (:owner target) (:name m) (:desc target))
+                   (arbace.lang.Compiler$CF$CallV. (char (tc tr)) key (real-method (:owner target) (:name m) (:desc target))
                                        this-node (nodes args) (char-array (map tc tps))))]
         [slots (value-convert call tr br)])
       :record-accessor
       (let [c (:component m)]
-        [[] (Compiler$CF$GetField. (char (tc (:desc c))) (Compiler$CF$Local. \L (int self))
+        [[] (arbace.lang.Compiler$CF$GetField. (char (tc (:desc c))) (arbace.lang.Compiler$CF$Local. \L (int self))
                                    (int (field-index k (:name c))))])
       :record-object-method
       (let [slots (vec (for [p bps] (slot! ctx p)))]
@@ -952,21 +952,21 @@
       :enum-values
       (let [self-desc (t/internal->desc (:name d))
             [sk i] (find-static k "$VALUES")]
-        [[] (Compiler$CF$CheckCast. (desc->class (str "[" self-desc)) nil
-                                    (Compiler$CF$ArrayClone. (Compiler$CF$GetStatic. \L sk (int i))))])
+        [[] (arbace.lang.Compiler$CF$CheckCast. (desc->class (str "[" self-desc)) nil
+                                    (arbace.lang.Compiler$CF$ArrayClone. (arbace.lang.Compiler$CF$GetStatic. \L sk (int i))))])
       :enum-valueOf
       (let [s (slot! ctx "Ljava/lang/String;")]
-        [[s] (Compiler$CF$CheckCast. (.-cls k) k
-                                     (Compiler$CF$CallR. \L (find-method Enum "valueOf" "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
+        [[s] (arbace.lang.Compiler$CF$CheckCast. (.-cls k) k
+                                     (arbace.lang.Compiler$CF$CallR. \L (find-method Enum "valueOf" "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
                                                          nil (nodes [(konst "Ljava/lang/Class;" (.-cls k))
-                                                                     (Compiler$CF$Local. \L (int s))])
+                                                                     (arbace.lang.Compiler$CF$Local. \L (int s))])
                                                          (char-array [\L \L])))])
       :enum-$values
       (let [self-desc (t/internal->desc (:name d))]
-        [[] (Compiler$CF$ArrayInit. (or (.-cls k) Object) \L
+        [[] (arbace.lang.Compiler$CF$ArrayInit. (or (.-cls k) Object) \L
                                     (nodes (for [c (:constants d)
                                                  :let [[sk i] (find-static k (:name c))]]
-                                             (Compiler$CF$GetStatic. \L sk (int i)))))])
+                                             (arbace.lang.Compiler$CF$GetStatic. \L sk (int i)))))])
       (fail (str "The Go build's class forms do not support " (:derived m) " yet")))))
 
 (defn- init-nodes
@@ -979,21 +979,21 @@
 (defn- trivial-super?
   "Is cn a superclass whose constructor the interpreter does not run: Object, Record, and the
   AFunction or RestFn of a Clojure fn's class (CF$FnObj's)."
-  [^Compiler$CF$Klass k cn]
+  [^arbace.lang.Compiler$CF$Klass k cn]
   (or (#{"java/lang/Object" "java/lang/Record"} cn)
       (and (.-fnClass k) (#{(t/lang-class "AFunction") (t/lang-class "RestFn")} cn))))
 
 (defn- ctor-call-node
   "The node of a constructor's call (its super or this call), and after a super call the
   instance initializers."
-  [ctx ^Compiler$CF$Klass k d ab call]
+  [ctx ^arbace.lang.Compiler$CF$Klass k d ab call]
   (let [self (int (:self ctx))
         n (:name d)
         inits (fn [] (when (:calls-super ab) (init-nodes ctx n)))]
     (cond
       (nil? call) (inits)
       (:enum-args call)
-      (concat [(Compiler$CF$SuperCtor. Enum "(Ljava/lang/String;I)V" self (nodes (enum-arg-nodes ctx))
+      (concat [(arbace.lang.Compiler$CF$SuperCtor. Enum "(Ljava/lang/String;I)V" self (nodes (enum-arg-nodes ctx))
                                        (char-array [\L \I]))]
               (inits))
       (:anon-args call)
@@ -1003,12 +1003,12 @@
             args (concat (enum-arg-nodes ctx) (map #(local-node ctx %) (:params ab)))]
         (concat
           (cond
-            sk [(Compiler$CF$CtorCall. (ctor-meth sk cdesc) self (nodes args) (int-array []) (nodes []))]
+            sk [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth sk cdesc) self (nodes args) (int-array []) (nodes []))]
             (trivial-super? k cn) nil
-            :else [(Compiler$CF$SuperCtor. (internal->class cn) cdesc self (nodes args) (ptypes cdesc))])
+            :else [(arbace.lang.Compiler$CF$SuperCtor. (internal->class cn) cdesc self (nodes args) (ptypes cdesc))])
           (inits)))
       (= :this (:kind call))
-      [(Compiler$CF$CtorCall. (ctor-meth k (:desc (:ctor call))) self
+      [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth k (:desc (:ctor call))) self
                               (nodes (concat (enum-arg-nodes ctx) (arg-nodes ctx (:args call) (:desc (:ctor call)))))
                               (int-array []) (nodes []))]
       :else
@@ -1020,11 +1020,11 @@
                    [[i (node ctx (:outer call))]]))]
         (concat
           (cond
-            sk [(Compiler$CF$CtorCall. (ctor-meth sk cdesc) self
+            sk [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth sk cdesc) self
                                        (arg-nodes ctx (:args call) cdesc)
                                        (int-array (map first xs)) (nodes (map second xs)))]
             (trivial-super? k cn) []
-            :else [(Compiler$CF$SuperCtor. (internal->class cn) cdesc self (arg-nodes ctx (:args call) cdesc)
+            :else [(arbace.lang.Compiler$CF$SuperCtor. (internal->class cn) cdesc self (arg-nodes ctx (:args call) cdesc)
                                            (ptypes cdesc))])
           (inits))))))
 
@@ -1033,16 +1033,16 @@
   call; none for other classes."
   [ctx]
   (when-let [[ns os] (:enum-slots ctx)]
-    [(Compiler$CF$Local. \L (int ns)) (Compiler$CF$Local. \I (int os))]))
+    [(arbace.lang.Compiler$CF$Local. \L (int ns)) (arbace.lang.Compiler$CF$Local. \I (int os))]))
 
 (defmethod build-op :ctor-call [ctx an]
   (if-let [site (:ctor-site ctx)]
-    (let [ns (site ctx an)] (Compiler$CF$Do. \V (nodes ns) (konst "V" nil)))
+    (let [ns (site ctx an)] (arbace.lang.Compiler$CF$Do. \V (nodes ns) (konst "V" nil)))
     (fail "Constructor call outside the constructor prologue")))
 
 (defn build-method!
   "Builds Meth mt (method entry m of class n, declaration d): its frame layout and body."
-  [^Compiler$CF$Klass k d m ^Compiler$CF$Meth mt]
+  [^arbace.lang.Compiler$CF$Klass k d m ^arbace.lang.Compiler$CF$Meth mt]
   (binding [env/*compile-set* (atom (:compile-set (.-info k)))
             *klasses* (:klasses (.-info k))]
     (let [n (:name d)
@@ -1072,9 +1072,9 @@
               ;; a record's canonical (or compact) constructor assigns the fields at its end
               assigns (when (and (= :record (:kind d)) (or (:compact m) (= :record-canonical (:derived m))))
                         (for [[b c] (map vector (:params ab) (:components d))]
-                          (Compiler$CF$SetField. (char (tc (:desc c))) (Compiler$CF$Local. \L (int (:self ctx)))
+                          (arbace.lang.Compiler$CF$SetField. (char (tc (:desc c))) (arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))
                                                  (int (field-index k (:name c))) (local-node ctx b))))]
-          (finish! ctx mt (Compiler$CF$Do. \V (nodes (concat body assigns)) (konst "V" nil))))
+          (finish! ctx mt (arbace.lang.Compiler$CF$Do. \V (nodes (concat body assigns)) (konst "V" nil))))
 
         (:derived m)
         (let [ctx (if static? (new-ctx n (:ret m)) (receiver-ctx n (:ret m)))
@@ -1092,7 +1092,7 @@
         (let [ctx (if static? (new-ctx n (:ret m)) (receiver-ctx n (:ret m)))
               slots (vec (for [p (first (t/parse-method-desc (:desc m)))] (slot! ctx p)))]
           (set! (.-pslots mt) (int-array slots))
-          (finish! ctx mt (Compiler$CF$Throw. (Compiler$CF$NewR. (.getConstructor UnsatisfiedLinkError (into-array Class [String]))
+          (finish! ctx mt (arbace.lang.Compiler$CF$Throw. (arbace.lang.Compiler$CF$NewR. (.getConstructor UnsatisfiedLinkError (into-array Class [String]))
                                                                  (nodes [(konst "Ljava/lang/String;" (str (str/replace n "/" ".") "." (:name m) (:desc m)))])
                                                                  (char-array [\L])))))
 
@@ -1142,11 +1142,11 @@
 (defn- new-lambda-klass
   "A Klass for a lambda of class cls implementing fi and markers, with nf fields."
   [cls fi markers nf]
-  (let [k (Compiler$CF$Klass. (str (str/replace cls "/" ".") "$$Lambda/" (swap! lambda-count inc)))
+  (let [k (arbace.lang.Compiler$CF$Klass. (str (str/replace cls "/" ".") "$$Lambda/" (swap! lambda-count inc)))
         is (cons fi markers)]
     (set! (.-iname k) (str/replace (.-name k) "." "/"))
     (set! (.-flags k) (int 0x1010))
-    (set! (.-ifaces k) (into-array Compiler$CF$Klass (keep klass is)))
+    (set! (.-ifaces k) (into-array arbace.lang.Compiler$CF$Klass (keep klass is)))
     (set! (.-interfaces k) (into-array Class (map internal->class (remove klass is))))
     (set! (.-superClass k) Object)
     (set! (.-nfields k) (int nf))
@@ -1159,7 +1159,7 @@
 
 (defn- lambda-done!
   "k (a lambda's class) with its method mt: defined by the host, the method published."
-  [^Compiler$CF$Klass k ^Compiler$CF$Meth mt]
+  [^arbace.lang.Compiler$CF$Klass k ^arbace.lang.Compiler$CF$Meth mt]
   (set! (.-self mt) (int -1))
   (.put (.-methods k) (.key mt) mt)
   (.put (.-vtable k) (.key mt) mt)
@@ -1177,7 +1177,7 @@
         self (when inst? (slot! lctx "Ljava/lang/Object;"))
         lctx (assoc lctx :self (if inst? self -1) :klass (:klass ctx))
         cslots (mapv #(bind! lctx %) caps)
-        mt (Compiler$CF$Meth. k (:name sam) (:desc sam) (int 1))
+        mt (arbace.lang.Compiler$CF$Meth. k (:name sam) (:desc sam) (int 1))
         _ (params! lctx mt (:params an))
         body (node lctx (:body an))]
     (set! (.-ret mt) (char (tc (:ret an))))
@@ -1185,7 +1185,7 @@
     (set! (.-ctypes mt) (char-array (concat (when inst? [\L]) (map #(tc (:type %)) caps))))
     (finish! lctx mt body)
     (lambda-done! k mt)
-    (Compiler$CF$MakeLambda. k (nodes (concat (when inst? [(Compiler$CF$Local. \L (int (:self ctx)))])
+    (arbace.lang.Compiler$CF$MakeLambda. k (nodes (concat (when inst? [(arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))])
                                               (map #(local-node ctx %) caps))))))
 
 (defmethod build-op :method-ref [ctx an]
@@ -1198,25 +1198,25 @@
         lctx (new-ctx (:class ctx) iret)
         recv (when bound? (slot! lctx "Ljava/lang/Object;"))
         pslots (mapv #(slot! lctx %) ips)
-        params (map (fn [s p] (Compiler$CF$Local. (char (tc p)) (int s))) pslots ips)
-        mt (Compiler$CF$Meth. k (:name sam) (:desc sam) (int 1))
+        params (map (fn [s p] (arbace.lang.Compiler$CF$Local. (char (tc p)) (int s))) pslots ips)
+        mt (arbace.lang.Compiler$CF$Meth. k (:name sam) (:desc sam) (int 1))
         ok (klass owner)
         key (str name desc)
         conv-args (fn [ps tps] (nodes (map (fn [n p tp] (value-convert n p tp)) ps (take (count ps) ips) tps)))
         call (case kind
                :static (if ok
-                         (Compiler$CF$CallI. (char (tc mret)) (method-of ok key) nil (conv-args params mps))
-                         (Compiler$CF$CallR. (char (tc mret)) (real-method owner name desc) nil (conv-args params mps) (ptypes desc)))
-               :bound (Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc)
-                                          (Compiler$CF$Local. \L (int recv)) (conv-args params mps) (ptypes desc))
+                         (arbace.lang.Compiler$CF$CallI. (char (tc mret)) (method-of ok key) nil (conv-args params mps))
+                         (arbace.lang.Compiler$CF$CallR. (char (tc mret)) (real-method owner name desc) nil (conv-args params mps) (ptypes desc)))
+               :bound (arbace.lang.Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc)
+                                          (arbace.lang.Compiler$CF$Local. \L (int recv)) (conv-args params mps) (ptypes desc))
                :unbound (let [target (value-convert (first params) (first ips) (t/internal->desc owner))]
-                          (Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc) target
+                          (arbace.lang.Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc) target
                                               (nodes (map (fn [n p tp] (value-convert n p tp)) (rest params) (rest ips) mps))
                                               (ptypes desc)))
                :new (if ok
-                      (Compiler$CF$NewI. ok (ctor-meth ok desc) (conv-args params mps) (int-array []) (nodes []))
+                      (arbace.lang.Compiler$CF$NewI. ok (ctor-meth ok desc) (conv-args params mps) (int-array []) (nodes []))
                       (let [ctor (doto (.getDeclaredConstructor (internal->class owner) (params-of desc)) (.setAccessible true))]
-                        (Compiler$CF$NewR. ctor (conv-args params mps) (ptypes desc)))))
+                        (arbace.lang.Compiler$CF$NewR. ctor (conv-args params mps) (ptypes desc)))))
         rt (if (= kind :new) (t/internal->desc owner) mret)
         body (if (= iret "V") call (value-convert call rt iret))]
     (when (and (not= kind :unbound) (not= (count ips) (count mps)))
@@ -1230,15 +1230,15 @@
     (finish! lctx mt body)
     (set! (.-self mt) (int -1))
     (lambda-done! k mt)
-    (Compiler$CF$MakeLambda. k (nodes (when bound?
+    (arbace.lang.Compiler$CF$MakeLambda. k (nodes (when bound?
                                         [(let [r (node ctx (:recv an))]
-                                           (if (:null-check an) (Compiler$CF$NullChecked. r) r))])))))
+                                           (if (:null-check an) (arbace.lang.Compiler$CF$NullChecked. r) r))])))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; publishing: the host learns the members (Go: Dyn slots and member tables, for translated
 ;; code and reflection)
 
-(defn- meth-classes [^Compiler$CF$Meth mt]
+(defn- meth-classes [^arbace.lang.Compiler$CF$Meth mt]
   (let [[ps r] (t/parse-method-desc (.-desc mt))]
     (set! (.-params mt) (into-array Class (map desc->class ps)))
     (set! (.-retClass mt) (desc->class (if (= "<init>" (.-name mt)) "V" r)))))
@@ -1246,15 +1246,15 @@
 (defn publish!
   "Hands k's members to the host: its virtual methods (its own and those it inherits from
   interpreted classes), its static and private methods, constructors, fields."
-  [^Compiler$CF$Klass k]
+  [^arbace.lang.Compiler$CF$Klass k]
   (let [h (host)
         seen (java.util.HashSet.)]
-    (doseq [[key ^Compiler$CF$Meth m] (concat (.-vtable k) (.-methods k))
+    (doseq [[key ^arbace.lang.Compiler$CF$Meth m] (concat (.-vtable k) (.-methods k))
             :when (.add seen key)
             :when (not= key "doInvoke")]
       (meth-classes m)
       (.method h k m))
-    (doseq [[_ ^Compiler$CF$Meth m] (.-ctors k)]
+    (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (.-ctors k)]
       (meth-classes m)
       (.ctor h k m))
     (let [info (.-info k)]
@@ -1268,12 +1268,12 @@
 
 (defn- clinit!
   "The static initializer of k (class n)."
-  [^Compiler$CF$Klass k n]
+  [^arbace.lang.Compiler$CF$Klass k n]
   (let [st @(:state (a/decl n))
         nodes* (:clinit st)]
     (when (seq nodes*)
       (let [ctx (new-ctx n "V")
-            body (Compiler$CF$Do. \V (nodes (map #(node ctx %) nodes*)) (konst "V" nil))]
+            body (arbace.lang.Compiler$CF$Do. \V (nodes (map #(node ctx %) nodes*)) (konst "V" nil))]
         (set! (.-clinit k) body)
         (set! (.-clinitR k) (int @(:nr ctx)))
         (set! (.-clinitP k) (int @(:np ctx)))))))
@@ -1295,21 +1295,21 @@
         (binding [*klasses* ks]
           (doseq [n sorted] (layout! (ks n) n))
           (doseq [n sorted]
-            (let [^Compiler$CF$Klass k (ks n)]
+            (let [^arbace.lang.Compiler$CF$Klass k (ks n)]
               (set! (.-cls k) (.define (host) k))
               (set! (.-info k) (assoc (.-info k) :compile-set @env/*compile-set* :klasses ks))))
           (doseq [n sorted] (vtable! (ks n)))
           ;; fn classes: their variadic arity by name (CF$FnObj)
           (doseq [n order
-                  :let [^Compiler$CF$Klass k (ks n)]
+                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]
                   :when (.-fnClass k)
                   [key m] (.-vtable k)
                   :when (str/starts-with? key "doInvoke(")]
             (.put (.-vtable k) "doInvoke" m))
           ;; every body, as the JVM compiles them all
           (doseq [n order
-                  :let [^Compiler$CF$Klass k (ks n)]]
-            (doseq [[_ ^Compiler$CF$Meth m] (concat (.-methods k) (.-ctors k))
+                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]]
+            (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (concat (.-methods k) (.-ctors k))
                     :when (not (has? (.-flags m) ACC_ABSTRACT))]
               (.ensure m))
             (clinit! k n))
@@ -1318,18 +1318,18 @@
                   :let [d (a/decl n)]
                   :when (= :member (:nesting d))
                   :let [o (ks (:outer d))]
-                  :when (and o (.-cls ^Compiler$CF$Klass o))]
-            (.outer (host) (ks n) (.-cls ^Compiler$CF$Klass o) (str (:simple d))))
+                  :when (and o (.-cls ^arbace.lang.Compiler$CF$Klass o))]
+            (.outer (host) (ks n) (.-cls ^arbace.lang.Compiler$CF$Klass o) (str (:simple d))))
           (doseq [n sorted
-                  :let [^Compiler$CF$Klass k (ks n)]
+                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]
                   :when (= :enum (:kind (a/decl n)))]
             (.setEnum (host) k (.declared k (str "values()[" (t/internal->desc n)))))
           (doseq [n order
-                  :let [^Compiler$CF$Klass k (ks n)]]
+                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]]
             (when (.-cls k)
               (swap! env/defined assoc n (assoc (a/decl n) :class (.-cls k) :loader nil))))
           (swap! registry merge ks)
-          (mapv (fn [n] [(str/replace n "/" ".") (.-cls ^Compiler$CF$Klass (ks n))]) names))))))
+          (mapv (fn [n] [(str/replace n "/" ".") (.-cls ^arbace.lang.Compiler$CF$Klass (ks n))]) names))))))
 
 (defn compile-and-load!
   "arbace.classes.compiler/compile-and-load! of the Go build (arbace.classes.native's
@@ -1338,6 +1338,6 @@
   (define! ns forms siblings))
 
 ;; the Go build's host (Compiler$CFGo), unless one is set (the JVM's tests set the test host)
-(when (nil? Compiler$CF$Rt/HOST)
+(when (nil? arbace.lang.Compiler$CF$Rt/HOST)
   (when-let [c (try (Class/forName "arbace.lang.Compiler$CFGo$GoHost") (catch Throwable _ nil))]
-    (Compiler$CF$Rt/setHost (.newInstance ^Class c))))
+    (arbace.lang.Compiler$CF$Rt/setHost (.newInstance ^Class c))))
