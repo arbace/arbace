@@ -12,7 +12,7 @@ Under `test/oracle/`:
 
 | part | sources | what | size |
 |---|---|---|---|
-| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 6,898 forms, 14 files |
+| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 7,222 forms, 15 files |
 | forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,189 forms, 29 files |
 | classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
@@ -35,7 +35,9 @@ time: `definterface`, protocols on host types and nil, records as maps, mutable 
 fields, `IFn` and collection implementations, `proxy`, `bean`; EVAL-NOTES.md phase 2A),
 `state_errors` (dynamic
 vars and `binding`, atoms, refs, delays, exceptions and their messages, metadata, namespaces,
-keywords and symbols, the regex functions, `eval`).
+keywords and symbols, the regex functions, `eval`), `files` (`java.io.File`, `arbace.java.io` on
+files and `file:` URLs, `java.net.URL`, `java.nio.file`'s `Path` and `Files`, `load-file`, in a
+temporary directory made for the run whose path never shows; JRT-NOTES.md, "Files").
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),
@@ -65,7 +67,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   (`bin/arbace -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
 - `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for
-  `bin/arbace -`, and `bin/oracle check jvm` passes (20,263 of 20,263 cases). It prints a line per file, the
+  `bin/arbace -`, and `bin/oracle check jvm` passes (20,587 of 20,587 cases). It prints a line per file, the
   first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
   is 0 when every case matches.
 - `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
@@ -91,7 +93,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
         ...]}
 
   `:form` is the case's text (shortened), for the reader; only `:case` is compared.
-  `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (32 cases in 5 groups,
+  `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (34 cases in 7 groups,
   2026-10-09), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
   file takes about 285 s there).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path

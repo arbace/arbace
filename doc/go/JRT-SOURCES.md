@@ -243,6 +243,17 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   `share:MODULE`.
 - **jrt's own Java**, `overlay/jdk/MODULE/...` (KIND `overlay`, `overlay-sources`), replacing or
   adding to jdk26u's files (C2G-SPEC §4.1, K1).
+- **Files** (`file-sources`; the user's decision of 2026-10-09, JRT-NOTES.md, "Files"): 46 files
+  for `java.io.File` and the file system, `java.nio.file`'s options and exceptions, and
+  `java.net.URL` with its handlers and the file: connection (`URL`, `URLStreamHandler`,
+  `URLConnection`, `URLDecoder`, `sun.net.www.ParseUtil`, `MessageHeader`, `IPAddressUtil`,
+  `Hashtable`, `HexFormat`, `jdk.internal.util.Exceptions` ...), each group's reason there; with
+  them jrt's own `java.nio.file.Path`, `Files` and `jdk.internal.jrt.HostPath` (KIND
+  `overlay`). Three are files of **`src/java.base/unix/classes`** (amendment FS1): KIND `unix`
+  in `sources.txt`, copied into java.base's tree like the others: `java/io/UnixFileSystem.java`,
+  `java/io/DefaultFileSystem.java`, `sun/net/www/protocol/file/Handler.java`. With them
+  `bin/jrt-convert` translates **389 files** (all 389 compiled to javac's class shapes; 385
+  identical, the 4 known differences as before).
 
 Two options of the conversion (amendment S2):
 
