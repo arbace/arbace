@@ -3335,7 +3335,9 @@ The executable (amd64, `bin/arbace-go --build`): **61,927,584 to 63,905,952 byte
 +3.2%)**, against main's at `15018b1`. The executables are stripped (SZ1), so no per-symbol
 split: the translated classes (about 80 more files, most of them the provider framework and
 `KnownOIDs`), their member tables (the REPL can call every public member of `java.security`),
-and `java.security` as resource data (75,186 bytes before compression).
+and `java.security` as resource data (75,186 bytes before compression). SC7 (the digests' blocks by Go's
+`crypto`) adds 69,632 bytes (63,975,584: Go's block functions and their assembly). With main at
+`7cc3637` merged (processes), the executable is 64,852,128 bytes.
 
 ## Deviations
 
