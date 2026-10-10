@@ -165,6 +165,21 @@
            ;; outside the world (its uses in Instant are operation-level stubs, toString a
            ;; variant)
            ["java/time/Instant.java" "java/time/DateTimeException.java"]
+           ;; sockets and the socket REPL (arbace.core.server; JRT-NOTES.md, "Sockets"): the plain
+           ;; Java of java.net's sockets and addresses, over jrt's own HostSocketImpl
+           ;; (overlay/jdk) in place of sun.nio.ch.NioSocketImpl; the name service through
+           ;; Inet6AddressImpl's natives (variants over the host's). NetworkInterface, Proxy, the
+           ;; SOCKS and HTTP-tunnel impls and the resolver SPI's providers stay outside the world
+           (map #(str "java/net/" % ".java")
+                ["ServerSocket" "Socket" "SocketImpl" "SocketImplFactory" "SocketAddress"
+                 "InetSocketAddress" "InetAddress" "Inet4Address" "Inet6Address" "InetAddressImpl"
+                 "Inet4AddressImpl" "Inet6AddressImpl" "SocketOptions" "SocketOption"
+                 "StandardSocketOptions" "SocketException" "BindException" "ConnectException"
+                 "NoRouteToHostException" "UnknownHostException" "SocketTimeoutException"
+                 "spi/InetAddressResolver"])
+           ;; (IPAddressUtil, Exceptions and Hashtable, which System.getProperties()'s Properties
+           ;; extends, are file-sources')
+           ["java/io/InterruptedIOException.java" "sun/net/PlatformSocketImpl.java"]
            ;; the regex flag CANON_EQ (JRT-NOTES.md, "The JDK's resource data"): java.text's
            ;; Normalizer over jdk.internal.icu's normalizer, whose loader reads ICU's nfc.nrm and
            ;; nfkc.nrm through java.nio's heap buffers (the buffers' generated files are
