@@ -311,6 +311,45 @@ computes its local fields, `toString` and its local constructors in the default 
 hooks (`DateZoneOffset`, `DateZoneOffsetByWall`, `DateZoneName`) that c2g's support code sets to
 jrt's own Java `jdk.internal.jrt.DefaultZone` (TM5).
 
+**Processes in the closed world** (amendments PR1, PR3, PR6, accepted 2026-10-10; JRT-NOTES.md,
+"Processes"; JRT-SOURCES.md, "Processes"). D6's cut of processes is reversed: jdk26u's `Process`,
+`ProcessBuilder` (with `Redirect`), `ProcessHandle`, `ProcessHandleImpl` and the Unix
+`ProcessImpl` and `ProcessEnvironment` are in the world, and `arbace.java.shell` and
+`arbace.java.process` are embedded (§10.3). Variants: `ProcessImpl` (no launch mechanism, helper
+path or native `init`; `forkAndExec` calls the static native `hostForkAndExec`; descriptors through
+`HostFiles.handle` and `setHandle` in place of `SharedSecrets`' `JavaIOFileDescriptorAccess`;
+Linux's branches of `initStreams` and `destroy`), `Process` (no `Blocker`; the native charset from
+`native.encoding`), `ProcessBuilder` (no JFR event or `System.Logger`; `Redirect`'s null file
+`/dev/null`) and `ProcessHandleImpl` (no `initNative`; plain daemon reaper threads;
+`Info.info0` over the static native `hostInfo`). The natives are jrt's (§9.1, PR3) over §9.4's
+`HostProc`; the children's pipes are entries of jrt's file table, and jrt's `FileDescriptor`
+gives `HostFiles` the setting of its number. `Runtime.exec`'s six overloads are in `Runtime`'s
+member table through jrt's own Java `jdk.internal.jrt.RuntimeExec` (§11, PR4). Code kept from
+jdk26u in the variants, `RuntimeExec` and jrt's process natives is recorded in LICENSE.md (PR6).
+
+**java.security's basics in the closed world** (amendments SC4, SC5, accepted 2026-10-10;
+JRT-NOTES.md, "Security"; JRT-SOURCES.md, "Security"). `MessageDigest` and its streams,
+`SecureRandom`, `javax.crypto.Mac` with `SecretKeySpec`, `Provider`, `Security` and
+`sun.security.jca` are in the world with the SUN and SunJCE providers and the services they
+implement in plain Java: `sun.security.provider`'s digests (MD2, MD5, SHA-1, the SHA-2 and SHA-3
+families, SHAKE), generators (NativePRNG and its two kinds, DRBG, SHA1PRNG) and
+`com.sun.crypto.provider`'s HMACs. Variants: `Provider` (no class literals of `Policy.Parameters`
+and `Configuration.Parameters`), `Provider$Service` (a service's implementation made by jrt's own
+`sun.security.provider.JrtServices` and `com.sun.crypto.provider.JceServices` with the JDK's
+choice of constructor and its exceptions, other classes by reflection), `Security` (its
+properties from the embedded `conf/security/java.security`, §10.3; no `SharedSecrets`, no
+`EventHelper` logging), `ProviderConfig` (SUN and SunJCE made directly; any other provider fails
+to load), `SunEntries` and `SunJCE` (the implemented services, with the JDK's aliases and
+attributes), `NativePRNG` (its streams the host's random source, `jdk.internal.jrt.HostRandom`),
+`SecretKeySpec` (no `SharedSecrets`), and `DigestBase`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`
+(amendment SC7: whole blocks compressed by Go's `crypto` on the digest's own chaining state, as
+the JVM's intrinsics replace `implCompressMultiBlock0`; jrt's `digests.clj`). jrt's own Java:
+`javax.crypto.JceSecurity` (every provider usable, the unlimited policy; the JDK generates it
+from a template), `sun.security.provider.SeedGenerator` (seeds from the host). **The providers
+are SUN and SunJCE alone** (a deviation: the JVM lists twelve); `getInstance` of anything
+else is the JDK's `NoSuchAlgorithmException`. `UUID`'s variant (M7) is gone: `randomUUID` and
+`nameUUIDFromBytes` are jdk26u's code over `SecureRandom` and `MessageDigest`.
+
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
 (the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
@@ -405,7 +444,7 @@ use each other, and the hand-written `String` uses translated classes that use `
 
 | Java packages | Go package | forms namespace |
 |---|---|---|
-| `java.*`, `jdk.internal.*`, `sun.*` (the translated closure, the shims, the stubs) | `arbace/jrt` | `go.arbace.jrt` |
+| `java.*`, `javax.*`, `jdk.internal.*`, `sun.*`, `com.sun.*` (the translated closure, the shims, the stubs; `com.sun.*` since amendment SC3, accepted 2026-10-10: the SunJCE provider) | `arbace/jrt` | `go.arbace.jrt` |
 | `arbace.lang` (the runtime, the evaluator's classes) | `arbace/lang` | `go.arbace.lang` |
 | the program's `main` (§10.6) | `arbace/cmd/arbace` | `go.arbace.cmd.arbace` |
 
@@ -584,7 +623,9 @@ since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 `Net_Proxy`, since jrt's `Proxy` is `java.lang.reflect`'s (amendment FS4, accepted
 2026-10-10; `Socket(Proxy)` names it too, JRT-NOTES.md "Sockets (go-net)"); `sun/text/Normalizer` → `Sun_Normalizer`, since `java.text.Normalizer` is
 `Normalizer` (amendment RD5, accepted 2026-10-10); `sun/util/calendar/Era` → `Calendar_Era`,
-since `java.time.chrono.Era` is `Era` (amendment TM7, accepted 2026-10-10).
+since `java.time.chrono.Era` is `Era` (amendment TM7, accepted 2026-10-10);
+`sun/security/provider/SecureRandom` → `Sun_SecureRandom`, since `java.security.SecureRandom` is
+`SecureRandom` (amendment SC2, accepted 2026-10-10).
 The check runs after translation (`arbace.c2g.checks`) over every Go package's package-level
 names and every type's method names, across c2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -669,13 +710,16 @@ amendment K1, accepted 2026-10-09), read by c2g only:
   `jdk.internal.lang.CaseFolding`'s field `expanded_case_cps`, whose initializer collected a
   map's keys through a stream (`java.util.stream` is cut), with a loop in an added method.
   `ByteArray` and `ByteArrayLittleEndian` read and write byte by byte instead of through
-  `VarHandle`s (`java.lang.invoke` is not in the Go build), and `UUID.randomUUID` draws its
-  bytes from the host (`SecureRandom` is not in the world) (amendment M7, accepted 2026-10-09).
+  `VarHandle`s (`java.lang.invoke` is not in the Go build), and `UUID.randomUUID` drew its
+  bytes from the host while `SecureRandom` was not in the world (amendment M7, accepted
+  2026-10-09; the variant is gone since SC4, accepted 2026-10-10).
   Step 5's phase 2B added `Random` (its seed's offset by `Unsafe.objectFieldOffset(Class,
   String)`), `URI` and `ReferencePipeline`, `Collectors` (no `SharedSecrets`), `GathererOp` and
   `Gatherers` (`Stream.gather`'s evaluation and `mapConcurrent` throw), `Instant` (`toString`,
-  `now`) and `UUID.nameUUIDFromBytes` (MD5 from the host, a native): JRT-NOTES.md, "Phase 2B
-  (step 5)". java.util's completion added `TreeMap` (its sorted build without the
+  `now`) and `UUID.nameUUIDFromBytes` (MD5 from the host, a native; gone with SC4): JRT-NOTES.md, "Phase 2B
+  (step 5)". java.security's basics added `Provider`, `Provider$Service`, `Security`,
+  `ProviderConfig`, `SunEntries`, `SunJCE`, `NativePRNG`, `SecretKeySpec` and the digests'
+  `DigestBase`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3` (§4.1; amendments SC4, SC7). java.util's completion added `TreeMap` (its sorted build without the
   `ObjectInputStream` parameter, for the copy constructor, `clone`, `putAll` and
   `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and `toByteArray` by shifts, no
   `ByteBuffer`) and `RandomGenerator` (`isDeprecated` false: no annotations, §12) (amendment
@@ -1716,7 +1760,9 @@ each check; c2g may generate them later.
   final locals (§7.3). `(return v)` inside returns from the literal.
 - `(method-ref F ...)`: a static method reference is a literal calling the function; a bound
   receiver (`expr::m`) is evaluated once and null-checked (`Objects.requireNonNull`, as javac)
-  before the literal captures it; an unbound one takes the receiver from the first argument;
+  before the literal captures it, and a bound reference to a private method of a non-leaf class
+  calls its `Impl_` with the receiver's struct and the receiver, as an invocation of it does
+  (amendment PR7, accepted 2026-10-10); an unbound one takes the receiver from the first argument;
   `C/new` allocates; the analyzer's lambda form of array constructor references is a lambda.
 - Marker interfaces of intersection targets (`(& Comparator Serializable)`, javac's
   `(Comparator<T> & Serializable)`) give the lambda an adapter of its own, `F_Fn_M1_..._Mn`,
@@ -2016,8 +2062,15 @@ c2g compiles them statically (`arbace.c2g.vh`):
   `NullPointerException`, `ArrayIndexOutOfBoundsException` and `ArrayStoreException`.
 - **Memory order.** Go's atomics are sequentially consistent, so every access mode is the
   volatile one; a weak compare-and-set never fails spuriously. Java allows both.
+- **Views of byte arrays** (amendment SC1, accepted 2026-10-10). A constant handle may also be
+  `MethodHandles.byteArrayViewVarHandle(int[].class or long[].class, ByteOrder.BIG_ENDIAN or
+  LITTLE_ENDIAN)`, with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
+  jrt's `VhView{Get,Set}{Int,Long}{BE,LE}`, with the view's bounds check and message (the index
+  below the array's length less the element's size less one, else
+  `ArrayIndexOutOfBoundsException` with that reduced length); its other access modes are
+  operation-level stubs. (`sun.security.provider.ByteArrayAccess`, `SHA3`.)
 - **Not compiled.** A handle that is not a constant handle (passed around, made outside a
-  static initializer, `findStaticVarHandle`, `byteArrayViewVarHandle`), an access mode on
+  static initializer, `findStaticVarHandle`), an access mode on
   element types other than `int`, `long` and references, and `getAndAdd` on `boolean` or
   `byte`/`short`/`char` fields are operation-level stubs (§4.1) that name this section.
 - **Reachability** (§4.1) follows the access modes into the field's class and the
@@ -2076,6 +2129,13 @@ the translated code may use, as the analyzer needs it:
   `port0`, `setOption0`, `getOption0`, `lookup0`, `reverse0`, `hostName0`, `hasFamily0`: the
   socket table and the name service over §9.4's `NetHost`, in `go/arbace/jrt/net.clj`), the same
   way (`String` parameters too).
+  With processes (PR3, accepted 2026-10-10) jrt defines natives of translated classes directly:
+  `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
+  `waitForProcessExit0`, `destroy0`, `parent0` and `getProcessPids0`, and the static natives the
+  variants add, `ProcessImpl.hostForkAndExec` and `ProcessHandleImpl.Info.hostInfo` (in
+  `go/arbace/jrt/process.clj`, over §9.4's `HostProc`), all static over primitives, arrays and
+  `String`; the children's pipes are entries of `HostFiles`' table, whose `available` asks a
+  file that can tell (a pipe: `FIONREAD`).
 - **Natives of `arbace.lang`** (amendments P1 and E6, accepted 2026-10-09). A `^:native` method
   a variant declares (§4.6) is translated the same way, a call of `C_M..._native` with the
   receiver first for an instance method. The function is **jrt's when jrt defines it**: the
@@ -2199,6 +2259,28 @@ then sorted order), else the host's offset now as `GMT+hh:mm`. The symbolic link
 a fourth optional interface, `jrt.HostLinks` (`Readlink`; `OSHost` implements it over
 `os.Readlink`), the files through `Host`. `VM.getNanoTimeAdjustment` (java.time's system clock)
 is the host's clock with its nanoseconds, so `Instant.now()` has them.
+
+**An optional `HostProc`; the JVM's process texts** (amendments PR2, PR5, accepted 2026-10-10;
+JRT-NOTES.md, "Processes"). The processes are a fifth optional interface, `jrt.HostProc` (in
+`hostproc.clj`): `Start` (a path, the arguments, the environment or nil for the program's, the
+directory, each standard stream a pipe, the program's own or an open file of the host, error output
+to standard output), `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`; a started child is a
+`jrt.HostChild` (`Pid`, `Wait`, `Signal`). `OSHost` implements it on Linux (`hostproc_linux.clj`,
+`//go:build linux`) over `os.StartProcess`, `os.Pipe` and `/proc`, a goroutine reaping each child
+at its end (no zombies; a reaped child's pid is never signalled). Without it no program starts.
+
+**`SecureRandom`'s entropy** (amendment SC6, accepted 2026-10-10; JRT-NOTES.md, "Security").
+`Host.RandomBytes` is unchanged; `OSHost`'s, Go's `crypto/rand` (getrandom(2)), is in the
+Linux-tagged `hostrand_linux.clj` (`//go:build linux`). jrt's own Java
+`jdk.internal.jrt.HostRandom` (a static native over it, and an endless `InputStream`) is what
+`NativePRNG`'s and `SeedGenerator`'s variants read where the JDK reads `/dev/random` and
+`/dev/urandom`.
+jrt's generic process files name no `syscall` or `os` (errors carry Linux's numbers as `int`s), so
+jrt builds for `GOOS=tamago` without them. A failed start's message is `ProcessImpl_md.c`'s
+`IOE_FORMAT` with musl's `strerror` (`Exec failed, error: 2 (No such file or directory) `), the
+program is looked for as this machine's JVM looks for it (musl's `execvp` with the environment
+inherited, `childproc.c`'s `JDK_execvpe` with it given, no `/bin/sh` fallback), and the exit
+status is the JDK's encoding (0x80 plus the signal) (PR5, with NT5).
 
 **An optional `NetHost`** (JRT-NOTES.md, "Sockets (go-net)"; accepted with NT1-NT5,
 2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.clj`): `Listen`, `Dial`
@@ -2344,7 +2426,8 @@ namespaces' sources under the main package's forms directory
 `//go:embed res`; `main` sets the host's `Resources` to `fs.Sub(resources, "res")` (§9.4)
 before `Main.main`. The embedded tree is `arbace/**/*.clj` less the tools (`classes`, `j2c`,
 `g2c`, `c2g`), the runtime's class forms (`arbace/lang`), ASM, and the namespaces the Go build
-leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`)
+leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`; processes,
+`arbace.java.shell` and `arbace.java.process`, are in since amendment PR1, accepted 2026-10-10)
 (`arbace.c2g.embed/excluded`). `RT.load` (variant) finds `NAME.clj` or `.cljc` among the
 embedded sources, then in the directories of the environment variable `ARBACE_PATH`, the class
 path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
@@ -2364,7 +2447,11 @@ JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as 
 data include an image file, `lib/tzdb.dat`, the time-zone database made as the JDK build's
 `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib` (a data file under `lib/` is
 the image's, the others are module resources): `TzdbZoneRulesProvider` and `ZoneInfoFile` read it
-as the resource `/lib/tzdb.dat` (amendment TM2, accepted 2026-10-10).
+as the resource `/lib/tzdb.dat` (amendment TM2, accepted 2026-10-10); and the image file
+`conf/security/java.security`, the security properties made as the JDK build's `Gendata.gmk`
+makes them (`MakeJavaSecurity` for linux) and compared with the image's `jdk/conf`, which
+`Security` reads as the resource `/conf/security/java.security` (amendment SC5, accepted
+2026-10-10).
 
 **Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
 image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
@@ -2531,6 +2618,17 @@ supertypes (amendment TM8, accepted 2026-10-10; `arbace.c2g.reach`).
 static initializer requires `arbace.edn` at first use) exists in the Go build as on the JVM. It is
 a class of the program, not an embedded namespace's source.
 
+**The interactive REPL under rlwrap** (amendments RL1, RL2, accepted 2026-10-10; EXEC-NOTES.md,
+"Line editing: rlwrap"). The main package's `main` first calls `execRlwrap`
+(`rlwrap_linux.go`; an empty `rlwrap_other.go` for other systems), before jrt's host and the
+image: when the arguments start the REPL (none, or `arbace.main`'s init options then
+`-r`/`--repl`), fds 0 and 1 are terminals and fd 0 reports a width, `TERM` is set and not
+`dumb`, the parent is not rlwrap, `rlwrap` is an executable on `PATH`, and `ARBACE_RLWRAP` is
+neither `off` (the user's switch) nor `wrapped` (the marker for the child), it replaces itself
+(`syscall.Exec`) with `rlwrap` with `clj`'s flags around the executable's own path and
+arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
+silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
+
 ### 10.7 Stack traces
 
 The evaluated Clojure code's frames are not Go frames: the Go stack shows only the
@@ -2582,7 +2680,7 @@ and T11, T13, T14 (threads and the host), accepted 2026-10-08.
 | the host | **`Host`**, **`HostFile`**, **`HostFileInfo`**, **`OSHost`**, **`SetHost`**, **`CurrentHost`**, **`Stdin`**, **`Stdout`**, **`Stderr`** (§9.4); the natives of jrt's own Java (§9.1): *`HostFiles_Open0_String_I_String1__I_native`*, *`HostFiles_Read0_I_B1_I_I__I_native`*, *`HostFiles_Write0_I_B1_I_I__V_native`*, *`HostFiles_Available0_I__I_native`*, *`HostFiles_Skip0_I_J__J_native`*, *`HostFiles_Close0_I__V_native`* |
 | run-time classes | *`Dynamic`* (`DynImplements`), *`DefineDynamic`*, *`Class.Descriptor`* (§5.12) |
 | c2g's helpers (`c2g_support.go`, written by c2g into jrt's package) | *`C2g_Missing`* (§4.1), *`C2g_NotTranslated`*, *`C2g_NotNull`*, *`C2g_Truth`* (a `Boolean` or `Object` condition), *`C2g_CastArray`*, *`C2g_Discard`* (§5.7), *`C2g_RefP`*, *`C2g_ObjectClone`*, *`C2g_ObjHash`*, *`C2g_ObjEquals`*, *`C2g_DoubleBits`*, *`C2g_FloatBits`* (§7.13); *`String_Format_String_O1__String`* and its `Locale` overload; jrt's members with translated values (K2, below): *`System_in`*, *`System_out`*, *`System_err`*, *`System_SetIn_InputStream__V`*, *`System_SetOut_PrintStream__V`*, *`System_SetErr_PrintStream__V`*, *`String_CASE_INSENSITIVE_ORDER`*, and `String`'s Go methods *`Split_String__String1`*, *`Split_String_I__String1`*, *`ReplaceAll_String_String__String`*, *`ReplaceFirst_String_String__String`*, *`Matches_String__Z`*; jrt's members naming translated classes (S4, below): *`String_Join_CharSequence_Iterable__String`*, `String`'s Go methods *`Formatted_O1__String`*, *`Lines__Stream`*, *`DescribeConstable__Optional`*, *`C2g_PrintStackTraceWriter`*, *`C2g_PrintStackTraceStream`*, *`C2g_SystemGetenv`*, and the default-method forwarders of §5.4 |
-| natives of `arbace.lang` and of the JDK's variants (hand-written, §9.1) | *`Reflector_AdaptFn_Class_O__O_native`*; the evaluator's (M6 and step 5): *`Compiler_Evaluator_SetTraceHook_Supplier__V_native`*, *`Compiler_Evaluator_MonitorEnter_O__V_native`*, *`Compiler_Evaluator_MonitorExit_O__V_native`*, *`Compiler_Evaluator_CheckCast_Class_O__O_native`*, *`RT_HostResource_String__B1_native`*; `UUID`'s variant's (M7; the MD5 since step 5's phase 2B): *`UUID_HostRandomBytes_B1__V_native`*, *`UUID_Md5_B1__B1_native`* (P1's `RT_HostWriter_...` and `RT_HostReader_...` natives are gone with amendment K2, §9.4) |
+| natives of `arbace.lang` and of the JDK's variants (hand-written, §9.1) | *`Reflector_AdaptFn_Class_O__O_native`*; the evaluator's (M6 and step 5): *`Compiler_Evaluator_SetTraceHook_Supplier__V_native`*, *`Compiler_Evaluator_MonitorEnter_O__V_native`*, *`Compiler_Evaluator_MonitorExit_O__V_native`*, *`Compiler_Evaluator_CheckCast_Class_O__O_native`*, *`RT_HostResource_String__B1_native`*; `UUID`'s variant's (M7; the MD5 since step 5's phase 2B) until SC4; java.security's (SC4, SC7): *`HostRandom_Fill0_B1_I_I__V_native`*, *`MD5_GoBlocks_I1_B1_I_I__V_native`* and the other digests' (P1's `RT_HostWriter_...` and `RT_HostReader_...` natives are gone with amendment K2, §9.4) |
 
 The hand-written classes (`Object`, `String`, `StringBuilder`, `Class`, `Throwable`, `Enum`,
 `Record`, `Thread`, `Math`, `System`, the reflection classes, atomics, locks ...) are used through
@@ -2635,7 +2733,9 @@ the member tables (`reflect_tables_c2g.go`, whose `init` runs after jrt's `refle
 `Throwable.printStackTrace(PrintStream)` and `(PrintWriter)` (the trace's text printed) and
 `System.getenv()` (the host's environment, unmodifiable) and `System.getProperties()` (a
 `Properties` copy of the properties, when `Properties` is translated; NT2), as functions `C2g_*`
-with table entries; `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
+with table entries; `Runtime.exec`'s six overloads, each an entry calling jrt's own Java
+`jdk.internal.jrt.RuntimeExec`'s method of the same parameters (rooted; when `RuntimeExec` is
+translated; PR4, accepted 2026-10-10); `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
 as table entries only, for reflection. Translated code calling a member that exists only as a
 table entry is an operation-level stub (§4.1; none does). And the forwarders of hand-written
 leaf classes to translated default methods (§5.4).
@@ -3865,6 +3965,36 @@ clock: §9.4. TM7 the rename table's `Calendar_Era` and the first package-privat
 by a variant: §4.4. TM8 root instance methods as virtual calls, reachability indexed: §10.6. TM9
 `bin/jrt-convert`'s shape check takes jrt's own replacing classes from source: JRT-SOURCES.md.
 TM4 replaces the hand-written locale shims of R17 with Java (§12); TM8 refines P2 and RD2.
+
+**Size** (JRT-NOTES.md, "Size"; accepted by the user 2026-10-10): SZ1 the executables linked
+with `-ldflags=-s -w` (`ARBACE_GO_SYMBOLS=1` keeps the symbols; Go's function table stays, so
+panics and Java stack traces are unchanged): `bin/arbace-go`. SZ2 embedded resources
+zlib-compressed (`P.z`) when a quarter smaller: §10.3. SZ3 a class's reflective members as a
+data table (`MemberTable`) decoded at first use (`EnsureMembers`): §5.8's member tables. SZ4
+`Dyn` and the `DynSub_C` types embed one `dynCore` with the world's interface methods: §5.12.
+Together 107.1 → 61.9 MB on amd64.
+
+**rlwrap** (EXEC-NOTES.md, "Line editing: rlwrap"; accepted by the user 2026-10-10): RL1 the
+interactive REPL under rlwrap, `ARBACE_RLWRAP`: §10.6. RL2 the main package's
+`rlwrap_linux.go` and `rlwrap_other.go`: §10.6 (U3's files). RL3 the smoke test's
+pseudo-terminal check: B1-PLAN.md, "Checks".
+
+**Processes** (JRT-NOTES.md, "Processes"; accepted by the user 2026-10-10): PR1 processes in the
+closed world, D6 reversed for them, `arbace.java.shell` and `arbace.java.process` embedded: §4.1,
+§10.3, B1-PLAN.md D6. PR2 the optional `HostProc`: §9.4. PR3 jrt's process natives, the pipes in
+jrt's file table, `FileDescriptor`'s access for `HostFiles`: §4.1, §9.1. PR4 `Runtime.exec` in
+`Runtime`'s member table through `RuntimeExec`: §4.1, §11. PR5 the JVM's texts, search and
+status: §9.4. PR6 the jdk26u-derived code: LICENSE.md, §4.1. PR7 bound references to private
+methods of non-leaf classes: §7.11.
+
+**Security** (JRT-NOTES.md, "Security"; accepted by the user 2026-10-10): SC1 byte-array view
+`VarHandle`s compiled to jrt's `VhView*`: §8.5. SC2 the rename table's `Sun_SecureRandom`: §4.4.
+SC3 `com.sun.*` in jrt's Go package: §4.2. SC4 java.security's basics in the closed world, the
+SUN and SunJCE providers alone (a deviation), their variants and jrt's own Java, `UUID`'s variant
+gone: §4.1, §4.6, JRT-SOURCES.md. SC5 `conf/security/java.security` as resource data, an image
+file: §10.3, JRT-SOURCES.md. SC6 `OSHost.RandomBytes` in a Linux-tagged file, `HostRandom`:
+§9.4. SC7 (the user's request of 2026-10-10, done on the same branch) the digests' blocks by Go's
+`crypto`, as the JVM's intrinsics: §4.1, §4.6. SC4 ends M7's `UUID` variant.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

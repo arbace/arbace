@@ -1,0 +1,44 @@
+;; Go-build variant of java.lang.ProcessHandleImpl (C2G-SPEC §4.6; doc/go/JRT-NOTES.md,
+;; "Processes"): read by c2g only. Its natives are jrt's over the host's HostProc
+;; (go/arbace/jrt/process.clj; initNative's state, the boot time and the page size, is jrt's
+;; own). The reaper threads are plain daemon threads of the Thread API (InnocuousThread, a
+;; system thread without permissions or thread locals, and its stack size are not in the Go
+;; build: a goroutine's stack grows). Info's info0, which the JDK's C fills through JNI field
+;; IDs, is a method setting the fields from the static native hostInfo. The replacing methods
+;; keep jdk26u's code where they keep it (baf63fb; Copyright (c) Oracle and/or its affiliates,
+;; GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors;
+;; Eclipse Public License 1.0.
+(in-ns 'java.lang)
+
+(c2g/variant ProcessHandleImpl
+  (c2g/cut ^:private ^:static ^:native initNative ^void [])
+
+  (static-initializer
+    (let [pid (ProcessHandleImpl/getCurrentPid0)]
+      (set! current (ProcessHandleImpl. pid (ProcessHandleImpl/isAlive0 pid)))))
+
+  (method ^:private ^:static initReaper ^java.util.concurrent.Executor []
+    (java.util.concurrent.ThreadLocalRandom/current)
+    (let [threadFactory (lambda java.util.concurrent.ThreadFactory ^Thread [^Runnable grimReaper]
+                          (let [t (Thread. grimReaper "process reaper")]
+                            (.setPriority t Thread/MAX_PRIORITY)
+                            (.setDaemon t true)
+                            t))]
+      (java.util.concurrent.Executors/newCachedThreadPool threadFactory))))
+
+(c2g/variant ProcessHandleImpl$Info
+  (c2g/cut (static-initializer 0))
+  (c2g/cut ^:private ^:static ^:native initIDs ^void [])
+
+  (method ^:private info0 ^void [this ^long pid]
+    (let [times (new long/1 [-1 -1])
+          s (ProcessHandleImpl$Info/hostInfo pid times)]
+      (set! totalTime (aget times 0))
+      (set! startTime (aget times 1))
+      (when (some? (aget s 0)) (set! command (aget s 0)))
+      (when (some? (aget s 1)) (set! commandLine (aget s 1)))
+      (when (some? (aget s 2)) (set! user (aget s 2)))
+      (when (some? (aget s 3))
+        (set! arguments (cast String/1 (java.util.Arrays/copyOfRange s 4 (alength s)))))))
+
+  (c2g/add (method ^:private ^:static ^:native hostInfo ^String/1 [^long pid ^long/1 times])))

@@ -1,7 +1,8 @@
 ;; jrt: the natives of jdk.internal.jrt.HostFiles (overlay/jdk/java.base/jdk/internal/jrt/
 ;; HostFiles.java, doc/go/JRT-NOTES.md "Phase 2C"), the file table under the FileDescriptor,
 ;; FileInputStream and FileOutputStream written for jrt: handles 0, 1 and 2 are the host's
-;; standard streams (Stdin, Stdout, Stderr), the others the files the host opened (Host.Open).
+;; standard streams (Stdin, Stdout, Stderr), the others the files the host opened (Host.Open)
+;; and the program's ends of its children's pipes (process.clj, doc/go/JRT-NOTES.md "Processes").
 (in-ns 'go.arbace.jrt)
 
 (go/file "files.go"
@@ -116,6 +117,14 @@ after its position, 0 for the standard input.\n"
   ^int32 [^int32 h]
   (when (<= h 2)
     (return 0))
+  (let [f (hostFile h)
+        (values av isAv) (assert (interface (Available [] :results [int error])) f)]
+    ;; a file that tells itself (a pipe to or from a child, process.clj: FIONREAD's count)
+    (when isAv
+      (let [(values k aerr) (.Available av)]
+        (when (!= aerr nil)
+          (return 0))
+        (return (conv int32 k)))))
   (let [f (hostFile h)
         (values cur err) (.Seek f 0 io/SeekCurrent)]
     (when (!= err nil)

@@ -12,7 +12,7 @@
   The file they make, go/arbace/jrt/standin_reflect.clj, is generated and tracked; when c2g's
   output joins the build it is deleted and the translated classes take the same names.
 
-  bin/jrt standins   regenerates it with standin_lang.clj (ARBACE_CLASSPATH=test bin/arbace
+  bin/jrt standins   regenerates it with standin_lang.clj (ARBACE_CLASSPATH=test bin/arbace-j
                      -m jrt.standins-reflect FILE)."
   (:require [arbace.string :as str]))
 

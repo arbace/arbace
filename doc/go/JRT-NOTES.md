@@ -395,7 +395,7 @@ Go tests written as Go forms (`*_test.clj`, printed as `_test.go`, in package `j
 | `TestToString`, `TestDoubles`, `TestFloats`, `TestInts`, `TestNoFusion`, `TestMathExceptions` | 60,228 + 110,312 + 65,072 + 47,754 cases of the numbers files; the FMA idiom |
 
 **Differential test data** comes from the JVM. `test/jrt/testdata.clj` (ns `jrt.testdata`) runs
-on `bin/arbace`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
+on `bin/arbace-j`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
 `exceptions.txt`, `tostring.txt`, `doubles.txt`, `floats.txt` and `ints.txt`.
 
 - **Format:** one case per line with tab-separated fields: the operation, its arguments, the
@@ -1897,7 +1897,7 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   quotes removed; other options ignored). So one setting starts a server on both builds:
 
       JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' target/arbace-go/amd64/arbace
-      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace
+      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace-j
 
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).
@@ -2999,7 +2999,7 @@ slightly lower (158 MB, 162 before), the member tables no longer built at the st
 - **jrt's hand-written classes' tables** (`reflect_tables.clj`, 0.4 MB): could use the
   `MemberTable` too (`test/jrt/tables.clj`); small.
 
-## Proposed amendments (for the user's review)
+## Amendments (SZ): accepted by the user 2026-10-10, folded into C2G-SPEC §16 ("Size")
 
 Numbered SZ (size); no SZ appears elsewhere in doc/.
 
@@ -3017,6 +3017,446 @@ Numbered SZ (size); no SZ appears elsewhere in doc/.
   `F`, `Self`) that has the interfaces' methods; a `DynSub_C` defines only Object's methods, its
   class's and those whose names its class's struct shares, and its slots begin with `Dyn`'s.
 
+# Processes
+
+Branch `goproc` (2026-10-10, the user's decision of that day, reversing D6 for processes):
+`java.lang.ProcessBuilder` (with `Redirect`, the environment, the directory, `inheritIO`,
+`redirectErrorStream`, `startPipeline`), `Process`, `ProcessHandle` and `Runtime.exec` in the Go
+build, over a new optional host interface `HostProc`; `arbace.java.shell` and
+`arbace.java.process` embedded. Sources: JRT-SOURCES.md, "Processes"; licences: LICENSE.md.
+
+## Translated, hand-written, and why
+
+**jdk26u's Java translated, the fork and exec jrt's over the host.** As for sockets and files:
+`Process`, `ProcessBuilder` (and `Redirect`, `Redirect.Type`, `NullInputStream`,
+`NullOutputStream`, `RedirectPipeImpl`), `ProcessHandle`, `ProcessHandle.Info` and
+`ProcessHandleImpl` of `src/java.base/share/classes/java/lang`, and `ProcessImpl` and
+`ProcessEnvironment` of `src/java.base/unix/classes/java/lang` (KIND `unix`, amendment FS1) are
+translated as they are, so that the JVM's behaviour where Java decides it is kept: the redirect
+checks and their texts, `Cannot run program "p" (in directory "d"): ...`, the environment map's
+validation (`Invalid environment variable name: ...`), the exit-status bookkeeping of
+`ProcessImpl` (its lock and condition, `waitFor` with a timeout, `exitValue`'s `process hasn't
+exited`, `toString`), the pipe streams that drain what a child left when it ends
+(`ProcessPipeInputStream.processExited`), the reaper threads and `CompletableFuture`s of
+`ProcessHandleImpl.completion`, `onExit`, `startPipeline`'s chaining. The seams are the natives:
+`ProcessImpl.forkAndExec` (the JDK's `posix_spawn` of `jspawnhelper`), `ProcessHandleImpl`'s
+nine natives and `ProcessEnvironment.environ`.
+
+- **`go/arbace/jrt/hostproc.clj`: `HostProc`**, the processes as a host gives them: an
+  interface of its own beside `Host` (`host.clj` is unchanged), as `HostFS`, `NetHost` and
+  `HostLinks` are: `Start` (a path, the arguments, the environment or nil, the directory, each
+  standard stream a pipe, the program's own or an open file of the host, and error output to
+  standard output), `Pid`, `ProcStat` (parent, CPU time, start), `ProcInfo` (command, arguments,
+  command line, user), `Pids`, `Kill`; a child is a `HostChild` (`Pid`, `Wait`, `Signal`). A host
+  without it starts nothing: `ProcessBuilder.start` throws the JVM's IOException with ENOSYS
+  (`Cannot run program "sh": Exec failed, error: 38 (Function not implemented) `), and
+  `ProcessHandle` knows no process (B1b's box until its monitor gives processes).
+- **`hostproc_linux.clj`: B1a's `OSHost` as a `HostProc`.** `os.StartProcess` forks and execs
+  from the multi-threaded Go program the way Go does it (clone with `CLONE_VFORK`, the exec's
+  errno reported through a close-on-exec pipe, a failed child reaped by Go); the pipes are
+  `os.Pipe`'s, close-on-exec, so a child gets its three streams only. **A goroutine waits for
+  each child** (`os.Process.Wait`, over a pidfd) and keeps its status: a child that ends is
+  reaped at once, whether or not the program ever waits for it, so no zombie is left (jrt's test
+  `TestProcessReapedUnwaited`), and a reused pid is never signalled (`Signal` goes through the
+  pidfd, and fails once the child is reaped). `destroy` is SIGTERM, `destroyForcibly` SIGKILL;
+  the status is the JDK's encoding (the exit status, or 0x80 plus the signal: 143, 137). The
+  processes are read from `/proc` as `ProcessHandleImpl_linux.c` reads them (the fields of
+  `stat` after the last `)`, `btime` of `/proc/stat`, 100 clock ticks a second; `exe` and
+  `cmdline`, the arguments up to the first empty one, the command line with every NUL a space
+  when the command is unknown or the arguments cut at a page; the user by the uid of
+  `/proc/pid` in `/etc/passwd`, as musl's `getpwuid`). The program's ends of the pipes are
+  `procPipe`s: reads and writes fail with the C library's texts (`Broken pipe`), a read on an
+  end another thread closed ends the stream, and `Available` is `FIONREAD`'s count, so that
+  `processExited` drains a child's last output as on the JVM.
+- **`process.clj`: the natives**, generic over `HostProc`. `ProcessImpl`'s variant passes
+  `forkAndExec`'s arguments to `hostForkAndExec`, which looks for the program as this machine's
+  JVM does: a name with a slash is executed as it is, else it is looked for on the search path
+  (with the environment inherited, musl's `execvp`: `PATH`, else `/usr/local/bin:/bin:/usr/bin`;
+  with the environment given, `childproc.c`'s `JDK_execvpe` over the program's `PATH` at its
+  first use, else `:/bin:/usr/bin`; an empty component `.`), going on after ENOENT, ENOTDIR and
+  EACCES (and ELOOP, ESTALE, ENODEV, ETIMEDOUT with the environment given), EACCES sticky; no
+  `/bin/sh` fallback on ENOEXEC (musl's `execvp` has none). A candidate the host's `Stat` does not
+  find is passed over without a fork; the directory is checked first, as the child changes to it
+  before the exec. The errors are `ProcessImpl_md.c`'s texts, `IOE_FORMAT` (`"%s, error: %d (%s)
+  %s"`, a trailing space) with musl's `strerror`: `Exec failed, error: 2 (No such file or
+  directory) `, `Failed to access working directory, error: 20 (Not a directory) `. (These are the
+  texts this machine's JVM prints, checked by the oracle; older JDKs printed `error=2, No such file
+  or directory`.) The children are kept in a table by pid until `waitForProcessExit0` reaps them;
+  the pipes are entries of jrt's file table (`files.clj`), so the process streams are the JDK's
+  `FileInputStream` and `FileOutputStream` subclasses over `FileDescriptor`s naming them.
+  `ProcessEnvironment.environ` is the host's environment as name and value bytes.
+- **The OS stays in `_linux` files.** `hostproc.clj` and `process.clj` name no `syscall` or
+  `os`: errors carry Linux's error numbers as `int`s (`process.clj`'s constants), and only
+  `hostproc_linux.clj` (`//go:build linux`, as `hostfs_linux.clj`) and the test file use
+  `os` and `syscall`, so jrt compiles for `GOOS=tamago` without processes (BOX-SURVEY.md).
+
+**Variants** (`overlay/jdk/variants/`):
+
+| class | what |
+|---|---|
+| `ProcessImpl` | no launch mechanism, helper path or native `init`; `forkAndExec` calls the static native `hostForkAndExec`; `start` and `newFileDescriptor` use `HostFiles.handle` and `HostFiles.setHandle` for SharedSecrets' `JavaIOFileDescriptorAccess`; `initStreams` and `destroy` keep their Linux branches (`OperatingSystem` is not in the world); `JNU_CHARSET` from `sun.jnu.encoding` |
+| `Process` | the pipe streams without `Blocker`; the native charset from `native.encoding` (`StaticProperty` is not in the world) |
+| `ProcessBuilder` | `start` without the JFR event and the `System.Logger` (both outside the world); `Redirect`'s null file `/dev/null` |
+| `ProcessHandleImpl` | no `initNative`; the reaper threads plain daemon threads (`InnocuousThread` is not in the world); `Info.info0` sets its fields from the static native `hostInfo` (the JDK's C sets them through JNI field IDs) |
+
+**jrt's own Java.** `FileDescriptor` gives `HostFiles` the setting of its number in its static
+initializer (`HostFiles.DescriptorAccess`, as the JDK's gives `SharedSecrets` its
+`JavaIOFileDescriptorAccess`). `jdk.internal.jrt.RuntimeExec` holds `Runtime.exec`'s six
+overloads (jdk26u's code, through `ProcessBuilder`'s public API: the package-private
+`environment(String[])` is a clear and puts); jrt's `Runtime` is hand-written Go, which cannot
+name the translated `ProcessBuilder`, so c2g gives `Runtime`'s member table the six `exec`
+methods, each a call of `RuntimeExec`'s (`out.clj`, rooted in `main.clj`), as it gives `System`
+its `getenv` and `getProperties`.
+
+**Found on the way (c2g).** A bound method reference to a private method of a non-leaf class
+(`Process.onExit`'s `this::waitForInternal`) called the method on the interface, where a private
+method is not: it now calls its `Impl_` with the receiver's struct and the receiver, as an
+invocation does (`code.clj`, `method-ref-val`).
+
+**What is out.** `ProcessHandle.Info` of other users' processes has what `/proc` lets one read
+(as on the JVM); `ProcessHandle.allProcesses`, `children` and `descendants` scan `/proc` as the
+JDK does. The launch mechanisms (`jdk.lang.Process.launchMechanism`) and `jspawnhelper` have no
+meaning in the Go build. No `/bin/sh` fallback for ENOEXEC (this machine's JVM has none either).
+
+## Decisions
+
+- Translate jdk26u's process classes and write only the natives (as for sockets and files),
+  rather than a hand-written `Process` over Go's `os/exec`: the JVM's texts, states, stream
+  classes and reaping protocol come with the translation, and the seam is small. `os/exec` itself
+  is not used: its `Cmd` copies non-file streams through goroutines and waits for them; the JDK
+  passes descriptors, which `os.StartProcess` does.
+- The children's pipes live in jrt's file table (not a table of their own): the JDK's process
+  streams are `FileInputStream`s and `FileOutputStream`s over `FileDescriptor`s, and
+  `startPipeline` passes a pipe's descriptor from one process to the next.
+- A goroutine per child reaps it at its end (the JVM reaps through its reaper thread, which
+  `ProcessImpl` always starts): the Java reaper thread waits on the host's record instead of
+  `waitpid`, so the child is reaped even when the Java side is slow, and its pid cannot be
+  reused under a later `destroy`.
+
+## Results
+
+| check | result |
+|---|---|
+| `bin/jrt-convert` | 644 files (637 on main), all converted and compiled to javac's class shapes (640 identical, the 4 known differences), 1,880 classes |
+| `bin/c2g --program` | 2,753 classes analyzed, 2,693 reached, 24,898 methods; the build succeeds |
+| `bin/jrt test` (`process_test.clj`: `TestProcessStreams`, `TestProcessReapedUnwaited`, `TestProcessAvailable`, `TestProcessOptions`, `TestProcessErrors`, `TestProcessDestroy`, `TestProcessHandles`, `TestNoProcesses`) | all of jrt's tests pass on amd64 and on arm64 under `qemu-aarch64` |
+| `bin/arbace-go --smoke` (amd64) | passes |
+| the oracle's new `forms/processes.clj` (129 cases: programs, streams, readers and writers, errors and their texts, the builder and `Redirect`, environment and directory, redirections to and from temporary files, error output to standard output, `DISCARD`, `inheritIO`, `startPipeline`, timed waits, `destroy` and `destroyForcibly` (143, 137), `onExit`, `close`, handles and info, `Runtime.exec`, `arbace.java.shell`, `arbace.java.process`; recorded twice on the JVM, identical) | 129 of 129 on Go |
+| the whole oracle on Go (`--expected test/oracle/known-go-amd64.edn`) | 21,921 of 21,929; the 8 mismatches exactly the known ones |
+| Clojure's suite on Go | 68 namespaces, all load, 687 tests, 19,651 assertions, 19,647 pass, 4 errors (java.io's, expected); `java.process` 2 tests, 6 of 6, `java.shell` 4 tests, 13 of 13, as on the JVM; no regressions (one namespace, `compilation.examples`, was killed once by the kernel's OOM killer while other agents' runs shared the machine, and passed when run again) |
+
+`arbace.java.shell/sh` returns at once but a program using it ends 60 s later unless it calls
+`shutdown-agents`, on the JVM as on Go (its `future`'s pool threads are not daemons): Clojure's
+behaviour, not changed.
+
+## Size
+
+Against main's executable (`target/arbace-go/amd64/arbace`, 61,927,584 bytes): 62,738,592 bytes,
+**+811 KB (+1.3%)**: the six translated classes and their nested ones, the variants' natives,
+`hostproc`/`process` in jrt, and the reflection of the classes' public members. The image of
+prepared namespaces is 6,010,651 bytes (shell and process are not prepared: they load from their
+embedded sources when required). Start (`-e nil`): 0.20-0.22 s.
+
+## Amendments (accepted by the user 2026-10-10)
+
+Numbered PR (processes). All seven were accepted on 2026-10-10 and folded into C2G-SPEC (§16,
+"Processes"), B1-PLAN.md, JRT-SOURCES.md and LICENSE.md; each says where below.
+
+- **PR1 (B1-PLAN.md D6; C2G-SPEC §4.1, the closed world; §10.3, the embedded namespaces)**
+  D6 is reversed for processes: `Process`, `ProcessBuilder` (with `Redirect`), `ProcessHandle`,
+  `ProcessHandleImpl`, `ProcessImpl` and `ProcessEnvironment` are translated from jdk26u with
+  the variants above, and `arbace.java.shell` and `arbace.java.process` are embedded (embed.clj
+  no longer leaves them out); Clojure's suite on Go runs `java.shell` and `java.process`. *Accepted 2026-10-10: C2G-SPEC §4.1, §10.3; B1-PLAN.md D6; JAVA-BASE.md.*
+- **PR2 (C2G-SPEC §9.4, the host interface)** An optional `HostProc` beside `Host` (`Start`,
+  `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`, children as `HostChild`), as `HostFS`,
+  `NetHost` and `HostLinks`; without it no program starts (the JVM's IOException with ENOSYS).
+  B1a's `OSHost` implements it on Linux over `os.StartProcess`, `os.Pipe` and `/proc`, reaping
+  each child in a goroutine at its end. *Accepted 2026-10-10: C2G-SPEC §9.4.*
+- **PR3 (C2G-SPEC §9.1, the natives)** jrt defines the natives of `ProcessEnvironment.environ`,
+  `ProcessHandleImpl`'s (`getCurrentPid0`, `isAlive0`, `waitForProcessExit0`, `destroy0`,
+  `parent0`, `getProcessPids0`) and those the variants add (`ProcessImpl.hostForkAndExec`,
+  `ProcessHandleImpl.Info.hostInfo`); the children's pipes are entries of jrt's file table
+  (`HostFiles`), whose `available` asks a file that can tell (a pipe: `FIONREAD`), and jrt's
+  `FileDescriptor` gives `HostFiles` the setting of its number (`HostFiles.DescriptorAccess`,
+  `setHandle`) for `ProcessImpl`'s descriptors. *Accepted 2026-10-10: C2G-SPEC §4.1, §9.1.*
+- **PR4 (C2G-SPEC §11, c2g's support code)** `Runtime.exec`'s six overloads are in `Runtime`'s
+  member table, written by c2g when jrt's own `jdk.internal.jrt.RuntimeExec` is translated (its
+  methods rooted), as `System.getenv` and `getProperties` are. *Accepted 2026-10-10: C2G-SPEC §4.1, §11.*
+- **PR5 (C2G-SPEC §9.4, the JVM's texts; with NT5)** A failed start's message is
+  `ProcessImpl_md.c`'s `IOE_FORMAT` with musl's `strerror` (`Exec failed, error: 2 (No such file
+  or directory) `, trailing space included), the program is looked for as this machine's JVM
+  looks for it (musl's `execvp` with the environment inherited, `JDK_execvpe` with it given; no
+  `/bin/sh` fallback), and the exit status is the JDK's encoding (0x80 plus the signal). *Accepted 2026-10-10: C2G-SPEC §9.4.*
+- **PR6 (LICENSE.md, B7)** The variants keep jdk26u's code of the methods they replace,
+  `RuntimeExec.java` transcribes `Runtime.exec`, and `process.clj` and `hostproc_linux.clj`
+  follow `ProcessImpl_md.c`, `childproc.c`, `ProcessHandleImpl_unix.c` and
+  `ProcessHandleImpl_linux.c`: recorded as jdk26u-derived (GPL 2 with the Classpath Exception),
+  as the B7 files are. *Accepted 2026-10-10: LICENSE.md; C2G-SPEC §4.1.*
+- **PR7 (C2G-SPEC §7.11, method references)** A bound method reference to a private method of a
+  non-leaf class is a call of its `Impl_` with the receiver's struct and the receiver, as an
+  invocation of it is. *Accepted 2026-10-10: C2G-SPEC §7.11.*
+
+# Resources by URL: `ClassLoader.getResource`, `URLClassLoader` (branch `gofix`)
+
+The user's decision of 2026-10-10 (before the freeze): `java.io`'s 4 errors on Go, the class
+loader's `getResource(s)` and `URLClassLoader`, keeping the JVM's semantics where they apply.
+
+## What was done
+
+**The class path's resources by URL.** `jdk.internal.jrt.ClassPathResources` (overlay/jdk, jrt's
+own Java, translated) finds a resource as the Go build's class path has it, in `RT.load`'s and
+`ResourceOrPath`'s order: the resources embedded in the executable, then the directories of
+`ARBACE_PATH`. An embedded resource's URL is a `jar:` URL naming the executable,
+`jar:file:/path/to/arbace!/arbace/core.clj`, as the JVM's names a resource of `arbace.jar`
+(`jar:file:/path/to/arbace.jar!/arbace/core.clj`); its handler is `ClassPathResources`' own
+(a subclass of the `jar:` handler, for its syntax and comparisons), whose connection reads the
+embedded resource (`openStream`, `slurp`), since the JDK's `jar:` connection is outside the
+world. A file of an `ARBACE_PATH` directory has its `file:` URL as the JVM's class path
+directories give it (`URLClassPath.FileLoader`: the directory's URL resolving the encoded name,
+a name with `..` only within the directory). Natives (jrt's Go, `resources.clj`): whether a
+resource is embedded and its bytes (`Host.Resource`), and the executable's path, from an
+optional host interface `HostExecutable` (as `HostFS`), which B1a's `OSHost` implements on Linux
+(`resources_linux.clj`, `//go:build linux`: `os.Executable`, links resolved); a host without it
+(B1b's box, `GOOS=tamago`) names `/arbace`.
+
+**`ClassLoader.getResource` and `getResources`** of the built-in loaders are c2g's member table
+entries (as `getResourceAsStream` was): the application loader's are `ClassPathResources`'
+(`getResources` was an empty enumeration); the platform loader and the bootstrap loader find
+none. `(io/resource "arbace/core.clj")` is a URL now, and `slurp` reads it.
+
+**`java.net.URLClassLoader`** (overlay/jdk, jrt's own Java, translated): jdk26u's public API,
+finding resources as the JDK's does, the parent first, then its URLs in order, a `file:` URL
+ending with `/` a directory searched as above. It loads no classes (there are no class files: a
+class is found by name in the closed world, through the parent). It left c2g's library cuts
+(SL7), where it was a class whose members throw.
+
+**`Files.newDirectoryStream`** (jrt's `Files`, overlay/jdk; java-interop's reflective call of it
+with a fn for a `DirectoryStream$Filter`, EVAL-NOTES.md "The suite's Java fixtures"): the three
+overloads, jdk26u's `DirectoryStream` and `NotDirectoryException`, a glob read as
+`UnixFileSystem.getPathMatcher` reads it (jdk26u's `sun.nio.fs.Globs`, through a public helper
+`sun.nio.fs.GlobPatterns`, its method being package-private). Deviation: the entries are listed
+and filtered when the stream is opened (jdk26u's read them as the iteration goes), so a filter's
+`IOException` is thrown by `newDirectoryStream`, not wrapped in `DirectoryIteratorException`.
+
+**`VM.isSystemDomainLoader`** (jrt, `resources.clj`): `URL` asks it of a handler that is not one
+of the JDK's (`isBuiltinStreamHandler`); the JDK's answer, the bootstrap or the platform loader.
+
+## Deviations
+
+- `URLClassLoader` extends `ClassLoader`, not `SecureClassLoader` (`java.security`'s code sources
+  and permissions are outside the world); `getResource` and `getResources` are declared by it,
+  the Go build's `ClassLoader` having none of its own for translated code to inherit.
+- A `URLClassLoader`'s `jar:` URLs and other protocols find nothing (`java.util.jar` is outside the
+  world).
+- The URL of an embedded resource opens only through the URL `getResource` returns: a URL made
+  again from its text has the JDK's `jar:` handler, whose connection is outside the world.
+
+## Results
+
+`clojure.test-clojure.java.io` on Go: 15 tests, 115 of 115 assertions (before: 109 of 113, 4
+errors), as on the JVM. `test-resource` and `test-resources-with-spaces` pass: a resource found
+through a `URLClassLoader` of a temporary directory equals the file's URL (`as-url`), and
+`spit` and `slurp` through it work.
+
+# Security: java.security basics in the Go build
+
+Branch `gosec` (2026-10-10, the user's decision): what server code commonly uses of
+`java.security` and `javax.crypto`: `MessageDigest` with the JDK's algorithms, names and aliases,
+`DigestInputStream`/`DigestOutputStream`, `SecureRandom` (NativePRNG and its blocking and
+non-blocking kinds, DRBG, SHA1PRNG, `getInstanceStrong`, the default), `UUID.randomUUID` and
+`nameUUIDFromBytes` over them, `javax.crypto.Mac` (the HMACs) with `SecretKeySpec`, the
+exceptions, and the provider framework (`Provider`, `Security`, `sun.security.jca`) with the
+providers SUN and SunJCE. Before, `java.security` and `javax.crypto` were absent (JAVA-BASE.md:
+0%), and `UUID` had a variant drawing from the host and Go's `crypto/md5`.
+
+## Decision: translated, with Go's crypto as the intrinsics
+
+The implementations are jdk26u's, translated: `sun.security.provider`'s digests (`DigestBase`,
+`MD2`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`, `ByteArrayAccess`), its generators (`SecureRandom`,
+the SHA1PRNG; `DRBG` with `AbstractDrbg`, `AbstractHashDrbg`, `HashDrbg`, `HmacDrbg`;
+`NativePRNG`), `com.sun.crypto.provider`'s `HmacCore`, `HmacMD5`, `HmacSHA1`, and the API
+classes and framework unchanged but for the variants below. All of it is plain Java; what
+needed work was the provider machinery (reflection, the `java.security` file, the service
+loader, the crypto policy), which variants and jrt's own Java simplify, and the digests'
+`VarHandle` views of byte arrays, which c2g now compiles (SC1). Backing the digests with Go's
+`crypto` alone was the alternative: a second implementation with its own corner cases behind
+the JDK's API (`clone` of a running digest, `digest(buf, off, len)`'s checks and messages,
+SHAKE, MD2, `toString`), where the translation gives the JDK's behaviour and messages exactly.
+
+Translated, the digests ran at 4% to 50% of the JVM's, whose intrinsics replace the block
+functions (`@IntrinsicCandidate` `implCompress0` and `DigestBase.implCompressMultiBlock0`). The
+Go build does the same (amendment SC7, the user's request of 2026-10-10): `DigestBase`'s variant
+first offers whole blocks to `compressBlocks`, which `MD5`, `SHA`, `SHA2`, `SHA5` and `SHA3`
+override with a native running Go's `crypto/md5`, `sha1`, `sha256`, `sha512` or `sha3` block
+function (assembly on amd64 and arm64) on the Java object's own chaining state: the state words
+are written into a fresh Go digest's marshaled state (`MarshalBinary`'s layout: a 4-byte magic,
+SHA-3's rate byte, the state, an empty buffer, a zero length), unmarshaled, the blocks written,
+and the new state read back (jrt's `digests.clj`). The Java object keeps the state, the buffer
+of a partial block, the padding and the final blocks, so `clone`, `reset`, partial digests and
+every message stay the JDK's, and MD2 (and a SHA-3 rate Go has no digest of) keep jdk26u's loop.
+The JVM's intrinsics also cover a single block (`implCompress0`); here the round trip through the
+marshaled state would cost about what it saves, so single blocks stay translated. An HMAC's
+inner and outer digests are `MessageDigest`s, so its long inputs take the same path.
+
+| 16 MB, amd64 | Go build, translated | Go build, Go's blocks (SC7) | JVM (JDK 26, intrinsics) | Go's `crypto` (go1.27.1) |
+|---|---:|---:|---:|---:|
+| MD5 | 237 MB/s | 666 MB/s | 646 MB/s | 628 MB/s |
+| SHA-1 | 170 MB/s | 1,554 MB/s | 1,437 MB/s | 1,605 MB/s |
+| SHA-256 | 116 MB/s | 1,326 MB/s | 1,332 MB/s | 1,500 MB/s |
+| SHA-512 | 42 MB/s | 617 MB/s | 606 MB/s | 645 MB/s |
+| SHA3-256 | 168 MB/s | 304 MB/s | 286 MB/s | 327 MB/s |
+| HmacSHA256 | 94 MB/s | 1,491 MB/s | 1,328 MB/s | |
+| `SecureRandom()` (NativePRNG) `nextBytes` | 20 MB/s | 19 MB/s | 66 MB/s | |
+| SHA1PRNG / DRBG `nextBytes` | 25 / 33 MB/s | 22 / 31 MB/s | 131 / 247 MB/s | |
+| 10,000 `UUID.randomUUID` | 12 ms | 12 ms | 4 ms | |
+| 10,000 `getInstance("SHA-256")` + digest of 64 bytes | 33 ms | 39 ms | 27 ms | |
+
+The digests now run as fast as the JVM's and Go's. The generators, which digest 20 to 64 bytes
+at a time (single blocks), and short digests are unchanged, 3 to 8 times slower than the JVM's.
+
+## What was done
+
+- **The closure** (`test/g2c/jrt_sources.clj`, `security-sources`; amendment SC4): 75 files of
+  jdk26u at `baf63fb`: `java/security/`'s `MessageDigest`, `MessageDigestSpi`,
+  `DigestInputStream`, `DigestOutputStream`, `SecureRandom`, `SecureRandomSpi`,
+  `SecureRandomParameters`, `DrbgParameters`, `Provider`, `Security`, `Key`,
+  `AlgorithmConstraints`, `CryptoPrimitive`, `spec/AlgorithmParameterSpec`, `spec/KeySpec`,
+  `cert/CertStoreParameters` and ten exceptions; `javax/crypto/`'s `Mac`, `MacSpi`, `SecretKey`,
+  `ShortBufferException`, `KDFParameters`, `spec/SecretKeySpec`; `javax/security/auth/`'s
+  `Destroyable`, `DestroyFailedException`; `sun/security/provider/`'s `Sun`, `SunEntries`, the
+  digests and generators above, `EntropySource`, `MoreDrbgParameters`, and
+  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`;
+  `com/sun/crypto/provider/`'s `SunJCE`, `HmacCore`, `HmacMD5`, `HmacSHA1`; `sun/security/jca/`'s
+  `GetInstance`, `ProviderList`, `Providers`, `ProviderConfig`, `ServiceId`, `JCAUtil`;
+  `sun/security/util/`'s `Debug`, `SecurityConstants`, `SecurityProviderConstants`,
+  `SecurityProperties`, `KnownOIDs` (the OID aliases), `MessageDigestSpi2`,
+  `CryptoAlgorithmConstraints`, `AbstractAlgorithmConstraints`, `AlgorithmDecomposer`,
+  `PropertyExpander`; `jdk/internal/event/`'s `Event`, `SecurityProviderServiceEvent`,
+  `SecurityPropertyModificationEvent` (never enabled). `bin/jrt-convert`: 717 files (637 on main
+  at `15018b1`), all converted and compiled to javac's class shapes (713 identical, the 4 known
+  differences), 1,979 classes.
+- **jrt's own Java** (overlay): `javax/crypto/JceSecurity.java` (the JDK generates it from a
+  template that reads the crypto policy files and verifies provider jars: here every provider
+  can be used and the policy is unlimited, the JDK's default; its `getInstance` methods
+  transcribed); `sun/security/provider/SeedGenerator.java` (seeds from the host; the system
+  entropy without network adapters, with a few system properties and `File.list`; javac could
+  not compile jdk26u's against jrt's `Files`, which has no directory streams);
+  `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` (the
+  services' constructors, below); `jdk/internal/jrt/HostRandom.java` (the host's random source as
+  an endless `InputStream`, with the native `fill0`).
+- **Variants** (`overlay/jdk/variants/`), each with its reason in its header:
+
+| class | variant |
+|---|---|
+| `Provider` | the static initializer without the class literals of `Policy.Parameters` and `Configuration.Parameters` (outside the build; the Policy and Configuration engines take no parameter) |
+| `Provider$Service` | `newInstanceUtil` asks `sun.security.provider.JrtServices` first: the JDK finds a service's class by name and calls its constructor by reflection, which the closed world cannot do for classes of non-exported packages (C2G-SPEC §10.6); the same constructor choice (`SecureRandomParameters` or none), the same `NoSuchMethodException` and `InvocationTargetException` wrapping, so `newInstance`'s messages are the JDK's; any other class (a provider the evaluator defines) by reflection as before |
+| `Security` | the security properties from the embedded `conf/security/java.security` (SC5) in `SecPropLoader.loadMaster`; the static initializer without `SharedSecrets`; `setProperty` without `EventHelper`'s logger |
+| `ProviderConfig` | `getProvider`: SUN and SunJCE are made directly, any other provider fails to load (no `ServiceLoader`, no class loading by name), as one the JDK cannot find |
+| `SunEntries`, `SunJCE` | register the services the Go build implements (SecureRandom and MessageDigest; the HMACs), with the JDK's aliases, attributes and order; the others' classes and engine classes are not in the build, so `getInstance` of them is the JDK's `NoSuchAlgorithmException` |
+| `NativePRNG`, `NativePRNG$RandomIO` | the seed and next streams are the host's random source (`HostRandom`) instead of `/dev/random` and `/dev/urandom`; the three kinds are always available; the seed file is null, so `setSeed` only mixes into the SHA1PRNG (the JDK also writes to `/dev/random`) |
+| `SecretKeySpec` | the static initializer (`SharedSecrets`' access to `clear`, for PBKDF2 and HKDF) cut |
+| `DigestBase`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3` | whole blocks by Go's `crypto` (SC7, above) |
+
+  `UUID`'s variant is gone: `randomUUID` (NativePRNG), `nameUUIDFromBytes` (MD5) and
+  `ofEpochMillis` (partial before) are jdk26u's code.
+- **Entropy from the host** (Host unchanged): `HostRandom`'s native calls
+  `CurrentHost().RandomBytes`, B1a's `OSHost`'s Go `crypto/rand` (getrandom(2)), now in the
+  Linux-tagged `hostrand_linux.clj` (`//go:build linux`), so that a TamaGo host supplies its
+  own; jrt's generic code reaches no OS for it.
+- **c2g**: byte-array view `VarHandle`s (SC1), the rename `Sun_SecureRandom` (SC2), `com.sun.*`
+  in jrt's Go package (SC3).
+
+## Results
+
+- **The oracle**: `test/oracle/forms/security.clj`, 181 cases recorded on the JVM (digests of
+  fixed inputs for every algorithm, across block boundaries and of a million `a`s; names,
+  aliases and OIDs; update, digest, reset, clone, partial digests and their exceptions;
+  many blocks in one update and in chunks with a clone midway, for every algorithm; `isEqual`;
+  the digest streams; the HMACs of every algorithm, keys longer than the block, clone,
+  reset, the uninitialized and missing cases; `SecretKeySpec`; `NoSuchAlgorithmException` and
+  `NoSuchProviderException` with the JDK's messages; providers, services, properties and
+  `getAlgorithms`; `SecureRandom`'s algorithms, providers, parameters, `toString`, lengths,
+  bounds and reseeding; SHA1PRNG seeded before first use, deterministic; `UUID`'s three
+  factories): **180 of 181 on Go**, the one other the provider list (SC4), recorded in
+  `test/oracle/known-go-amd64.edn`. The whole Go oracle: 21,969 of 21,978, the 9 known
+  mismatches (8 before and this one).
+- **Clojure's suite on Go**: 19,628 of 19,632 assertions (the 4 errors of `java.io`, expected),
+  66 namespaces, test.generative 26 of 26, no regressions. **`bin/arbace-go --smoke`**: passes.
+  **`bin/jrt test`**: passes on amd64 and arm64 (qemu), with `TestVhView` (the views' values,
+  stores and bounds).
+- **Coverage** (`bin/jrt-coverage`): java.base 9,032 of 17,546 members provided (51.5%; JAVA-BASE.md's
+  last measurement 8,792, 50.1%), 606 classes in Go; `java.security` 199 of 1,307 (15.2%; the
+  package itself 198 of 663, 29.9%), `javax.crypto` 37 of 407 (9.1%). Five protected members
+  are stubs, reached only by a subclass the evaluator makes (`MessageDigest(String)`,
+  `Provider(String, double, String)`, `Provider.removeService`, `SecureRandom(SecureRandomSpi,
+  Provider)`, `SecureRandomSpi(SecureRandomParameters)`).
+
+## Size
+
+The executable (amd64, `bin/arbace-go --build`): **61,927,584 to 63,905,952 bytes (+1.98 MB,
++3.2%)**, against main's at `15018b1`. The executables are stripped (SZ1), so no per-symbol
+split: the translated classes (about 80 more files, most of them the provider framework and
+`KnownOIDs`), their member tables (the REPL can call every public member of `java.security`),
+and `java.security` as resource data (75,186 bytes before compression). SC7 (the digests' blocks by Go's
+`crypto`) adds 69,632 bytes (63,975,584: Go's block functions and their assembly). With main at
+`7cc3637` merged (processes), the executable is 64,852,128 bytes.
+
+## Deviations
+
+- The providers are SUN and SunJCE alone, with the services above: `Security.getProviders()`
+  has two entries where the JVM has twelve; `getInstance` of a signature, cipher, key store,
+  key pair generator, key factory ... throws the JDK's `NoSuchAlgorithmException`
+  ("... not available"); the engine classes `Signature`, `Cipher`, `KeyStore`, ... are not in
+  the build.
+- NativePRNG's three kinds read the same host source; `generateSeed` does not block on an
+  initialized kernel (getrandom(2)).
+- `java.security.debug` works but for the caller frames (`StackWalker`); `DRBG` with
+  `securerandom.drbg.config` naming CTR_DRBG throws (`CtrDrbg` needs `Cipher`).
+
+## Amendments (accepted by the user 2026-10-10)
+
+Numbered SC (security). SC1-SC6 were accepted on 2026-10-10 and folded into C2G-SPEC (§16,
+"Security") and JRT-SOURCES.md; SC7 was the user's request of the same day. Each says where.
+
+- **SC1 (C2G-SPEC §8.5, VarHandles)** A constant handle may also be
+  `MethodHandles.byteArrayViewVarHandle(int[].class or long[].class, ByteOrder.BIG_ENDIAN or
+  LITTLE_ENDIAN)`, with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
+  jrt's `VhView{Get,Set}{Int,Long}{BE,LE}`, with the view's bounds check and message (the index
+  below the length less the element's size less one, else `ArrayIndexOutOfBoundsException` with
+  that reduced length); its other access modes remain operation-level stubs.
+  (`sun.security.provider.ByteArrayAccess`, `SHA3`; `jdk.internal.util.ByteArray`'s variant could
+  now go.) *Accepted 2026-10-10: C2G-SPEC §8.5.*
+- **SC2 (C2G-SPEC §4.4, the rename table)** `sun/security/provider/SecureRandom` →
+  `Sun_SecureRandom` (java.security's `SecureRandom` is `SecureRandom`). *Accepted 2026-10-10: C2G-SPEC §4.4.*
+- **SC3 (C2G-SPEC §4.2, Go packages)** Classes of `com/sun/` are the JDK's: jrt's package (they
+  went to `arbace/lang`, an import cycle); likewise the reflected marker interfaces. *Accepted 2026-10-10: C2G-SPEC §4.2.*
+- **SC4 (C2G-SPEC §4.1, the closed world; JRT-SOURCES.md)** `java.security`'s basics are in the
+  world, as listed above, with the variants and jrt's own Java above; the providers are SUN and
+  SunJCE with the services the build implements; `UUID`'s variant (M7's part of §4.6) is gone. *Accepted 2026-10-10: C2G-SPEC §4.1, §4.6; JRT-SOURCES.md "Security".*
+- **SC5 (C2G-SPEC §10.3, RD1; JRT-SOURCES.md, RD4)** The resource data include the image file
+  `conf/security/java.security`, made by `bin/jrt-convert` as `make/modules/java.base/Gendata.gmk`
+  makes it (`build.tools.makejavasecurity.MakeJavaSecurity` for `linux x86 unlimited`) and
+  compared byte for byte with the image's `jdk/conf/security/java.security` (the same);
+  `Security` reads it as the resource `/conf/security/java.security`. *Accepted 2026-10-10: C2G-SPEC §10.3; JRT-SOURCES.md "Security".*
+- **SC6 (C2G-SPEC §9.4, the host interface)** `OSHost.RandomBytes` (Go's `crypto/rand`) is in
+  the Linux-tagged `hostrand_linux.clj`; the `Host` interface is unchanged. *Accepted 2026-10-10: C2G-SPEC §9.4.*
+- **SC7 (C2G-SPEC §4.1, §4.6; jrt's `digests.clj`)** The translated digests' whole blocks run
+  Go's `crypto` block functions on the Java object's chaining state, through Go's marshaled
+  digest state, as the JVM's intrinsics replace `implCompressMultiBlock0`: variants of
+  `DigestBase` (`compressBlocks`, false by default) and of `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`
+  (their natives `*_GoBlocks_*_native`). *The user's request of 2026-10-10; folded into C2G-SPEC
+  §4.1, §4.6.*
+
+## Sources
+
+https://github.com/openjdk/jdk26u at `baf63fb`: the files of `security-sources` above;
+transcribed in part: `src/java.base/share/classes/javax/crypto/JceSecurity.java.template`,
+`sun/security/provider/SeedGenerator.java`, and the replaced members of `Provider.java`,
+`Security.java`, `ProviderConfig.java`, `SunEntries.java`, `SunJCE.java` (LICENSE.md);
+`src/java.base/share/conf/security/java.security` and
+`make/jdk/src/classes/build/tools/makejavasecurity/MakeJavaSecurity.java`,
+`make/modules/java.base/Gendata.gmk`; the view bounds of
+`src/java.base/share/classes/java/lang/invoke/X-VarHandleByteArrayView.java.template`.
 # Text and locales: java.text and jdk.localedata's locales in the Go build
 
 Branch `gotext` (2026-10-10, the user's decision): `java.text` translated from jdk26u, and the

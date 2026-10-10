@@ -2,7 +2,8 @@
   "VarHandles compiled statically (C2G-SPEC §8.5, amendment JC1): the JDK's concurrent classes
   make their VarHandles once, in static initializers, as static final fields
   (MethodHandles.lookup().findVarHandle(C.class, \"f\", T.class), MhUtil.findVarHandle,
-  MethodHandles.arrayElementVarHandle(T[].class)), and use them only through those fields
+  MethodHandles.arrayElementVarHandle(T[].class), MethodHandles.byteArrayViewVarHandle(int[].class
+  or long[].class, ByteOrder.X)), and use them only through those fields
   (NEXT.compareAndSet(node, a, b)). c2g reads the initializers into a table of constant handles
   and translates each access mode called on one of these fields into an atomic operation on the
   field it names (or on the array element), as Go code; java.lang.invoke itself stays outside
@@ -39,6 +40,18 @@
   (let [node (acc/unaccess node)]
     (when (and (= :const (:op node)) (string? (:val node))) (:val node))))
 
+(defn- byte-order-arg
+  "\"BE\" or \"LE\" for a node reading ByteOrder.BIG_ENDIAN or LITTLE_ENDIAN (or a final local
+  bound to one), else nil."
+  [node env]
+  (let [node (acc/unaccess node)]
+    (case (:op node)
+      :get-static (let [f (:field node)]
+                    (when (= "java/nio/ByteOrder" (or (:declarer f) (:owner f)))
+                      ({"BIG_ENDIAN" "BE" "LITTLE_ENDIAN" "LE"} (:name f))))
+      :local (when-let [init (get env (:id (:b node)))] (byte-order-arg init env))
+      nil)))
+
 (defn- find-field
   "The instance field `fname` of class n or a superclass (as findVarHandle resolves it)."
   [n fname]
@@ -51,7 +64,8 @@
 
 (defn- handle-spec
   "The handle the initializer node `init` makes in class n's static initializer, or nil:
-  {:kind :field :class C :name f :desc T :field field} or {:kind :array :desc \"[T\"}."
+  {:kind :field :class C :name f :desc T :field field}, {:kind :array :desc \"[T\"} or {:kind
+  :view :desc \"[I\" or \"[J\" :order \"BE\" or \"LE\"} (a byte[] view)."
   [n init env]
   (let [init (acc/unaccess init)
         field-spec (fn [c fname tdesc]
@@ -77,6 +91,20 @@
                (= 1 (count args)))
           (let [d (class-arg (first args) env)]
             (when (and d (t/array? d)) {:kind :array :desc d}))
+
+          ;; a view of byte[] as int[] or long[] elements in a byte order (C2G-SPEC §8.5,
+          ;; amendment SC1): MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.X),
+          ;; with or without .withInvokeExactBehavior() (which changes only how a call's
+          ;; descriptor is checked)
+          (and (= owner "java/lang/invoke/MethodHandles") (= name "byteArrayViewVarHandle") (= kind :static)
+               (= 2 (count args)))
+          (let [d (class-arg (first args) env)
+                o (byte-order-arg (second args) env)]
+            (when (and (#{"[I" "[J"} d) o) {:kind :view :desc d :order o}))
+
+          (and (= owner varhandle) (#{"withInvokeExactBehavior" "withInvokeBehavior"} name) (empty? args)
+               (map? (:target init)))
+          (handle-spec n (:target init) env)
 
           :else nil)))))
 

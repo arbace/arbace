@@ -397,6 +397,10 @@
                 ["SequencedCollection" "SequencedSet" "SequencedMap" "ReverseOrderDequeView"
                  "ReverseOrderSortedSetView" "ReverseOrderSortedMapView"])
            ["jdk/internal/util/NullableKeyValueHolder.java"]
+           ;; the JVM's error for compiled code's new of an abstract class, which the
+           ;; evaluator's NewExpr throws as compiled code does (EVAL-NOTES.md, "The suite's
+           ;; Java fixtures")
+           ["java/lang/InstantiationError.java"]
            ;; the constant API's two interfaces, which String and the wrapper classes implement
            ;; (supers, bases and ancestors list them); their methods name classes outside the
            ;; world (Optional, MethodHandles.Lookup) and do not exist in Go
@@ -566,7 +570,12 @@
                 ["Paths" "OpenOption" "StandardOpenOption" "LinkOption" "CopyOption"
                  "StandardCopyOption" "FileSystemException" "NoSuchFileException"
                  "FileAlreadyExistsException" "DirectoryNotEmptyException" "AccessDeniedException"
-                 "InvalidPathException" "ProviderMismatchException" "attribute/FileAttribute"])
+                 "InvalidPathException" "ProviderMismatchException" "attribute/FileAttribute"
+                 ;; Files.newDirectoryStream (Clojure's suite, java-interop's reflective call
+                 ;; with a fn for a DirectoryStream$Filter): the stream's interface, its
+                 ;; error, and glob patterns as UnixFileSystem.getPathMatcher makes them
+                 "DirectoryStream" "NotDirectoryException"])
+           ["src/java.base/share/classes/sun/nio/fs/Globs.java"]
            ;; URLs (io/as-url, readers on file: URLs, slurp of a path string, RT.toUrl): URL and
            ;; its handlers (file:, and http:, https: and jar: for their syntax; their
            ;; connections are outside the world), the file: connection, URLDecoder, and what
@@ -628,6 +637,70 @@
            (map #(str "java/util/concurrent/locks/" % ".java")
                 ["AbstractQueuedSynchronizer" "AbstractOwnableSynchronizer" "AbstractQueuedLongSynchronizer"])))))
 
+(def security-sources
+  "java.security basics in the Go build (the user's decision of 2026-10-10; doc/go/JRT-NOTES.md,
+  \"Security\"): MessageDigest and its streams, SecureRandom, javax.crypto.Mac with
+  SecretKeySpec, the providers SUN and SunJCE with the services they implement in plain Java
+  (the digests, the SHA1PRNG, NativePRNG and DRBG generators, the HMACs), and the provider
+  framework (Provider, Security, sun.security.jca) over the JDK's java.security file. Paths
+  relative to jdk26u; NativePRNG is a src/java.base/unix/classes file."
+  (vec (sort
+         (concat
+           (map #(str "src/java.base/share/classes/" % ".java")
+                (concat
+                  ;; the API: the engines, their SPIs, the digest streams, keys and parameters,
+                  ;; the exceptions
+                  (map #(str "java/security/" %)
+                       ["MessageDigest" "MessageDigestSpi" "DigestInputStream" "DigestOutputStream"
+                        "SecureRandom" "SecureRandomSpi" "SecureRandomParameters" "DrbgParameters"
+                        "Provider" "Security" "Key" "AlgorithmConstraints" "CryptoPrimitive"
+                        "spec/AlgorithmParameterSpec" "spec/KeySpec"
+                        "GeneralSecurityException" "NoSuchAlgorithmException" "NoSuchProviderException"
+                        "DigestException" "InvalidKeyException" "KeyException" "InvalidParameterException"
+                        "InvalidAlgorithmParameterException" "ProviderException"])
+                  (map #(str "javax/crypto/" %)
+                       ["Mac" "MacSpi" "SecretKey" "ShortBufferException" "spec/SecretKeySpec"])
+                  ["javax/security/auth/Destroyable" "javax/security/auth/DestroyFailedException"]
+                  ;; the constructor parameter types of two engine types Provider describes (its
+                  ;; static initializer names them), and the events Provider.getService and
+                  ;; Security.setProperty commit (never enabled: no JFR in the Go build)
+                  ["java/security/cert/CertStoreParameters" "javax/crypto/KDFParameters"
+                   "jdk/internal/event/Event" "jdk/internal/event/SecurityProviderServiceEvent"
+                   "jdk/internal/event/SecurityPropertyModificationEvent"]
+                  ;; the SUN provider: the digests (the JDK's own, plain Java), the generators,
+                  ;; the seed generator
+                  (map #(str "sun/security/provider/" %)
+                       ["Sun" "SunEntries" "DigestBase" "MD2" "MD5" "SHA" "SHA2" "SHA5" "SHA3"
+                        "ByteArrayAccess" "SecureRandom" "DRBG" "AbstractDrbg" "AbstractHashDrbg"
+                        "HashDrbg" "HmacDrbg" "EntropySource" "MoreDrbgParameters"])
+                  ;; the SunJCE provider's HMACs
+                  (map #(str "com/sun/crypto/provider/" %) ["SunJCE" "HmacCore" "HmacMD5" "HmacSHA1"])
+                  ;; the provider framework, and what it uses of sun.security.util
+                  (map #(str "sun/security/jca/" %)
+                       ["GetInstance" "ProviderList" "Providers" "ProviderConfig" "ServiceId" "JCAUtil"])
+                  (map #(str "sun/security/util/" %)
+                       ["Debug" "SecurityConstants" "SecurityProviderConstants" "SecurityProperties"
+                        "KnownOIDs" "MessageDigestSpi2" "CryptoAlgorithmConstraints"
+                        "AbstractAlgorithmConstraints" "AlgorithmDecomposer" "PropertyExpander"])))
+           ;; NativePRNG (the default SecureRandom on Linux); its seed generator is jrt's own
+           ;; SeedGenerator (overlay), over the host's random source
+           ["src/java.base/unix/classes/sun/security/provider/NativePRNG.java"]))))
+
+(def process-sources
+  "Processes in the Go build (the user's decision of 2026-10-10, reversing D6 for them;
+  doc/go/JRT-NOTES.md, \"Processes\"): paths relative to jdk26u. Process, ProcessBuilder (with
+  its Redirect), ProcessHandle and ProcessHandleImpl are plain Java; ProcessImpl and
+  ProcessEnvironment are src/java.base/unix/classes files (KIND unix). ProcessImpl's forkAndExec
+  and ProcessHandleImpl's natives are jrt's over the host's optional HostProc (variants
+  overlay/jdk/variants/ProcessImpl.clj, ProcessHandleImpl.clj); ProcessEnvironment's environ is
+  jrt's over Host.Environ."
+  (vec (sort
+         (concat
+           (map #(str "src/java.base/share/classes/java/lang/" % ".java")
+                ["Process" "ProcessBuilder" "ProcessHandle" "ProcessHandleImpl"])
+           (map #(str "src/java.base/unix/classes/java/lang/" % ".java")
+                ["ProcessImpl" "ProcessEnvironment"])))))
+
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
   whose JDK sources need what is cut (java.nio's encoders and channels), written for jrt.
@@ -651,7 +724,9 @@
                                (map #(str "src/java.base/share/classes/" %) concurrent-sources)
                                (map #(str "src/java.base/share/classes/" %) util-sources)
                                added-module-sources
-                               file-sources)))))
+                               file-sources
+                               process-sources
+                               security-sources)))))
 
 (defn print-sources
   "Prints the closure's sources of surface file f, one per line, as \"MODULE KIND REL\": KIND

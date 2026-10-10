@@ -1,7 +1,7 @@
 ;; The socket server's test client (bin/net-check; doc/go/JRT-NOTES.md, "Sockets"): sessions with
 ;; a socket REPL (arbace.core.server/repl) and an io-prepl server, as a user's client sends them,
 ;; printed as transcripts that bin/net-check compares between the JVM's server and the Go
-;; executable's. It runs on the JVM Arbace (bin/arbace test/net/client.clj MODE PORT).
+;; executable's. It runs on the JVM Arbace (bin/arbace-j test/net/client.clj MODE PORT).
 ;;
 ;; Modes:
 ;;   repl PORT        one session of the socket REPL: forms, output, an error, a namespace switch,

@@ -1,5 +1,5 @@
 ;; The class forms interpreter (doc/go/CLASSFORMS-REPL.md) on the JVM, against the compiled
-;; classes: run with bin/arbace test/classforms/jvm_check.clj [FILE...] (default
+;; classes: run with bin/arbace-j test/classforms/jvm_check.clj [FILE...] (default
 ;; test/oracle/forms/defclass.clj). Each defclass form of the file is compiled (as the file
 ;; runs) and also interpreted, over the test host (Compiler$CF$TestHost: no Class objects, objects
 ;; are CF$Obj); each top-level form that calls static methods of the classes, and nothing else of

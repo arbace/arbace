@@ -827,15 +827,21 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         pst-s? (m/translated? "java/io/PrintStream")
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
         props? (m/translated? "java/util/Properties")
+        ;; Runtime.exec over the translated ProcessBuilder, through jrt's own Java RuntimeExec
+        ;; (JRT-NOTES.md, "Processes")
+        exec? (m/translated? "jdk/internal/jrt/RuntimeExec")
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
-        ;; the system loader; resources are the host's (the program's embedded sources), with
-        ;; no URLs (java.net is cut)
+        ;; the system loader; resources are the host's (the program's embedded sources, then
+        ;; ARBACE_PATH's files)
         loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
+        ;; getResource and getResources by URL (the class path's embedded resources and
+        ;; ARBACE_PATH's files; JRT-NOTES.md, "Resources by URL")
+        cp-resources? (m/translated? "jdk/internal/jrt/ClassPathResources")
         ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
         instant? (m/translated? "java/time/Instant")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props?)
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec?)
       [(apply list 'go/func 'init []
               (concat
                 (when (or pst-w? pst-s?)
@@ -855,6 +861,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetenv)))))])
+                (when exec?
+                  (let [s '((inst As (* String)) (aget args 0))
+                        a0 '((inst As (* RefArray)) (aget args 0))
+                        a1 '((inst As (* RefArray)) (aget args 1))
+                        f2 '((inst As (* File)) (aget args 2))
+                        sa '(.ArrayClass String_class)]
+                    [(list 'set! '(.-Methods (.Info Runtime_class))
+                           (list 'append '(.-Methods (.Info Runtime_class))
+                                 (sig "exec" '[String_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String__Process s))
+                                 (sig "exec" ['String_class sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1__Process s a1))
+                                 (sig "exec" ['String_class sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1_File__Process s a1 f2))
+                                 (sig "exec" [sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1__Process a0))
+                                 (sig "exec" [sa sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1__Process a0 a1))
+                                 (sig "exec" [sa sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1_File__Process a0 a1 f2))))]))
                 (when props?
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))
@@ -872,15 +898,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     '(ClassLoader_GetSystemClassLoader__ClassLoader))
                                (sig "setContextClassLoader" '[ClassLoader_class] 'Prim_void 0x1 '(return nil))))
                    (list 'set! '(.-Methods (.Info ClassLoader_class))
-                         (list 'append '(.-Methods (.Info ClassLoader_class))
-                               (sig "getResources" '[String_class] 'Enumeration_class 0x1
-                                    '(Collections_EmptyEnumeration__Enumeration))
+                         (apply list 'append '(.-Methods (.Info ClassLoader_class))
+                               (concat
+                                 (if cp-resources?
+                                   ;; by URL: jdk.internal.jrt.ClassPathResources (overlay/jdk;
+                                   ;; JRT-NOTES.md, "Resources by URL"), a URLClassLoader's own
+                                   [(sig "getResource" '[String_class] 'URL_class 0x1
+                                         (list 'ClassPathResources_GetResource_ClassLoader_String__URL
+                                               '((inst As ClassLoader_I) this) s0))
+                                    (sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         (list 'ClassPathResources_GetResources_ClassLoader_String__Enumeration
+                                               '((inst As ClassLoader_I) this) s0))]
+                                   [(sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         '(Collections_EmptyEnumeration__Enumeration))])
+                                 [
                                (sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
                                     '(let [(values b ok) (ResourceOrPath (.String (NN ((inst As (* String)) (aget args 0)))))]
                                        (when (not ok) (return nil))
                                        (let [a (NewByteArray (conv int32 (len b)))]
                                          (range [i x b] (aset (.-A a) i (conv int8 x)))
-                                         (return (ByteArrayInputStream_New_B1 a)))))))])
+                                         (return (ByteArrayInputStream_New_B1 a)))))])))])
                 (when instant?
                   [(list 'set! '(.-Methods (.Info Date_class))
                          (list 'append '(.-Methods (.Info Date_class))

@@ -2,7 +2,8 @@
  * Arbace (overlay/jdk, doc/go/JRT-NOTES.md "Phase 2C"): jrt's file table, under the
  * FileDescriptor, FileInputStream and FileOutputStream written for jrt (overlay/jdk/java.base/
  * java/io). A handle is a number: 0, 1 and 2 the host's standard streams, the others the files
- * the host opened (Host.Open); the natives are jrt's Go (go/arbace/jrt/files.clj).
+ * the host opened (Host.Open) and the program's ends of its children's pipes (go/arbace/jrt/
+ * process.clj); the natives are jrt's Go (go/arbace/jrt/files.clj).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -25,6 +26,26 @@ public final class HostFiles {
     private static final IdentityHashMap<FileDescriptor, Integer> handles = new IdentityHashMap<>();
 
     private HostFiles() {
+    }
+
+    /**
+     * The setting of a descriptor's number, which jrt's FileDescriptor gives (as the JDK's gives
+     * SharedSecrets its JavaIOFileDescriptorAccess): ProcessImpl's pipes.
+     */
+    public interface DescriptorAccess {
+        void set(FileDescriptor fd, int h);
+    }
+
+    private static DescriptorAccess access;
+
+    /** Called once, by FileDescriptor's static initializer. */
+    public static void setDescriptorAccess(DescriptorAccess a) {
+        access = a;
+    }
+
+    /** Makes fd name handle h (-1: none), as the JDK's JavaIOFileDescriptorAccess.set does. */
+    public static void setHandle(FileDescriptor fd, int h) {
+        access.set(fd, h);
     }
 
     /** Records that fd names handle h (-1: none). */

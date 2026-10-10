@@ -4,7 +4,7 @@ B1a builds Arbace as a static Go executable ([B1-PLAN.md](B1-PLAN.md)); its step
 the c2g-translated runtime, the evaluator) are each checked against the JVM Arbace, the
 oracle. This document describes the oracle's corpora, their formats, the runner `bin/oracle`
 and how to extend it. It depends on nothing of the Go work: the expected results are recorded
-from `bin/arbace` (built by `bin/build-arbace`) and, for regex, from its JDK.
+from `bin/arbace-j` (built by `bin/build-arbace`) and, for regex, from its JDK.
 
 ## Contents
 
@@ -81,10 +81,10 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
     bin/oracle harvest [SUITE]
 
 - `record` regenerates the expected files of the selected parts from the JVM Arbace
-  (`bin/arbace -`). The result is byte-identical across runs (checked: two records, same
+  (`bin/arbace-j -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
 - `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for
-  `bin/arbace -`, and `bin/oracle check jvm` passes (20,587 of 20,587 cases). It prints a line per file, the
+  `bin/arbace-j -`, and `bin/oracle check jvm` passes (20,587 of 20,587 cases). It prints a line per file, the
   first mismatches of each, and writes all of them to `.tmp/oracle/check.txt`; the exit status
   is 0 when every case matches.
 - `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
@@ -111,7 +111,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 
   `:form` is the case's text (shortened), for the reader; only `:case` is compared.
   `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (34 cases in 7 groups,
-  2026-10-09), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
+  2026-10-09; 6 cases in 4 groups since the branch `gofix`, 2026-10-10), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
   file takes about 285 s there).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
   (`forms/numbers`, `harvest`); `-j` the concurrent runs (default 16), `--timeout` the seconds

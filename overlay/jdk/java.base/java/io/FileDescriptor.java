@@ -3,7 +3,9 @@
  * for jrt in place of jdk26u's (which needs the VM's native handles, Blocker and cleaners),
  * with jdk26u's public members and the package-private ones the streams use (set, close). A
  * descriptor is a number of jrt's file table (jdk.internal.jrt.HostFiles): 0, 1 and 2 the
- * host's standard streams, the others files the host opened.
+ * host's standard streams, the others files the host opened. The static initializer gives
+ * HostFiles the setting of a descriptor's number (the JDK's FileDescriptor gives SharedSecrets its
+ * JavaIOFileDescriptorAccess so), which ProcessImpl uses for its pipes (JRT-NOTES.md "Processes").
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.io;
@@ -35,6 +37,14 @@ public final class FileDescriptor {
 
     /** The standard error stream. */
     public static final FileDescriptor err = new FileDescriptor(2);
+
+    static {
+        HostFiles.setDescriptorAccess(new HostFiles.DescriptorAccess() {
+            public void set(FileDescriptor fd, int h) {
+                fd.set(h);
+            }
+        });
+    }
 
     /** Whether the descriptor is open. */
     public boolean valid() {

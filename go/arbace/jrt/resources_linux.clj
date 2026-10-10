@@ -1,0 +1,16 @@
+;; jrt: B1a's OSHost as a HostExecutable (resources.clj; doc/go/JRT-NOTES.md, "Resources by
+;; URL"), over Go's os on Linux. Other systems (TamaGo's, B1b) get their own host.
+(in-ns 'go.arbace.jrt)
+
+(go/file "resources_linux.go"
+  :build ["//go:build linux"]
+  :imports [[os "os"] [filepath "path/filepath"]])
+
+(go/method Executable [^OSHost h] :results [string error]
+  (let [(values p err) (os/Executable)]
+    (when (!= err nil)
+      (return "" err))
+    (let [(values r rerr) (filepath/EvalSymlinks p)]
+      (when (== rerr nil)
+        (return r nil)))
+    (return p nil)))

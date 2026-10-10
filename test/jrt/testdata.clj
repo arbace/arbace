@@ -5,7 +5,7 @@
   tests). Reproducible: fixed inputs and seeded java.util.Random, no hash order; two runs give
   the same bytes (bin/jrt testdata --check).
 
-  bin/jrt testdata   runs ARBACE_CLASSPATH=test bin/arbace -m jrt.testdata DIR
+  bin/jrt testdata   runs ARBACE_CLASSPATH=test bin/arbace-j -m jrt.testdata DIR
 
   Format, one case per line, fields separated by a tab: the operation's name, its arguments,
   the result. Strings are escaped (\\\\ \\t \\n, and \\uXXXX for every code unit outside

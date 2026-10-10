@@ -1,0 +1,253 @@
+;; Processes (doc/go/JRT-NOTES.md, "Processes"): ProcessBuilder (commands, the environment, the
+;; directory, redirections to and from files, error output to standard output, pipelines),
+;; Process (streams, readers and writers, waits with and without a timeout, exit values,
+;; destroy, onExit, handles), Runtime.exec, ProcessHandle, and arbace.java.shell and
+;; arbace.java.process over them, on this machine's programs (sh, echo, cat, sort, sleep). No
+;; process IDs, temporary paths, user names or times appear in the results; the children that
+;; are not waited for are destroyed.
+
+(import '[java.lang ProcessBuilder ProcessBuilder$Redirect ProcessBuilder$Redirect$Type Process ProcessHandle]
+        '[java.io File IOException]
+        '[java.util.concurrent TimeUnit])
+(require '[arbace.java.shell :as sh] '[arbace.java.process :as p] '[arbace.string :as str])
+
+(defn run
+  "Starts args, reads its outputs and waits: [out err exit]."
+  [& args]
+  (let [pr (.start (ProcessBuilder. ^java.util.List (vec args)))]
+    [(slurp (.getInputStream pr)) (slurp (.getErrorStream pr)) (.waitFor pr)]))
+
+;; ----- starting programs
+(run "echo" "hello" "world")
+(run "sh" "-c" "echo out; echo err >&2; exit 7")
+(run "sh" "-c" "kill -TERM $$")
+(run "sh" "-c" "kill -KILL $$")
+(run "/bin/echo" "absolute")
+(run "sh" "-c" "printf '%s|' \"$@\"" "sh" "a b" "" "c")
+(run "printf" "\303\251\n")
+(count (first (run "sh" "-c" "head -c 100000 /dev/zero | tr '\\0' x")))
+(let [pr (.start (ProcessBuilder. ["cat"]))]
+  (with-open [o (.getOutputStream pr)] (.write o (.getBytes "piped\ninput\n")))
+  [(slurp (.getInputStream pr)) (.waitFor pr)])
+(let [pr (.start (ProcessBuilder. ["cat"])) w (.outputWriter pr)]
+  (.write w "through a writer\n")
+  (.close w)
+  [(.readLine (.inputReader pr)) (.waitFor pr)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "echo e1 >&2; echo e2 >&2"]))]
+  [(line-seq (.errorReader pr)) (.waitFor pr)])
+
+;; ----- errors
+(try (.start (ProcessBuilder. ["no-such-program-xyz"])) (catch IOException e (.getMessage e)))
+(try (.start (ProcessBuilder. ["no-such-program-xyz"])) (catch IOException e (.getMessage (.getCause e))))
+(try (.start (ProcessBuilder. ["/etc/passwd"])) (catch IOException e (.getMessage e)))
+(try (.start (ProcessBuilder. ["/"])) (catch IOException e (.getMessage e)))
+(try (.start (ProcessBuilder. [""])) (catch IOException e (.getMessage e)))
+(try (.start (doto (ProcessBuilder. ["ls"]) (.directory (File. "/no/such/dir")))) (catch IOException e (.getMessage e)))
+(try (.start (doto (ProcessBuilder. ["ls"]) (.directory (File. "/etc/passwd")))) (catch IOException e (.getMessage e)))
+(try (.start (doto (ProcessBuilder. ["no-such-program-xyz"]) (.directory (File. "/no/such/dir")))) (catch IOException e (.getMessage e)))
+(try (.start (ProcessBuilder. ["echo" "a\u0000b"])) (catch IOException e (.getMessage e)))
+(try (.start (ProcessBuilder. [])) (catch IndexOutOfBoundsException e (class e)))
+(try (.start (ProcessBuilder. ["echo" nil])) (catch NullPointerException e (class e)))
+(try (.start (doto (ProcessBuilder. ["cat"]) (.redirectInput (File. "/no/such/file")))) (catch IOException e (.getMessage e)))
+(try (ProcessBuilder. ^java.util.List (identity nil)) (catch NullPointerException e (class e)))
+
+;; ----- the builder
+(let [pb (ProcessBuilder. ["a" "b"])]
+  [(vec (.command pb)) (.directory pb) (.redirectErrorStream pb)
+   (str (.redirectInput pb)) (str (.redirectOutput pb)) (str (.redirectError pb))])
+(vec (.command (.command (ProcessBuilder. ["a"]) (into-array String ["x" "y"]))))
+(str (.directory (.directory (ProcessBuilder. ["a"]) (File. "/tmp"))))
+(map str (let [pb (.inheritIO (ProcessBuilder. ["a"]))] [(.redirectInput pb) (.redirectOutput pb) (.redirectError pb)]))
+(map str [ProcessBuilder$Redirect/PIPE ProcessBuilder$Redirect/INHERIT ProcessBuilder$Redirect/DISCARD])
+(map #(.type ^ProcessBuilder$Redirect %) [ProcessBuilder$Redirect/PIPE ProcessBuilder$Redirect/INHERIT ProcessBuilder$Redirect/DISCARD])
+(str (.file ProcessBuilder$Redirect/DISCARD))
+(.file ProcessBuilder$Redirect/PIPE)
+(str (ProcessBuilder$Redirect/to (File. "out.txt")))
+(str (ProcessBuilder$Redirect/from (File. "in.txt")))
+(str (ProcessBuilder$Redirect/appendTo (File. "log.txt")))
+(map #(.type ^ProcessBuilder$Redirect %) [(ProcessBuilder$Redirect/to (File. "o")) (ProcessBuilder$Redirect/from (File. "i")) (ProcessBuilder$Redirect/appendTo (File. "l"))])
+(= (ProcessBuilder$Redirect/to (File. "o")) (ProcessBuilder$Redirect/to (File. "o")))
+(= (ProcessBuilder$Redirect/to (File. "o")) (ProcessBuilder$Redirect/appendTo (File. "o")))
+(= (hash (ProcessBuilder$Redirect/to (File. "o"))) (hash (File. "o")))
+(vec (ProcessBuilder$Redirect$Type/values))
+(try (.redirectInput (ProcessBuilder. ["a"]) ProcessBuilder$Redirect/DISCARD) (catch IllegalArgumentException e (.getMessage e)))
+(try (.redirectOutput (ProcessBuilder. ["a"]) (ProcessBuilder$Redirect/from (File. "in"))) (catch IllegalArgumentException e (.getMessage e)))
+(try (.redirectError (ProcessBuilder. ["a"]) (ProcessBuilder$Redirect/from (File. "in"))) (catch IllegalArgumentException e (.getMessage e)))
+(contains? (into {} (.environment (ProcessBuilder. ["a"]))) "PATH")
+(try (.put (.environment (ProcessBuilder. ["a"])) "A=B" "v") (catch IllegalArgumentException e (.getMessage e)))
+(try (.put (.environment (ProcessBuilder. ["a"])) "A" "v\u0000") (catch IllegalArgumentException e (.getMessage e)))
+(try (.put (.environment (ProcessBuilder. ["a"])) nil "v") (catch NullPointerException e (class e)))
+(let [env (.environment (ProcessBuilder. ["a"]))] (.put env "ZZ_ORACLE" "1") [(.get env "ZZ_ORACLE") (.containsKey env "ZZ_ORACLE") (.remove env "ZZ_ORACLE") (.get env "ZZ_ORACLE")])
+(= (into {} (System/getenv)) (into {} (.environment (ProcessBuilder. ["a"]))))
+
+;; ----- the environment and the directory
+(let [pb (ProcessBuilder. ["sh" "-c" "echo $ZZ_A-$ZZ_B"])]
+  (doto (.environment pb) (.put "ZZ_A" "one") (.put "ZZ_B" "two"))
+  (slurp (.getInputStream (.start pb))))
+(let [pb (ProcessBuilder. ["sh" "-c" "echo [$HOME]"])]
+  (.clear (.environment pb))
+  (slurp (.getInputStream (.start pb))))
+(let [pb (ProcessBuilder. ["sh" "-c" "env | grep -c ^ZZ_ || true"])]
+  (.clear (.environment pb))
+  (.put (.environment pb) "ZZ_ONLY" "x")
+  (slurp (.getInputStream (.start pb))))
+(slurp (.getInputStream (.start (doto (ProcessBuilder. ["pwd"]) (.directory (File. "/"))))))
+(slurp (.getInputStream (.start (doto (ProcessBuilder. ["sh" "-c" "cd /etc && pwd"]) (.directory (File. "/usr"))))))
+(try (.start (doto (ProcessBuilder. ["./passwd"]) (.directory (File. "/etc")))) (catch IOException e (.getMessage e)))
+(slurp (.getInputStream (.start (doto (ProcessBuilder. ["./echo" "relative"]) (.directory (File. "/bin"))))))
+
+;; ----- redirections (a temporary directory; its path is not in the results)
+(def tmp (.toFile (java.nio.file.Files/createTempDirectory "oracle-proc" (make-array java.nio.file.attribute.FileAttribute 0))))
+(let [f (File. tmp "out.txt")
+      pr (.start (doto (ProcessBuilder. ["echo" "to a file"]) (.redirectOutput f)))]
+  [(.waitFor pr) (slurp f) (.read (.getInputStream pr)) (class (.getInputStream pr))])
+(let [f (File. tmp "out.txt")]
+  (.waitFor (.start (doto (ProcessBuilder. ["echo" "appended"]) (.redirectOutput (ProcessBuilder$Redirect/appendTo f)))))
+  (slurp f))
+(let [f (File. tmp "out.txt")]
+  (.waitFor (.start (doto (ProcessBuilder. ["echo" "replaced"]) (.redirectOutput (ProcessBuilder$Redirect/to f)))))
+  (slurp f))
+(let [f (File. tmp "in.txt")]
+  (spit f "c\nb\na\n")
+  (let [pr (.start (doto (ProcessBuilder. ["sort"]) (.redirectInput f)))]
+    [(slurp (.getInputStream pr)) (.waitFor pr) (class (.getOutputStream pr))
+     (try (.write (.getOutputStream pr) 65) (catch IOException e (.getMessage e)))]))
+(let [f (File. tmp "err.txt")
+      pr (.start (doto (ProcessBuilder. ["sh" "-c" "echo o; echo e >&2"]) (.redirectError f)))]
+  [(slurp (.getInputStream pr)) (.waitFor pr) (slurp f)])
+(let [pr (.start (doto (ProcessBuilder. ["sh" "-c" "echo o; echo e >&2"]) (.redirectErrorStream true)))]
+  [(slurp (.getInputStream pr)) (slurp (.getErrorStream pr)) (.waitFor pr) (class (.getErrorStream pr))])
+(let [f (File. tmp "both.txt")
+      pr (.start (doto (ProcessBuilder. ["sh" "-c" "echo o; echo e >&2"]) (.redirectErrorStream true) (.redirectOutput f)))]
+  [(.waitFor pr) (slurp f)])
+(let [pr (.start (doto (ProcessBuilder. ["sh" "-c" "echo o; echo e >&2"]) (.redirectOutput ProcessBuilder$Redirect/DISCARD)))]
+  [(slurp (.getInputStream pr)) (slurp (.getErrorStream pr)) (.waitFor pr)])
+(.waitFor (.start (.inheritIO (ProcessBuilder. ["true"]))))
+(let [ps (ProcessBuilder/startPipeline [(ProcessBuilder. ["printf" "b\\na\\nc\\nb\\n"]) (ProcessBuilder. ["sort"]) (ProcessBuilder. ["uniq" "-c"])])]
+  [(count ps) (str/replace (slurp (.getInputStream (last ps))) #" +" " ") (mapv #(.waitFor ^Process %) ps)
+   (class (.getInputStream (first ps)))])
+(try (ProcessBuilder/startPipeline [(doto (ProcessBuilder. ["echo"]) (.redirectOutput ProcessBuilder$Redirect/DISCARD)) (ProcessBuilder. ["cat"])])
+     (catch IllegalArgumentException e (.getMessage e)))
+(doseq [f (.listFiles tmp)] (.delete f))
+(.delete tmp)
+
+;; ----- waiting, exit values, destroy
+(let [pr (.start (ProcessBuilder. ["sleep" "5"]))]
+  [(.waitFor pr 10 TimeUnit/MILLISECONDS) (.isAlive pr)
+   (try (.exitValue pr) (catch IllegalThreadStateException e (.getMessage e)))
+   (.supportsNormalTermination pr)
+   (do (.destroy pr) (.waitFor pr)) (.isAlive pr) (.exitValue pr)
+   (.waitFor pr 10 TimeUnit/MILLISECONDS)])
+(let [pr (.start (ProcessBuilder. ["sleep" "5"]))]
+  [(identical? pr (.destroyForcibly pr)) (.waitFor pr) (.exitValue pr)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "trap '' TERM; sleep 0.3; exit 4"]))]
+  (Thread/sleep 100)
+  (.destroy pr)
+  [(.waitFor pr 5 TimeUnit/SECONDS) (.exitValue pr)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "exit 5"]))]
+  [(.waitFor pr 5 TimeUnit/SECONDS) (.exitValue pr) (.waitFor pr (java.time.Duration/ofSeconds 1))])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "exit 6"]))]
+  [(.waitFor pr) (str/replace (str pr) #"pid=\d+" "pid=N")])
+(let [pr (.start (ProcessBuilder. ["sleep" "5"]))
+      s (str/replace (str pr) #"pid=\d+" "pid=N")]
+  (.destroyForcibly pr)
+  [s (.waitFor pr)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "exit 9"]))
+      f (.onExit pr)]
+  [(identical? pr (.get f)) (.exitValue ^Process (.get f)) (.isDone f)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "exit 1"]))]
+  (.close pr)
+  [(.isAlive pr) (.exitValue pr)])
+(let [pr (.start (ProcessBuilder. ["echo" "x"]))]
+  [(= (.pid pr) (.pid (.toHandle pr))) (pos? (.pid pr)) (.waitFor pr)])
+(let [pr (.start (ProcessBuilder. ["sh" "-c" "echo partial; exit 0"]))]
+  (.waitFor pr)
+  (Thread/sleep 50)
+  [(class (.getInputStream pr)) (slurp (.getInputStream pr))])
+(map #(.getName (class %)) (let [pr (.start (ProcessBuilder. ["true"]))] (.waitFor pr) [(.getInputStream pr) (.getErrorStream pr) (.getOutputStream pr)]))
+
+;; ----- handles
+(let [h (ProcessHandle/current)]
+  [(pos? (.pid h)) (.isAlive h) (.isPresent (.parent h)) (.supportsNormalTermination h)
+   (try (.destroy h) (catch IllegalStateException e (.getMessage e)))
+   (try (.onExit h) (catch IllegalStateException e (.getMessage e)))
+   (= h (ProcessHandle/current)) (= (str (.pid h)) (str h))])
+(let [info (.info (ProcessHandle/current))]
+  [(.isPresent (.command info)) (.isPresent (.arguments info)) (.isPresent (.user info))
+   (.isPresent (.startInstant info)) (.isPresent (.totalCpuDuration info))])
+(let [pr (.start (ProcessBuilder. ["sleep" "5"]))
+      h (.toHandle pr)
+      info (.info pr)]
+  (try
+    [(.isAlive h) (= h (.get (ProcessHandle/of (.pid pr))))
+     (vec (.get (.arguments info))) (.isPresent (.command info))
+     (str/includes? (.get (.commandLine info)) " 5")
+     (= (.pid (ProcessHandle/current)) (.pid (.get (.parent h))))
+     (boolean (some #(= h %) (iterator-seq (.iterator (.children (ProcessHandle/current))))))
+     (boolean (some #(= h %) (iterator-seq (.iterator (.descendants (ProcessHandle/current))))))
+     (.destroy h) (.waitFor pr) (.isAlive h) (.isPresent (ProcessHandle/of (.pid pr)))]
+    (finally (.destroyForcibly pr))))
+(let [pr (.start (ProcessBuilder. ["sleep" "5"]))
+      h (.toHandle pr)
+      f (.onExit h)]
+  (.destroyForcibly h)
+  [(= h (.get f)) (.waitFor pr)])
+(.isPresent (ProcessHandle/of 0x7ffffff0))
+(compare (ProcessHandle/current) (ProcessHandle/current))
+
+;; ----- Runtime.exec
+(let [pr (.exec (Runtime/getRuntime) "echo  split\tby  spaces")] [(slurp (.getInputStream pr)) (.waitFor pr)])
+(let [pr (.exec (Runtime/getRuntime) (into-array String ["sh" "-c" "echo $ZZ_E"]) (into-array String ["ZZ_E=from envp" "junk" "ZZ_F=x\u0000y"]))]
+  [(slurp (.getInputStream pr)) (.waitFor pr)])
+(let [pr (.exec (Runtime/getRuntime) (into-array String ["pwd"]) nil (File. "/"))] [(slurp (.getInputStream pr)) (.waitFor pr)])
+(let [pr (.exec (Runtime/getRuntime) "pwd" nil (File. "/usr"))] [(slurp (.getInputStream pr)) (.waitFor pr)])
+(let [pr (.exec (Runtime/getRuntime) (into-array String ["echo" "array"]))] [(slurp (.getInputStream pr)) (.waitFor pr)])
+(try (.exec (Runtime/getRuntime) "") (catch IllegalArgumentException e (.getMessage e)))
+(try (.exec (Runtime/getRuntime) " ") (catch IndexOutOfBoundsException e (class e)))
+(try (.exec (Runtime/getRuntime) "no-such-program-xyz -x") (catch IOException e (.getMessage e)))
+
+;; ----- arbace.java.shell
+(sh/sh "echo" "a" "b")
+(sh/sh "sh" "-c" "echo out; echo err >&2; exit 3")
+(sh/sh "cat" :in "piped input")
+(sh/sh "cat" :in (java.io.StringReader. "from a reader"))
+(sh/sh "sh" "-c" "echo $ZZ_FOO" :env {"ZZ_FOO" "bar"})
+(sh/sh "sh" "-c" "echo $ZZ_FOO" :env {:ZZ_FOO "keyword"})
+(sh/sh "pwd" :dir "/")
+(sh/sh "pwd" :dir (File. "/usr"))
+(sh/with-sh-dir "/etc" (sh/sh "pwd"))
+(sh/with-sh-env {"ZZ_W" "with"} (sh/sh "sh" "-c" "echo $ZZ_W"))
+(update (sh/sh "printf" "abc" :out-enc :bytes) :out vec)
+(sh/sh "printf" "\351t\351" :out-enc "ISO-8859-1")
+(sh/sh "cat" :in "été" :in-enc "ISO-8859-1" :out-enc "ISO-8859-1")
+(sh/sh "true")
+(try (sh/sh "no-such-program-xyz") (catch IOException e (.getMessage e)))
+
+;; ----- arbace.java.process
+(p/exec "echo" "x")
+(p/exec {:dir "/"} "pwd")
+(p/exec {:env {"ZZ_P" "envy"}} "sh" "-c" "echo $ZZ_P")
+(p/exec {:clear-env true :env {"ZZ_Q" "only"}} "sh" "-c" "env | grep ^ZZ_")
+(p/exec {:err :stdout} "sh" "-c" "echo to-err >&2")
+(p/exec {:err :discard} "sh" "-c" "echo to-err >&2; echo to-out")
+(try (p/exec "sh" "-c" "exit 2") (catch RuntimeException e (.getMessage e)))
+@(p/exit-ref (p/start "true"))
+@(p/exit-ref (p/start "sh" "-c" "exit 4"))
+(deref (p/exit-ref (p/start "sh" "-c" "exit 0")) 5000 :timeout)
+(let [pr (p/start "sleep" "5")] (try (deref (p/exit-ref pr) 20 :timeout) (finally (.destroyForcibly pr))))
+(let [pr (p/start "cat")]
+  (with-open [w (arbace.java.io/writer (p/stdin pr))] (.write w "via stdin\n"))
+  [(slurp (p/stdout pr)) (slurp (p/stderr pr)) @(p/exit-ref pr)])
+(let [d (.toFile (java.nio.file.Files/createTempDirectory "oracle-proc" (make-array java.nio.file.attribute.FileAttribute 0)))
+      o (File. d "o.txt")
+      i (File. d "i.txt")]
+  (spit i "from file\n")
+  (try
+    [@(p/exit-ref (p/start {:in (p/from-file i) :out (p/to-file o)} "cat"))
+     (slurp o)
+     @(p/exit-ref (p/start {:out (p/to-file o :append true)} "echo" "more"))
+     (slurp o)]
+    (finally (.delete o) (.delete i) (.delete d))))
+(str (p/to-file "x"))
+(str (p/to-file "x" :append true))
+(str (p/from-file "y"))

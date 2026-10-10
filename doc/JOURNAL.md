@@ -1347,3 +1347,233 @@ decision (2026-10-08).
   test` on amd64 and arm64; start 0.20-0.21 s unchanged, memory after start 162 → 158 MB.
 - Earlier the same day (main session): JC1-JC10 folded and `doc/go/JAVA-BASE.md` measured again
   on `d97e0f9` (`b8584d8`): java.base members 50.1% (8,792 of 17,546), Arbace's own use 89.8%.
+
+## 2026-10-10: narrowing the Go build's gaps before the freeze
+
+- Compared (main session): the JVM build passes Clojure's suite whole (809 tests, 20,750
+  assertions); the Go build runs 66 of 85 namespaces, 19,628 of 19,632 assertions (94.6% of the
+  JVM's), the oracle 21,792 of 21,800; java.base 50.1% of members (Arbace's own use 89.8%);
+  start-up alike (0.17-0.20 s); throughput about 40-55× slower (no AOT to Go yet). The gaps,
+  by cost, offered to the user: (1) the suite's Java fixtures as a test build (SL4), (2) class
+  loader resources (java.io's 4 errors), (3) small oracle differences and more CLDR locales, (4)
+  processes, (5) java.security basics, (6) java.text formats; larger: (7) AOT of namespaces to
+  Go, (8) XML, (9) gen-class, (10) serialization.
+- The user's choice: 1-6 before the freeze; 7-10 after. Four agents: `gofix` (1-3 without the
+  locales), `gotext` (6 with the locales), `goproc` (4, reversing D6 for processes), `gosec`
+  (5).
+
+## 2026-10-10: the Go executable's REPL under rlwrap
+
+- Agent, branch `gorl` (`6608250`), merged; the user accepted RL1-RL3 (EXEC-NOTES.md, "Line
+  editing: rlwrap"), folded by the main session into C2G-SPEC §10.6 and §16 and B1-PLAN's
+  "Checks". `main` first calls `execRlwrap` (before jrt's host and the image; about 11 ms of
+  Go's package initialization in the first process): when the arguments start the REPL, fds 0
+  and 1 are terminals with a width, `TERM` is set and not `dumb`, the parent is not rlwrap,
+  `rlwrap` is on `PATH` and `ARBACE_RLWRAP` is neither `off` nor `wrapped`, it execs `rlwrap`
+  with `clj`'s flags around itself (`ARBACE_RLWRAP=wrapped` for the child; history in
+  `~/.arbace_history`); otherwise silently on. The smoke test gains 24 checks on a
+  pseudo-terminal (`test/arbace-go-rlwrap.py`). Considered: a message when rlwrap is missing, as
+  `clj` (not taken: the executable is the only way to its REPL and works without rlwrap).
+- Also folded by the main session: SZ1-SZ4 into C2G-SPEC §16 ("Size").
+- Main session on the merge (over the size trimming): `bin/jrt-convert`, the amd64 build (61.9
+  MB), the smoke test 36 of 36 with the terminal checks, the Go oracle 21,792 of 21,800 as
+  recorded.
+
+## 2026-10-10: the READMEs
+
+- The user's request: both READMEs up to date, and the divergence prepared for the next freeze.
+  `arbace-for-java-26`'s README and FREEZE.md now name v1-v3, the base image and the Alpine
+  package (`b07fdf9`, pushed). Main's README follows the `baseimage` merge (the Go executable,
+  v3, `bin/arbace-j`, the licences). At the Go freeze (B1-PLAN step 8) the READMEs diverge as at
+  the JVM freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26",
+  pointing to the branch `arbace-for-golang`, its tags and the branch's freeze document; the
+  branch's README describes the frozen executables locally.
+- The user's decision: after the Go freeze main's journal starts over, as after the JVM freeze
+  (2026-10-08): the journal up to the freeze stays on `arbace-for-golang`, its tag
+  `arbace-for-go1.27.1-v1` and in git; main's new journal opens with a paragraph pointing to
+  them, as this one points to `arbace-for-java-26`. Part of B1-PLAN step 8; CLAUDE.md's Records
+  paragraph is updated then to name both freezes.
+
+## 2026-10-10: what comes after the freeze
+
+- The user's decisions: XML (SAX, `arbace.xml`), `gen-class` and Java serialization will not be
+  done: they stay out of the Go build for good (D6; the suite's `clojure-xml`, `genclass` and
+  `serialization` namespaces stay skipped, the oracle's serialization case stays a known
+  mismatch). After the freeze, the `.ae` rename comes first, then the focus is TamaGo: B1b, the
+  box. AOT of namespaces to Go (the throughput gap) is not scheduled.
+- The user's decision, the same day: after the `.ae` rename, a Clojure → Arbace translator,
+  c2a: first the mechanical renames (`clojure.*` namespaces, the `clojure.lang`, `clojure.asm`
+  and `clojure.java.api` packages, the `:clojure.error` keyword, the `clojure.*` system
+  properties; what `arbace.j2c.rename` does for the test tools today), later more as the Clojure
+  and Arbace dialects diverge. With it the tools are renamed to name Arbace as their target:
+  j2c → j2a, g2c → g2a, and c2g → a2g if it is still needed then. Arbace runs Clojure source
+  unchanged only when it names nothing but `clojure.core` (measured: `(require 'clojure.string)`
+  fails on both builds; `#?(:clj ...)` reads); a measured corpus of libraries is deferred.
+
+## 2026-10-10: main's image on java.base; bin/arbace-j with rlwrap
+
+- Agent, branch `baseimage` (to `4a57d5d`), merged (`7d17154`). The `arbace-for-java-26-v3`
+  changes ported to main as VENDOR-NOTES hand changes 15-17 (main's 14 is MultiFn's order):
+  15 `bean` by reflection in a new `arbace/core_bean.clj` (properties sorted by name, as
+  upstream), so main's Go variant of core_proxy drops its own `bean` and keeps only
+  `core_bean.subst.clj` (`bean-exported?` true: jrt has no modules); 16 `#inst` without
+  java.sql (`arbace/instant_timestamp.clj`, left out of the Go embed, whose `instant` variant
+  has its own); 17 `arbace.xml`, `arbace.inspector`, `arbace.java.browse-ui` fail with an error
+  naming their module. `bin/arbace-image`: `java.base,jdk.unsupported` plus
+  `ARBACE_IMAGE_MODULES`; 133 → 100 MB, start with the cache 180-190 ms. The launcher uses a
+  cache not older than the jar.
+- `bin/arbace` renamed `bin/arbace-j` (git mv; live callers, CLAUDE.md's layout mention, README,
+  ORACLE.md and the notes updated; historical records keep the old name); its interactive REPL
+  runs under rlwrap with the Go executable's convention (`ARBACE_RLWRAP`), tested on a
+  pseudo-terminal (history recall, `off`, `-e` unwrapped, 15 argument patterns).
+- Found on the way: `(reduce + (eduction (map inc) (range 10)))` throws ClassCastException on
+  every JVM release (v1-v3; upstream Clojure 1.12.6 and the Go build give 55): an agent fixes it
+  on both lines. And v3's `bean` returned its keys in hash order (fixed on `apk26`, `84da2dc`,
+  not yet released).
+- Main session on the merge: `bin/gate` passed (6m51s); the Go oracle as recorded (8);
+  Clojure's suite on Go 19,628 of 19,632, no regressions.
+- Main's README brought up to date (the user's request): the third bullet says the runtime is
+  already a static Go executable; "Arbace for Java 26" names v1-v3 and the Alpine package and
+  links FREEZE.md and ALPINE.md on the branch; main's JVM commands with `bin/arbace-j` and
+  `bin/arbace-image`; a new section "The Go executable" (what it is, its numbers, what it leaves
+  out, the coming freeze, how to build and run it), which becomes "Arbace for Golang" at the
+  freeze; the documentation list gains doc/go/; the licences beyond EPL-1.0.
+- The user's decision: after the freeze, Arbace gets its own version. The REPL's banner says
+  `Arbace <describe> (<short hash>)` in place of `Clojure 1.13.0-master-SNAPSHOT`;
+  `*arbace-version*` and `(arbace-version)` hold `git describe --tags --always --dirty`, the full
+  commit and the dirty flag. In a checkout from git; in a tarball (the Alpine APKBUILD's GitHub
+  archive) from a file filled by `git archive` through `export-subst` (`$Format:%H$`,
+  `$Format:%(describe)$`), deterministic per commit. The Go program takes it as a constant (Go's
+  `-buildvcs` does not apply: the program builds from a generated directory), the jar as a
+  resource, as Clojure's `version.properties`. `*clojure-version*` stays 1.13 for the libraries
+  that test it. On the agenda after the `.ae` rename.
+
+## 2026-10-10: reduce without an init over an IReduceInit-only reducible
+
+- Agent, branch `edu-main` (`8037a06`), merged; VENDOR-NOTES hand change 18. The bug is
+  upstream's: `CollReduce`'s implementation for `IReduceInit` (arbace/core/protocols.clj, as
+  Clojure 1.12.6's) casts to `IReduce` in its two-argument arity. `Eduction` implements
+  `IReduceInit`, `Iterable` and `Sequential`, not `IReduce`; `find-protocol-impl` picks among
+  `(supers Eduction)`, a hash set of classes ordered by identity hash, so `Iterable` (works) or
+  `IReduceInit` (throws) wins by hash. With a CDS or AOT archive `Iterable` won; without one it
+  varies (upstream with `-Xshare:off` throws too). The oracle recorded 55 through
+  `bin/arbace-j` with the AOT cache; `ARBACE_AOT=off` reproduces the failure. `iteration` and
+  any `reify` of `IReduceInit` alone always threw, upstream too (the oracle had recorded the
+  exception for `seqs.clj:465`). Fixed: the arity calls `IReduce.reduce` only on an `IReduce`,
+  otherwise reduces through `IReduceInit.reduce` from a fresh sentinel (empty → `(f)`, one item
+  returned without calling `f`, `reduced` honoured). `find-protocol-impl`'s rule is unchanged
+  (changing it would change upstream's dispatch). New `test/native/reduce_test.clj`; 8 oracle
+  forms after `seqs.clj:420`, `seqs.edn` re-recorded (`iteration` now 45).
+- The agent's checks on exactly this code (main adds only documents): `bin/gate` passed
+  (stage 2 = stage 3, Clojure's suite 20,750 of 20,750, the Go smoke); `bin/oracle check jvm`
+  with and without the cache: only `strings.clj:408`; the Go oracle as recorded (8).
+- On `arbace-for-java-26`, the same fix (hand change 17) with v3's `bean` key order (`84da2dc`):
+  branch `edu-26` (`840f0af`, `d83d628`), checked with the branch's gate; a release is the
+  user's call.
+- The `reduce` change (hand change 18) recorded as a dialect divergence, not a bug fix (the
+  user's decision): upstream does not support `reduce` without an init on an `IReduceInit`-only
+  reducible, by design (Alex Miller, clojure-dev 2017; ask.clojure.org #11138, 2021); the
+  eduction's run-to-run difference is upstream's CLJ-2656 ("Protocol dispatch via interfaces is
+  nondeterministic", open since 2021; its name-sorting patch would make the eduction case always
+  throw). VENDOR-NOTES gains a section "Dialect divergences", the list for c2a; the same on
+  `arbace-for-java-26` (`0160052`). A comment for CLJ-2656 connecting it to `Eduction` was
+  drafted for the user to post (not posted).
+
+## 2026-10-10: the box survey (B1b, after the freeze)
+
+- Agent, branch `boxsurvey` (`c3245f3`), merged: `doc/go/BOX-SURVEY.md`, a survey of go-whim's
+  joint /dev/kvm + Hypervisor.framework box (`/root/go-whim` at `80c49bf`, read only) for
+  vendoring, the user's request. Found: arbace-go already runs inside go-whim's box on /dev/kvm
+  here (a copy built `GOOS=tamago` with `jrt/net.go`'s Linux socket options stubbed and a
+  scratch main of about 80 lines: a jrt host over the board's calls, files on TamaGo's
+  in-memory file system; go-whim's monitor unmodified): the REPL over the console, `spit`/
+  `slurp`, a `future`, exit 0; start 0.38-0.42 s (native 0.20 s), 445 MB resident. Two defects
+  at once: the wall clock counts from boot (`jrt/date.clj` reads `time.Now()`), and a blocking
+  console read stops the guest (the monitor serves host calls one at a time). go-whim's KVM and
+  TamaGo guest tests pass from a clone; the arm64 images cross-compile.
+- Vendorable: about 5,000 lines (`hv/` one API in Hypervisor.framework's shape, KVM by ioctl,
+  HVF by purego, no cgo; `vmm/`; `guest/abi`, the doorbell; `guest/tamago/board`), tied to the
+  editor only by `vmm.Config.Host` and the launcher. Licence: go-whim's LICENSE is Vim's (for
+  the modified vim); the box code is not vim-derived and all of it is the user's, so it can be
+  licensed to Arbace in LICENSE.md; TamaGo's goos (BSD-3) and purego (Apache-2.0) need entries.
+- Surfaces: the doorbell has 29 calls, Arbace needs about 12-14; jrt's `Host` has 20 methods
+  plus about 40 in the optional interfaces. Proposed stages S0 (vendor) to S6, S1 a boxed REPL
+  on amd64. Decisions D3, D8-D14 and risks R1-R8 for the user, after the freeze. Before the
+  freeze: no code; new jrt work keeps OS calls in `linux`-tagged files.
+
+## 2026-10-10: processes on Go
+
+- Agent, branch `goproc` (11 commits), merged; the user accepted PR1-PR7 (JRT-NOTES.md,
+  "Processes"), reversing D6 for processes. Translated from jdk26u: `Process`, `ProcessBuilder`,
+  `ProcessHandle`, `ProcessHandleImpl` (share), `ProcessImpl`, `ProcessEnvironment` (unix), with
+  variants; a new optional host interface `HostProc` (`hostproc.clj`; Linux in
+  `hostproc_linux.clj` over `os.StartProcess`, `os.Pipe` and `/proc`; a goroutine reaps each
+  child; SIGTERM/SIGKILL for destroy); pipes in jrt's file table; `Runtime.exec` through jrt's
+  own `RuntimeExec`, written into `Runtime`'s member table by c2g; `arbace.java.shell` and
+  `arbace.java.process` embedded and their suite namespaces un-skipped. Error texts, PATH search
+  and exit statuses as this machine's JDK 26 (musl texts; "Exec failed, error: 2 (No such file
+  or directory)"). A c2g fix: a method reference to a private method of a non-leaf class. New
+  oracle forms `processes.clj` (129, all match). +0.8 MB.
+- Main session on the merge (over the base image, rlwrap, the reduce fix): `bin/jrt-convert`,
+  `bin/jrt manifest` (no change), `bin/jrt test`, the amd64 build (62.8 MB), smoke; the Go oracle
+  as recorded (8); Clojure's suite on Go 68 namespaces, 19,647 of 19,651 assertions, no
+  regressions.
+- `gosec` (java.security, SC1-SC6 accepted) follows, with its digests' compression over Go's
+  crypto first (the user: before the freeze).
+
+## 2026-10-10: Go's build cache trimmed by every gate and build
+
+- The disk reached 86% (the user): Go's build cache had grown to 52 GB in a few hours of
+  parallel agents' builds; trimmed to entries used in the last 3 hours (21 GB; disk 57%). The
+  user's decision: trim it automatically. `bin/lib/gocache.bash`'s `gocache_trim` deletes
+  entries unused for `ARBACE_GOCACHE_KEEP_MIN` minutes (default 360; Go refreshes an entry's
+  time at most hourly when it uses it, so builds in progress keep theirs); `bin/gate` runs it at
+  every run (it was `--full` only, with a day), `bin/arbace-go --build` before each build.
+  CLAUDE.md's gate paragraph says so.
+
+## 2026-10-10: the suite's Java fixtures, resources by URL
+
+- Agent, branch `gofix` (`c1115bc`, `a106dca`), merged; the user accepted FX1-FX7 (EVAL-NOTES.md,
+  "The suite's Java fixtures"; JRT-NOTES.md, "Resources by URL"). FX1: `bin/arbace-go
+  --build-tests` builds `arbace-tests`, the program with the suite's 12 Java fixtures converted
+  by j2c and translated in (the shipped executable does not carry them); `bin/clojure-tests`
+  runs the Go suite on it; `bin/gate --full` builds it beside the shipped one (about 3 more
+  minutes). FX2 skipped tests are not compiled; a stand-in `arbace.inspector` for Go suite runs.
+  FX3 let/loop locals tagged with a functional interface adapted as the JVM's
+  `LetExpr.doEmit`. FX4 `InstantiationError` for `new` of an abstract class; a stub's illegal
+  name refused as `ClassLoader.preDefineClass`. FX5 `arbace.reflect` without ASM. FX6
+  resources found embedded then in `ARBACE_PATH`, with URLs (`jar:file:<executable>!/name`,
+  `file:`), `URLClassLoader` over directories, an optional `HostExecutable`. FX7
+  `Files.newDirectoryStream`. A c2g fix (a bridge method's casts). Both oracle differences
+  fixed (8 → 6 recorded).
+- Main session on the merge (over processes): conflicts in `bin/arbace-go` (the cache trim and
+  the test build's variant), JRT-NOTES and the suite reference; `bin/jrt-convert`, `bin/jrt
+  manifest` (no change), `bin/jrt test`, the shipped build and smoke, the test build; the Go
+  oracle as recorded (6); Clojure's suite on the test build: 76 namespaces, 777 tests, 20,506 of
+  20,520 assertions (11 failures and 3 errors recorded), 9 skipped, test.generative 27 of 27, no
+  regressions. (Before: 66 namespaces, 19,628 of 19,632.)
+
+## 2026-10-10: java.security basics on Go
+
+- Agent, branch `gosec` (to `440bd56`), merged; the user accepted SC1-SC6, and asked for SC7
+  (JRT-NOTES.md, "Security"; folded into C2G-SPEC §4.1, §4.2, §4.4, §4.6, §8.5, §9.4, §10.3,
+  §16 "Security"). Translated from jdk26u: sun.security.provider's digests and generators,
+  com.sun.crypto.provider's HMACs, the java.security and javax.crypto API classes, sun.security.jca,
+  with variants simplifying the provider machinery; providers SUN and SunJCE only (signatures,
+  ciphers and key stores throw the JDK's NoSuchAlgorithmException); the JDK's `java.security`
+  file generated and embedded (byte-identical); entropy through `Host.RandomBytes` in a
+  linux-tagged file; `UUID` on jdk26u's own code. SC1: c2g compiles
+  `byteArrayViewVarHandle`'s int/long views. SC7 (the user's request): a `DigestBase` variant
+  hands whole blocks to natives over Go's crypto block functions on the Java object's own state
+  (as the JVM's intrinsics): SHA-256 116 → 1,326 MB/s (JVM 1,332), HmacSHA256 94 → 1,491 MB/s.
+  New oracle forms `security.clj` (181; the provider list is a known mismatch). java.base
+  coverage 52.0% of members (9,124 of 17,546), Arbace's use 827 of 896.
+- Main session on the merge (over the fixtures): conflicts in JRT-NOTES and the known
+  mismatches (the security case kept, gofix's two fixed cases dropped); the checks as for
+  gofix: the Go oracle 22,111 of 22,118, the 7 recorded mismatches; Clojure's suite on the test
+  build 20,506 of 20,520, no regressions; the executable 65.1 MB.
+- A read-through of the documents before the freeze (the user's request): five reviewers, about
+  330 findings in `.tmp/docreview/` (stale status and numbers, accepted amendments shown as
+  proposed or unfolded, FX1-FX7 folded nowhere, wrong cross-references, `bin/arbace` as current,
+  LICENSE.md silent on the Go executable's translated jdk26u code and Go's runtime). To be fixed
+  after gotext's merge.

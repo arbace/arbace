@@ -9,11 +9,13 @@
 ;; Go packages (§4.2)
 
 (defn pkg-of
-  "The Go package of a class (internal name): :jrt for the JDK's packages, :lang for Arbace's."
+  "The Go package of a class (internal name): :jrt for the JDK's packages (java, javax, jdk,
+  sun, and com.sun since the SunJCE provider: amendment SC3), :lang for Arbace's."
   [internal]
   (cond
     (or (str/starts-with? internal "java/") (str/starts-with? internal "jdk/")
-        (str/starts-with? internal "sun/") (str/starts-with? internal "javax/")) :jrt
+        (str/starts-with? internal "sun/") (str/starts-with? internal "javax/")
+        (str/starts-with? internal "com/sun/")) :jrt
     :else :lang))
 
 (def pkg-path {:jrt "arbace/jrt" :lang "arbace/lang"})
@@ -89,7 +91,10 @@
    "sun/util/calendar/Era" "Calendar_Era"
    ;; java.lang.annotation.Annotation's namesake in java.text, an attribute value's wrapper
    ;; (JRT-NOTES.md, "Text and locales")
-   "java/text/Annotation" "Text_Annotation"})
+   "java/text/Annotation" "Text_Annotation"
+   ;; java.security.SecureRandom's namesake in sun.security.provider, the SHA1PRNG
+   ;; (JRT-NOTES.md, "Security", amendment SC2)
+   "sun/security/provider/SecureRandom" "Sun_SecureRandom"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

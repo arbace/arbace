@@ -53,7 +53,7 @@ Prior art:
     (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
     reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
     `test/aot-training.clj`). With `--suite` it also runs Clojure's test suite on stages 1
-    and 2. Run Arbace with `bin/arbace` (the jar, with the cache when it applies), or a stage
+    and 2. Run Arbace with `bin/arbace-j` (the jar, with the cache when it applies), or a stage
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
@@ -67,11 +67,13 @@ Prior art:
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite`, the
   g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`) and
   the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
-  Clojure's suite on it (`test/arbace-go-results.edn`) and the oracle on it, against its known
+  Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
+  suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2c and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
-  on Go the longest; it also trims Go's build cache of entries unused for a day): run it when
-  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`.
+  on Go the longest): run it when
+  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
+  cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
   - `arbace/j2c/`: the Java → class forms converter.
 
 ## Records
