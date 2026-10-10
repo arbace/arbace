@@ -1311,3 +1311,39 @@ decision (2026-10-08).
   tagged `arbace-for-java-26-v3` (`71ffc9f`), then the APKBUILD bumped to the tag (`ec49a67`);
   both pushed (the user's decisions: merge and tag v3, the name `arbace-java26`, Temurin
   26.0.2.1 as the build JDK, publishing later).
+
+## 2026-10-10: the .ae rename after the freeze; rlwrap in the Go executable
+
+- The user's decision: the `.ae` rename is no longer B1a's step 8, the last before the freeze;
+  it is the first task right after the `arbace-for-golang` freeze. The freeze becomes step 8.
+  B1-PLAN and the agenda updated. The frozen branch then keeps `.clj` sources, as
+  `arbace-for-java-26` does.
+- The user's decision: the Go executable runs its interactive REPL under `rlwrap` when stdin is
+  a terminal (as Alpine's `clj` and the JVM package's `arb`). An agent designs and builds it
+  (branch `gorl`): only for the interactive REPL, with a marker against re-wrapping and a way to
+  turn it off.
+- The user's decision: on main, `bin/arbace` is renamed `bin/arbace-j` (the JVM launcher, beside
+  the Go executable) and runs its interactive REPL under `rlwrap` as the Go executable does. One
+  convention for both: `ARBACE_RLWRAP=off` disables it, `ARBACE_RLWRAP=wrapped` marks the
+  child; wrap only for the interactive REPL with stdin and stdout terminals, `rlwrap` on PATH and
+  TERM not `dumb`; `clj`'s flags. Done with the base-image port (branch `baseimage`); historical
+  records keep the old name. The `arbace-for-java-26` line keeps `bin/arbace`.
+
+## 2026-10-10: the executable trimmed, 107.1 → 61.9 MB
+
+- Agent, branch `gosize` (to `8716900`, over main `d97e0f9`), merged; the user accepted SZ1-SZ4
+  (JRT-NOTES.md, "Size"). SZ1: `-ldflags=-s -w` (no symbol table or DWARF; Go's function table
+  stays, so panics, Java stack traces and profiles are unchanged, checked;
+  `ARBACE_GO_SYMBOLS=1` keeps them): −23.5 MB. SZ4: `Dyn` and the 18 `DynSub_C` types embed one
+  `dynCore` holding the world's interface methods, where each defined about 1,300: −11.3 MB.
+  SZ3: each class's reflective members as a data table decoded at first use (`EnsureMembers`,
+  jrt/members.clj), replacing about 22,600 closures and 5 MB of start-up code: −9.2 MB. SZ2:
+  embedded resources zlib-compressed when a quarter smaller (`P.z`): −1.15 MB. Not done, with
+  numbers: compressing the image of prepared namespaces (6.0 → 1.7 MB, +40 ms start), fewer REPL
+  roots (changes behaviour), CLDR arrays by a helper, jrt's reflect_tables in the new format.
+- Also folded: TM1-TM9 (C2G-SPEC §4.1, §4.4, §9.4, §10.3, §10.6, §12, §16 "Time"; JRT-SOURCES).
+- Checks (the agent's, on the merged program; main adds only documents): the Go oracle 21,792
+  of 21,800, the 8 recorded mismatches; smoke; Clojure's suite on Go, no regressions; `bin/jrt
+  test` on amd64 and arm64; start 0.20-0.21 s unchanged, memory after start 162 → 158 MB.
+- Earlier the same day (main session): JC1-JC10 folded and `doc/go/JAVA-BASE.md` measured again
+  on `d97e0f9` (`b8584d8`): java.base members 50.1% (8,792 of 17,546), Arbace's own use 89.8%.

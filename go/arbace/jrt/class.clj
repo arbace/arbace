@@ -58,6 +58,7 @@ for stack traces (JRT-NOTES.md, \"Stack traces\")\n"} Go
     ^{:tag (slice FieldInfo)} Fields
     ^{:tag (slice MethodInfo)} Methods
     ^{:tag (slice CtorInfo)} Ctors
+    ^{:tag (* MemberTable) :doc "the member table as data, decoded into Fields, Methods and Ctors at their first use (EnsureMembers)\n"} Table
     ^{:tag (func [any] [bool]) :doc "C_InstanceOf\n"} IsInstance
     ^{:tag (func []) :doc "C_Init, for Class.forName(name, true, ...)\n"} Init
     ^{:tag (func [] [(* RefArray)]) :doc "the enum constants in order\n"} Enum

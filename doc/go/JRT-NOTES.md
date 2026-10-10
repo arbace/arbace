@@ -2610,25 +2610,26 @@ largest single part; kept as the JDK's sources (fidelity) rather than turned int
 - `Date` follows the default zone (hooks) rather than staying GMT: with the host's zone the JVM
   and the Go build would otherwise print different `toString`s.
 
-## Proposed amendments (for the user's review)
+## Amendments (accepted by the user 2026-10-10)
 
-Numbered TM (time); no TM appears elsewhere in doc/.
+Numbered TM (time). All nine were accepted on 2026-10-10 and folded into C2G-SPEC (§16, "Time")
+and JRT-SOURCES.md; each says where below.
 
 - **TM1 (C2G-SPEC §4.1, the closed world; JRT-SOURCES.md)** `java.time` is in the world:
   `java.time`, `.temporal`, `.format`, `.zone` whole but the serialization proxies, `.chrono`
   with the ISO chronology alone (Hijrah, Japanese, Minguo, Thai Buddhist cut: `Chronology.of`
   of them is the JDK's unknown-chronology exception); `DateTimeFormatter.toFormat` throws
   (`java.text.Format` is outside); variants for `ZoneRulesProvider`, `TzdbZoneRulesProvider`,
-  `AbstractChronology`, `ZoneOffset` (above). `Instant`'s variant and jrt's `TimeText` are gone.
+  `AbstractChronology`, `ZoneOffset` (above). `Instant`'s variant and jrt's `TimeText` are gone. *Accepted 2026-10-10: C2G-SPEC §4.1.*
 - **TM2 (C2G-SPEC §10.3, RD1; JRT-SOURCES.md, RD4)** The resource data include an image file,
   `lib/tzdb.dat`, made as `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib`
   (a data file under `lib/` is the image's, the others the module's); `TzdbZoneRulesProvider`
-  and `ZoneInfoFile` read it as the resource `/lib/tzdb.dat`.
+  and `ZoneInfoFile` read it as the resource `/lib/tzdb.dat`. *Accepted 2026-10-10: C2G-SPEC §10.3.*
 - **TM3 (JRT-SOURCES.md, RD4)** The generated sources include java.base's CLDR data, made by
   the JDK build's `CLDRConverter` with the build's arguments and compared byte for byte:
   `FormatData`, `FormatData_en`, `TimeZoneNames`, `TimeZoneNames_en`, `CalendarData`,
   `CLDRBaseLocaleDataMetaInfo` (its static initializer cut: parent locales and language
-  aliases need `Locale.forLanguageTag`), `ZoneName`.
+  aliases need `Locale.forLanguageTag`), `ZoneName`. *Accepted 2026-10-10: C2G-SPEC §4.1, JRT-SOURCES.md "Time".*
 - **TM4 (C2G-SPEC §4.1, jrt's own Java, K1; §9.1, the manifest)** The locale providers are
   jrt's own Java over those bundles (`LocaleProviderAdapter`, `LocaleResources`,
   `CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`,
@@ -2639,30 +2640,30 @@ Numbered TM (time); no TM appears elsewhere in doc/.
   another English region `en`'s, where the JVM has `jdk.localedata`'s (a deviation; 3 oracle
   cases). The week parameters are by region for every locale. jrt's `Locale` answers
   `getUnicodeLocaleType` (null), `hasExtensions` (false), `stripExtensions`, and has the JDK's
-  locale constants.
+  locale constants. *Accepted 2026-10-10: C2G-SPEC §4.1, §12 (R17).*
 - **TM5 (C2G-SPEC §4.1)** `java.util.TimeZone` is jdk26u's (with `SimpleTimeZone`, `ZoneInfo`,
   `ZoneInfoFile`, `sun.util.calendar`, `CRC32`), replacing jrt's own fixed-offset `TimeZone` and
   `ZoneInfo`; jrt's `GregorianCalendar` takes a `ZoneInfo`'s offsets as the JDK's, and has
   `toZonedDateTime` and `from`; jrt's `Date` computes its local fields, `toString` and its local
-  constructors in the default zone through hooks c2g sets to jrt's `jdk.internal.jrt.DefaultZone`.
+  constructors in the default zone through hooks c2g sets to jrt's `jdk.internal.jrt.DefaultZone`. *Accepted 2026-10-10: C2G-SPEC §4.1.*
 - **TM6 (C2G-SPEC §9.4, the host interface)** The default zone is the host's, as the JDK finds
   it on Linux (`TZ`, `/etc/localtime`; jrt's natives of `TimeZone`, after `TimeZone_md.c`),
   with a second optional interface of the host, `HostLinks` (`Readlink`), as `HostFS` is; the
   clock of `java.time.Clock` is the host's with its nanoseconds (`VM.getNanoTimeAdjustment`), so
-  `Instant.now()` is no longer in milliseconds.
+  `Instant.now()` is no longer in milliseconds. *Accepted 2026-10-10: C2G-SPEC §9.4.*
 - **TM7 (C2G-SPEC §4.4, the rename table; W4)** `sun.util.calendar.Era` is `Calendar_Era` in
   Go; the first package-private pair across packages c2g found, `TimeZone.getOffsets(long,
   int[])` and `ZoneInfo`'s public one, is resolved by a variant that cuts `TimeZone`'s (nothing
   in the world calls it on a `TimeZone`) instead of a member entry in the rename table, which
   W4 foresaw and c2g has no mechanism for (a renamed method would need its callers' and
-  overrides' names to follow).
+  overrides' names to follow). *Accepted 2026-10-10: C2G-SPEC §4.4.*
 - **TM8 (C2G-SPEC §10.6, the REPL's world; P2, RD2)** A root instance method is a virtual call
   too: its overrides in every instantiated class are translated, those of classes the REPL
   cannot name (RD2's) included, so that reflection on their instances does not reach a stub.
   Reachability indexes virtual calls by receiver type (167 s to 3.6 s with the roots as virtual
-  calls; 68 s on main before).
+  calls; 68 s on main before). *Accepted 2026-10-10: C2G-SPEC §10.6.*
 - **TM9 (`bin/jrt-convert`'s shape check)** In the overlay chunk the checker takes jrt's own
-  classes from their sources (`FROM_SOURCE`), not the running JDK's of the same names.
+  classes from their sources (`FROM_SOURCE`), not the running JDK's of the same names. *Accepted 2026-10-10: JRT-SOURCES.md "Time".*
 
 ## Sources
 
@@ -2858,41 +2859,160 @@ Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure; before: main after `jbase`
 What is left of the family: the field updaters, `StructuredTaskScope` and its kin, and
 `ForkJoinPool`'s members beyond jrt's (its work-stealing internals, `ForkJoinWorkerThreadFactory`).
 
-## Amendments (JC), for the user's review
+## Amendments (JC)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "Concurrency"):
 
 - **JC1 (C2G-SPEC §8.5, new) VarHandles compiled statically**: constant handles read from
   static initializers, access modes as atomic operations on the field or element, fields named
   by a handle volatile in Go, fences, `MethodHandles.lookup()` a `nil`; `arbace.c2g.vh`, jrt's
-  `varhandle.clj`.
+  `varhandle.clj`. *Accepted 2026-10-10, folded into C2G-SPEC §8.5.*
 - **JC2 (C2G-SPEC §7.8) A `switch` over an enum outside the closed world** switches on an
-  operation-level stub (above).
+  operation-level stub (above). *Accepted 2026-10-10, folded into C2G-SPEC §7.8.*
 - **JC3 (JRT-SOURCES.md, the closure) The concurrent classes**: `concurrent-sources` in
   `test/g2c/jrt_sources.clj` (the list above, with `PriorityQueue`, `SortedSet` and
   `RandomSupport`), jrt's own Java `ThreadPerTaskExecutor`, `Delays`, `ForkJoinPools`,
-  `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above.
+  `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above. *Accepted 2026-10-10, folded into JRT-SOURCES.md ("The closure as grown").*
 - **JC4 (C2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
   three random fields as `F_` fields and registers its Go type for `Unsafe.objectFieldOffset`;
-  jrt's hand-written probes go.
+  jrt's hand-written probes go. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (its summary there).*
 - **JC5 (C2G-SPEC §8.4) The executors translated**: jrt's hand-written pools, `FutureTask` and
   `Executors` go; `ExecutorService` is translated over a stand-in (C2G-SPEC §4.3), and c2g gives
   jrt's `ForkJoinPool` its `shutdownNow`, `invokeAll`, `invokeAny` through jrt's Java
-  (`out/fjp-support-forms`, §11).
+  (`out/fjp-support-forms`, §11). *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC6 (C2G-SPEC §8.3, §8.4) `AbstractQueuedSynchronizer` translated**, its
   `AbstractQueuedLongSynchronizer` too, with `Node.waiter` and
   `AbstractOwnableSynchronizer.exclusiveOwnerThread` volatile by variants (§8.3's cure for a
   two-word field read by other threads); this revises §8.4's "measured and not taken" for the
-  executors' workers, while jrt's locks stay hand-written.
+  executors' workers, while jrt's locks stay hand-written. *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC7 (C2G-SPEC §8.4, the fork-join pool) jrt's `ForkJoinPool` an `ExecutorService`**, with
   `ManagedBlocker`, `managedBlock`, `asyncCommonPool`, `isQuiescent`, termination, and
-  `ForkJoinTask`'s tags; `CompletableFuture`'s delays on jrt's `Delays`.
+  `ForkJoinTask`'s tags; `CompletableFuture`'s delays on jrt's `Delays`. *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC8 (C2G-SPEC §11, jrt's API) Additions to jrt's hand-written classes**: `Thread.State` and
   `getState` (three of its six states), `Thread.Builder`, `Future.State` and `Future`'s JDK 19
   defaults, `LockSupport`'s blockers and class object, `Unsafe`'s `weakCompareAndSetReference`,
   `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`, `storeStoreFence`, `park`, `unpark`,
-  and the casts of the new types.
+  and the casts of the new types. *Accepted 2026-10-10, it stays here; C2G-SPEC §16 refers to it.*
 - **JC9 (C2G-SPEC §8.4, `RunMain`) No Go deadlock crash at main's end**: `RunMain` keeps a
   ticker pending for the program's life, so a program whose threads all wait forever waits, as
   on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,
-  agents without and with `shutdown-agents`).
+  agents without and with `shutdown-agents`). *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (`RunMain`).*
 - **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
+  what the executable is built from (it changes the conversion, but the key did not see it). *Accepted 2026-10-10, it stays here, `bin/arbace-go` holds it.*
+
   what the executable is built from (it changes the conversion, but the key did not see it).
+
+# Size: trimming the executable
+
+Branch `gosize` (2026-10-10, the user's request before the freeze): where the Go executable's
+107 MB went (amd64, main at `d97e0f9`, go-juc merged), and what was cut without changing
+behaviour. Measured with `go tool nm -size` (the symbols by package, class and kind), `readelf
+-S` (the sections) and the build's own outputs.
+
+## Where it went (main at `d97e0f9`, 107,070,549 bytes)
+
+| section | MB | what |
+|---|---:|---|
+| `.text` | 34.2 | code: the translated classes 10.8, the 18 `DynSub_C` types' methods 9.1, the member tables' construction at initialization 5.0 and their per-member closures 4.5, jrt's own and Go's std |
+| `.gopclntab` | 29.0 | Go's function table (names, line and stack tables): about 200 bytes and a name per function, 127,000 functions |
+| `.debug_*` | 16.6 | DWARF |
+| `.symtab`, `.strtab` | 10.5 | the ELF symbol table |
+| `.rodata` | 10.1 | the image of prepared namespaces 6.0, the embedded sources and data 1.7, constants |
+| `.go.type`, `.go.func`, data | 6.7 | type descriptors, function data |
+
+(`.noptrbss`, 33.6 MB of zeros in std's crypto tables, takes no space in the file.)
+
+## What was cut
+
+| item | amendment | bytes saved |
+|---|---|---:|
+| the `DynSub_C` types take the interfaces' methods from an embedded `dynCore` | SZ4 | 11.3 MB (measured alone on main at `a5ace08`: 99,635,531 to 88,353,780) |
+| member tables as data, decoded at their first use, one dispatch function per class and kind | SZ3 | about 9.2 MB (the rest of the 21.7 MB with symbols, below) |
+| embedded resources zlib-compressed when a quarter smaller | SZ2 | 1.15 MB (1,744,745 to 593,404 bytes of resources) |
+| the executables linked without the symbol table and DWARF (`-ldflags=-s -w`) | SZ1 | 23.5 MB (85,398,138 with them, 61,898,912 without) |
+| **all** | | **107,070,549 to 61,898,912 bytes (-45.2 MB, -42%)** |
+
+With the symbols kept (`ARBACE_GO_SYMBOLS=1`) the program is 85,398,138 bytes, 21.7 MB less than
+main: `.text` 34.2 to 20.7 MB (the `DynSub_C` methods 9.1 to 0.6, the tables' initialization 5.0
+to 1.6 and closures 4.5 to 0.3, against 2.8 of dispatch functions), `.gopclntab` 29.0 to 25.9,
+DWARF 16.6 to 13.6, `.rodata` 10.1 to 8.8.
+
+**SZ4: `Dyn` and `dynCore`.** Every interface method of the world was a Go method of `Dyn` and,
+again, of each of the 18 `DynSub_C` (the proxies' and the class forms' superclasses): about
+1,300 methods each, 21,600 in all. They are now methods of one struct, `dynCore` (`D`, `F`, and
+`Self`, the object around it), which `Dyn` and every `DynSub_C` embed; Go's promotion gives them
+the methods. A core method passes `Self` (the `Dyn` or `DynSub_C`) to the slot's fn, to an
+interface's default method (asserted to the interface) and to `AbstractMethodError`'s text, as
+the methods on `Dyn` passed the object. A `DynSub_C` defines itself Object's methods, its class's
+virtual methods and the core's methods whose names its class's struct has too (its interfaces'
+markers, its ancestors' methods: Go would find them ambiguous); its slots are `Dyn`'s, then its
+class's own methods, so that the core's slot indexes hold for it. Go generates a small wrapper
+per promoted method (23,400, 0.6 MB).
+
+**SZ3: member tables as data.** c2g wrote each class's public members as a `MethodInfo`,
+`CtorInfo` and `FieldInfo` literal with a closure, built by the class's `init` at the program's
+start: 22,600 closures and 5 MB of initialization code. Now each class has a `MemberTable`
+(`jrt/members.clj`): its members as lines of text ("M1 getHours ()I", the descriptors with
+binary names), and per kind one dispatch function, a switch over the member's index
+(`C_invoke`, `C_new`, `C_get`, `C_set`); jrt decodes the table into the `ClassInfo`'s `Methods`,
+`Ctors` and `Fields` the first time reflection reads them (`EnsureMembers`, once), resolving the
+descriptors' classes by name (jrt's registry) and making each member's function a closure over
+the dispatch function and its index. Members that do not exist in Go (`m`, `c`) and the cut
+classes' (`MemberTable.Cut`; `f`, a field that is not a constant) throw the same
+`UnsupportedOperationException`s as before, made by jrt. The tables' order, names, modifiers
+and behaviour are unchanged; only their construction moved from the start to the first use.
+
+**SZ2: compressed resources.** c2g writes an embedded resource as `P.z` (zlib) when that is at
+least a quarter smaller (the namespaces' sources, `generics.edn`, `tzdb.dat`, ICU's data; not
+`uniName.dat`, already deflated), and jrt's `OSHost.Resource` inflates `P.z` when asked for `P`.
+The image step takes the embedded namespaces from a list c2g writes (`prog/namespaces.txt`)
+instead of reading the sources.
+
+**SZ1: no symbol table or DWARF.** `bin/arbace-go` links the executables with `-ldflags=-s -w`.
+Go's own function table (`.gopclntab`) stays: panics' traces, jrt's Java stack traces
+(`runtime.CallersFrames`) and profiles read it, and they are unchanged (checked: the same traces
+of an uncaught `ArithmeticException` and of `printStackTrace`). What goes is for debuggers and
+`go tool nm`; `ARBACE_GO_SYMBOLS=1 bin/arbace-go --build` keeps them.
+
+## Checks
+
+On the program with all four (amd64, main at `d97e0f9` merged): the whole Go oracle with
+`--expected test/oracle/known-go-amd64.edn` as recorded (21,792 of 21,800, the 8 known
+mismatches); `bin/arbace-go`'s smoke test; Clojure's suite on Go without regressions against
+`test/arbace-go-results.edn`; `bin/jrt test` on amd64 and on arm64 (qemu), `bin/jrt testdata`
+unchanged. The start (`-e nil`) is unchanged, 0.20 to 0.21 s, and the resident memory after it
+slightly lower (158 MB, 162 before), the member tables no longer built at the start.
+
+## Not done, and why
+
+- **The image of prepared namespaces** (6.0 MB): zlib makes it 1.7 MB, but Go inflates it in
+  about 40 ms, a fifth of the start (0.21 s), and a load needs most of it (core). Not taken; a
+  per-namespace compression loaded on demand would cost less, core still the most.
+- **The REPL's roots** (every public member of every class the REPL can name): fewer roots would
+  cut translated code, but members Clojure code can call would become stubs. Kept.
+- **Go's function table** (25.9 MB with 104,000 functions): it shrinks only with fewer
+  functions; the largest remaining groups are the translated code itself and the `DynSub_C`
+  wrappers that Go needs for the types' method sets.
+- **CLDR's bundles as code** (`FormatData`, `TimeZoneNames`, `ZoneName`: 1.0 MB of code): arrays
+  of string literals compile to one store per element; a c2g helper building such arrays from
+  one string would save perhaps half, at the cost of a special case in c2g. Not done.
+- **jrt's hand-written classes' tables** (`reflect_tables.clj`, 0.4 MB): could use the
+  `MemberTable` too (`test/jrt/tables.clj`); small.
+
+## Proposed amendments (for the user's review)
+
+Numbered SZ (size); no SZ appears elsewhere in doc/.
+
+- **SZ1 (BUILD.md, `bin/arbace-go`; C2G-SPEC §10.6)** The executables are linked without the
+  symbol table and DWARF (`-ldflags=-s -w`); Go's function table stays, so traces and profiles
+  are unchanged; `ARBACE_GO_SYMBOLS=1` keeps them.
+- **SZ2 (C2G-SPEC §10.3, RD1)** An embedded resource is stored zlib-compressed as `P.z` when that
+  saves a quarter, and the host's `Resource` inflates it; `bin/arbace-go`'s image step takes the
+  namespaces from c2g's `namespaces.txt`.
+- **SZ3 (C2G-SPEC §5.11, the member tables; R12)** A translated or cut class's member table is a
+  `MemberTable`: its members as text and one dispatch function per kind, decoded into the
+  `ClassInfo`'s slices at reflection's first use (`jrt.EnsureMembers`); absent and cut members
+  throw as before, their functions made by jrt.
+- **SZ4 (C2G-SPEC §5.12, `Dyn`; E4, X1)** `Dyn` and the `DynSub_C` types embed a `dynCore` (`D`,
+  `F`, `Self`) that has the interfaces' methods; a `DynSub_C` defines only Object's methods, its
+  class's and those whose names its class's struct shares, and its slots begin with `Dyn`'s.

@@ -159,12 +159,13 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Before the freeze: an assessment of how much of `java.base` jrt implements (the user's
     request, an agent; `doc/go/JAVA-BASE.md`); SL3's per-namespace timeouts once step 7 lands;
     the agents-without-`shutdown-agents` deadlock found by step 7a.
-  - Then: step 8 (the `.ae` rename), step 9 (the freeze, with `bin/gate --full`).
+  - Then: step 8, the freeze (`bin/gate --full`, PGO executables, the branch `arbace-for-golang`,
+    the tag `arbace-for-go1.27.1-v1`); right after it, as the first task, the `.ae` rename.
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`
-  considered and not taken: hard to type and script). One self-contained change, B1a's step 8:
-  the last step before the `arbace-for-golang` freeze (the user's timing, 2026-10-09): loaders (`RT.load`, the compiler:
+  considered and not taken: hard to type and script). One self-contained change, the first task right after the `arbace-for-golang` freeze (the
+  user's timing, 2026-10-10; it was B1a's step 8, before the freeze): loaders (`RT.load`, the compiler:
   `.ae` first, then `.clj`), the tools and their outputs (class forms build, j2c, g2c, c2g), `bin/`,
   `go/`, tests, the oracle, the docs; `bin/build-arbace` gives the frozen seed a `.clj` view of
   the sources for stage 1 (the seed stays as it is).

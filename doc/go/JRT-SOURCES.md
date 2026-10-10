@@ -329,8 +329,8 @@ jdk26u at `baf63fb`:
   4 known differences), 1,249 classes; deterministic (`--twice`). With the files merged: 424
   files, 420 identical and the 4 known differences, 1,321 classes.
 
-- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, proposed
-  amendment JC3, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
+- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, amendment
+  JC3, accepted 2026-10-10, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
   synchronizers, `CompletableFuture`, the executors (`ExecutorService` over jrt's stand-in),
   `ThreadLocalRandom` with `RandomSupport`, the atomic arrays, adders and accumulators,
   `StampedLock`, `AbstractQueuedSynchronizer` and its long and ownable kin, `Flow` and
@@ -357,7 +357,10 @@ Two options of the conversion (amendment S2):
 ## Time (2026-10-10)
 
 java.time in the Go build (JRT-NOTES.md, "Time"; the user's decision of 2026-10-10), from jdk26u
-at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`:
+at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`. Amendments TM2,
+TM3 and TM9 (the time-zone database as an image file of the resource data, java.base's CLDR data
+as generated sources, the shape check's `FROM_SOURCE`) were accepted on 2026-10-10 and are folded
+here and in C2G-SPEC §4.1, §10.3:
 
 - **Sources added** (`time-sources`, 94 files of `src/java.base/share/classes`; `MissingResourceException` is also `util-sources`'): `java/time/`
   but `Ser.java` (`Clock`, `DayOfWeek`, `Duration`, `InstantSource`, `LocalDate`,

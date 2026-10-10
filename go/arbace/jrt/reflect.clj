@@ -621,6 +621,7 @@ kept); an interface does not list Object's methods.\n"
                     (return))
                   (aset lists i (mergeMethod (aget lists i) e))))]
     (when (and (!= (.-Kind (.-info c)) KindPrimitive) (!= (.-Kind (.-info c)) KindArray))
+      (EnsureMembers (.-info c))
       (range [i _ (.-Methods (.-info c))]
         (let [m (addr (aget (.-Methods (.-info c)) i))]
           (when (!= (bit-and (.-Modifiers m) AccPublic) 0)
@@ -664,6 +665,7 @@ parameter list.\n"
 (go/method declaredMethodInfo
   "declaredMethodInfo: the entry of the method name(params) in c's own table, nil if none.\n"
   ^{:tag (* MethodInfo)} [^{:tag (* Class)} c ^string name ^{:tag (slice (* Class))} params ^bool publicOnly]
+  (EnsureMembers (.-info c))
   (range [i _ (.-Methods (.-info c))]
     (let [m (addr (aget (.-Methods (.-info c)) i))]
       (when (and (== (.-Name m) name) (sameParams (.-Params m) params)
@@ -685,6 +687,7 @@ parameter list.\n"
 member table (all its methods when the table lists its declared members, C2G-SPEC §16 Q13;
 else its public ones).\n"
   ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (EnsureMembers (.-info c))
   (let [ms (.-Methods (.-info c))
         a (NewRefArray Method_class (conv int32 (len ms)))]
     (range [i _ ms]
@@ -758,6 +761,7 @@ superclass's.\n"
             (when (aget seen k)
               (return))
             (aset seen k true)
+            (EnsureMembers (.-info k))
             (range [i _ (.-Fields (.-info k))]
               (let [f (addr (aget (.-Fields (.-info k)) i))]
                 (when (!= (bit-and (.-Modifiers f) AccPublic) 0)
@@ -793,6 +797,7 @@ getFields' order; NoSuchFieldException(name) otherwise.\n"
 
 (go/method GetDeclaredFields__Field1 "GetDeclaredFields__Field1 is Class.getDeclaredFields.\n"
   ^{:tag (* RefArray)} [^{:tag (* Class)} c]
+  (EnsureMembers (.-info c))
   (let [fs (.-Fields (.-info c))
         a (NewRefArray Field_class (conv int32 (len fs)))]
     (range [i _ fs]
@@ -803,6 +808,7 @@ getFields' order; NoSuchFieldException(name) otherwise.\n"
   "GetDeclaredField_String__Field is Class.getDeclaredField over the class's own table.\n"
   ^{:tag (* Field)} [^{:tag (* Class)} c ^{:tag (* String)} name]
   (let [n (.String (NN name))]
+    (EnsureMembers (.-info c))
     (range [i _ (.-Fields (.-info c))]
       (when (== (.-Name (aget (.-Fields (.-info c)) i)) n)
         (return (newField c (addr (aget (.-Fields (.-info c)) i))))))
@@ -814,6 +820,7 @@ getFields' order; NoSuchFieldException(name) otherwise.\n"
   (let [^{:tag (slice any)} ks nil]
     (when (and (!= (.-Kind (.-info c)) KindPrimitive) (!= (.-Kind (.-info c)) KindArray)
                (!= (.-Kind (.-info c)) KindInterface) (!= (.-Kind (.-info c)) KindAnnotation))
+      (EnsureMembers (.-info c))
       (range [i _ (.-Ctors (.-info c))]
         (let [k (addr (aget (.-Ctors (.-info c)) i))]
           (when (or (not publicOnly) (!= (bit-and (.-Modifiers k) AccPublic) 0))

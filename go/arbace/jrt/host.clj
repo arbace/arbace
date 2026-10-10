@@ -4,7 +4,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "host.go"
-  :imports [[rand "crypto/rand"] [errors "errors"] [io "io"] [fs "io/fs"] [os "os"]
+  :imports [[bytes "bytes"] [zlib "compress/zlib"] [rand "crypto/rand"] [errors "errors"] [io "io"] [fs "io/fs"] [os "os"]
             [runtime "runtime"] [strings "strings"] [sync "sync"] [time "time"]])
 
 (go/type Host
@@ -89,11 +89,23 @@ embedded resources.\n"
 (go/method Args ^{:tag (slice string)} [^OSHost h] os/Args)
 (go/method NumCPU ^int [^OSHost h] (runtime/NumCPU))
 (go/method RandomBytes [^OSHost h ^{:tag (slice byte)} b] (rand/Read b))
-(go/method Resource [^OSHost h ^string name] :results [(slice byte) bool]
+(go/method Resource
+  "Resource is an embedded resource: the file name, else name.z inflated (c2g writes the
+resources a zlib stream makes a quarter smaller so: amendment SZ2).\n"
+  [^OSHost h ^string name] :results [(slice byte) bool]
   (when (== (.-Resources h) nil)
     (return nil false))
   (let [(values b err) (fs/ReadFile (.-Resources h) name)]
-    (return b (== err nil))))
+    (when (== err nil)
+      (return b true)))
+  (let [(values z err) (fs/ReadFile (.-Resources h) (+ name ".z"))]
+    (when (!= err nil)
+      (return nil false))
+    (let [(values r zerr) (zlib/NewReader (bytes/NewReader z))]
+      (when (!= zerr nil)
+        (return nil false))
+      (let [(values b rerr) (io/ReadAll r)]
+        (return b (== rerr nil))))))
 (go/method Exit [^OSHost h ^int code] (StopProfile) (os/Exit code))
 
 (go/func ResourceOrPath
