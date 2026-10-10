@@ -968,6 +968,58 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 - **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
   name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
 
+Accepted by the user (2026-10-09) and folded: Y1 C2G-SPEC §4.4, Y2 §5.12, Y3 §8.4 and
+JAVA-SURFACE.md decision 4, Y4 ORACLE.md (Exclusions); listed in C2G-SPEC §16.
+
+## Proxies of BufferedWriter: pprint passes
+
+Branch `pprint-bw` (2026-10-09). The last 4 errors of the suite's `pprint` namespace (the
+`flush-underlying` tests) made a proxy of `java.io.BufferedWriter` that counts its flushes
+(`(proxy [java.io.BufferedWriter] [o] (flush [] (proxy-super flush) (swap! n inc)))`), and
+`BufferedWriter` was not one of c2g's proxy superclasses: a class of `proxy-supers` had to be
+non-leaf already, and `BufferedWriter` is a leaf of the closed world (nothing extends it).
+
+**The general way: a class of `proxy-supers` is not a leaf.** Its `DynSub_C` extends it, so it has
+a subclass in the program, and leafness (§5.3) now counts it: `model/leaf?` answers false for a
+translated, non-final class of the list, which moves from `arbace.c2g.dyn` to `arbace.c2g.model`
+(`m/proxy-supers`; `dyn/proxy-supers` refers to it) and gains `java/io/BufferedWriter`. A listed
+class then gets its class interface `C_I`, its values are `C_I` wherever the static type is `C`,
+its methods split into `Impl_` and dispatch methods, and c2g writes `DynSub_C` over it with no
+other change: the rule a class must be non-leaf to be listed becomes a consequence of being
+listed. (A hand-written class stays as jrt declares it: `ThreadLocal` is non-leaf in jrt.) For
+`BufferedWriter` the change touches its own file, `PrintStream` (which holds one) and the class
+table; `DynSub_BufferedWriter` has 1,039 methods, as the other `DynSub_C`.
+
+**Behaviour as on the JVM.** The oracle's `forms/types.clj` gains 13 forms (appended, so the
+other cases keep their lines): a `BufferedWriter` proxy whose `flush` calls `proxy-super` and
+counts, buffering (nothing reaches the underlying writer before a flush), `newLine` and
+`write(String, int, int)`, `instance?` and the superclass, `prn` with `*flush-on-newline*` true
+and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer over it) and
+`cl-format` with a case directive through it, a proxy overriding `write` that calls
+`proxy-super` with another string (the buffer size given to the constructor), and a write after
+`close` (`IOException` "Stream closed"). All 438 cases of the file match on the Go build.
+
+### Results
+
+- **Clojure's suite** (amd64): `pprint` 58 tests, 474 of 474 (was 470, 4 errors). The whole
+  suite: 646 tests, 19,280 assertions, 19,255 pass, 19 fail, 6 errors (were 19,251, 19, 10);
+  58 namespaces pass as on the JVM. `test/arbace-go-results.edn` updated; no regression.
+- **Executable size** (amd64, built from the same tree with and without the change): 58,603,950
+  to 59,584,911 bytes, +981 KB (+1.7%): `DynSub_BufferedWriter` and `BufferedWriter`'s split.
+- **The oracle**: `bin/oracle check jvm` 20,276 of 20,276. The Go build (amd64): 20,243 of
+  20,276 (the 13 new cases match); the 33 mismatches are those `known-go-amd64.edn` records.
+- **Checks**: `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and on arm64; `bin/jrt test` (amd64) passes.
+  The change is in c2g only (not compiled by the bootstrap), so `bin/gate` was not needed.
+
+### Proposed amendments (for the user's review)
+
+- **Z1 (C2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A translated, non-final class of `proxy-supers` is not a leaf:
+  its `DynSub_C` is a subclass in the program, so leafness counts it (it was a condition on the
+  list, now a consequence of it; X1's "leafness stays a property of the closed world" reads: of
+  the closed world and the proxy types c2g adds to it). The list moves to
+  `arbace.c2g.model/proxy-supers` and gains `java.io.BufferedWriter` (pprint's tests); §5.12's
+  "a proxy of a leaf class throws (`BufferedWriter` ...)" keeps `BitSet` as its example.
+
 ## The suite's last failures
 
 Branch `suite-last` (2026-10-09, the user's decision): the failures of Clojure's suite on the Go

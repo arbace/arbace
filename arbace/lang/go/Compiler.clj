@@ -852,6 +852,7 @@
         (set! closesExprs (.cons closesExprs (LocalBindingExpr. (cast LocalBinding (.first s)) nil)))
         (recur (.next s))))
     (when (instance? NewInstanceExpr this)
+      (Compiler$Image/event (new Object/1 ["type" name this interfaceNames]))
       (set! compiledClass (Compiler$Evaluator/defineType (cast NewInstanceExpr this) interfaceNames))))
 
   (method ^:synchronized getCompiledClass ^Class [this] compiledClass)
@@ -883,6 +884,8 @@
   (method ^:static compileStub ^Class [^String superName ^NewInstanceExpr ret
                                        ^String/1 interfaceNames frm]
     ;; (the closes of a reify are not known yet: its methods are analyzed after the stub)
+    (Compiler$Image/event (new Object/1 ["stub" (java-str COMPILE_STUB_PREFIX "." (.-name ret))
+                                         superName ret interfaceNames frm]))
     (let [ni (if (nil? interfaceNames) 0 (alength interfaceNames))
           ifaces (new Class/1 ni)
           ks (RT/keys (.-closes ret))
@@ -1554,3 +1557,294 @@
                   (PersistentVector/create tags)
                   " insufficient to resolve "
                   (arbace.lang.Compiler/methodDescription c methodName))))))
+
+;; ---------------------------------------------------------------------------------------
+;; The prepared namespaces (B1a step 6, doc/go/EXEC-NOTES.md): the executable starts from
+;; namespaces analyzed at build time. `bin/arbace-go --build` runs the executable once with
+;; ARBACE_PREPARE set: each source embedded in the program that RT.load evaluates is then
+;; recorded, unit by unit (a top-level form, or each form of a top-level do, as Compiler.eval
+;; splits them), as the Expr tree its analysis made, with the classes made while it was
+;; analyzed (deftype's stub and class, gen-interface's interfaces) as events; the program
+;; writes the records (the image, Go's encoding of the object graph: the main package's
+;; image.go) and the build embeds it. At run time RT.load replays an embedded source from the
+;; image instead of reading, macroexpanding and analyzing it: each unit's events are made
+;; again, then its Expr is evaluated as Compiler.eval evaluates it. Evaluation is the same,
+;; analysis is skipped, as the JVM's AOT-compiled namespaces skip it.
+
+(c2g/variant Compiler
+  (c2g/add
+    (defclass ^:public ^:static Image
+      ;; the recorder of the source being loaded (Object[] {name, ArrayList events}) while
+      ;; Compiler.load analyzes its forms; nil while they are evaluated
+      (field ^:public ^:static ^:final ^Var RECORDER (.setDynamic (Var/create nil)))
+      ;; the recorder RT.load hands Compiler.load (which takes it and binds this to nil)
+      (field ^:public ^:static ^:final ^Var PENDING (.setDynamic (Var/create nil)))
+
+      ;; 1 when the program records (ARBACE_PREPARE), else 0
+      (method ^:public ^:static ^:native mode ^int [])
+      ;; starts the record of source name (false: recorded already)
+      (method ^:public ^:static ^:native begin ^boolean [^String name])
+      ;; records a unit {kind line column lineBefore columnBefore expr events}
+      (method ^:public ^:static ^:native unit ^void [^String name ^Object/1 u])
+      ;; ends the record of source name, kept when ok
+      (method ^:public ^:static ^:native end ^void [^String name ^boolean ok])
+      ;; whether the image holds source name
+      (method ^:public ^:static ^:native has ^boolean [^String name])
+      ;; the next unit of source name from the image (opened on first use), nil at its end
+      (method ^:public ^:static ^:native next ^Object/1 [^String name])
+      ;; resolves the classes and members the units decoded so far name, when they exist, once
+      ;; the first k events of the unit (which may make them) are made again (strict: all,
+      ;; else IllegalStateException)
+      (method ^:public ^:static ^:native resolve ^void [^String name ^int k ^boolean strict])
+
+      ;; the program has started (Main.main, after arbace.main is loaded): the start's settings
+      ;; end (the garbage collector's)
+      (method ^:public ^:static ^:native started ^void [])
+
+      ;; an event of the analysis being recorded
+      (method ^:public ^:static event ^void [^Object/1 ev]
+        (let [r (.deref RECORDER)]
+          (when (some? r)
+            (.add (cast ArrayList (aget (cast Object/1 r) 1)) ev))))
+
+      ;; gen-interface's interfaces (genclass.clj), recorded
+      (method ^:public ^:static defineInterface ^Class [^String name ^Class/1 extends]
+        (Image/event (new Object/1 ["iface" name name extends]))
+        (Compiler$Dyn/defineInterface name extends))
+
+      (method ^:public ^:static addInterfaceMethod ^void [^Class c ^String name ^Class/1 params
+                                                          ^Class ret]
+        (Image/event (new Object/1 ["imethod" nil c name params ret]))
+        (Compiler$Dyn/addInterfaceMethod c name params ret))
+
+      ;; an event made again: {kind, the name of the class it makes or nil, args...}
+      (method ^:static replay ^void [^Object/1 ev]
+        (let [k (cast String (aget ev 0))]
+          (cond
+            (.equals k "stub")
+              (NewInstanceExpr/compileStub (cast String (aget ev 2)) (cast NewInstanceExpr (aget ev 3))
+                                           (cast String/1 (aget ev 4)) (aget ev 5))
+            (.equals k "type")
+              (let [nie (cast NewInstanceExpr (aget ev 2))]
+                (set! (.-compiledClass nie) (Compiler$Evaluator/defineType nie (cast String/1 (aget ev 3)))))
+            (.equals k "iface")
+              (Compiler$Dyn/defineInterface (cast String (aget ev 2)) (cast Class/1 (aget ev 3)))
+            (.equals k "ns")
+              (.set RT/CURRENT_NS (Namespace/findOrCreate (cast Symbol (aget ev 2))))
+            (.equals k "proxy")
+              (.applyTo (RT/var "arbace.core" "get-proxy-class")
+                        (RT/cons (aget ev 2) (RT/seq (aget ev 3))))
+            (.equals k "imethod")
+              (Compiler$Dyn/addInterfaceMethod (cast Class (aget ev 2)) (cast String (aget ev 3))
+                                               (cast Class/1 (aget ev 4)) (cast Class (aget ev 5)))
+            :else (throw (IllegalStateException. (java-str "image: unknown event " k))))))
+
+      ;; RT.load of an embedded source: replayed from the image when it holds it, else read
+      ;; and evaluated by Compiler.load (recorded when the program prepares)
+      (method ^:public ^:static load [^Reader rdr ^String sourcePath ^String sourceName]
+        (when (some? (.deref RECORDER))
+          ;; a load while a form is analyzed (Compiler.ensureMacroCheck's spec): the unit
+          ;; being recorded will not load it when replayed
+          (.println (RT/errPrintWriter)
+                    (java-str "image: " sourcePath " loaded while "
+                              (aget (cast Object/1 (.deref RECORDER)) 0) " is analyzed")))
+        (cond
+          (Image/has sourcePath) (Image/replayLoad sourcePath sourceName)
+          (and (== (Image/mode) 1) (Image/begin sourcePath))
+            (let [^:mutable ok false]
+              (Var/pushThreadBindings
+                (^[Object/1] RT/map PENDING (new Object/1 [sourcePath (ArrayList.)])))
+              (try
+                (let [r (arbace.lang.Compiler/load rdr sourcePath sourceName)]
+                  (set! ok true)
+                  r)
+                (finally
+                  (Var/popThreadBindings)
+                  (Image/end sourcePath ok))))
+          :else (arbace.lang.Compiler/load rdr sourcePath sourceName)))
+
+      ;; Compiler.eval(form, false) of a top-level form of a source being recorded: its
+      ;; analysis with the recorder bound, then the unit recorded, then its evaluation
+      (method ^:public ^:static evalUnit [^:mutable form ^Object/1 rec]
+        (Var/pushThreadBindings (^[Object/1] RT/map LOADER (RT/makeClassLoader)))
+        (try
+          (let [meta (RT/meta form)
+                line (if (some? meta) (.valAt meta RT/LINE_KEY (.deref LINE)) (.deref LINE))
+                column (if (some? meta) (.valAt meta RT/COLUMN_KEY (.deref COLUMN)) (.deref COLUMN))]
+            (Var/pushThreadBindings (^[Object/1] RT/mapUniqueKeys LINE line COLUMN column))
+            (try
+              (Var/pushThreadBindings (^[Object/1] RT/map RECORDER rec))
+              (let [^:mutable popped false]
+                (try
+                  (set! form (arbace.lang.Compiler/macroexpand form))
+                  (cond
+                    (and (instance? ISeq form) (Util/equals (RT/first form) DO))
+                      (do
+                        (Var/popThreadBindings)
+                        (set! popped true)
+                        (loop [s (RT/next form)]
+                          (if (some? (RT/next s))
+                              (do (Image/evalUnit (RT/first s) rec) (recur (RT/next s)))
+                              (Image/evalUnit (RT/first s) rec))))
+                    :else
+                      (let [fn (or (instance? IType form)
+                                   (and (instance? IPersistentCollection form)
+                                        (not (and (instance? Symbol (RT/first form))
+                                                  (.startsWith (.-name (cast Symbol (RT/first form))) "def")))))
+                            ^:mutable ^Expr expr nil]
+                        (if fn
+                            (set! expr (arbace.lang.Compiler/analyze C/EXPRESSION
+                                                                     (RT/list FN PersistentVector/EMPTY form)
+                                                                     (java-str "eval" (RT/nextID))))
+                            (try
+                              (set! expr (arbace.lang.Compiler/analyze C/EVAL form))
+                              (catch ClassFormsExpr$Signal sig
+                                (set! expr (arbace.lang.Compiler/analyze
+                                             C/EVAL
+                                             (RT/list (RT/list FN PersistentVector/EMPTY form)))))))
+                        (let [evs (cast ArrayList (aget rec 1))]
+                          (Image/unit (cast String (aget rec 0))
+                                      (new Object/1 [(Integer/valueOf (if fn 1 0)) line column
+                                                     (.deref LINE_BEFORE) (.deref COLUMN_BEFORE)
+                                                     expr (.toArray evs)]))
+                          (.clear evs))
+                        (Var/popThreadBindings)
+                        (set! popped true)
+                        (Var/pushThreadBindings (^[Object/1] RT/map RECORDER nil))
+                        (try
+                          (if fn
+                              (.invoke (cast IFn (.eval expr)))
+                              (.eval expr))
+                          (finally (Var/popThreadBindings)))))
+                  (finally (when-not popped (Var/popThreadBindings)))))
+              (finally (Var/popThreadBindings))))
+          (finally (Var/popThreadBindings))))
+
+      ;; Compiler.load of a source from the image: the bindings Compiler.load makes, then each
+      ;; unit's events made again and its Expr evaluated as Compiler.eval evaluates it
+      (method ^:static replayLoad [^String sourcePath ^String sourceName]
+        (Var/pushThreadBindings
+          (^[Object/1] RT/mapUniqueKeys LOADER (RT/makeClassLoader) SOURCE_PATH sourcePath
+                                        SOURCE sourceName METHOD nil LOCAL_ENV nil LOOP_LOCALS nil
+                                        CLASS_FORM_SIBLINGS nil NEXT_LOCAL_NUM (Integer/valueOf 0)
+                                        RT/READEVAL RT/T RT/CURRENT_NS (.deref RT/CURRENT_NS)
+                                        LINE_BEFORE (Integer/valueOf 1) COLUMN_BEFORE (Integer/valueOf 1)
+                                        LINE_AFTER (Integer/valueOf 1) COLUMN_AFTER (Integer/valueOf 1)
+                                        RT/UNCHECKED_MATH (.deref RT/UNCHECKED_MATH)
+                                        RT/WARN_ON_REFLECTION (.deref RT/WARN_ON_REFLECTION)
+                                        RT/DATA_READERS (.deref RT/DATA_READERS)
+                                        RECORDER nil PENDING nil))
+        (try
+          (loop [^:mutable ret nil]
+            (let [u (Image/next sourcePath)]
+              (if (nil? u)
+                  ret
+                  (let [evs (cast Object/1 (aget u 6))]
+                    (.set LINE_BEFORE (aget u 3))
+                    (.set COLUMN_BEFORE (aget u 4))
+                    (loop [^int i 0]
+                      (when (< i (alength evs))
+                        (Image/resolve sourcePath i false)
+                        (Image/replay (cast Object/1 (aget evs i)))
+                        (recur (unchecked-inc-int i))))
+                    (Image/resolve sourcePath (alength evs) true)
+                    (Var/pushThreadBindings
+                      (^[Object/1] RT/mapUniqueKeys LOADER (RT/makeClassLoader) LINE (aget u 1) COLUMN (aget u 2)))
+                    (let [r (try
+                              (let [e (cast Expr (aget u 5))]
+                                (if (== (.intValue (cast Integer (aget u 0))) 1)
+                                    (.invoke (cast IFn (.eval e)))
+                                    (.eval e)))
+                              (finally (Var/popThreadBindings)))]
+                      (recur r))))))
+          (catch Throwable e
+            (if (not (instance? CompilerException e))
+                (throw (CompilerException. sourcePath
+                                           (cast Integer (.deref LINE_BEFORE))
+                                           (cast Integer (.deref COLUMN_BEFORE))
+                                           nil
+                                           CompilerException/PHASE_EXECUTION
+                                           e))
+                (throw (cast CompilerException e))))
+          (finally (Var/popThreadBindings))))))
+
+  ;; Compiler.load: a source being recorded (Image.PENDING) has its top-level forms evaluated
+  ;; by Image.evalUnit; else as upstream's
+  (method ^:public ^:static load [^Reader rdr ^String sourcePath ^String sourceName]
+    (let [EOF (Object.)
+          rec (cast Object/1 (.deref Compiler$Image/PENDING))
+          ^:mutable ^Object ret nil
+          pushbackReader (if (instance? LineNumberingPushbackReader rdr)
+                             (cast LineNumberingPushbackReader rdr)
+                             (LineNumberingPushbackReader. rdr))]
+      (arbace.lang.Compiler/consumeWhitespaces pushbackReader)
+      (Var/pushThreadBindings
+        (^[Object/1] RT/mapUniqueKeys LOADER
+                                      (RT/makeClassLoader)
+                                      SOURCE_PATH
+                                      sourcePath
+                                      SOURCE
+                                      sourceName
+                                      METHOD
+                                      nil
+                                      LOCAL_ENV
+                                      nil
+                                      LOOP_LOCALS
+                                      nil
+                                      CLASS_FORM_SIBLINGS
+                                      nil
+                                      NEXT_LOCAL_NUM
+                                      (Integer/valueOf 0)
+                                      RT/READEVAL
+                                      RT/T
+                                      RT/CURRENT_NS
+                                      (.deref RT/CURRENT_NS)
+                                      LINE_BEFORE
+                                      (.getLineNumber pushbackReader)
+                                      COLUMN_BEFORE
+                                      (.getColumnNumber pushbackReader)
+                                      LINE_AFTER
+                                      (.getLineNumber pushbackReader)
+                                      COLUMN_AFTER
+                                      (.getColumnNumber pushbackReader)
+                                      RT/UNCHECKED_MATH
+                                      (.deref RT/UNCHECKED_MATH)
+                                      RT/WARN_ON_REFLECTION
+                                      (.deref RT/WARN_ON_REFLECTION)
+                                      RT/DATA_READERS
+                                      (.deref RT/DATA_READERS)
+                                      Compiler$Image/PENDING
+                                      nil
+                                      Compiler$Image/RECORDER
+                                      nil))
+      (let [readerOpts (arbace.lang.Compiler/readerOpts sourceName)]
+        (try
+          (loop [r (LispReader/read pushbackReader false EOF false readerOpts)]
+            (when-not (identical? r EOF)
+              (arbace.lang.Compiler/consumeWhitespaces pushbackReader)
+              (.set LINE_AFTER (.getLineNumber pushbackReader))
+              (.set COLUMN_AFTER (.getColumnNumber pushbackReader))
+              (set! ret (if (some? rec)
+                            (Compiler$Image/evalUnit r rec)
+                            (arbace.lang.Compiler/eval r false)))
+              (.set LINE_BEFORE (.getLineNumber pushbackReader))
+              (.set COLUMN_BEFORE (.getColumnNumber pushbackReader))
+              (recur (LispReader/read pushbackReader false EOF false readerOpts))))
+          (catch LispReader$ReaderException e
+            (throw (CompilerException. sourcePath
+                                       (.-line e)
+                                       (.-column e)
+                                       nil
+                                       CompilerException/PHASE_READ
+                                       (.getCause e))))
+          (catch Throwable e
+            (if (not (instance? CompilerException e))
+                (throw (CompilerException. sourcePath
+                                           (cast Integer (.deref LINE_BEFORE))
+                                           (cast Integer (.deref COLUMN_BEFORE))
+                                           nil
+                                           CompilerException/PHASE_EXECUTION
+                                           e))
+                (throw (cast CompilerException e))))
+          (finally (Var/popThreadBindings)))
+        ret))))

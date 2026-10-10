@@ -344,7 +344,8 @@ the small `Date`, which became non-leaf (C2G-SPEC §5.3, S3).)
    `LockSupport` over `sync` and goroutines; translate `ConcurrentHashMap` and the blocking
    queues over a shim of `Unsafe`'s CAS; (b) translate `java.util.concurrent.locks` (AQS) too,
    over `LockSupport` and `Unsafe` (exact, more code); (c) shim `ConcurrentHashMap` as a locked
-   map (less code, different iteration). *Recommended: (a).*
+   map (less code, different iteration). *Recommended: (a).* `Semaphore` joined the shims in step 5
+   (C2G-SPEC amendment Y3, accepted 2026-10-09): (b) was measured for it and not taken.
 5. **Thread identity** (`Thread.currentThread`, `ThreadLocal`: `Var`'s dynamic bindings,
    `LockingTransaction`, `Agent`'s nesting; Go has no goroutine-local storage). (a) A
    goroutine-local slot in the Go runtime held as forms (one field of `g` and two functions;
