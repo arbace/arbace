@@ -1259,3 +1259,32 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   --suite --image` (stages identical, 20,750/20,750 on stages 1 and 2), key order equal to
   v2's for a `Double`, an `Optional` and a `URI`. Not released: a v3.1 (or the next tag) would
   carry it; the APKBUILD would then move to that tag.
+
+## 2026-10-10: reduce without an init on an IReduceInit-only reducible (after v3)
+
+- Found on main: `(reduce + (eduction (map inc) (range 10)))` threw `ClassCastException:
+  Eduction cannot be cast to IReduce` on the seed jar and the v1-v3 jars, while main's oracle
+  had recorded 55 (`bin/oracle record`, commit `521bd0a`, 2026-10-08, on main). Cause, in
+  `arbace/core/protocols.clj` as in upstream's `clojure/core/protocols.clj` (Clojure 1.12.6
+  too): `CollReduce`'s implementation for `IReduceInit` casts to `IReduce` in its two-argument
+  arity. An `Eduction` is both `IReduceInit` and `Iterable`, and `find-protocol-impl` chooses
+  between the two by the order of `(supers Eduction)`, a hash set of classes keyed by identity
+  hashes: with the JDK's CDS/AOT archive the hashes are the archive's and `Iterable` wins (the
+  oracle's recording, run with `target/arbace.aot`, and upstream's `clojure.main` with the
+  default CDS archive both give 55); without it, `IReduceInit` can win (Arbace's jar without its
+  cache, the seed, and upstream with `-Xshare:off` throw). `iteration`, a `reify` of
+  `IReduceInit` without `Iterable`, threw every time (upstream too).
+- Fix: VENDOR-NOTES hand change 17 (main: 18). The two-argument arity calls `IReduce.reduce`
+  only on an `IReduce`, else reduces through `IReduceInit.reduce` from a fresh sentinel (first
+  item replaces it; empty gives `(f)`; one item returned without calling `f`). Alternatives
+  considered: dispatching `Eduction` to `Iterable` (only that one class, and `iteration` stays
+  broken); making `find-protocol-impl`'s choice among interfaces deterministic (a change of
+  upstream's dispatch rule, left out). Regression test `test/native/reduce_test.clj` (13
+  assertions, including CollReduce's IReduceInit implementation called on an eduction
+  directly, whatever dispatch picks).
+- On top of `84da2dc` (apk26: `bean`'s keys in name order), cherry-picked, so both can be
+  released together. Checks: `bin/build-arbace --suite --image` (stages 1-3 identical at 5,781
+  classes, verifier clean, native tests 51/2,860, Clojure's suite 20,750/20,750 on stages 1 and
+  2, test.generative 27/27), `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without
+  regressions; on the image, with and without its cache: 55 for the eduction, 45 for
+  `iteration`, `bean`'s URI keys sorted. Not released.

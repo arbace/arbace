@@ -84,7 +84,16 @@
 
   arbace.lang.IReduceInit
   (coll-reduce
-    ([coll f] (.reduce ^arbace.lang.IReduce coll f))
+    ([coll f]
+     (if (instance? arbace.lang.IReduce coll)
+       (.reduce ^arbace.lang.IReduce coll f)
+       ;; an IReduceInit only (eduction, iteration): reduce from a fresh sentinel standing
+       ;; for no value yet, so that f first sees the first two items, as without an init
+       (let [none (Object.)
+             ret (.reduce ^arbace.lang.IReduceInit coll
+                          (fn [acc x] (if (identical? acc none) x (f acc x)))
+                          none)]
+         (if (identical? ret none) (f) ret))))
     ([coll f val] (.reduce coll f val)))
 
   ;;aseqs are iterable, masking internal-reducers

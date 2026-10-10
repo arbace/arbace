@@ -749,6 +749,29 @@ step 4 (2026-10-07); the others came with later work, as each says:
     (reflection, `ClassNotFoundException` caught); it reaches `arbace.java.browse-ui`, and so
     the error, only when there is no `xdg-open` either.
 
+17. **`reduce` without an init on an `IReduceInit` that is not an `IReduce`** (2026-10-10):
+    `(reduce + (eduction (map inc) (range 10)))` threw `ClassCastException: Eduction cannot be
+    cast to IReduce` in some runs and returned 55 in others. `reduce` without an init goes to
+    `coll-reduce` (`arbace/core/protocols.clj`) for anything not an `IReduce`, and
+    `CollReduce`'s implementation for `IReduceInit` cast its argument to `IReduce` in its
+    two-argument arity, as upstream's does (`clojure/core/protocols.clj`, also in Clojure
+    1.12.6). An `Eduction` is an `IReduceInit`, an `Iterable` and a `Sequential`; when no class
+    on its superclass chain has an implementation, `find-protocol-impl` picks among the matching
+    interfaces with `pref` over the set `(supers c)`, a hash set of classes ordered by their
+    identity hashes, so `Iterable` (the iterator, which works) or `IReduceInit` (the cast,
+    which throws) won by chance: with the JDK's CDS or AOT archive the classes' hashes come
+    from the archive and are stable, without it they follow the run (upstream Clojure 1.12.6
+    returns 55 with its default CDS archive and throws with `-Xshare:off`; Arbace's jar returned
+    55 with `target/arbace.aot` and threw without it, as on the seed). `iteration` (a `reify`
+    of `IReduceInit` and `Seqable` only) threw every time, upstream too. The two-argument arity
+    now calls `IReduce.reduce` only on an `IReduce`, and otherwise reduces through
+    `IReduceInit.reduce` from a fresh sentinel object standing for no value yet: the first item
+    replaces it, `f` sees the first two items first, an empty reducible gives `(f)` and a single
+    item is returned without calling `f`, as `reduce` without an init promises; `reduced`
+    stops it as before. So the result no longer depends on which implementation the hashes
+    pick; the choice itself (`find-protocol-impl`, upstream's) is unchanged. Regression test:
+    `test/native/reduce_test.clj` (run by the bootstrap on stage 1). (Main: hand change 18.)
+
 ## Spec (2026-10-07)
 
 The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of
