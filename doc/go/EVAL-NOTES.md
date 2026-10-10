@@ -1174,7 +1174,22 @@ No difference specific to arm64 was found, so nothing was fixed for it.
 
 ### Results
 
-RESULTS
+After merging main (step 6's image, `pprint-bw`, `go-file`), amd64, `bin/clojure-tests` with
+`CLOJURE_TESTS_GO` (7.5 minutes with `-j 12`, test.generative included):
+
+| | main before (`b90504e`'s reference) | this branch |
+|---|---:|---:|
+| namespaces run / loading | 64 / 62 | 65 / 64 |
+| tests | 646 | 664 |
+| assertions passing | 19,379 of 19,398 | 19,506 of 19,506 |
+| failures, errors | 19, 0 | 0, 0 |
+| test.generative | not run | 26 specs, no failure |
+
+The one namespace that does not load is `java.io` (`java.net.ServerSocket`: the sockets
+work's). `bin/arbace-go --smoke` passes (amd64). `test/arbace-go-results.edn` is updated
+(`clearing`, `api`, `transducers`, `:skipped-tests`, `:generative`). The JVM's suite on stage 2
+is unchanged by the runner's change (`clearing`, `transducers`, `api` checked: 19 tests, 108
+assertions for `transducers` there).
 
 ### Proposed amendments (for the user's review)
 
