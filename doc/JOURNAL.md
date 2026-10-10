@@ -1432,3 +1432,9 @@ decision (2026-10-08).
   not yet released).
 - Main session on the merge: `bin/gate` passed (6m51s); the Go oracle as recorded (8);
   Clojure's suite on Go 19,628 of 19,632, no regressions.
+- Main's README brought up to date (the user's request): the third bullet says the runtime is
+  already a static Go executable; "Arbace for Java 26" names v1-v3 and the Alpine package and
+  links FREEZE.md and ALPINE.md on the branch; main's JVM commands with `bin/arbace-j` and
+  `bin/arbace-image`; a new section "The Go executable" (what it is, its numbers, what it leaves
+  out, the coming freeze, how to build and run it), which becomes "Arbace for Golang" at the
+  freeze; the documentation list gains doc/go/; the licences beyond EPL-1.0.
