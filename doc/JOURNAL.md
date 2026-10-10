@@ -1196,3 +1196,13 @@ decision (2026-10-08).
   projected headless modules: java.base, java.sql (`#inst`'s `Timestamp` guard and printing,
   `resultset-seq`) with java.logging, java.transaction.xa and java.xml, and jdk.unsupported. The
   Alpine package agent does it on `apk26`; main follows.
+- Revised by the user the same day: the default jlinked image holds `java.base` only; every
+  other module is optional (used when the runtime provides it). Besides java.desktop (inspector,
+  browse, `bean`), the jar reaches java.sql (`core.clj`'s `when-class "java.sql.Timestamp"`
+  guards of `#inst`, `instant.clj`'s `Timestamp` printing and reader, `resultset-seq`'s hint),
+  java.xml (`arbace.xml`, `arbace.lang.XMLHandler`) and jdk.unsupported
+  (`arbace.repl/set-break-handler!`'s `sun.misc.Signal`). `#inst` with `java.util.Date` stays on
+  java.base; the `Timestamp` support loads when java.sql is there; `arbace.xml` and the desktop
+  namespaces fail cleanly without their modules; the break handler degrades. Hand changes
+  (VENDOR-NOTES), done on `apk26` first; `bin/arbace-image`'s default modules: `java.base`, plus
+  `ARBACE_IMAGE_MODULES`.
