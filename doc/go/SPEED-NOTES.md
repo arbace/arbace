@@ -358,7 +358,7 @@ Before merging main (the branch at `14a9553`, linux/amd64 unless said):
 | `bin/arbace-go --smoke` | pass (the `--pgo` build) |
 
 After merging main (`ad06cda`): `bin/jrt test` amd64 passes; the oracle 20,243 of 20,276
-against `test/oracle/known-go-amd64.edn`: 33 known, 0 new, 0 now passing; SMOKE_AFTER.
+against `test/oracle/known-go-amd64.edn`: 33 known, 0 new, 0 now passing; `bin/arbace-go --smoke` passes.
 `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/c2g`, `arbace/g2c`
 and `arbace/lang/go` are read by the tools, not compiled into the stages).
 
