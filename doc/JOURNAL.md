@@ -1281,3 +1281,33 @@ decision (2026-10-08).
 - Main session on the merge: `bin/jrt-convert`, `bin/jrt testdata`, `bin/jrt test`, the amd64
   build, smoke; the Go oracle 21,542 of 21,553, the 11 recorded mismatches; Clojure's suite on Go
   19,628 of 19,632, no regressions.
+
+## 2026-10-10: java.util.concurrent on Go
+
+- Agent, branch `go-juc` (20 commits to `bd2c2e2`), merged. JC1: c2g compiles `VarHandle`s
+  statically (the `findVarHandle`/`MhUtil.findVarHandle`/`arrayElementVarHandle` constants of
+  static initializers; each access mode as the atomic operation on the field or element, the
+  field made volatile in Go; `arbace/c2g/vh.clj`, jrt's `varhandle.clj`; `java.lang.invoke`
+  stays out). With it, translated from jdk26u: the concurrent collections and queues,
+  `Exchanger`, `Phaser`, `CompletableFuture`, `ThreadPoolExecutor`,
+  `ScheduledThreadPoolExecutor`, `Executors`, `FutureTask`, `ThreadLocalRandom`, the atomic
+  arrays, adders and accumulators, `StampedLock`, AQS, `Flow`, `SubmissionPublisher`; jrt's
+  hand-written pools and `FutureTask` removed (`ReentrantLock`, `ReentrantReadWriteLock`,
+  `Semaphore`, `CountDownLatch` stay hand-written: `LazySeq` and `Delay` lock on every use, and
+  the JDK's lock allocates per acquire). Variants make the two-word fields read across threads
+  volatile (LinkedTransferQueue's `waiter` was read half-written under test.generative: an NPE in
+  `LockSupport.unpark`). JC9: `RunMain` keeps a ticker pending, so a program ends as on the JVM
+  (a `send` without `shutdown-agents` keeps running, a `future`-only one exits after 60 s; Go's
+  "all goroutines are asleep" crash is gone; three new smoke checks). Amendments JC1-JC10
+  (JRT-NOTES.md, "Concurrency"), accepted by the user (to fold).
+- Coverage: java.util.concurrent's family 29.0% → 89.2% of members. New oracle forms
+  `concurrency.clj` (247, all match); the 3 `nextProbablePrime` cases now pass (removed from the
+  known mismatches). Executable +7.4 MB.
+- Main session on the merge (over java.time): conflicts in jrt's file list and JRT-NOTES;
+  `bin/jrt-convert`, `bin/jrt manifest` (no change), `bin/jrt testdata`, `bin/jrt test`, the
+  amd64 build (107.1 MB), smoke; the Go oracle 21,792 of 21,800, the 8 recorded mismatches;
+  Clojure's suite on Go 19,628 of 19,632, no regressions.
+- The JVM line: `arbace-for-java-26` gained the Alpine package and the base image and was
+  tagged `arbace-for-java-26-v3` (`71ffc9f`), then the APKBUILD bumped to the tag (`ec49a67`);
+  both pushed (the user's decisions: merge and tag v3, the name `arbace-java26`, Temurin
+  26.0.2.1 as the build JDK, publishing later).
