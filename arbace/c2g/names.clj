@@ -9,11 +9,13 @@
 ;; Go packages (§4.2)
 
 (defn pkg-of
-  "The Go package of a class (internal name): :jrt for the JDK's packages, :lang for Arbace's."
+  "The Go package of a class (internal name): :jrt for the JDK's packages (java, javax, jdk,
+  sun, and com.sun since the SunJCE provider: amendment SC3), :lang for Arbace's."
   [internal]
   (cond
     (or (str/starts-with? internal "java/") (str/starts-with? internal "jdk/")
-        (str/starts-with? internal "sun/") (str/starts-with? internal "javax/")) :jrt
+        (str/starts-with? internal "sun/") (str/starts-with? internal "javax/")
+        (str/starts-with? internal "com/sun/")) :jrt
     :else :lang))
 
 (def pkg-path {:jrt "arbace/jrt" :lang "arbace/lang"})
@@ -86,7 +88,10 @@
    "sun/text/Normalizer" "Sun_Normalizer"
    ;; java.time.chrono.Era's namesake in sun.util.calendar, which ZoneInfo's calendars use
    ;; (JRT-NOTES.md, "Time")
-   "sun/util/calendar/Era" "Calendar_Era"})
+   "sun/util/calendar/Era" "Calendar_Era"
+   ;; java.security.SecureRandom's namesake in sun.security.provider, the SHA1PRNG
+   ;; (JRT-NOTES.md, "Security", amendment SC2)
+   "sun/security/provider/SecureRandom" "Sun_SecureRandom"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

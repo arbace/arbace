@@ -44,7 +44,8 @@
   interfaces\")?"
   [n]
   (and (not (a/decl n))
-       (or (str/starts-with? n "java/") (str/starts-with? n "javax/") (str/starts-with? n "jdk/") (str/starts-with? n "sun/"))
+       (or (str/starts-with? n "java/") (str/starts-with? n "javax/") (str/starts-with? n "jdk/") (str/starts-with? n "sun/")
+           (str/starts-with? n "com/sun/"))
        (not (str/includes? n "$$"))
        (some? (env/info n))
        (env/interface? n)

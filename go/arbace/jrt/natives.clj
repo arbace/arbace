@@ -6,7 +6,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "natives.go"
-  :imports [[bytes "bytes"] [zlib "compress/zlib"] [md5 "crypto/md5"] [errors "errors"] [io "io"]])
+  :imports [[bytes "bytes"] [zlib "compress/zlib"] [errors "errors"] [io "io"]])
 
 (go/func NullPointerException_GetExtendedNPEMessage__String_native
   "NullPointerException_GetExtendedNPEMessage__String_native is the native
@@ -98,28 +98,17 @@ embedded resource name (the host's Resource: RT.load's sources), or null.\n"
       a)))
 
 ;; ---------------------------------------------------------------------------------------
-;; java.util.UUID (variant, overlay/jdk/variants/UUID.clj)
+;; jdk.internal.jrt.HostRandom (overlay; doc/go/JRT-NOTES.md, "Security"): the host's random
+;; source, which NativePRNG and SeedGenerator read (variants)
 
-(go/func UUID_HostRandomBytes_B1__V_native
-  "UUID_HostRandomBytes_B1__V_native fills b from the host's random source (randomUUID).\n"
-  [^{:tag (* ByteArray)} b]
-  (let [bs (make (slice byte) (len (.-A b)))]
+(go/func HostRandom_Fill0_B1_I_I__V_native
+  "HostRandom_Fill0_B1_I_I__V_native fills b[off, off+n) from the host's random source
+(Host.RandomBytes; the caller checked the range).\n"
+  [^{:tag (* ByteArray)} b ^int32 off ^int32 n]
+  (let [bs (make (slice byte) n)]
     (.RandomBytes (CurrentHost) bs)
     (range [i x bs]
-      (aset (.-A b) i (conv int8 x)))))
-
-(go/func UUID_Md5_B1__B1_native
-  "UUID_Md5_B1__B1_native is MessageDigest.getInstance(\"MD5\").digest(b) (nameUUIDFromBytes),
-over Go's crypto/md5.\n"
-  ^{:tag (* ByteArray)} [^{:tag (* ByteArray)} b]
-  (let [bs (make (slice byte) (len (.-A (NN b))))]
-    (range [i x (.-A b)]
-      (aset bs i (conv byte x)))
-    (let [sum (md5/Sum bs)
-          a (NewByteArray (conv int32 (len sum)))]
-      (range [i x sum]
-        (aset (.-A a) i (conv int8 x)))
-      a)))
+      (aset (.-A b) (+ (conv int off) i) (conv int8 x)))))
 
 (go/func Compiler_Evaluator_CheckCast_Class_O__O_native
   "Compiler_Evaluator_CheckCast_Class_O__O_native is the evaluator's checkcast of o to c (null

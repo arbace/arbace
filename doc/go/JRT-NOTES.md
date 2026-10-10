@@ -3257,3 +3257,203 @@ of the JDK's (`isBuiltinStreamHandler`); the JDK's answer, the bootstrap or the 
 errors), as on the JVM. `test-resource` and `test-resources-with-spaces` pass: a resource found
 through a `URLClassLoader` of a temporary directory equals the file's URL (`as-url`), and
 `spit` and `slurp` through it work.
+
+# Security: java.security basics in the Go build
+
+Branch `gosec` (2026-10-10, the user's decision): what server code commonly uses of
+`java.security` and `javax.crypto`: `MessageDigest` with the JDK's algorithms, names and aliases,
+`DigestInputStream`/`DigestOutputStream`, `SecureRandom` (NativePRNG and its blocking and
+non-blocking kinds, DRBG, SHA1PRNG, `getInstanceStrong`, the default), `UUID.randomUUID` and
+`nameUUIDFromBytes` over them, `javax.crypto.Mac` (the HMACs) with `SecretKeySpec`, the
+exceptions, and the provider framework (`Provider`, `Security`, `sun.security.jca`) with the
+providers SUN and SunJCE. Before, `java.security` and `javax.crypto` were absent (JAVA-BASE.md:
+0%), and `UUID` had a variant drawing from the host and Go's `crypto/md5`.
+
+## Decision: translated, with Go's crypto as the intrinsics
+
+The implementations are jdk26u's, translated: `sun.security.provider`'s digests (`DigestBase`,
+`MD2`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`, `ByteArrayAccess`), its generators (`SecureRandom`,
+the SHA1PRNG; `DRBG` with `AbstractDrbg`, `AbstractHashDrbg`, `HashDrbg`, `HmacDrbg`;
+`NativePRNG`), `com.sun.crypto.provider`'s `HmacCore`, `HmacMD5`, `HmacSHA1`, and the API
+classes and framework unchanged but for the variants below. All of it is plain Java; what
+needed work was the provider machinery (reflection, the `java.security` file, the service
+loader, the crypto policy), which variants and jrt's own Java simplify, and the digests'
+`VarHandle` views of byte arrays, which c2g now compiles (SC1). Backing the digests with Go's
+`crypto` alone was the alternative: a second implementation with its own corner cases behind
+the JDK's API (`clone` of a running digest, `digest(buf, off, len)`'s checks and messages,
+SHAKE, MD2, `toString`), where the translation gives the JDK's behaviour and messages exactly.
+
+Translated, the digests ran at 4% to 50% of the JVM's, whose intrinsics replace the block
+functions (`@IntrinsicCandidate` `implCompress0` and `DigestBase.implCompressMultiBlock0`). The
+Go build does the same (amendment SC7, the user's request of 2026-10-10): `DigestBase`'s variant
+first offers whole blocks to `compressBlocks`, which `MD5`, `SHA`, `SHA2`, `SHA5` and `SHA3`
+override with a native running Go's `crypto/md5`, `sha1`, `sha256`, `sha512` or `sha3` block
+function (assembly on amd64 and arm64) on the Java object's own chaining state: the state words
+are written into a fresh Go digest's marshaled state (`MarshalBinary`'s layout: a 4-byte magic,
+SHA-3's rate byte, the state, an empty buffer, a zero length), unmarshaled, the blocks written,
+and the new state read back (jrt's `digests.clj`). The Java object keeps the state, the buffer
+of a partial block, the padding and the final blocks, so `clone`, `reset`, partial digests and
+every message stay the JDK's, and MD2 (and a SHA-3 rate Go has no digest of) keep jdk26u's loop.
+The JVM's intrinsics also cover a single block (`implCompress0`); here the round trip through the
+marshaled state would cost about what it saves, so single blocks stay translated. An HMAC's
+inner and outer digests are `MessageDigest`s, so its long inputs take the same path.
+
+| 16 MB, amd64 | Go build, translated | Go build, Go's blocks (SC7) | JVM (JDK 26, intrinsics) | Go's `crypto` (go1.27.1) |
+|---|---:|---:|---:|---:|
+| MD5 | 237 MB/s | 666 MB/s | 646 MB/s | 628 MB/s |
+| SHA-1 | 170 MB/s | 1,554 MB/s | 1,437 MB/s | 1,605 MB/s |
+| SHA-256 | 116 MB/s | 1,326 MB/s | 1,332 MB/s | 1,500 MB/s |
+| SHA-512 | 42 MB/s | 617 MB/s | 606 MB/s | 645 MB/s |
+| SHA3-256 | 168 MB/s | 304 MB/s | 286 MB/s | 327 MB/s |
+| HmacSHA256 | 94 MB/s | 1,491 MB/s | 1,328 MB/s | |
+| `SecureRandom()` (NativePRNG) `nextBytes` | 20 MB/s | 19 MB/s | 66 MB/s | |
+| SHA1PRNG / DRBG `nextBytes` | 25 / 33 MB/s | 22 / 31 MB/s | 131 / 247 MB/s | |
+| 10,000 `UUID.randomUUID` | 12 ms | 12 ms | 4 ms | |
+| 10,000 `getInstance("SHA-256")` + digest of 64 bytes | 33 ms | 39 ms | 27 ms | |
+
+The digests now run as fast as the JVM's and Go's. The generators, which digest 20 to 64 bytes
+at a time (single blocks), and short digests are unchanged, 3 to 8 times slower than the JVM's.
+
+## What was done
+
+- **The closure** (`test/g2c/jrt_sources.clj`, `security-sources`; amendment SC4): 75 files of
+  jdk26u at `baf63fb`: `java/security/`'s `MessageDigest`, `MessageDigestSpi`,
+  `DigestInputStream`, `DigestOutputStream`, `SecureRandom`, `SecureRandomSpi`,
+  `SecureRandomParameters`, `DrbgParameters`, `Provider`, `Security`, `Key`,
+  `AlgorithmConstraints`, `CryptoPrimitive`, `spec/AlgorithmParameterSpec`, `spec/KeySpec`,
+  `cert/CertStoreParameters` and ten exceptions; `javax/crypto/`'s `Mac`, `MacSpi`, `SecretKey`,
+  `ShortBufferException`, `KDFParameters`, `spec/SecretKeySpec`; `javax/security/auth/`'s
+  `Destroyable`, `DestroyFailedException`; `sun/security/provider/`'s `Sun`, `SunEntries`, the
+  digests and generators above, `EntropySource`, `MoreDrbgParameters`, and
+  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`;
+  `com/sun/crypto/provider/`'s `SunJCE`, `HmacCore`, `HmacMD5`, `HmacSHA1`; `sun/security/jca/`'s
+  `GetInstance`, `ProviderList`, `Providers`, `ProviderConfig`, `ServiceId`, `JCAUtil`;
+  `sun/security/util/`'s `Debug`, `SecurityConstants`, `SecurityProviderConstants`,
+  `SecurityProperties`, `KnownOIDs` (the OID aliases), `MessageDigestSpi2`,
+  `CryptoAlgorithmConstraints`, `AbstractAlgorithmConstraints`, `AlgorithmDecomposer`,
+  `PropertyExpander`; `jdk/internal/event/`'s `Event`, `SecurityProviderServiceEvent`,
+  `SecurityPropertyModificationEvent` (never enabled). `bin/jrt-convert`: 717 files (637 on main
+  at `15018b1`), all converted and compiled to javac's class shapes (713 identical, the 4 known
+  differences), 1,979 classes.
+- **jrt's own Java** (overlay): `javax/crypto/JceSecurity.java` (the JDK generates it from a
+  template that reads the crypto policy files and verifies provider jars: here every provider
+  can be used and the policy is unlimited, the JDK's default; its `getInstance` methods
+  transcribed); `sun/security/provider/SeedGenerator.java` (seeds from the host; the system
+  entropy without network adapters, with a few system properties and `File.list`; javac could
+  not compile jdk26u's against jrt's `Files`, which has no directory streams);
+  `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` (the
+  services' constructors, below); `jdk/internal/jrt/HostRandom.java` (the host's random source as
+  an endless `InputStream`, with the native `fill0`).
+- **Variants** (`overlay/jdk/variants/`), each with its reason in its header:
+
+| class | variant |
+|---|---|
+| `Provider` | the static initializer without the class literals of `Policy.Parameters` and `Configuration.Parameters` (outside the build; the Policy and Configuration engines take no parameter) |
+| `Provider$Service` | `newInstanceUtil` asks `sun.security.provider.JrtServices` first: the JDK finds a service's class by name and calls its constructor by reflection, which the closed world cannot do for classes of non-exported packages (C2G-SPEC §10.6); the same constructor choice (`SecureRandomParameters` or none), the same `NoSuchMethodException` and `InvocationTargetException` wrapping, so `newInstance`'s messages are the JDK's; any other class (a provider the evaluator defines) by reflection as before |
+| `Security` | the security properties from the embedded `conf/security/java.security` (SC5) in `SecPropLoader.loadMaster`; the static initializer without `SharedSecrets`; `setProperty` without `EventHelper`'s logger |
+| `ProviderConfig` | `getProvider`: SUN and SunJCE are made directly, any other provider fails to load (no `ServiceLoader`, no class loading by name), as one the JDK cannot find |
+| `SunEntries`, `SunJCE` | register the services the Go build implements (SecureRandom and MessageDigest; the HMACs), with the JDK's aliases, attributes and order; the others' classes and engine classes are not in the build, so `getInstance` of them is the JDK's `NoSuchAlgorithmException` |
+| `NativePRNG`, `NativePRNG$RandomIO` | the seed and next streams are the host's random source (`HostRandom`) instead of `/dev/random` and `/dev/urandom`; the three kinds are always available; the seed file is null, so `setSeed` only mixes into the SHA1PRNG (the JDK also writes to `/dev/random`) |
+| `SecretKeySpec` | the static initializer (`SharedSecrets`' access to `clear`, for PBKDF2 and HKDF) cut |
+| `DigestBase`, `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3` | whole blocks by Go's `crypto` (SC7, above) |
+
+  `UUID`'s variant is gone: `randomUUID` (NativePRNG), `nameUUIDFromBytes` (MD5) and
+  `ofEpochMillis` (partial before) are jdk26u's code.
+- **Entropy from the host** (Host unchanged): `HostRandom`'s native calls
+  `CurrentHost().RandomBytes`, B1a's `OSHost`'s Go `crypto/rand` (getrandom(2)), now in the
+  Linux-tagged `hostrand_linux.clj` (`//go:build linux`), so that a TamaGo host supplies its
+  own; jrt's generic code reaches no OS for it.
+- **c2g**: byte-array view `VarHandle`s (SC1), the rename `Sun_SecureRandom` (SC2), `com.sun.*`
+  in jrt's Go package (SC3).
+
+## Results
+
+- **The oracle**: `test/oracle/forms/security.clj`, 181 cases recorded on the JVM (digests of
+  fixed inputs for every algorithm, across block boundaries and of a million `a`s; names,
+  aliases and OIDs; update, digest, reset, clone, partial digests and their exceptions;
+  many blocks in one update and in chunks with a clone midway, for every algorithm; `isEqual`;
+  the digest streams; the HMACs of every algorithm, keys longer than the block, clone,
+  reset, the uninitialized and missing cases; `SecretKeySpec`; `NoSuchAlgorithmException` and
+  `NoSuchProviderException` with the JDK's messages; providers, services, properties and
+  `getAlgorithms`; `SecureRandom`'s algorithms, providers, parameters, `toString`, lengths,
+  bounds and reseeding; SHA1PRNG seeded before first use, deterministic; `UUID`'s three
+  factories): **180 of 181 on Go**, the one other the provider list (SC4), recorded in
+  `test/oracle/known-go-amd64.edn`. The whole Go oracle: 21,969 of 21,978, the 9 known
+  mismatches (8 before and this one).
+- **Clojure's suite on Go**: 19,628 of 19,632 assertions (the 4 errors of `java.io`, expected),
+  66 namespaces, test.generative 26 of 26, no regressions. **`bin/arbace-go --smoke`**: passes.
+  **`bin/jrt test`**: passes on amd64 and arm64 (qemu), with `TestVhView` (the views' values,
+  stores and bounds).
+- **Coverage** (`bin/jrt-coverage`): java.base 9,032 of 17,546 members provided (51.5%; JAVA-BASE.md's
+  last measurement 8,792, 50.1%), 606 classes in Go; `java.security` 199 of 1,307 (15.2%; the
+  package itself 198 of 663, 29.9%), `javax.crypto` 37 of 407 (9.1%). Five protected members
+  are stubs, reached only by a subclass the evaluator makes (`MessageDigest(String)`,
+  `Provider(String, double, String)`, `Provider.removeService`, `SecureRandom(SecureRandomSpi,
+  Provider)`, `SecureRandomSpi(SecureRandomParameters)`).
+
+## Size
+
+The executable (amd64, `bin/arbace-go --build`): **61,927,584 to 63,905,952 bytes (+1.98 MB,
++3.2%)**, against main's at `15018b1`. The executables are stripped (SZ1), so no per-symbol
+split: the translated classes (about 80 more files, most of them the provider framework and
+`KnownOIDs`), their member tables (the REPL can call every public member of `java.security`),
+and `java.security` as resource data (75,186 bytes before compression). SC7 (the digests' blocks by Go's
+`crypto`) adds 69,632 bytes (63,975,584: Go's block functions and their assembly). With main at
+`7cc3637` merged (processes), the executable is 64,852,128 bytes.
+
+## Deviations
+
+- The providers are SUN and SunJCE alone, with the services above: `Security.getProviders()`
+  has two entries where the JVM has twelve; `getInstance` of a signature, cipher, key store,
+  key pair generator, key factory ... throws the JDK's `NoSuchAlgorithmException`
+  ("... not available"); the engine classes `Signature`, `Cipher`, `KeyStore`, ... are not in
+  the build.
+- NativePRNG's three kinds read the same host source; `generateSeed` does not block on an
+  initialized kernel (getrandom(2)).
+- `java.security.debug` works but for the caller frames (`StackWalker`); `DRBG` with
+  `securerandom.drbg.config` naming CTR_DRBG throws (`CtrDrbg` needs `Cipher`).
+
+## Amendments (accepted by the user 2026-10-10)
+
+Numbered SC (security). SC1-SC6 were accepted on 2026-10-10 and folded into C2G-SPEC (§16,
+"Security") and JRT-SOURCES.md; SC7 was the user's request of the same day. Each says where.
+
+- **SC1 (C2G-SPEC §8.5, VarHandles)** A constant handle may also be
+  `MethodHandles.byteArrayViewVarHandle(int[].class or long[].class, ByteOrder.BIG_ENDIAN or
+  LITTLE_ENDIAN)`, with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
+  jrt's `VhView{Get,Set}{Int,Long}{BE,LE}`, with the view's bounds check and message (the index
+  below the length less the element's size less one, else `ArrayIndexOutOfBoundsException` with
+  that reduced length); its other access modes remain operation-level stubs.
+  (`sun.security.provider.ByteArrayAccess`, `SHA3`; `jdk.internal.util.ByteArray`'s variant could
+  now go.) *Accepted 2026-10-10: C2G-SPEC §8.5.*
+- **SC2 (C2G-SPEC §4.4, the rename table)** `sun/security/provider/SecureRandom` →
+  `Sun_SecureRandom` (java.security's `SecureRandom` is `SecureRandom`). *Accepted 2026-10-10: C2G-SPEC §4.4.*
+- **SC3 (C2G-SPEC §4.2, Go packages)** Classes of `com/sun/` are the JDK's: jrt's package (they
+  went to `arbace/lang`, an import cycle); likewise the reflected marker interfaces. *Accepted 2026-10-10: C2G-SPEC §4.2.*
+- **SC4 (C2G-SPEC §4.1, the closed world; JRT-SOURCES.md)** `java.security`'s basics are in the
+  world, as listed above, with the variants and jrt's own Java above; the providers are SUN and
+  SunJCE with the services the build implements; `UUID`'s variant (M7's part of §4.6) is gone. *Accepted 2026-10-10: C2G-SPEC §4.1, §4.6; JRT-SOURCES.md "Security".*
+- **SC5 (C2G-SPEC §10.3, RD1; JRT-SOURCES.md, RD4)** The resource data include the image file
+  `conf/security/java.security`, made by `bin/jrt-convert` as `make/modules/java.base/Gendata.gmk`
+  makes it (`build.tools.makejavasecurity.MakeJavaSecurity` for `linux x86 unlimited`) and
+  compared byte for byte with the image's `jdk/conf/security/java.security` (the same);
+  `Security` reads it as the resource `/conf/security/java.security`. *Accepted 2026-10-10: C2G-SPEC §10.3; JRT-SOURCES.md "Security".*
+- **SC6 (C2G-SPEC §9.4, the host interface)** `OSHost.RandomBytes` (Go's `crypto/rand`) is in
+  the Linux-tagged `hostrand_linux.clj`; the `Host` interface is unchanged. *Accepted 2026-10-10: C2G-SPEC §9.4.*
+- **SC7 (C2G-SPEC §4.1, §4.6; jrt's `digests.clj`)** The translated digests' whole blocks run
+  Go's `crypto` block functions on the Java object's chaining state, through Go's marshaled
+  digest state, as the JVM's intrinsics replace `implCompressMultiBlock0`: variants of
+  `DigestBase` (`compressBlocks`, false by default) and of `MD5`, `SHA`, `SHA2`, `SHA5`, `SHA3`
+  (their natives `*_GoBlocks_*_native`). *The user's request of 2026-10-10; folded into C2G-SPEC
+  §4.1, §4.6.*
+
+## Sources
+
+https://github.com/openjdk/jdk26u at `baf63fb`: the files of `security-sources` above;
+transcribed in part: `src/java.base/share/classes/javax/crypto/JceSecurity.java.template`,
+`sun/security/provider/SeedGenerator.java`, and the replaced members of `Provider.java`,
+`Security.java`, `ProviderConfig.java`, `SunEntries.java`, `SunJCE.java` (LICENSE.md);
+`src/java.base/share/conf/security/java.security` and
+`make/jdk/src/classes/build/tools/makejavasecurity/MakeJavaSecurity.java`,
+`make/modules/java.base/Gendata.gmk`; the view bounds of
+`src/java.base/share/classes/java/lang/invoke/X-VarHandleByteArrayView.java.template`.

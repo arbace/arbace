@@ -1,0 +1,26 @@
+;; Go-build variant of sun.security.provider.DigestBase (C2G-SPEC §4.6; doc/go/JRT-NOTES.md,
+;; "Security", amendment SC7): read by c2g only. As the JVM's intrinsic replaces
+;; implCompressMultiBlock0 (@IntrinsicCandidate), the Go build first offers the whole blocks to
+;; compressBlocks, which the digests' variants (MD5, SHA, SHA2, SHA5, SHA3) override to run Go's
+;; crypto on their chaining state (jrt's digests.clj); a digest without one (MD2) keeps jdk26u's
+;; loop over implCompress. The bounds are checked before, as in jdk26u
+;; (implCompressMultiBlockCheck). The loop is jdk26u's (baf63fb; Copyright (c) Oracle and/or its
+;; affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c) the
+;; Arbace authors; Eclipse Public License 1.0.
+(in-ns 'sun.security.provider)
+
+(c2g/variant DigestBase
+  (c2g/add
+    (method compressBlocks ^boolean [this ^byte/1 b ^int ofs ^int len]
+      false))
+
+  (method ^:private ^{IntrinsicCandidate true} implCompressMultiBlock0 ^int [this ^byte/1 b
+                                                                           ^:mutable ^int ofs
+                                                                           ^int limit]
+    (when (<= ofs limit)
+      (let [len (unchecked-multiply-int (unchecked-add-int (unchecked-divide-int (unchecked-subtract-int limit ofs) blockSize) 1)
+                                        blockSize)]
+        (when (.compressBlocks this b ofs len)
+          (return (unchecked-add-int ofs len)))))
+    (while (<= ofs limit) (.implCompress this b ofs) (set! ofs (unchecked-add-int ofs blockSize)))
+    ofs))

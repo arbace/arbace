@@ -5,14 +5,14 @@
 
 (go/package jrt
   :path "arbace/jrt"
-  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "dyn.go"
-          "enum.go" "executor.go" "fdlibm.go" "files.go" "filesystem.go" "forkjoin.go" "host.go" "hostfs.go" "hostfs_linux.go" "hostproc.go" "hostproc_linux.go" "image.go" "locale.go" "locks.go" "math.go" "members.go" "monitor.go"
+  :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "digests.go" "dyn.go"
+          "enum.go" "executor.go" "fdlibm.go" "files.go" "filesystem.go" "forkjoin.go" "host.go" "hostfs.go" "hostfs_linux.go" "hostproc.go" "hostproc_linux.go" "hostrand_linux.go" "image.go" "locale.go" "locks.go" "math.go" "members.go" "monitor.go"
           "natives.go" "net.go" "numconv.go" "object.go" "process.go" "reference.go" "reflect.go" "reflect_array.go"
           "reflect_tables.go" "standin_character.go" "standin_executor.go" "standin_lang.go" "standin_reflect.go"
           "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "thread.go" "threadid.go"
           "threadlocal.go" "throwable.go" "timezone.go" "tooloptions.go" "tuning.go" "unsafe.go" "varhandle.go" "volatile.go" "vm.go"]
   :test-files ["bench_test.go" "concurrent_test.go" "enum_test.go" "filesystem_test.go" "manifest_test.go" "math_test.go"
-               "monitor_test.go" "net_test.go" "object_test.go" "process_test.go" "reflect_test.go" "shims_test.go" "string_test.go"
+               "monitor_test.go" "net_test.go" "object_test.go" "process_test.go" "reflect_test.go" "security_test.go" "shims_test.go" "string_test.go"
                "system_test.go" "testutil_test.go" "thread_test.go" "throwable_test.go" "timezone_test.go"])
 
 (load "jrt/access")
@@ -23,6 +23,7 @@
 (load "jrt/classloader")
 (load "jrt/codec")
 (load "jrt/date")
+(load "jrt/digests")
 (load "jrt/dyn")
 (load "jrt/enum")
 (load "jrt/executor")
@@ -35,6 +36,7 @@
 (load "jrt/hostfs_linux")
 (load "jrt/hostproc")
 (load "jrt/hostproc_linux")
+(load "jrt/hostrand_linux")
 (load "jrt/image")
 (load "jrt/locale")
 (load "jrt/locks")
@@ -80,6 +82,7 @@
 (load "jrt/object_test")
 (load "jrt/process_test")
 (load "jrt/reflect_test")
+(load "jrt/security_test")
 (load "jrt/shims_test")
 (load "jrt/string_test")
 (load "jrt/system_test")

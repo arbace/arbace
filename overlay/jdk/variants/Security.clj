@@ -1,0 +1,42 @@
+;; Go-build variant of java.security.Security (C2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Security"):
+;; read by c2g only.
+;; - The JDK reads its security properties from $JAVA_HOME/conf/security/java.security; the Go
+;;   build embeds the same file (bin/jrt-convert makes it as the JDK build does, with
+;;   build.tools.makejavasecurity.MakeJavaSecurity for linux) as the resource
+;;   conf/security/java.security (RD1's resource data, an image file as lib/tzdb.dat is), which
+;;   loadMaster reads through Class.getResourceAsStream. The extra file of the system property
+;;   java.security.properties is read as the JDK reads it (loadExtra, unchanged).
+;; - The static initializer leaves out SharedSecrets' access to the initial properties (its users,
+;;   the JFR's and the security tools', are not in the Go build).
+;; - setProperty commits the same event (never enabled) but has no EventHelper logging (the
+;;   System.Logger of jdk.event.security is not in the Go build).
+;; The replacing methods keep jdk26u's code where they keep it (baf63fb; Copyright (c) Oracle
+;; and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md); the rest Copyright (c)
+;; the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'java.security)
+
+(c2g/variant Security
+  (static-initializer
+    (Security/initialize))
+
+  (method ^:public ^:static setProperty ^void [^String key ^String datum]
+    (Security$SecPropLoader/checkReservedKey key)
+    (.put Security/props key datum)
+    (let [spe (jdk.internal.event.SecurityPropertyModificationEvent.)]
+      (set! (.-key spe) key)
+      (set! (.-value spe) datum)
+      (.commit spe))))
+
+(c2g/variant Security$SecPropLoader
+  (method ^:private ^:static loadMaster ^void []
+    (let [is (.getResourceAsStream Security "/conf/security/java.security")]
+      (when (nil? is)
+        (throw (InternalError. "Error loading java.security file"
+                               (java.io.FileNotFoundException. "conf/security/java.security"))))
+      (try
+        (with-resources [in is]
+          (Security$SecPropLoader/debugLoad true "conf/security/java.security")
+          (.load props in)
+          (Security$SecPropLoader/debugLoad false "conf/security/java.security"))
+        (catch java.io.IOException e
+          (throw (InternalError. "Error loading java.security file" e)))))))
