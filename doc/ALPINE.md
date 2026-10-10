@@ -49,6 +49,18 @@ module. It does for `java.base,java.sql,jdk.unsupported` (also tried: adding `jd
 that set); `bin/arbace-image` keeps its fallback (training with `-XX:-AOTClassLinking`) for such
 sets made with `ARBACE_IMAGE_MODULES`.
 
+## `arb`: the REPL with line editing (3-r1)
+
+As Alpine's `clojure` ships `clj` (`rlwrap` around `clojure`), the package ships `/usr/bin/arb`
+(`dist/alpine/arb.sh`): `rlwrap -m -r -q '\"' -b "(){}[],^%#@\";:'"` around `/usr/bin/arbace`,
+the flags `clj` uses (history, completion of words seen, Clojure's delimiters as word breaks);
+without `rlwrap` it says so and runs `arbace`. `arbace` stays plain for scripts and pipes.
+`depends="bash rlwrap"` (rlwrap, readline, libptytty, ncurses' terminfo: under 1 MiB, readline
+already there through bash). The user's decision, 2026-10-10. A packaging change only: the same
+tag, `pkgrel=1`. `arbace-java26-3-r1.apk` (x86_64): 31 MiB, installed 98 MiB, 21 packages in a
+fresh root; every check of `bin/alpine-package` passes (start 190 ms with the cache, 622 ms
+without); `arb` under a pseudo-terminal evaluates and recalls history (the up arrow).
+
 ## Decisions
 
 **Name: `arbace-java26`.** Arbace's main line leaves the JVM; a later standalone package can

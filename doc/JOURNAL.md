@@ -1246,3 +1246,7 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   musl; built in 1 min 52 s and passing every check in a fresh root (start 198 ms with the
   cache, 600 ms without). aarch64 was not rebuilt (same sources as the tested v2-plus-patches
   build).
+- `arbace-java26-3-r1` (the user's decision): `/usr/bin/arb`, the REPL with line editing,
+  `rlwrap` around `arbace` with the flags of Alpine's `clj`; `depends="bash rlwrap"`. Built and
+  checked with `bin/alpine-package` (31 MiB, installed 98 MiB; start 190 ms with the cache);
+  `arb` tested under a pseudo-terminal (evaluation, history). doc/ALPINE.md, "`arb`".

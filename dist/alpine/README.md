@@ -9,6 +9,8 @@ package (Alpine edge has openjdk21 and openjdk25, no 26).
 - `APKBUILD`: package `arbace-java26`, version `$pkgver` = the release tag's number
   (`arbace-for-java-26-v3` is `3`), for x86_64 and aarch64.
 - `arbace.sh`: `/usr/bin/arbace`, which runs the image's launcher.
+- `arb.sh`: `/usr/bin/arb`, the REPL with line editing: `rlwrap` around `arbace`, as `clj` is to
+  `clojure` in Alpine's `clojure` package (package `3-r1`).
 
 Build and test it here, with a throwaway key and all abuild state under `.tmp/alpine/`:
 
