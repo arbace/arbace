@@ -814,6 +814,31 @@ step 4 (2026-10-07); the others came with later work, as each says:
     for `iteration` (line 474) had recorded the exception. (On `arbace-for-java-26`, after v3:
     hand change 17.)
 
+    **A dialect divergence, not a bug fix** (recorded 2026-10-10, the user's decision): upstream
+    does not support `reduce` without an init on an `IReduceInit` that is not an `IReduce`, by
+    design. Alex Miller on clojure-dev (2017, "reduce and IReduce vs IReduceInit (and
+    CollReduce)"): the `ClassCastException` is "your clue that you should implement IReduce or
+    use an init value"; ask.clojure.org #11138 (2021): "eduction has always been implemented only
+    with IReduceInit. The clojuredocs example is wrong." The run-to-run difference is upstream's
+    CLJ-2656, "Protocol dispatch via interfaces is nondeterministic" (open since 2021; its patch
+    sorts the interfaces by name, under which `clojure.lang.IReduceInit` would win over
+    `java.lang.Iterable` and the eduction case would always throw). Arbace instead gives
+    `reduce` without an init its documented meaning on every reducible: code relying on it
+    works on Arbace and not reliably on Clojure (the reverse direction is unaffected: code that
+    passes an init behaves the same). Listed under "Dialect divergences" below.
+
+## Dialect divergences
+
+Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
+(`clojure.*` → `arbace.*`) and Java 26: code written for one may not behave the same on the
+other. The list for c2a, the Clojure → Arbace translator (after the `arbace-for-golang` freeze),
+and for anyone porting code.
+
+- **`reduce` without an init on an `IReduceInit`-only reducible** (hand change 18; on
+  `arbace-for-java-26` from v4, hand change 17): Arbace reduces it, seeded with the first item;
+  upstream throws `ClassCastException` by design, or, for `eduction`, works or throws depending
+  on the JVM's class archive (CLJ-2656).
+
 ## Spec (2026-10-07)
 
 The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of

@@ -1470,3 +1470,11 @@ decision (2026-10-08).
 - On `arbace-for-java-26`, the same fix (hand change 17) with v3's `bean` key order (`84da2dc`):
   branch `edu-26` (`840f0af`, `d83d628`), checked with the branch's gate; a release is the
   user's call.
+- The `reduce` change (hand change 18) recorded as a dialect divergence, not a bug fix (the
+  user's decision): upstream does not support `reduce` without an init on an `IReduceInit`-only
+  reducible, by design (Alex Miller, clojure-dev 2017; ask.clojure.org #11138, 2021); the
+  eduction's run-to-run difference is upstream's CLJ-2656 ("Protocol dispatch via interfaces is
+  nondeterministic", open since 2021; its name-sorting patch would make the eduction case always
+  throw). VENDOR-NOTES gains a section "Dialect divergences", the list for c2a; the same on
+  `arbace-for-java-26` (`0160052`). A comment for CLJ-2656 connecting it to `Eduction` was
+  drafted for the user to post (not posted).
