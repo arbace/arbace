@@ -1068,3 +1068,24 @@ decision (2026-10-08).
   §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
   considered: keeping leafness a condition on the list (a listed class must already be
   non-leaf), which excluded BufferedWriter.
+
+## 2026-10-10: java.io.File and the file system on Go
+
+- Agent, branch `go-file` (`6bb5b0a`, `6172f24`), merged: jdk26u's `File`, `FileSystem`,
+  `UnixFileSystem` (`src/java.base/unix/classes`, a new source kind `unix` in `bin/jrt-convert`),
+  `FileReader`, `FileWriter`, `DeleteOnExitHook` translated; `overlay/jdk/variants/UnixFileSystem.clj`
+  routes its 15 natives to `go/arbace/jrt/filesystem.clj` (canonicalize from jdk26u's C, in
+  LICENSE.md) over an optional host interface `HostFS` (`hostfs.clj`, `hostfs_linux.clj`; `Host`
+  unchanged). Shutdown hooks run when main returns. A small `java.nio.file` of jrt's own (`Path`,
+  `Files`, `HostPath`, path arithmetic from jdk26u's `UnixPath`) instead of jdk26u's provider
+  layer (about a hundred more natives for what Arbace and the suite use: temp files, a buffered
+  reader). `java.net.URL` translated with the `file:` connection (`slurp` tries `URL.` first);
+  `http:`, `https:`, `jar:` parse only. `RandomAccessFile` not done (unused). Amendments FS1-FS7
+  in JRT-NOTES.md "Files" (to review). JDK closure 340 → 389 files; executable +2.1 MB.
+- Merge conflicts (main session): jrt's file list and load order (union with step 6's
+  `image`), the suite reference's header.
+- Main session on the merge: `bin/jrt-convert`, the amd64 build, `--smoke`; the Go oracle 20,566
+  of 20,600, its 34 mismatches as recorded (a new one: a `localhost` URL's hash, which the JDK
+  takes from the resolved address); Clojure's suite on Go 19,379 of 19,398 assertions, 19
+  failures, 0 errors (`method-thunks`, `reader`, `sequences` and `pprint` pass), no regressions.
+  `java.io` still fails to load on `ServerSocket` (the sockets agent).

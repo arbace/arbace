@@ -70,7 +70,16 @@
    ;; jrt's java.util.Date is Date (JRT-NOTES.md, phase 2B "Dates")
    "java/sql/Date" "Sql_Date"
    ;; java.util.Tripwire's twin in java.util.stream (step 5 phase 2B, streams)
-   "java/util/stream/Tripwire" "Stream_Tripwire"})
+   "java/util/stream/Tripwire" "Stream_Tripwire"
+   ;; java.net.URLConnection's subclass in sun.net.www, and the URL handlers, all named Handler
+   ;; (JRT-NOTES.md, "Files")
+   "sun/net/www/URLConnection" "Www_URLConnection"
+   "sun/net/www/protocol/file/Handler" "File_Handler"
+   "sun/net/www/protocol/http/Handler" "Http_Handler"
+   "sun/net/www/protocol/https/Handler" "Https_Handler"
+   "sun/net/www/protocol/jar/Handler" "Jar_Handler"
+   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members name
+   "java/net/Proxy" "Net_Proxy"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it
