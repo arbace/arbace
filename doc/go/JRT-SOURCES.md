@@ -254,6 +254,15 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   `java/io/DefaultFileSystem.java`, `sun/net/www/protocol/file/Handler.java`. With them
   `bin/jrt-convert` translates **389 files** (all 389 compiled to javac's class shapes; 385
   identical, the 4 known differences as before).
+- **java.util** (`util-sources`; amendment JB1, accepted 2026-10-10; JAVA-BASE.md, "java.util
+  completed"): 25 files, first those whose absence made translated members throw
+  (`DualPivotQuicksort`, `ArraysParallelSortHelpers`, `ArrayPrefixHelpers`: `Arrays`'
+  primitive and parallel sorts and `parallelPrefix`; `Comparators`: the natural-order
+  comparators; `SortedSet`; `jdk.internal.util.random.RandomSupport`; `java.math.BitSieve`),
+  then java.util's plain Java (`BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`,
+  `Base64`, `SplittableRandom`, the event classes, `Observable`, and seven exceptions and
+  constants). With them `bin/jrt-convert` translates **414 files** (all 414 compiled to
+  javac's class shapes; 410 identical, the 4 known differences).
 
 Two options of the conversion (amendment S2):
 

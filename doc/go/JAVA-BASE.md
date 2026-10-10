@@ -375,33 +375,35 @@ against `known-go-amd64.edn`: the only new mismatches besides the three recorded
 271 `defclass`/`defclass_corpus` cases that main at `8ace8b1` has too (the class forms at the
 REPL, checked on an executable built from `8ace8b1`: the same 271), not recorded here.
 
-### Amendments (JB), for the user's review
+### Amendments (JB)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "java.util
+completed"):
 
 - **JB1 (JRT-SOURCES.md, "The closure as grown") The java.util files**: the list above, as
-  `util-sources` beside `added-sources`, each group with its reason.
+  `util-sources` beside `added-sources`, each group with its reason. *Accepted 2026-10-10, folded into JRT-SOURCES.md, "The closure as grown".*
 - **JB2 (C2G-SPEC §4.6, the JDK's variants) `TreeMap`, `BitSet`, `RandomGenerator`**, as above.
   A replacing member's parameter tags are written as j2c writes the original's (generic tags
-  included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them.
+  included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them. *Accepted 2026-10-10, folded into C2G-SPEC §4.6.*
 - **JB3 (C2G-SPEC §7.11, FromFn) An array result is checked against the return type's array
   class**, as `Dyn`'s results are. Before, the adapter checked the result against its own class
   through the generic `jrt.NN`, which Go cannot instantiate on an `any`, and wrote the call
   twice; no functional interface with an array result had been in the world
-  (`DualPivotQuicksort`'s private `PartitionOperation` is the first).
+  (`DualPivotQuicksort`'s private `PartitionOperation` is the first). *Accepted 2026-10-10, folded into C2G-SPEC §7.11.*
 - **JB4 (C2G-SPEC §8.4, the fork-join pool) A forked task not yet done runs again.** jrt ran a
   task once (claimed `fjNew` to `fjRunning`); a `CountedCompleter` whose `exec` returned
   without completing and that is forked again (`ArrayPrefixHelpers`' cumulation reforks its
   parent) never ran again, and `parallelPrefix` deadlocked. Forking now runs `exec` whenever
   the task is not done, as the JDK's `doExec`; joining is unchanged. (A change to jrt's
-  `forkjoin.clj`, which the java.util.concurrent branch also owns.)
+  `forkjoin.clj`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JB5 (C2G-SPEC §7.11, lambdas) A lambda whose target is an intersection with marker
   interfaces** (`(lambda (& Comparator Serializable) ...)`, javac's
   `(Comparator<T> & Serializable)`) gets an adapter that implements them, `F_Fn_M1_..._Mn`,
   registered as `F$$Lambda$M1...`. Before, the adapter implemented only `F`, and the cast to
   `Serializable` that javac writes threw `ClassCastException`: `Comparator.comparing`,
-  `comparingInt`, `thenComparing`, `Map.Entry.comparingByKey` and the like failed on Go.
+  `comparingInt`, `thenComparing`, `Map.Entry.comparingByKey` and the like failed on Go. *Accepted 2026-10-10, folded into C2G-SPEC §7.11.*
 
 ## Decisions for the user
 
-- The amendments JB1-JB5 above.
 - Whether `doc/go/java-base-coverage.edn` is regenerated in the freeze's checklist (it needs
   c2g's output: `bin/arbace-go --build`, then `bin/jrt-coverage`), or kept as this measurement.
