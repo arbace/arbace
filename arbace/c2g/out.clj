@@ -327,6 +327,33 @@ sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
             (range [_ x (splitLines (.-value t))]
               (.Add_O__Z l (NewStringUTF16 x)))
             (.Stream__Stream l)))])
+     ;; Class.getResourceAsStream over the host's resources (the program's embedded data, then
+     ;; ARBACE_PATH: jrt's ResourceOrPath) once ByteArrayInputStream is translated (JRT-NOTES.md,
+     ;; "The JDK's resource data"); jrt's Class cannot name the translated InputStream
+     (when (m/translated? "java/io/ByteArrayInputStream")
+       [(list 'go/method 'GetResourceAsStream_String__InputStream
+              "GetResourceAsStream_String__InputStream is Class.getResourceAsStream: the resource name
+resolved as Class.resolveName resolves it (absolute without its /, else in the package of the
+class or of its arrays' element class), from the host's resources, as a ByteArrayInputStream; null
+when there is none.\n"
+              (with-meta [(tag 'c '(* Class)) (tag 'name '(* String))] {:tag (m/go-type :jrt "Ljava/io/InputStream;")})
+              '(let [n (.String (NN name))]
+                 (if (strings/HasPrefix n "/")
+                   (set! n (subslice n 1))
+                   (let [e c]
+                     (while (.IsArray__Z e)
+                       (set! e (.GetComponentType__Class e)))
+                     (let [cn (.-Name (.Info e))
+                           i (strings/LastIndexByte cn \.)]
+                       (when (>= i 0)
+                         (set! n (+ (strings/ReplaceAll (subslice cn _ i) "." "/") "/" n))))))
+                 (let [(values b ok) (ResourceOrPath n)]
+                   (when (not ok)
+                     (return nil))
+                   (let [a (NewByteArray (conv int32 (len b)))]
+                     (range [i x b]
+                       (aset (.-A a) i (conv int8 x)))
+                     (return (ByteArrayInputStream_New_B1 a))))))])
      (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))

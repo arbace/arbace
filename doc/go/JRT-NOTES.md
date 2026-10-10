@@ -1958,3 +1958,213 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
   the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
   from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).*
+
+# The JDK's resource data (regex `\N{name}` and `CANON_EQ`)
+
+Branch `regex-res` (2026-10-09, the user's decision): the 29 oracle regex cases that failed on
+the Go build for want of the JDK's resource data (EVAL-NOTES.md, "Phase 2B follow-up": 5
+`\N{name}`, 24 `CANON_EQ`). With them the REPL gains `Character/getName`,
+`Character/codePointOf` and `java.text.Normalizer` (NFC, NFD, NFKC, NFKD), and Clojure code gets
+java.nio's heap buffers (`ByteBuffer/wrap`, `CharBuffer/wrap`, ...). Sources and data from
+jdk26u at `baf63fb`; how `bin/jrt-convert` makes them: JRT-SOURCES.md, "The JDK's resource
+data".
+
+## The data in the executable
+
+- `bin/jrt-convert`'s `generate` step makes the data as the JDK build does, into
+  `.tmp/jrt/data` under their resource paths: `java/lang/uniName.dat` (Gendata.gmk's
+  `CharacterName` tool on `UnicodeData.txt`), ICU's `nfc.nrm` and `nfkc.nrm` (copied); all three
+  byte-identical to the JDK build's module image. `uprops.icu` and `ubidi.icu` are left out:
+  nothing reached loads them (`UCharacterProperty`'s static initializer reads no data; its
+  `INSTANCE`, which would, is not reached).
+- `bin/c2g --program` embeds them next to the namespaces' sources
+  (`go/arbace/cmd/arbace/res/...`, `arbace.c2g.embed/data`, the directory `data` beside the
+  `--jdk` input), as binary files: the embedding held only text so far. 270 KB more data.
+- **`Class.getResourceAsStream`** (an edge member jrt left undefined since phase 2b) is c2g's
+  support method on jrt's `Class` once `ByteArrayInputStream` is translated (jrt cannot name the
+  translated stream): the name resolved as `Class.resolveName` does (absolute without its `/`,
+  else in the package of the class, or of an array class's element class), then
+  `jrt.ResourceOrPath` (the embedded resources, then `ARBACE_PATH`'s directories, as
+  `ClassLoader.getResourceAsStream`), as a `ByteArrayInputStream`; null when absent. Deviation:
+  the JVM encapsulates a named module's resources, so `(.getResourceAsStream Character
+  "uniName.dat")` is nil from Clojure on the JVM and the data on Go; jdk26u's own classes read
+  them as on the JVM.
+
+## `\N{name}`: `CharacterName` translated unchanged
+
+`java.lang.CharacterName` (already in the closure) reads `uniName.dat` through
+`java.util.zip.InflaterInputStream`, whose `Inflater` is the VM's zlib (natives over native
+memory, a `Cleaner`, direct buffers). Considered: a variant of `CharacterName`'s constructor
+(the previous proposal), which would copy its 60 lines to change one; translating `Inflater` with
+natives over Go's `compress/flate` (its streaming protocol, `inflateBytesBytes` resuming on more
+input, does not map onto Go's pull reader). Chosen: **jrt's own `InflaterInputStream`**
+(`overlay/jdk/java.base/java/util/zip/InflaterInputStream.java`, the `InputStream` constructor
+only, as `FileInputStream`'s overlay is jrt's), which reads its input whole at the first read and
+inflates it with a native over Go's `compress/zlib` (`natives.clj`,
+`InflaterInputStream_Inflate0_B1_String1__B1_native`); a truncated stream throws
+`EOFException("Unexpected end of ZLIB input stream")`, bad data `ZipException` (jdk26u's
+`ZipException.java`, added). So `CharacterName` and `Character.getName`/`codePointOf` are
+jdk26u's code, unchanged. Cost: Go's `compress/flate` and `zlib`, about 20 KB.
+
+## `CANON_EQ`: java.nio's heap buffers translated (the route)
+
+`Pattern` normalizes with `java.text.Normalizer` (NFD, NFC), jdk.internal.icu's normalizer, whose
+loader (`ICUBinary.getRequiredData`, `NormalizerImpl.load`, `CodePointTrie.fromBinary`) reads
+`nfc.nrm` through `java.nio.ByteBuffer` (`getInt`, `getChar`, `get(int)`, `order`, `position`,
+`asCharBuffer().get(char[])`, `asIntBuffer().get(int[])`, `asCharBuffer().subSequence`). The
+routes considered:
+
+1. **Translate jdk26u's buffers** (chosen): the generated `ByteBuffer`, `CharBuffer`,
+   `IntBuffer`, `HeapByteBuffer`, `HeapCharBuffer`, `HeapIntBuffer` and the big- and
+   little-endian char and int views of a byte buffer, with `Buffer`, `ByteOrder`,
+   `StringCharBuffer` and the four exceptions, made by `bin/jrt-convert` exactly as the JDK build
+   makes them (byte-identical). The heap buffers reach memory through
+   `jdk.internal.misc.ScopedMemoryAccess` (`getIntUnaligned(session, hb, offset, bigEndian)`, a
+   null session for heap buffers), itself generated: translated too, and `Unsafe`'s byte-order
+   overloads and copies are added to jrt. The constructors and `session()` name
+   `java.lang.foreign.MemorySegment` and `jdk.internal.foreign.MemorySessionImpl`, so those two
+   files are in the world as types (none of their code is reached: the segment is always null);
+   without them c2g drops every constructor (C2G-SPEC §4.1, M8). Two variants only: `Buffer`'s
+   static initializer (it hands `SharedSecrets` the package's `JavaNioAccess`: direct and
+   mapped buffers, segments, the buffer pool) and `ScopedMemoryAccess`'s (its VM natives
+   `registerNatives`, cut; `closeScope0`, which closes a shared session, throws). The ICU code is
+   jdk26u's, unchanged.
+2. A variant of the ICU loader over a `byte[]` (no java.nio): `ByteBuffer` is in the signatures
+   of `ICUBinary` (5 methods), `NormalizerImpl.load`, `CodePointTrie.fromBinary` and its six
+   typed variants, `Trie2`, so the variant would copy about 300 lines of ICU with the type
+   swapped for a cursor class of jrt's: smaller (no buffers in the world), but a rewrite of the
+   exact code that parses the data.
+3. jrt's own minimal `java.nio` buffers (an overlay): the ICU code unchanged, but `ByteBuffer` and
+   `CharBuffer` would be partial, non-JDK classes visible to the REPL.
+
+Route 1 keeps both the loader and the buffers jdk26u's own code, and gives the REPL the JDK's
+buffers whole (heap only: `allocateDirect`, mapped buffers, `asLongBuffer` and the other views
+whose classes are not in the world throw). It costs the most, measured below; most of the cost
+was `ScopedMemoryAccess`'s 400 public members, rooted only because the REPL's world roots every
+public member (P2), which led to amendment RD2.
+
+## Found on the way
+
+- **A missing class initialization** (c2g, `decls.clj`, `touches-statics?`): a static method of
+  a class with benign initialization goes without an entry guard when its body reads none of
+  the class's statics (W3); the walk looking for static reads skipped maps that are not nodes,
+  and a `switch`'s arms are such maps (`{:labels :body}`). `NormalizerBase.toMode` returns the
+  class's `NFC` ... `NFKD` from switch arms, so it read them unguarded, before `NormalizerBase`'s
+  initialization: null, then a `NullPointerException` in `Normalizer.normalize`. The walk now
+  enters every map. Three translated methods of the existing closure had the same latent bug
+  and now get their guard: `RoundingMode.valueOf(int)` (`BigDecimal`'s rounding modes by
+  number), `Calendar.names`, `Nodes.emptyNode`; `arbace/lang` is unchanged.
+- **A name collision**: `java.text.Normalizer` and `sun.text.Normalizer` (which `Pattern` calls for
+  combining classes) are both `Normalizer` in Go; the rename table (C2G-SPEC §4.4) makes the
+  latter `Sun_Normalizer`.
+- `CharBuffer`'s code cast to `StringCharBuffer`, outside the world, as an undefined
+  `StringCharBuffer_Cast` (a c2g gap for a checkcast to a class outside the world that the
+  build caught); with `StringCharBuffer` in the world (`CharBuffer.wrap(CharSequence)` needs
+  it anyway) it does not arise; the gap itself is not fixed here.
+- jrt: `Reference.reachabilityFence` (`runtime.KeepAlive`; `ScopedMemoryAccess`'s every access);
+  `Unsafe`'s `get`/`put` `Char`/`Short`/`Int`/`Long` `Unaligned` with a byte order, `getShortUnaligned`
+  and `putShortUnaligned`, `copyMemory` and `copySwapMemory` between primitive arrays.
+
+## The closure and the executable, measured (amd64)
+
+| | main (`815d9d9`'s code) | RD2 alone | this branch |
+|---|---:|---:|---:|
+| `bin/jrt-convert`: files (share, gensrc, overlay, java.sql) | 340 (317, 8, 13, 2) | 340 | 375 (340, 19, 14, 2) |
+| c2g: files, classes analyzed | 482, 1,950 | 482, 1,950 | 517, 2,021 |
+| c2g: classes, methods reached | 1,945, 16,499 | 1,932, 16,189 | 1,981, 16,985 |
+| methods with missing parts | 511 | 484 | 561 |
+| executable (bytes) | 58,603,718 | 58,294,936 | 61,131,717 |
+
+The resource data and the classes that read it cost **+2.84 MB** over RD2 alone (+4.9%; 49
+classes and 796 methods more reached), the branch as a whole +2.53 MB over main (+4.3%): the
+Go symbols grow by 0.89 MB (the reflection tables' initialization about 0.5 MB, the buffers
+about 0.15 MB, `NormalizerBase` and the ICU loader, `compress/flate`), the embedded data by
+0.27 MB, the rest is the tables of the runtime (line tables, types). Without RD2 the branch was
+62,794,179 bytes (+4.19 MB): `ScopedMemoryAccess`'s 400 public members alone were 0.34 MB of
+code and most of the reflection tables' growth.
+
+## Results
+
+- **Against the JVM, directly** (`Character/getName` of 17 code points, among them the
+  algorithmic CJK and Hangul names, surrogates, unassigned; `Character/codePointOf` of 11 names,
+  lower case and errors included; `Normalizer/normalize` and `isNormalized` of 17 strings in the
+  four forms, among them Hangul, compatibility ligatures, the Ångström sign, a supplementary
+  character, reordering of combining marks): the 97 lines printed are the JVM's.
+- **The regex corpus** (`bin/c2g-regex`): 1,233 of 1,233 cases, 11,682 of 11,682 inputs (amd64).
+- **The oracle on the Go build** (amd64): 20,259 of 20,263; the 29 cases pass, none new; the
+  reference `test/oracle/known-go-amd64.edn` rewritten with `--write-expected` (the two
+  resource-data groups gone, the other 4 cases and their reasons kept; checked by hand).
+- **No regressions**: `bin/arbace-go --smoke`; `bin/jrt test` on amd64 and arm64;
+  `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and arm64; Clojure's suite on the
+  Go build 19,251 of 19,280 assertions, no regression against `test/arbace-go-results.edn`
+  (unchanged: the suite does not use `\N{}`, `CANON_EQ` or `Normalizer`). The essential
+  `bin/gate` was not run: the bootstrap compiles none of the changed sources (`arbace/c2g` is a
+  tool), as the gate policy of 2026-10-09 allows. arm64's executable: 58,465,447 bytes.
+- **After merging main** (step 6's image, the files of `go-file`): 424 files translated; the
+  executable 69,415,929 bytes with step 6's image of prepared namespaces; the smoke test, the
+  direct checks (identical to the JVM's), the oracle 20,595 of 20,600 (exactly the 5 known
+  mismatches), the regex corpus 1,233 of 1,233, `bin/jrt test` on amd64 pass again; Clojure's
+  suite on the Go build 19,379 of 19,398 assertions, no regression against
+  `test/arbace-go-results.edn`.
+- The amendments are numbered RD (resource data): the single letters are taken (Z since by
+  EVAL-NOTES.md's proxies of `BufferedWriter`).
+
+## Decisions
+
+- Route 1 for `CANON_EQ` (above), against the smaller ICU-loader variant: fidelity, as the user
+  prefers, at +2.8 MB.
+- jrt's own `InflaterInputStream` over Go's zlib rather than a `CharacterName` variant: the JDK's
+  class whose source needs what is cut (the VM's zlib) is the one replaced (K1's rule).
+- The data are made, not kept: `bin/jrt-convert` makes them from the jdk26u checkout, as the
+  translated sources; LICENSE.md records what the executables carry (ICU4J's and the Unicode
+  Character Database's Unicode License V3, as jdk26u's `legal/icu.md` and `unicode.md`).
+- The regex check program (`bin/c2g-regex`, which embeds nothing) finds the data through
+  `ARBACE_PATH`, set to `.tmp/jrt/data` by `test/c2g/regex_check.clj`.
+
+## Proposed amendments (for the user's review)
+
+- **RD1 (C2G-SPEC §10.3, Classes and resources by name; M5)** The program embeds, besides the
+  namespaces' sources, the JDK's resource data that `bin/jrt-convert` makes (`.tmp/jrt/data`,
+  under their resource paths: `uniName.dat`, `nfc.nrm`, `nfkc.nrm`), as binary files.
+  `Class.getResourceAsStream` is c2g's support method on jrt's `Class` (when
+  `ByteArrayInputStream` is translated): the name resolved as `Class.resolveName`, then the
+  embedded resources and `ARBACE_PATH`, as `ClassLoader.getResourceAsStream`. No module
+  encapsulation of resources (a deviation: the JVM hides java.base's from Clojure code).
+- **RD2 (C2G-SPEC §10.6, the REPL's world; P2)** The REPL's world roots every public member of
+  every class with class forms **except the classes of JDK packages their module does not
+  export** (`jdk.internal.*`, `sun.*`): the JVM refuses Clojure code access to them
+  (`IllegalAccessError`), so rooting them only grew the executable. Classes of no JDK module
+  (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted. Alone it saves 310 methods and 0.31 MB on
+  main; Clojure's suite, the oracle and the smoke test are unchanged by it (below).
+- **RD3 (C2G-SPEC §4.1, jrt's own Java; K1)** jrt's own Java gains
+  `java.util.zip.InflaterInputStream`, the `InputStream` constructor only, which inflates its
+  whole input at the first read through a native over Go's `compress/zlib`.
+- **RD4 (JRT-SOURCES.md; C2G-SPEC §4.1, the inputs)** The closure takes generated files beyond
+  the measured closure's (`added-gensrc`: java.nio's heap buffers and their views, and
+  `ScopedMemoryAccess`), generated by `bin/jrt-convert` as the JDK build generates them and
+  compared byte for byte with the build's; and the resource data likewise
+  (`generated.edn`'s `:data`, against the build's module image).
+- **RD5 (C2G-SPEC §4.4, the rename table)** `sun.text.Normalizer` is `Sun_Normalizer` in Go
+  (`java.text.Normalizer` keeps `Normalizer`).
+
+Fixed, not amended: §6.2's benign-initialization rule (W3) counts a static read anywhere in the
+method's body, `switch` arms included (it always meant that; the implementation missed them).
+
+## Sources
+
+https://github.com/openjdk/jdk26u at `baf63fb`:
+`src/java.base/share/classes/java/nio/{X-Buffer,X-Buffer-bin,Heap-X-Buffer,ByteBufferAs-X-Buffer}.java.template`,
+`Buffer.java`, `ByteOrder.java`, `StringCharBuffer.java` and the four exceptions;
+`jdk/internal/misc/X-ScopedMemoryAccess{,-bin}.java.template`;
+`java/lang/foreign/MemorySegment.java`, `jdk/internal/foreign/MemorySessionImpl.java`;
+`java/text/Normalizer.java`, `CharacterIterator.java`; `jdk/internal/icu/` (the files listed in
+JRT-SOURCES.md) and `jdk/internal/icu/impl/data/icudata/nfc.nrm`, `nfkc.nrm`;
+`java/lang/CharacterName.java`, `java/util/zip/ZipException.java` (and `InflaterInputStream.java`,
+`Inflater.java`, studied for the overlay's behaviour);
+`make/modules/java.base/gensrc/GensrcBuffer.gmk`, `GensrcScopedMemoryAccess.gmk`,
+`make/common/modules/GensrcStreamPreProcessing.gmk`, `make/modules/java.base/Gendata.gmk`,
+`make/ToolsJdk.gmk`, `make/jdk/src/classes/build/tools/spp/Spp.java`,
+`make/jdk/src/classes/build/tools/generatecharacter/CharacterName.java`;
+`src/java.base/share/data/unicodedata/UnicodeData.txt`; `src/java.base/share/legal/icu.md`,
+`unicode.md`. The JDK build's outputs compared against:
+`build/linux-x86_64-server-release/support/gensrc/java.base/` and `jdk/modules/java.base/`.
