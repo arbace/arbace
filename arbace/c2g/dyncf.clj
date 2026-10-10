@@ -57,7 +57,10 @@
              (if (or (m/hand-written? n) (m/trivial-init? n))
                '(do)
                (list (m/class-sym :lang n "_Init")))
-             (list 'addr (list 'lit (symbol g) :D 'dc :F 'f)))
+             (list 'let ['t (list 'addr (list 'lit (symbol g) :D 'dc :F 'f))]
+                   ;; the header's dynamic flag (jrt.MarkDynamic: the nominal checks)
+                   '(.MarkDynamic t)
+                   't))
        (list 'go/var (tag (symbol (str "dynCfCtors_" g)) '(map string (func [any (slice any)])))
              (apply list 'lit '(map string (func [any (slice any)]))
                     (for [mm (if (m/hand-written? n) (m/methods-of n) (:methods (a/decl n)))
@@ -204,7 +207,7 @@ or CF$FnObj, whose getClass is their class).\n"
             (let [nw (aget cfNews c)]
               (.Unlock dynMu)
               (when (!= nw nil) (return (nw dc (.-A values))))
-              (addr (lit Dyn :D dc :F (.-A values))))))
+              (newDyn dc (.-A values)))))
    (list 'go/func (native-name "canExtend" "(Ljava/lang/Class;)Z")
          (with-meta [(tag 'c '(* jrt/Class))] {:tag 'bool})
          '(let [(values nw _ _) (cfSubFor c)]
