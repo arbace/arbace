@@ -354,6 +354,17 @@ when there is none.\n"
                      (range [i x b]
                        (aset (.-A a) i (conv int8 x)))
                      (return (ByteArrayInputStream_New_B1 a))))))])
+     ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
+     ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
+     ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
+     ;; (jrt's Date cannot name them)
+     (when (m/translated? "jdk/internal/jrt/DefaultZone")
+       ['(go/func c2gSetDateZone "c2gSetDateZone sets jrt's DateZone hooks to DefaultZone's methods.\n" ^bool []
+          (set! DateZoneOffset DefaultZone_Offset_J__I)
+          (set! DateZoneOffsetByWall DefaultZone_OffsetByWall_J__I)
+          (set! DateZoneName (fn ^string [^int64 ms] (return (.String (DefaultZone_Name_J__String ms)))))
+          true)
+        '(go/var ^bool c2gDateZoneSet (c2gSetDateZone))])
      (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))

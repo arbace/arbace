@@ -1,6 +1,10 @@
 ;; jrt: java.util.Date, small and hand-written over its millisecond count (JAVA-SURFACE.md,
-;; decision 7, the user's: #inst over a Date shim; doc/go/JRT-NOTES.md, "Phase 2b"). The default
-;; time zone is GMT, so the deprecated field accessors and Date.UTC read and write UTC fields.
+;; decision 7, the user's: #inst over a Date shim; doc/go/JRT-NOTES.md, "Phase 2b"). The
+;; deprecated field accessors, toString and the deprecated local constructors read and write the
+;; fields in the default time zone, as the JDK's, through the DateZone hooks, which c2g sets to
+;; jrt's own jdk.internal.jrt.DefaultZone over the translated TimeZone (JRT-NOTES.md, "Time");
+;; without them (jrt's own tests) the zone is GMT. Date.UTC, toGMTString and #inst's text are
+;; GMT's.
 ;; The calendar is Java's: Julian before the Gregorian cutover of 1582-10-15, Gregorian from it
 ;; (GregorianCalendar's default, which Date and the #inst printer's SimpleDateFormat share);
 ;; Date.UTC normalizes as jdk26u's Date.normalize does (the year 1582 as GregorianCalendar).
@@ -50,7 +54,7 @@ c2g translates, extends it: Impl_ methods, C2G-SPEC §5.3, §5.4).\n"
   (let [t (addr (lit Date))] (.Ctor t t) t))
 (go/func Date_New_J ^{:tag (* Date)} [^int64 ms] (let [t (addr (lit Date))] (.Ctor_J t t ms) t))
 (go/func Date_New_I_I_I
-  "Date_New_I_I_I is the deprecated new Date(year - 1900, month, date), in GMT.\n"
+  "Date_New_I_I_I is the deprecated new Date(year - 1900, month, date), in the default zone.\n"
   ^{:tag (* Date)} [^int32 y ^int32 m ^int32 d]
   (let [t (addr (lit Date))] (.Ctor_I_I_I t t y m d) t))
 (go/func Date_New_I_I_I_I_I ^{:tag (* Date)} [^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi]
@@ -62,11 +66,11 @@ c2g translates, extends it: Impl_ methods, C2G-SPEC §5.3, §5.4).\n"
   (set! (.-F_fastTime t) (.UnixMilli (time/Now))))
 (go/method Ctor_J [^{:tag (* Date)} t ^Date_I this ^int64 ms] (set! (.-F_fastTime t) ms))
 (go/method Ctor_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d]
-  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d 0 0 0)))
+  (set! (.-F_fastTime t) (utcOfLocal (Date_UTC_I_I_I_I_I_I__J y m d 0 0 0))))
 (go/method Ctor_I_I_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi]
-  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d h mi 0)))
+  (set! (.-F_fastTime t) (utcOfLocal (Date_UTC_I_I_I_I_I_I__J y m d h mi 0))))
 (go/method Ctor_I_I_I_I_I_I [^{:tag (* Date)} t ^Date_I this ^int32 y ^int32 m ^int32 d ^int32 h ^int32 mi ^int32 s]
-  (set! (.-F_fastTime t) (Date_UTC_I_I_I_I_I_I__J y m d h mi s)))
+  (set! (.-F_fastTime t) (utcOfLocal (Date_UTC_I_I_I_I_I_I__J y m d h mi s))))
 
 ;; the implementations: this is the whole object, called virtually where the JDK's Date calls
 ;; getTime() (equals, hashCode, and getMillisOf's subclass case in compareTo, before, after)
@@ -198,14 +202,41 @@ cutover): astronomical year, month 1..12, day.\n"
       (return))))
 
 (go/type dateFields
-  "dateFields are a Date's fields in GMT: the astronomical year, month 1..12, day, hours,
+  "dateFields are a Date's fields in a zone: the astronomical year, month 1..12, day, hours,
 minutes, seconds, milliseconds, day of the week (1 Sunday ... 7 Saturday), and whether the
 date is Julian.\n"
   (struct ^int64 year ^int64 month ^int64 day ^int64 hour ^int64 minute ^int64 second ^int64 millis
           ^int64 weekday ^bool julian))
 
-(go/method fields ^dateFields [^{:tag (* Date)} t]
-  (let [ms (.-F_fastTime t)
+(go/var
+  [^{:tag (func [int64] [int32])
+     :doc "DateZoneOffset is the default zone's offset in milliseconds at an instant (TimeZone.getOffset), or nil: GMT.\n"}
+   DateZoneOffset nil]
+  [^{:tag (func [int64] [int32])
+     :doc "DateZoneOffsetByWall is the default zone's offset in milliseconds at a local time, as the JDK's calendars resolve one (ZoneInfo.getOffsetsByWall), or nil: GMT.\n"}
+   DateZoneOffsetByWall nil]
+  [^{:tag (func [int64] [string])
+     :doc "DateZoneName is the default zone's short name at an instant, as Date.toString writes it (US English), or nil: GMT.\n"}
+   DateZoneName nil])
+
+(go/func localOffset "localOffset is the default zone's offset at the instant ms (0 without the hooks).\n"
+  ^int64 [^int64 ms]
+  (when (== DateZoneOffset nil)
+    (return 0))
+  (conv int64 (DateZoneOffset ms)))
+
+(go/func utcOfLocal "utcOfLocal is the instant of the local time local in the default zone.\n"
+  ^int64 [^int64 local]
+  (when (== DateZoneOffsetByWall nil)
+    (return local))
+  (- local (conv int64 (DateZoneOffsetByWall local))))
+
+(go/method fields "fields are the date's fields in the default zone.\n" ^dateFields [^{:tag (* Date)} t]
+  (.fieldsAt t (localOffset (.-F_fastTime t))))
+
+(go/method fieldsAt "fieldsAt are the date's fields at the offset off (milliseconds).\n"
+  ^dateFields [^{:tag (* Date)} t ^int64 off]
+  (let [ms (+ (.-F_fastTime t) off)
         days (floorDiv ms dayMillis)
         tod (floorMod ms dayMillis)
         (values y m d) (civilOfDays days)]
@@ -259,7 +290,11 @@ result falls on its side of the cutover; in 1582 GregorianCalendar's rule).\n"
 (go/method Impl_GetHours__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-hour (.fields t))))
 (go/method Impl_GetMinutes__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-minute (.fields t))))
 (go/method Impl_GetSeconds__I ^int32 [^{:tag (* Date)} t ^Date_I this] (conv int32 (.-second (.fields t))))
-(go/method Impl_GetTimezoneOffset__I ^int32 [^{:tag (* Date)} t ^Date_I this] 0)
+(go/method Impl_GetTimezoneOffset__I
+  "Impl_GetTimezoneOffset__I is the deprecated getTimezoneOffset: minutes to add to the local
+time for UTC.\n"
+  ^int32 [^{:tag (* Date)} t ^Date_I this]
+  (conv int32 (/ (- (localOffset (.-F_fastTime t))) 60000)))
 
 (go/var
   [^{:tag (slice string)} dayNames (lit (slice string) "" "Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat")]
@@ -280,17 +315,20 @@ result falls on its side of the cutover; in 1582 GregorianCalendar's rule).\n"
       s)))
 
 (go/method Impl_ToString__String
-  "Impl_ToString__String is Date.toString in GMT: Thu Jan 01 00:00:00 GMT 1970.\n"
+  "Impl_ToString__String is Date.toString in the default zone: Thu Jan 01 01:00:00 CET 1970.\n"
   ^{:tag (* String)} [^{:tag (* Date)} t ^Date_I this]
-  (let [f (.fields t)]
+  (let [f (.fields t)
+        zone "GMT"]
+    (when (!= DateZoneName nil)
+      (set! zone (DateZoneName (.-F_fastTime t))))
     (Str (+ (aget dayNames (.-weekday f)) " " (aget monthNames (.-month f)) " " (pad (.-day f) 2) " "
-            (pad (.-hour f) 2) ":" (pad (.-minute f) 2) ":" (pad (.-second f) 2) " GMT "
+            (pad (.-hour f) 2) ":" (pad (.-minute f) 2) ":" (pad (.-second f) 2) " " zone " "
             (strconv/FormatInt (.yearOfEra f) 10)))))
 
 (go/method Impl_ToGMTString__String
   "Impl_ToGMTString__String is the deprecated Date.toGMTString: 1 Jan 1970 00:00:00 GMT.\n"
   ^{:tag (* String)} [^{:tag (* Date)} t ^Date_I this]
-  (let [f (.fields t)]
+  (let [f (.fieldsAt t 0)]
     (Str (+ (strconv/FormatInt (.-day f) 10) " " (aget monthNames (.-month f)) " "
             (strconv/FormatInt (.yearOfEra f) 10) " " (pad (.-hour f) 2) ":" (pad (.-minute f) 2) ":"
             (pad (.-second f) 2) " GMT"))))
@@ -300,7 +338,7 @@ result falls on its side of the cutover; in 1582 GregorianCalendar's rule).\n"
 \"yyyy-MM-dd'T'HH:mm:ss.SSS-00:00\" in GMT writes it (the year of the era, at least four
 digits): what the reworked arbace.instant needs (JRT-NOTES.md, \"#inst\").\n"
   ^string [^{:tag (* Date)} t]
-  (let [f (.fields t)]
+  (let [f (.fieldsAt t 0)]
     (+ (pad (.yearOfEra f) 4) "-" (pad (.-month f) 2) "-" (pad (.-day f) 2) "T" (pad (.-hour f) 2) ":"
        (pad (.-minute f) 2) ":" (pad (.-second f) 2) "." (pad (.-millis f) 3) "-00:00")))
 
