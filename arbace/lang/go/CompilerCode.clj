@@ -222,22 +222,24 @@
           vs))
 
       ;; the arguments of a resolved method or constructor as the compiled call passes them
-      ;; (Evaluator.typedArgs), a fn passed for a functional interface adapted (Reflector.boxArg)
+      ;; (Evaluator.typedArgs, a fn for a functional interface adapted)
       (method ^:public ^:static directArgs ^Object/1 [^Class/1 ps ^Object/1 vs]
-        (Evaluator/typedArgs ps vs)
-        (loop [^int i 0]
-          (when (< i (alength ps))
-            (let [p (aget ps i)
-                  v (aget vs i)]
-              (when (and (some? v) (not (.isPrimitive p)) (not (.isInstance p v)))
-                (aset vs i (Reflector/boxArg p v))))
-            (recur (unchecked-inc-int i))))
-        vs)
+        (Evaluator/typedArgs ps vs))
 
-      ;; a method called through its member table's invoker (virtually for an instance method),
-      ;; its arguments of their parameters' types (boxed), its result boxed; its exception not
-      ;; wrapped (jrt's natives.clj)
-      (method ^:public ^:static ^:native call [^java.lang.reflect.Method m target ^Object/1 args])
+      ;; a resolved method's list for Reflector.invokeMatchingMethod
+      (method ^:public ^:static one ^List [^java.lang.reflect.Method m]
+        (let [l (LinkedList.)]
+          (.add l m)
+          l))
+
+      ;; a hinted call of resolved method m (parameter types ps) on target (nil: static) with the
+      ;; evaluated arguments vs: Evaluator.invokeResolved (its invoker directly) when direct
+      ;; (Evaluator.directOk), else Reflector's, as the evaluator's evalIn calls it
+      (method ^:public ^:static call [^java.lang.reflect.Method m ^Class/1 ps ^List ms
+                                      ^boolean direct target ^Object/1 vs]
+        (if direct
+            (Evaluator/invokeResolved m ps target vs)
+            (Reflector/invokeMatchingMethod (.getName m) ms target (Evaluator/typedArgs ps vs))))
 
       (method ^:public ^:static ^:native construct [^java.lang.reflect.Constructor k ^Object/1 args])
 
@@ -395,7 +397,7 @@
 
       (method ^:public compile ^Code [this ^Expr e]
         (cond
-          (instance? LocalBindingExpr e) (.local this (.-b (cast LocalBindingExpr e)))
+          (instance? LocalBindingExpr e) (.localUse this (cast LocalBindingExpr e))
           (or (instance? NumberExpr e) (instance? ConstantExpr e) (instance? StringExpr e)
               (instance? KeywordExpr e) (instance? NilExpr e) (instance? BooleanExpr e)
               (instance? EmptyExpr e) (instance? TheVarExpr e))
@@ -412,7 +414,16 @@
                   n (.count es)]
               (if (== n 1)
                   (.compile this (cast Expr (.nth es 0)))
-                  (CodeCompiler/chain (.compileAll this es) 0)))
+                  ;; a local as a statement is neither read nor cleared (LocalBindingExpr.emit
+                  ;; in a statement context emits nothing)
+                  (let [^{:tag (ArrayList Code)} cs (ArrayList.)]
+                    (loop [^int i 0]
+                      (when (< i n)
+                        (let [x (cast Expr (.nth es i))]
+                          (when-not (and (instance? LocalBindingExpr x) (< i (unchecked-dec-int n)))
+                            (.add cs (.compile this x))))
+                        (recur (unchecked-inc-int i))))
+                    (CodeCompiler/chain (.toArray cs (new Code/1 (.size cs))) 0))))
           (instance? InvokeExpr e)
             (let [ie (cast InvokeExpr e)]
               (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)))
@@ -563,15 +574,34 @@
               (recur (unchecked-inc-int i))))
           (CodeRecur. cs kinds vkinds dest tmp pcs)))
 
-      ;; the reads, in the method being compiled, of the locals objx closes over
+      ;; the reads, in the method being compiled, of the locals objx closes over: through its
+      ;; closesExprs (made by ObjExpr.compile, as ObjExpr.emit loads them), which take part in
+      ;; locals clearing (Evaluator.capture)
       (method fetchers ^Code/1 [this ^ObjExpr ox]
         (let [bs (Evaluator/closes ox)
+              ces (.-closesExprs ox)
+              byExpr (== (.count ces) (alength bs))
               cs (new Code/1 (alength bs))]
           (loop [^int i 0]
             (when (< i (alength bs))
-              (aset cs i (.local this (aget bs i)))
+              (aset cs i (if byExpr
+                             (.localUse this (cast LocalBindingExpr (.nth ces i)))
+                             (.local this (aget bs i))))
               (recur (unchecked-inc-int i))))
           cs))
+
+      ;; a use of a local: its read, then, where the analyzer marks it as the last use on its
+      ;; path (shouldClear), its slot cleared, or in a ^:once fn its closed-over value (locals
+      ;; clearing, ObjExpr.emitLocal; Evaluator.clear). Primitive locals are not cleared
+      (method localUse ^Code [this ^LocalBindingExpr lbe]
+        (let [lb (.-b lbe)]
+          (if (and (.-shouldClear lbe) (.-canBeCleared lb) (nil? (.getPrimitiveType lb)))
+              (let [j (.closedIndex this lb)]
+                (cond
+                  (< j 0) (CodeLocalClear. (.-idx lb))
+                  (and isFn (.-onceOnly objx)) (CodeClosedClear. j)
+                  :else (.local this lb)))
+              (.local this lb))))
 
       (method compileLetFn ^Code [this ^LetFnExpr le]
         (let [bis (.-bindingInits le)
@@ -702,6 +732,30 @@
       (field ^:public ^:final ^int i)
       (constructor ^:public [this ^int i] (set! (.-i this) i))
       (method ^:public run [this ^Frame f] (aget (.-slots f) i))))
+
+  (c2g/add
+    (defclass ^:public ^:static CodeLocalClear
+      :extends Code
+      ;; a slot local read for the last time on its path: cleared (CodeCompiler.localUse)
+      (field ^:public ^:final ^int i)
+      (constructor ^:public [this ^int i] (set! (.-i this) i))
+      (method ^:public run [this ^Frame f]
+        (let [slots (.-slots f)
+              v (aget slots i)]
+          (aset slots i nil)
+          v))))
+
+  (c2g/add
+    (defclass ^:public ^:static CodeClosedClear
+      :extends Code
+      ;; a ^:once fn's closed-over value read for the last time on its path: cleared
+      (field ^:public ^:final ^int j)
+      (constructor ^:public [this ^int j] (set! (.-j this) j))
+      (method ^:public run [this ^Frame f]
+        (let [cl (.-closed (.-fn f))
+              v (aget cl j)]
+          (aset cl j nil)
+          v))))
 
   (c2g/add
     (defclass ^:public ^:static CodeLocalLong
@@ -1364,15 +1418,20 @@
       (field ^:public ^:final ^Class/1 ps)
       (field ^:public ^:final ^Code/1 args)
       (field ^:public ^:final ^int line)
+      ;; Evaluator.invokeResolved's path when the method's class is public, else Reflector's
+      (field ^:public ^:final ^boolean direct)
+      (field ^:public ^:final ^List ms)
       (constructor ^:public [this ^java.lang.reflect.Method m ^Code/1 args ^int line]
         (set! (.-m this) m)
         (set! (.-ps this) (.getParameterTypes m))
         (set! (.-args this) args)
-        (set! (.-line this) line))
+        (set! (.-line this) line)
+        (set! (.-direct this) (Evaluator/directOk m))
+        (set! (.-ms this) (CodeRun/one m)))
       (method ^:public run [this ^Frame f]
         (let [vs (CodeRun/runAll args f)]
           (set! (.-line f) line)
-          (CodeRun/call m nil (CodeRun/directArgs ps vs))))))
+          (CodeRun/call m ps ms direct nil vs)))))
 
   (c2g/add
     (defclass ^:public ^:static CodeHostStaticReflect
@@ -1402,20 +1461,23 @@
       (field ^:public ^:final ^Class/1 ps)
       (field ^:public ^:final ^Code/1 args)
       (field ^:public ^:final ^int line)
+      (field ^:public ^:final ^boolean direct)
+      (field ^:public ^:final ^List ms)
       (constructor ^:public [this ^Code target ^java.lang.reflect.Method m ^Code/1 args ^int line]
         (set! (.-target this) target)
         (set! (.-m this) m)
         (set! (.-dc this) (.getDeclaringClass m))
         (set! (.-ps this) (.getParameterTypes m))
         (set! (.-args this) args)
-        (set! (.-line this) line))
+        (set! (.-line this) line)
+        (set! (.-direct this) (Evaluator/directOk m))
+        (set! (.-ms this) (CodeRun/one m)))
       (method ^:public run [this ^Frame f]
         (let [t (.run target f)
               vs (CodeRun/runAll args f)]
           (set! (.-line f) line)
           (Evaluator/checkCast dc t)
-          (when (nil? t) (throw (NullPointerException.)))
-          (CodeRun/call m t (CodeRun/directArgs ps vs))))))
+          (CodeRun/call m ps ms direct t vs)))))
 
   (c2g/add
     (defclass ^:public ^:static CodeHostInstanceReflect
