@@ -329,8 +329,8 @@ jdk26u at `baf63fb`:
   4 known differences), 1,249 classes; deterministic (`--twice`). With the files merged: 424
   files, 420 identical and the 4 known differences, 1,321 classes.
 
-- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, proposed
-  amendment JC3, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
+- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, amendment
+  JC3, accepted 2026-10-10, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
   synchronizers, `CompletableFuture`, the executors (`ExecutorService` over jrt's stand-in),
   `ThreadLocalRandom` with `RandomSupport`, the atomic arrays, adders and accumulators,
   `StampedLock`, `AbstractQueuedSynchronizer` and its long and ownable kin, `Flow` and

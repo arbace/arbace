@@ -2858,41 +2858,43 @@ Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure; before: main after `jbase`
 What is left of the family: the field updaters, `StructuredTaskScope` and its kin, and
 `ForkJoinPool`'s members beyond jrt's (its work-stealing internals, `ForkJoinWorkerThreadFactory`).
 
-## Amendments (JC), for the user's review
+## Amendments (JC)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "Concurrency"):
 
 - **JC1 (C2G-SPEC §8.5, new) VarHandles compiled statically**: constant handles read from
   static initializers, access modes as atomic operations on the field or element, fields named
   by a handle volatile in Go, fences, `MethodHandles.lookup()` a `nil`; `arbace.c2g.vh`, jrt's
-  `varhandle.clj`.
+  `varhandle.clj`. *Accepted 2026-10-10, folded into C2G-SPEC §8.5.*
 - **JC2 (C2G-SPEC §7.8) A `switch` over an enum outside the closed world** switches on an
-  operation-level stub (above).
+  operation-level stub (above). *Accepted 2026-10-10, folded into C2G-SPEC §7.8.*
 - **JC3 (JRT-SOURCES.md, the closure) The concurrent classes**: `concurrent-sources` in
   `test/g2c/jrt_sources.clj` (the list above, with `PriorityQueue`, `SortedSet` and
   `RandomSupport`), jrt's own Java `ThreadPerTaskExecutor`, `Delays`, `ForkJoinPools`,
-  `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above.
+  `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above. *Accepted 2026-10-10, folded into JRT-SOURCES.md ("The closure as grown").*
 - **JC4 (C2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
   three random fields as `F_` fields and registers its Go type for `Unsafe.objectFieldOffset`;
-  jrt's hand-written probes go.
+  jrt's hand-written probes go. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (its summary there).*
 - **JC5 (C2G-SPEC §8.4) The executors translated**: jrt's hand-written pools, `FutureTask` and
   `Executors` go; `ExecutorService` is translated over a stand-in (C2G-SPEC §4.3), and c2g gives
   jrt's `ForkJoinPool` its `shutdownNow`, `invokeAll`, `invokeAny` through jrt's Java
-  (`out/fjp-support-forms`, §11).
+  (`out/fjp-support-forms`, §11). *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC6 (C2G-SPEC §8.3, §8.4) `AbstractQueuedSynchronizer` translated**, its
   `AbstractQueuedLongSynchronizer` too, with `Node.waiter` and
   `AbstractOwnableSynchronizer.exclusiveOwnerThread` volatile by variants (§8.3's cure for a
   two-word field read by other threads); this revises §8.4's "measured and not taken" for the
-  executors' workers, while jrt's locks stay hand-written.
+  executors' workers, while jrt's locks stay hand-written. *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC7 (C2G-SPEC §8.4, the fork-join pool) jrt's `ForkJoinPool` an `ExecutorService`**, with
   `ManagedBlocker`, `managedBlock`, `asyncCommonPool`, `isQuiescent`, termination, and
-  `ForkJoinTask`'s tags; `CompletableFuture`'s delays on jrt's `Delays`.
+  `ForkJoinTask`'s tags; `CompletableFuture`'s delays on jrt's `Delays`. *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
 - **JC8 (C2G-SPEC §11, jrt's API) Additions to jrt's hand-written classes**: `Thread.State` and
   `getState` (three of its six states), `Thread.Builder`, `Future.State` and `Future`'s JDK 19
   defaults, `LockSupport`'s blockers and class object, `Unsafe`'s `weakCompareAndSetReference`,
   `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`, `storeStoreFence`, `park`, `unpark`,
-  and the casts of the new types.
+  and the casts of the new types. *Accepted 2026-10-10, it stays here; C2G-SPEC §16 refers to it.*
 - **JC9 (C2G-SPEC §8.4, `RunMain`) No Go deadlock crash at main's end**: `RunMain` keeps a
   ticker pending for the program's life, so a program whose threads all wait forever waits, as
   on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,
-  agents without and with `shutdown-agents`).
+  agents without and with `shutdown-agents`). *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (`RunMain`).*
 - **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
-  what the executable is built from (it changes the conversion, but the key did not see it).
+  what the executable is built from (it changes the conversion, but the key did not see it). *Accepted 2026-10-10, it stays here, `bin/arbace-go` holds it.*

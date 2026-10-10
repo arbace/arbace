@@ -10,7 +10,9 @@ W1-W6, [C2G-NOTES.md](C2G-NOTES.md)), accepted 2026-10-09 and folded in (§16), 
 performance work deferred to step 7 (§13.4), and the amendments of the evaluator, B1a step 5
 (M1-M8, X1-X3, S1, S3-S6, [EVAL-NOTES.md](EVAL-NOTES.md)), accepted 2026-10-09 and folded in
 (§16), and the amendments of java.util's completion (JB1-JB5,
-[JAVA-BASE.md](JAVA-BASE.md)), accepted 2026-10-10 and folded in (§16). The
+[JAVA-BASE.md](JAVA-BASE.md)), accepted 2026-10-10 and folded in (§16), and those of the rest of
+`java.util.concurrent` (JC1-JC10, [JRT-NOTES.md](JRT-NOTES.md), "Concurrency"), accepted
+2026-10-10 and folded in (§16). The
 decisions it builds on: D1 (c2g + jrt), D2 (an evaluator first), D4 (Java's UTF-16 strings), D5
 (a port of `java.util.regex`), D6 (the first REPL without class forms, `gen-class`, `proxy`,
 interop beyond jrt's classes; `proxy` came back with amendment X2, and the fork-join pool with
@@ -1520,7 +1522,8 @@ writes the converted value instead (`4294967288`). The prototype of §15 met thi
   §5.8).
 
 An enum `switch` whose enum class is outside the closed world switches on an operation-level
-stub (`C2g_Missing[int32]`), its arms kept for Go's flow analysis (proposed amendment JC2).
+stub (`C2g_Missing[int32]`), its arms kept for Go's flow analysis (amendment JC2, accepted
+2026-10-10).
 
 ### 7.9 Exceptions
 
@@ -1867,7 +1870,7 @@ this only matters for racy publication, which the race detector also finds.
     returns the status (`System.exit` ends the process before). It also keeps a ticker pending
     for the program's life, so that Go's run time never ends a program whose threads all wait
     forever with "all goroutines are asleep - deadlock!": it waits, as the JVM does (proposed
-    amendment JC9, JRT-NOTES.md, "Concurrency").
+    amendment JC9, accepted 2026-10-10; JRT-NOTES.md, "Concurrency").
   - `jrt.Go(name, f func()) *jrt.Thread` starts a Go function as a daemon jrt thread;
     `jrt.RunnableOf(f func())` is a `Runnable` of a Go function; `Thread_defaultHandler` holds
     the default uncaught exception handler.
@@ -1890,7 +1893,7 @@ this only matters for racy publication, which the race detector also finds.
   accepted 2026-10-09: the full public API with Java's messages, fairness not kept, as for
   `ReentrantLock`; `AbstractQueuedSynchronizer` translated was measured and not taken: it needs
   `Unsafe` additions and has a two-word race on `Node.waiter`, §8.3); `ConcurrentHashMap` and the blocking
-  queues are translated over `Unsafe`'s compare-and-set (§9.2). *Proposed amendments JC5, JC6
+  queues are translated over `Unsafe`'s compare-and-set (§9.2). *Amendments JC5, JC6, accepted 2026-10-10
   (JRT-NOTES.md, "Concurrency"):* the executors (`ThreadPoolExecutor`,
   `ScheduledThreadPoolExecutor`, `FutureTask`, `Executors`, `ExecutorService` over a stand-in) are
   translated from jdk26u and jrt's hand-written pools go; `AbstractQueuedSynchronizer` is
@@ -1918,7 +1921,7 @@ this only matters for racy publication, which the race detector also finds.
 
 ### 8.5 VarHandles
 
-(Proposed amendment JC1, for the user's review; [JRT-NOTES.md](JRT-NOTES.md),
+(Amendment JC1, accepted 2026-10-10; [JRT-NOTES.md](JRT-NOTES.md),
 "Concurrency".) `java.lang.invoke` is not in the Go build (§12), but JDK 26's concurrent classes
 do their atomic work through `VarHandle`s, and always in one shape: a class makes its handles
 once, in its static initializer, into `static final` fields, and uses them only through those
@@ -3780,6 +3783,18 @@ them: §13.4. O6 a `try` with nothing to catch has no literal: §7.9.2. O7 the p
 O3 (one shared array from `getParameterTypes`, a deviation) was not taken: jrt keeps Java's
 contract, a fresh copy per call. O4 refines §5.8's header (the identity hash is 31 bits beside
 the flag).
+
+**Concurrency** (JRT-NOTES.md, "Concurrency"; accepted by the user 2026-10-10): JC1
+`VarHandle`s compiled statically to atomic operations, the fields they name volatile in Go:
+§8.5. JC2 a `switch` over an enum outside the closed world: §7.8. JC3 the concurrent classes in
+the closure: JRT-SOURCES.md. JC4 `ThreadLocalRandom` translated over the Thread's fields
+(`Unsafe`): §8.4, §9.2. JC5 the executors translated, `ExecutorService` over a stand-in,
+`ForkJoinPool`'s collection methods through jrt's Java: §8.4, §11. JC6
+`AbstractQueuedSynchronizer` translated, its waiter and owner volatile: §8.3, §8.4. JC7 jrt's
+`ForkJoinPool` an `ExecutorService`, `CompletableFuture`'s delays on threads: §8.4. JC8 the
+additions to jrt's hand-written classes (`Thread.State`, `Thread.Builder`, `Future.State`,
+`LockSupport`'s blockers, `Unsafe`): §11. JC9 no Go deadlock crash at main's end: §8.4. JC10
+`bin/arbace-go`'s gate key covers `test/g2c/jrt_sources.clj`.
 
 Each with a recommendation, which the text above follows, for the user's review.
 
