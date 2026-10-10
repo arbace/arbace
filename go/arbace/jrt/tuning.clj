@@ -23,13 +23,12 @@ written, without pointers, so neither scanned nor resident (the pages stay untou
 (go/var ^{:tag (* os/File)} cpuProfile)
 (go/var ^string memProfile)
 
-(go/func StartRuntime
-  "StartRuntime applies jrt's settings of the Go runtime before a program's main runs
-(RunMain): GOGC is DefaultGOGC unless the environment sets GOGC, the minimum heap
-DefaultMinHeapMB MiB unless ARBACE_MIN_HEAP_MB sets it (0: none); ARBACE_CPUPROFILE=FILE writes
-a CPU profile of the run to FILE (go tool pprof), ARBACE_MEMPROFILE=FILE a heap profile
-(allocations sampled as Go samples them) when the program ends (RunMain's return or
-System.exit).\n"
+(go/func init
+  "init applies jrt's settings of the Go runtime when the program starts, before any main
+package's own (whose start may raise GOGC for a while and then restore this setting): GOGC is
+DefaultGOGC unless the environment sets GOGC, the minimum heap DefaultMinHeapMB MiB unless
+ARBACE_MIN_HEAP_MB sets it (0: none), and allocations are sampled for a heap profile only when
+ARBACE_MEMPROFILE asks for one.\n"
   []
   (when (== (os/Getenv "GOGC") "")
     (debug/SetGCPercent DefaultGOGC))
@@ -37,13 +36,20 @@ System.exit).\n"
     (let [(values n err) (strconv/Atoi (os/Getenv "ARBACE_MIN_HEAP_MB"))]
       (when (== err nil)
         (set! mb n)))
-    (when (and (> mb 0) (== minHeap nil))
+    (when (> mb 0)
       (set! minHeap (make (slice byte) (<< mb 20)))))
   (set! memProfile (os/Getenv "ARBACE_MEMPROFILE"))
   ;; Go samples allocations for the heap profile whenever a program links it (pprof does here);
   ;; each sample walks the stack, and the evaluator's are deep
   (when (== memProfile "")
-    (set! runtime/MemProfileRate 0))
+    (set! runtime/MemProfileRate 0)))
+
+(go/func StartRuntime
+  "StartRuntime starts the profiles a program's run asks for, before its main runs (RunMain):
+ARBACE_CPUPROFILE=FILE writes a CPU profile of the run to FILE (go tool pprof),
+ARBACE_MEMPROFILE=FILE a heap profile when the program ends (RunMain's return or
+System.exit).\n"
+  []
   (let [p (os/Getenv "ARBACE_CPUPROFILE")]
     (when (and (!= p "") (== cpuProfile nil))
       (let [(values f err) (os/Create p)]
