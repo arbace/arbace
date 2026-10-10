@@ -1,0 +1,187 @@
+;; Go-build variant of java.lang.ProcessImpl (C2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Processes"):
+;; read by c2g only. ProcessImpl is translated from jdk26u (src/java.base/unix/classes); the child
+;; is started by jrt over the host's HostProc (go/arbace/jrt/process.clj), not by forkAndExec's
+;; posix_spawn of jspawnhelper: the launch mechanism and the helper's path (StaticProperty's
+;; java.home) are gone, forkAndExec passes its arguments to the static native hostForkAndExec,
+;; and the native init (the parent's PATH, the SIGCHLD handler) is jrt's. A descriptor is a
+;; number of jrt's file table (jdk.internal.jrt.HostFiles), which holds the program's ends of
+;; the pipes as it holds the files of the redirections: SharedSecrets'
+;; JavaIOFileDescriptorAccess is HostFiles' handle and setHandle. The platform is Linux's
+;; (jdk.internal.util.OperatingSystem is not in the Go build): initStreams and destroy keep
+;; their LINUX branches. JNU_CHARSET is sun.jnu.encoding's (System.getProperty: StaticProperty is
+;; not in the Go build). The replacing methods keep jdk26u's code where they keep it (baf63fb;
+;; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md);
+;; the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'java.lang)
+
+(c2g/variant ProcessImpl
+  (c2g/cut (field ^:private ^:static ^:final ^jdk.internal.access.JavaIOFileDescriptorAccess fdAccess))
+  (c2g/cut (field ^:static ^:final ^java.nio.charset.Charset JNU_CHARSET))
+  (c2g/add (field ^:static ^:final ^java.nio.charset.Charset JNU_CHARSET
+             (java.nio.charset.Charset/forName (System/getProperty "sun.jnu.encoding"))))
+  (c2g/cut ^:private ^:static launchMechanism ^ProcessImpl$LaunchMechanism [])
+  (c2g/cut (field ^:private ^:static ^:final ^ProcessImpl$LaunchMechanism launchMechanism))
+  (c2g/cut (field ^:private ^:static ^:final ^byte/1 helperpath))
+  (c2g/cut ^:private ^:static ^:native init ^void [])
+  (c2g/cut (static-initializer 0))
+
+  (method ^:static start :throws [java.io.IOException] ^Process [^String/1 cmdarray
+                                                                ^{:tag (java.util.Map String String)} environment
+                                                                ^String dir
+                                                                ^ProcessBuilder$Redirect/1 redirects
+                                                                ^boolean redirectErrorStream]
+    (let [args (new byte/2 (unchecked-subtract-int (alength cmdarray) 1))
+          ^:mutable size (alength args)]
+      (loop [^int i 0]
+        (when (< i (alength args))
+          (aset args i (.getBytes (aget cmdarray (unchecked-add-int i 1)) JNU_CHARSET))
+          (set! size (unchecked-add-int size (alength (aget args i))))
+          (recur (unchecked-inc-int i))))
+      (let [argBlock (new byte/1 size)
+            ^:mutable ^int i 0]
+        (for-each [^byte/1 arg args]
+          (System/arraycopy arg 0 argBlock i (alength arg))
+          (set! i (unchecked-add-int i (unchecked-add-int (alength arg) 1))))
+        (let [envc (new int/1 1)
+              envBlock (ProcessEnvironment/toEnvironmentBlock environment envc)
+              ^:mutable ^int/1 std_fds nil
+              ^:mutable ^java.io.FileInputStream f0 nil
+              ^:mutable ^java.io.FileOutputStream f1 nil
+              ^:mutable ^java.io.FileOutputStream f2 nil]
+          (try
+            (let [^:mutable forceNullOutputStream false]
+              (if (nil? redirects)
+                  (set! std_fds (new int/1 [-1 -1 -1]))
+                  (do
+                    (set! std_fds (new int/1 3))
+                    (cond
+                      (identical? (aget redirects 0) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 0 -1)
+                      (identical? (aget redirects 0) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 0 0)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 0))
+                        (aset std_fds 0 (jdk.internal.jrt.HostFiles/handle
+                                          (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 0)))))
+                      :else
+                        (do
+                          (set! f0 (java.io.FileInputStream. (.file (aget redirects 0))))
+                          (aset std_fds 0 (jdk.internal.jrt.HostFiles/handle (.getFD f0)))))
+                    (cond
+                      (identical? (aget redirects 1) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 1 -1)
+                      (identical? (aget redirects 1) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 1 1)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 1))
+                        (do
+                          (aset std_fds 1 (jdk.internal.jrt.HostFiles/handle
+                                            (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 1)))))
+                          (set! forceNullOutputStream true))
+                      :else
+                        (do
+                          (set! f1 (java.io.FileOutputStream. (.file (aget redirects 1)) (.append (aget redirects 1))))
+                          (aset std_fds 1 (jdk.internal.jrt.HostFiles/handle (.getFD f1)))))
+                    (cond
+                      (identical? (aget redirects 2) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 2 -1)
+                      (identical? (aget redirects 2) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 2 2)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 2))
+                        (aset std_fds 2 (jdk.internal.jrt.HostFiles/handle
+                                          (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 2)))))
+                      :else
+                        (do
+                          (set! f2 (java.io.FileOutputStream. (.file (aget redirects 2)) (.append (aget redirects 2))))
+                          (aset std_fds 2 (jdk.internal.jrt.HostFiles/handle (.getFD f2)))))))
+              (let [^Process p (ProcessImpl. (ProcessImpl/toCString (aget cmdarray 0))
+                                             argBlock
+                                             (alength args)
+                                             envBlock
+                                             (aget envc 0)
+                                             (ProcessImpl/toCString dir)
+                                             std_fds
+                                             forceNullOutputStream
+                                             redirectErrorStream)]
+                (when (some? redirects)
+                  (when (and (>= (aget std_fds 0) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 0)))
+                    (jdk.internal.jrt.HostFiles/setHandle
+                      (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 0))) (aget std_fds 0)))
+                  (when (and (>= (aget std_fds 1) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 1)))
+                    (jdk.internal.jrt.HostFiles/setHandle
+                      (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 1))) (aget std_fds 1)))
+                  (when (and (>= (aget std_fds 2) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 2)))
+                    (jdk.internal.jrt.HostFiles/setHandle
+                      (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 2))) (aget std_fds 2))))
+                p))
+            (finally
+              (try
+                (when (some? f0) (.close f0))
+                (finally
+                  (try (when (some? f1) (.close f1)) (finally (when (some? f2) (.close f2))))))))))))
+
+  (method ^:private forkAndExec :throws [java.io.IOException] ^int [this ^int mode
+                                                                     ^byte/1 helperpath ^byte/1 prog
+                                                                     ^byte/1 argBlock ^int argc
+                                                                     ^byte/1 envBlock ^int envc
+                                                                     ^byte/1 dir ^int/1 fds
+                                                                     ^boolean redirectErrorStream]
+    (ProcessImpl/hostForkAndExec prog argBlock argc envBlock envc dir fds redirectErrorStream))
+
+  (c2g/add (method ^:private ^:static ^:native hostForkAndExec :throws [java.io.IOException] ^int [^byte/1 prog
+                                                                                                 ^byte/1 argBlock ^int argc
+                                                                                                 ^byte/1 envBlock ^int envc
+                                                                                                 ^byte/1 dir ^int/1 fds
+                                                                                                 ^boolean redirectErrorStream]))
+
+  (constructor :throws [java.io.IOException] ^:private [this ^:final ^byte/1 prog ^:final ^byte/1 argBlock
+                                                       ^:final ^int argc ^:final ^byte/1 envBlock
+                                                       ^:final ^int envc ^:final ^byte/1 dir
+                                                       ^:final ^int/1 fds
+                                                       ^:final ^boolean forceNullOutputStream
+                                                       ^:final ^boolean redirectErrorStream]
+    (set! pid (.forkAndExec this 0 nil prog argBlock argc envBlock envc dir fds redirectErrorStream))
+    (set! processHandle (ProcessHandleImpl/getInternal pid))
+    (.initStreams this fds forceNullOutputStream))
+
+  (method ^:static newFileDescriptor ^java.io.FileDescriptor [^int fd]
+    (let [fileDescriptor (java.io.FileDescriptor.)]
+      (jdk.internal.jrt.HostFiles/setHandle fileDescriptor fd)
+      fileDescriptor))
+
+  (method initStreams :throws [java.io.IOException] ^void [this ^int/1 fds ^boolean forceNullOutputStream]
+    (set! stdin
+          (if (== (aget fds 0) -1)
+              ProcessBuilder$NullOutputStream/INSTANCE
+              ^java.io.OutputStream (ProcessImpl$ProcessPipeOutputStream. (aget fds 0))))
+    (set! stdout
+          (if (or (== (aget fds 1) -1) forceNullOutputStream)
+              ProcessBuilder$NullInputStream/INSTANCE
+              ^java.io.InputStream (ProcessImpl$ProcessPipeInputStream. (aget fds 1))))
+    (set! stderr
+          (if (== (aget fds 2) -1)
+              ProcessBuilder$NullInputStream/INSTANCE
+              ^java.io.InputStream (ProcessImpl$ProcessPipeInputStream. (aget fds 2))))
+    (.handle (ProcessHandleImpl/completion pid true)
+             (lambda java.util.function.BiFunction [^Integer exitcode ^Throwable throwable]
+               (.lock lock)
+               (try
+                 (set! (.-exitcode this) (if (nil? exitcode) -1 (.intValue exitcode)))
+                 (set! (.-hasExited this) true)
+                 (.signalAll condition)
+                 (finally (.unlock lock)))
+               (when (instance? ProcessImpl$ProcessPipeInputStream stdout)
+                 (.processExited (cast ProcessImpl$ProcessPipeInputStream stdout)))
+               (when (instance? ProcessImpl$ProcessPipeInputStream stderr)
+                 (.processExited (cast ProcessImpl$ProcessPipeInputStream stderr)))
+               (when (instance? ProcessImpl$ProcessPipeOutputStream stdin)
+                 (.processExited (cast ProcessImpl$ProcessPipeOutputStream stdin)))
+               nil)))
+
+  (method ^:private destroy ^void [this ^boolean force]
+    (.lock lock)
+    (try (when-not hasExited (.destroyProcess processHandle force)) (finally (.unlock lock)))
+    (try (.close stdin) (catch java.io.IOException ignored))
+    (try (.close stdout) (catch java.io.IOException ignored))
+    (try (.close stderr) (catch java.io.IOException ignored))))

@@ -385,6 +385,16 @@
                                   ["java/util/regex/Matcher" "replaceFirst" "(Ljava/lang/String;)Ljava/lang/String;"]])
                                (when ci-order?
                                  [["jdk/internal/jrt/CaseInsensitiveComparator" "<clinit>" "()V"]])
+                               ;; Runtime.exec's six overloads (out/support-forms; JRT-NOTES.md,
+                               ;; "Processes")
+                               (when (jrt-java? "jdk/internal/jrt/RuntimeExec")
+                                 (for [d ["(Ljava/lang/String;)Ljava/lang/Process;"
+                                          "(Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/Process;"
+                                          "(Ljava/lang/String;[Ljava/lang/String;Ljava/io/File;)Ljava/lang/Process;"
+                                          "([Ljava/lang/String;)Ljava/lang/Process;"
+                                          "([Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/Process;"
+                                          "([Ljava/lang/String;[Ljava/lang/String;Ljava/io/File;)Ljava/lang/Process;"]]
+                                   ["jdk/internal/jrt/RuntimeExec" "exec" d]))
                                (when fjp-support?
                                  (map out/fjp-support-key out/fjp-support-methods))
                                ;; c2g's support for the REPL's reflection (out/support-forms)
