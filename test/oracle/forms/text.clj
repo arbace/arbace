@@ -369,3 +369,8 @@
 [(.getCalendarField DateFormat$Field/MONTH) (str (DateFormat$Field/ofCalendarField Calendar/YEAR))]
 (let [e (ParseException. "bad" 7)] [(.getMessage e) (.getErrorOffset e)])
 (mapv #(str (Normalizer/normalize "é ﬁ ①" %)) (Normalizer$Form/values))
+
+;; ----- String's case mapping with locales (Turkish and Azerbaijani i)
+(for [l [Locale/ROOT Locale/US (Locale/of "tr" "TR") (Locale/of "az") Locale/FRANCE]]
+  [(str l) (.toLowerCase "TITLE İstanbul DIŞ İx ıi" l) (.toUpperCase "title istanbul dış ıi" l)])
+(String/format (Locale/of "tr" "TR") "%S %s" (to-array ["istanbul" "x"]))

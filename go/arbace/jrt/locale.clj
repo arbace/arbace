@@ -2,20 +2,46 @@
 
 ;; jrt: String's Locale overloads (doc/go/JRT-NOTES.md, "Phase 2b" and "Text and locales"). The
 ;; Locale is jdk26u's, translated by c2g (jrt's own build has a stand-in, standin_locale.clj);
-;; java.text's DecimalFormatSymbols is jdk26u's too. The case mapping is the root locale's for
-;; every locale: no Turkish, Azerbaijani or Lithuanian rules (a deviation for those locales).
+;; java.text's DecimalFormatSymbols is jdk26u's too. The case mapping is the root locale's, with
+;; the Turkish and Azerbaijani dotted and dotless i (ConditionalSpecialCasing's tr and az
+;; entries); no Lithuanian rules (a deviation for lt).
 
 (go/file "locale.go")
 
 ;; ---------------------------------------------------------------------------------------
-;; String's Locale overloads: the root locale's case mapping for every locale (no Turkish,
-;; Azerbaijani or Lithuanian rules: JRT-NOTES.md, "Locales")
+;; String's Locale overloads: the root locale's case mapping, and Turkish and Azerbaijani's i
+;; (JDK: StringUTF16.toLowerCase/toUpperCase with ConditionalSpecialCasing for tr and az): a
+;; capital I lowers to dotless ı unless a combining dot above (U+0307) follows it, which then
+;; goes; İ lowers to i; i uppers to İ. The dot is looked for right after the I (the JDK skips
+;; combining marks of other classes between them).
+
+(go/func turkic ^bool [^{:tag (* Locale)} l]
+  (let [lang (.String (.GetLanguage__String l))]
+    (or (== lang "tr") (== lang "az"))))
 
 (go/method ToLowerCase_Locale__String ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* Locale)} l]
   (NN l)
-  (.ToLowerCase__String t))
+  (when (not (turkic l))
+    (return (.ToLowerCase__String t)))
+  (let [v (.-value t)
+        out (make (slice uint16) 0 (len v))]
+    (range [i c v]
+      (cond
+        (== c 0x0130) (set! out (append out 0x0069))
+        (== c 0x0049) (if (and (< (+ i 1) (len v)) (== (aget v (+ i 1)) 0x0307))
+                        (set! out (append out 0x0069))
+                        (set! out (append out 0x0131)))
+        (not (and (== c 0x0307) (> i 0) (== (aget v (- i 1)) 0x0049))) (set! out (append out c))))
+    (.ToLowerCase__String (newString out))))
 
 (go/method ToUpperCase_Locale__String ^{:tag (* String)} [^{:tag (* String)} t ^{:tag (* Locale)} l]
   (NN l)
-  (.ToUpperCase__String t))
-
+  (when (not (turkic l))
+    (return (.ToUpperCase__String t)))
+  (let [v (.-value t)
+        out (make (slice uint16) (len v))]
+    (range [i c v]
+      (if (== c 0x0069)
+        (aset out i 0x0130)
+        (aset out i c)))
+    (.ToUpperCase__String (newString out))))

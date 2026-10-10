@@ -1047,6 +1047,12 @@
           :else
           (rv (apply list (symbol (str ".Impl_" base)) (super-struct) thisx (map :x args)))))
 
+      ;; an interface's private instance method (called from its default methods): its
+      ;; function, as a default method's, with the receiver first (MatchResult.groupNumber)
+      (and mm (m/private? mm) (m/translated? mowner) (m/interface? mowner))
+      (let [[tv & args] (operands (cons (:target node) (:args node)) (cons nil ps))]
+        (rv (apply list (m/class-sym (pkg) mowner (str "_" base)) (:x tv) (map :x args))))
+
       ;; private methods are not virtual
       (and mm (m/private? mm) (m/translated? mowner))
       (let [[tv & args] (if (or (m/leaf? mowner) (#{:local :this-path} (:op (:target node))))
