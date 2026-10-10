@@ -968,6 +968,147 @@ only renumbers their `fn*` argument gensyms, so they were not rewritten). Amendm
 - **Y4 (ORACLE.md, Exclusions)** the harvest keeps the assertions of `java_interop.clj` that
   name the proxy functions (the suite's proxy tests), the rest of that namespace staying out.
 
+## The suite's last failures
+
+Branch `suite-last` (2026-10-09, the user's decision): the failures of Clojure's suite on the Go
+build that no other agent owns (`java.io.File`, sockets, pprint's `BufferedWriter` proxy, regex
+resources, class forms at the REPL and general speed are others').
+
+### Locals clearing (`clearing`: 12 of 31 before, 31 of 31 now)
+
+What the tests check: `clearing.clj` reads a fn's closed-over values **by reflection**
+(`getDeclaredFields` of the fn's class, less primitive fields and the compiler's `__meta`,
+`const__`, `__cached_class__`, `...__` fields), and requires them non-nil before a `^:once` fn is
+called and all nil after (8 cases: the fn below a conditional, a `case`, a loop; a `when` in the
+fn), not nil when a `loop` or `recur` in the fn keeps the value needed (3 cases), nested `^:once`
+fns each clearing their own (8 cases), and CLJ-2145's repro (a `^:once` fn made in a conditional
+is cleared once called). Before, an evaluated fn's class declared no fields, so every "not
+cleared" check failed (`cleared?` of no fields is true) and nothing was cleared anyway.
+
+What compiled code does (`ObjExpr.emitLocal`, `LocalBindingExpr.emit`): the analyzer marks each
+use of a local that is the last on its path (`shouldClear`, with `canBeCleared` and the clear
+paths), and the emitted code then stores null into the local's slot after loading it; a
+closed-over value is a field, nulled in the same way only in a `^:once` fn; primitive locals are
+never cleared; a local in a statement position is neither loaded nor cleared. The JVM's `compile`
+also makes, after the fn's body is analyzed, a `LocalBindingExpr` for each closed-over local
+(`closesExprs`, what the constructor call loads in the creating method): those take part in the
+clearing analysis like any use (a closure's creation can be a local's last use, and makes an
+earlier use not the last).
+
+The evaluator now does the same (`arbace/lang/go/Compiler.clj`):
+
+- `ObjExpr.compile`'s variant makes `closesExprs` as the JVM's does, so the analysis sees the
+  same uses; `Evaluator.capture` clears the creating frame's local (or the creating `^:once`
+  fn's value) where a `closesExprs` entry says so.
+- `LocalBindingExpr.evalIn` clears the slot (or the `^:once` fn's closed-over value) after
+  reading it when the analyzer says so (`evalClear`, decided with `evalWhere` at the first
+  evaluation, once the analysis is done).
+- `BodyExpr.evalIn` skips a local in a statement position (compiled code emits nothing for it).
+- An evaluated fn's class declares its closed-over locals as fields, named and typed as
+  `ObjExpr.compile` declares them (not public; primitive ones with their primitive type), whose
+  reflective `get` reads the `EvalFn`'s captured value (`Dyn.defineFnField`, a native c2g
+  writes, `arbace/c2g/dyn.clj`).
+
+Effect beyond the tests: a lazy seq's head held in a local is no longer retained.
+`(defn f [n] (let [s (map inc (range n))] (count s)))` with `n` 5,000,000 runs in 121 MB
+resident instead of 619 MB. No deviation from the JVM is left that the tests or the oracle see.
+(A local's last use inside an `if` in a statement position, which compiled code does not load,
+is still read and cleared: harmless, as nothing reads it after; seen by no test.)
+
+### The Java API (`api`: loads now)
+
+`clojure.test-clojure.api` imports `arbace.java.api.Clojure` (the Java API for calling Arbace,
+a class of the runtime on the JVM, class forms in `arbace/java/api/Clojure.clj`), which the Go
+program did not have. `bin/c2g --program` now translates it with `arbace/lang`
+(`arbace/c2g/main.clj`): `Clojure/var`, `Clojure/read` work (its static initializer requires
+`arbace.edn` at first use, as on the JVM). The namespace has no `deftest`s, only three
+test.generative specs (`api-can-read`, `api-can-find-var`, `api-can-find-var-str`): see
+"test.generative" below.
+
+### test.generative on the Go build
+
+Upstream's second phase (`ant test-generative`: 27 specs in `data-structures`, `api`, `numbers`,
+`reader`, ...) did not run on the Go build: its runner requires `clojure.tools.namespace.find`
+and `clojure.java.classpath`, which import `java.util.jar.JarFile` and `JarEntry`,
+`java.io.FileReader` and extend `java.net.URLClassLoader`; `clojure.tools.reader` names
+`java.text.SimpleDateFormat`. These libraries are loaded from `ARBACE_PATH`, not embedded, so
+c2g's cut classes (the classes the embedded namespaces name outside the world) did not include
+them. `arbace.c2g.embed/library-cuts` adds them to the cut classes (their members throw when
+called; the runner, given the namespace list, calls none).
+
+GENERATIVE-RESULT
+
+### transducers: the time of seq-and-transducer
+
+`seq-and-transducer` runs 200,000 test.check trials (a random collection through a random
+chain of 1 to 5 transducers, as seqs, `sequence`, `into`, `eduction` and `transduce`, compared).
+Measured with the first 1,000 trials of seed 42 (`.tmp/` script loading the namespace, then
+`quick-check`), amd64, `GOGC=400`:
+
+| | ms per trial | 200,000 trials |
+|---|---:|---:|
+| JVM (stage 2) | 0.11 | 22 s |
+| Go build, main (`815d9d9`) | 11.5 | 2,300 s |
+| Go build, this branch | 8.6 | 1,720 s |
+
+The profile (`perf`, 1,500 trials) is flat: no node kind or function above 3% of the samples;
+the garbage collector's marking takes about 35% of the CPU and allocation about 10%; the rest
+is the tree walk's calls (`InvokeFn`, frames, `RestFn`'s argument seqs, `Var` lookups) and, in
+the first profile, reflective hinted calls: every `Numbers/lt`, `.nth`, `RT/count` went through
+`Reflector.invokeMatchingMethod` (the single method selected again, an argument array copied by
+`boxArgs` with each primitive re-boxed, the call wrapped in `InvocationTargetException` and
+unwrapped). The evaluator-local fix: a resolved method of a public class is called through jrt's
+invoker directly (`Evaluator.invokeResolved`, jrt's native `InvokeDirect`: the arguments as
+`typedArgs` makes them, which now adapts a fn for a functional interface as `boxArg` does; the
+parameter types cached on the node; an exception propagates as it is, which is what Reflector's
+unwrapping gave). A loop of three static calls per iteration
+(`(loop [i 0 acc 0] (if (< i n) (recur (unchecked-inc i) (+ acc i)) acc))`) takes 1.2 µs per
+iteration instead of 2.4; the trials 8.6 ms instead of 11.5.
+
+The rest is general speed (step 7: per-arity invokes, closure compilation, allocation and GC),
+so the test cannot fit in the 900 s a namespace may take before then. Done instead: the
+reference `test/arbace-go-results.edn` can skip single tests (`:skipped-tests {ns {test
+reason}}`; `test/run_clojure_tests.clj` removes their `:test` before running the namespace, and
+`bin/clojure-tests` passes it the reference), and skips `seq-and-transducer` only: `transducers`
+runs its other 18 tests (108 assertions, all passing) instead of being skipped whole. Proposed
+for when step 7 lands (SL3): a per-namespace timeout in the reference (`:timeouts {ns s}`) to
+run the test again, about 30 minutes at today's speed.
+
+### Other skipped namespaces (item 4)
+
+The namespaces `test/arbace-go-results.edn` still skips or that fail, other than those owned
+elsewhere (`java.io`, `method-thunks`, `reader`'s and `sequences`' `File` errors, `server`,
+`pprint`'s flush tests), with what fixing each would take (JVM assertions in parentheses):
+
+| namespace | why | to fix | cost |
+|---|---|---|---|
+| `generated-all-fi-adapters-in-let`, `generated-functional-adapters-in-def`, `...-requiring-reflection` (3 × 99) | Java fixture `arbace.test.AdapterExerciser` | the suite's Java fixtures (`test/java`, 12 files, 709 lines) converted by j2c (tried: all 12 convert, 0 errors, in 1 s) and translated into a test build of the executable (`bin/c2g --program --input DIR`, a second link `arbace-tests`); the runner uses it; the gate's `suite-go` builds it (about 3 minutes more) | half a day (SL4) |
+| `param-tags` (136), `reflect` (7), `try-catch` (5) | Java fixtures `SwissArmy`, `ConcreteClass`; `reflector.IBar`; `ReflectorTryCatchFixture` | the same test build | with the above |
+| `java-interop` (337) | Java fixtures, and `arbace.inspector` (D6: Swing) | the test build, and the namespace loading with Swing's classes cut (as `metadata`); `test-proxy-method-order` reads class files with ASM, `test-proxy-super` extends `BitSet` (not a proxy superclass) | the above plus a day |
+| `compilation` (125) | Java fixtures; `compile` writes class files | the test build gives the fixtures; the AOT tests (`compile`, `*compile-path*`) cannot pass while the Go build writes no class files: a per-test skip as for `transducers` | the above plus an hour |
+| `metadata` (53) | requires `arbace.inspector`, `arbace.xml`, `arbace.java.browse`, `javadoc`, `shell` (D6) to list their vars' metadata | embed these namespaces (D6 left them out) with their JDK classes cut (Swing, SAX, `Desktop`, `ProcessBuilder`): they load and their fns throw when called | half a day, a D6 change (SL5) |
+| `java.javadoc` (5), `java.shell` (13), `java.process` (6) | the namespaces are not in the Go build (D6) | embedding as above makes them load; `shell` and `process` need `ProcessBuilder` and `Process` in jrt over `os/exec` | `javadoc`: with SL5; `shell`, `process`: 1-2 days |
+| `clojure-xml` (1) | `arbace.xml` needs SAX (D6) | a SAX parser in jrt (the JDK's is large; over Go's `encoding/xml`: a day or two) | 1-2 days |
+| `serialization` (77) | `ObjectOutputStream` (D6) | Java serialization in the closed world (translated `java.io.ObjectOutputStream` and its reflection on fields, `serialVersionUID`) | several days |
+| `genclass`, `genclass.examples` (54) | `gen-class` stays out (the user's decision) | | |
+| `repl.deps` (0) | `arbace.repl.deps` (D6: tools.deps) | | |
+
+Fixed here as the cheap ones: `transducers` (its 18 other tests run), `api` (loads, its specs
+run) and test.generative (above). Nothing else on the list is cheap: the Java fixtures (SL4) are
+the next best value (about 450 assertions in five namespaces for half a day), then SL5.
+
+### arm64
+
+ARM64-RESULT
+
+### Results
+
+RESULTS
+
+### Proposed amendments (for the user's review)
+
+AMENDMENTS
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`
