@@ -1250,3 +1250,6 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   `rlwrap` around `arbace` with the flags of Alpine's `clj`; `depends="bash rlwrap"`. Built and
   checked with `bin/alpine-package` (31 MiB, installed 98 MiB; start 190 ms with the cache);
   `arb` tested under a pseudo-terminal (evaluation, history). doc/ALPINE.md, "`arb`".
+- README and FREEZE.md brought up to date (the user's request, 2026-10-10): the releases v1-v3,
+  the base image, the Alpine package and `arb`, ALPINE.md in the documentation list, and the
+  licences beyond EPL-1.0. Docs only, after the tag: no new release.

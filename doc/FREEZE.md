@@ -14,7 +14,11 @@ Arbace on the JVM lives; main moves on.
 
 **Releases on this branch:** `arbace-for-java-26-v1` (the freeze, 2026-10-08) and
 `arbace-for-java-26-v2` (2026-10-09), a fix release: comparisons with NaN were wrong (every
-ordered comparison with NaN was true; see the journal's last entry). Use the newest tag.
+ordered comparison with NaN was true); `arbace-for-java-26-v3` (2026-10-10), for the server side:
+the runtime image holds `java.base` and `jdk.unsupported` only, `bean` finds properties by
+reflection, `#inst` needs only `java.base`, the desktop and XML namespaces fail cleanly without
+their modules (VENDOR-NOTES.md, hand changes 14-16), and the Alpine package (`dist/alpine/`,
+ALPINE.md). Use the newest tag.
 
 ## What the branch holds
 
