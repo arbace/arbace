@@ -278,6 +278,39 @@ VM's `Inflater` stays outside the world. `bin/jrt-convert` also makes the data t
 (RD4): `uniName.dat` as the JDK build's `Gendata.gmk` makes it, ICU's `nfc.nrm` and `nfkc.nrm`,
 into `.tmp/jrt/data`, compared with the build's module image; the program embeds them (§10.3).
 
+**java.time** (amendments TM1, TM3, TM4, TM5, accepted 2026-10-10; JRT-NOTES.md, "Time";
+JRT-SOURCES.md, "Time"). `java.time`, `java.time.temporal`, `java.time.format` and
+`java.time.zone` are in the world whole but their serialization proxies (`java.time.zone`'s
+`Ser` is in: it reads the time-zone database), `java.time.chrono` with the ISO chronology alone
+(the Hijrah, Japanese, Minguo and Thai Buddhist chronologies are cut: `Chronology.of` of them is
+the JDK's unknown-chronology exception); `DateTimeFormatter.toFormat` throws (`java.text.Format`
+is outside) (TM1). Variants: `ZoneRulesProvider` (the TZDB provider alone, no `ServiceLoader`, a
+synchronized `ArrayList` of providers), `TzdbZoneRulesProvider` and `ZoneInfoFile` (`tzdb.dat`
+from the resource `/lib/tzdb.dat`, §10.3), `AbstractChronology` (ISO alone), `ZoneOffset` (its
+quarter-hour cache a `ConcurrentHashMap`), `OpenListResourceBundle` (no `LazyConstant`), `CRC32`
+(no zip library, no direct-buffer natives); `Instant`'s former variant and jrt's `TimeText` are
+gone. The generated sources include java.base's CLDR data, made by the JDK build's
+`CLDRConverter` with the build's arguments and compared byte for byte: `FormatData`,
+`FormatData_en`, `TimeZoneNames`, `TimeZoneNames_en`, `CalendarData`,
+`CLDRBaseLocaleDataMetaInfo` (a variant cuts its static initializer: parent locales and
+language aliases by `Locale.forLanguageTag`) and `java.time.format.ZoneName` (TM3). The locale
+providers are jrt's own Java over those bundles (`LocaleProviderAdapter`, `LocaleResources`,
+`CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`,
+`ResourceBundleBasedAdapter`, lookups transcribed from jdk26u: LICENSE.md) with jrt's own
+`java.util.ResourceBundle` (no `getBundle`); jrt's hand-written Go `LocaleProviderAdapter`,
+`LocaleResources` and `ResourceBundleBasedAdapter` are gone from jrt and the manifest. **The
+locale data are the root locale's and English's** (java.base's): another language takes the
+root locale's data, another English region `en`'s, where the JVM has `jdk.localedata`'s (a
+deviation); week parameters are by region for every locale; jrt's `Locale` answers
+`getUnicodeLocaleType` (null), `hasExtensions` (false), `stripExtensions`, and has the JDK's
+locale constants (TM4; §12, R17). `java.util.TimeZone` is jdk26u's, with `SimpleTimeZone`, `ZoneInfo`,
+`ZoneInfoFile`, the `sun.util.calendar` classes they use and `CRC32` (its natives jrt's over
+Go's `hash/crc32`), in place of jrt's own fixed-offset `TimeZone` and `ZoneInfo`; jrt's own
+`GregorianCalendar` takes a `ZoneInfo`'s offsets as the JDK's, and jrt's hand-written `Date`
+computes its local fields, `toString` and its local constructors in the default zone through
+hooks (`DateZoneOffset`, `DateZoneOffsetByWall`, `DateZoneName`) that c2g's support code sets to
+jrt's own Java `jdk.internal.jrt.DefaultZone` (TM5).
+
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
 (the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
@@ -520,8 +553,11 @@ world (checked at translation). **As built** (amendment W4, accepted 2026-10-09)
 compares **Java packages**, not Go packages (`java.util` and `java.util.concurrent` share jrt,
 and a pair across them would collide just the same), and a pair found is an **error** (c2g
 exits 1, `report.edn` `:package-private-overrides`), not renamed: the cure, a member entry in
-the rename table below, is added when one is found. None has been found in any world built
-(the check's, the whole program's, all of `arbace.lang`).
+the rename table below, is added when one is found. The first pair found
+(`TimeZone.getOffsets(long, int[])`, package-private in java.util, and `ZoneInfo`'s public one in
+sun.util.calendar, with java.time; amendment TM7, accepted 2026-10-10) is resolved by a variant
+that cuts `TimeZone`'s method, which nothing in the world calls on a `TimeZone`: c2g has no
+member renaming (a renamed method's callers and overrides would have to follow).
 
 **Locals, parameters, labels.** Local and parameter names are kept, munged as Clojure's
 `munge` does for the characters Go does not allow (hand-written class forms use Clojure names:
@@ -547,7 +583,8 @@ since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 `File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler`, and `java/net/Proxy` →
 `Net_Proxy`, since jrt's `Proxy` is `java.lang.reflect`'s (amendment FS4, accepted
 2026-10-10; `Socket(Proxy)` names it too, JRT-NOTES.md "Sockets (go-net)"); `sun/text/Normalizer` → `Sun_Normalizer`, since `java.text.Normalizer` is
-`Normalizer` (amendment RD5, accepted 2026-10-10).
+`Normalizer` (amendment RD5, accepted 2026-10-10); `sun/util/calendar/Era` → `Calendar_Era`,
+since `java.time.chrono.Era` is `Era` (amendment TM7, accepted 2026-10-10).
 The check runs after translation (`arbace.c2g.checks`) over every Go package's package-level
 names and every type's method names, across c2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -2153,6 +2190,16 @@ the natives of `UnixFileSystem`'s variant (`filesystem.clj`) answer as the JDK d
 system call fails (no permission or time changes, canonical paths only collapsed, no space).
 `Host` itself is unchanged, so B1b's host and other additions (sockets) are not touched by it.
 
+**An optional `HostLinks`; the host's zone and clock** (amendment TM6, accepted 2026-10-10;
+JRT-NOTES.md, "Time"). `TimeZone`'s natives `getSystemTimeZoneID` and `getSystemGMTOffsetID`
+are jrt's (`timezone.clj`) and find the default zone as jdk26u's `TimeZone_md.c` does on Linux:
+`TZ` (without a leading `:` or `posix/`), else the target of the symbolic link `/etc/localtime`
+after `zoneinfo/`, else the file of `/usr/share/zoneinfo` with its contents (`UTC`, `GMT` first,
+then sorted order), else the host's offset now as `GMT+hh:mm`. The symbolic link is read through
+a fourth optional interface, `jrt.HostLinks` (`Readlink`; `OSHost` implements it over
+`os.Readlink`), the files through `Host`. `VM.getNanoTimeAdjustment` (java.time's system clock)
+is the host's clock with its nanoseconds, so `Instant.now()` has them.
+
 **An optional `NetHost`** (JRT-NOTES.md, "Sockets (go-net)"; accepted with NT1-NT5,
 2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.clj`): `Listen`, `Dial`
 (with a local address and a timeout), `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`,
@@ -2313,7 +2360,11 @@ translated stream): the name resolved as `Class.resolveName` resolves it (absolu
 `/`, else in the package of the class or of an array class's element class), then searched as
 `ClassLoader.getResourceAsStream` searches (`jrt.ResourceOrPath`), the bytes as a
 `ByteArrayInputStream`, null when absent. Deviation: no module encapsulation of resources (the
-JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as on the JVM).
+JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as on the JVM). The
+data include an image file, `lib/tzdb.dat`, the time-zone database made as the JDK build's
+`GendataTZDB.gmk` makes it and compared with the image's `jdk/lib` (a data file under `lib/` is
+the image's, the others are module resources): `TzdbZoneRulesProvider` and `ZoneInfoFile` read it
+as the resource `/lib/tzdb.dat` (amendment TM2, accepted 2026-10-10).
 
 **Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
 image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
@@ -2469,7 +2520,11 @@ translated code, not stubs that throw. **Except the classes of JDK packages thei
 export** (`jdk.internal.*`, `sun.*`; the running JDK's boot layer decides): the JVM refuses
 Clojure code access to them (`IllegalAccessError`), so rooting them only grew the executable;
 classes of no JDK module (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted (amendment RD2,
-accepted 2026-10-10; `arbace.c2g.main/repl-visible?`).
+accepted 2026-10-10; `arbace.c2g.main/repl-visible?`). A root instance method is also a **virtual
+call**: its overrides in every instantiated class are translated, those of classes that are not
+roots themselves (RD2's) included, so that reflection on their instances reaches no stub; the
+reachability pass indexes virtual calls by their receiver's type and instantiated classes by their
+supertypes (amendment TM8, accepted 2026-10-10; `arbace.c2g.reach`).
 
 **The Java API** (amendment SL6, accepted 2026-10-10): `--program` also translates
 `arbace/java/api/Clojure.clj`, so `arbace.java.api.Clojure` (`Clojure/var`, `Clojure/read`; its
@@ -2627,6 +2682,9 @@ defined.
   (`DecimalFormatSymbols`, the number patterns), with the currency `$`/`USD` for the United
   States and `¤`/`XXX` otherwise. `String.toLowerCase(Locale)` and `toUpperCase(Locale)` apply
   the root locale's mapping for every locale: no Turkish, Azerbaijani or Lithuanian rules.
+  Since java.time (amendment TM4, accepted 2026-10-10) the number patterns and java.time's text,
+  patterns, week rules and zone names come from java.base's CLDR data of the root and English
+  locales, through jrt's own Java providers (§4.1).
 - **Charsets** (amendment R18, accepted 2026-10-08; V9): three only, UTF-8, ISO-8859-1 and
   US-ASCII, with JDK 26's names and aliases; `Charset.forName` throws
   `UnsupportedCharsetException` for any other legal name (`UTF-16` included, and
@@ -3795,6 +3853,18 @@ the closure: JRT-SOURCES.md. JC4 `ThreadLocalRandom` translated over the Thread'
 additions to jrt's hand-written classes (`Thread.State`, `Thread.Builder`, `Future.State`,
 `LockSupport`'s blockers, `Unsafe`): §11. JC9 no Go deadlock crash at main's end: §8.4. JC10
 `bin/arbace-go`'s gate key covers `test/g2c/jrt_sources.clj`.
+
+**Time** (JRT-NOTES.md, "Time"; accepted by the user 2026-10-10): TM1 java.time in the world,
+the ISO chronology alone, its variants: §4.1. TM2 `lib/tzdb.dat` as resource data, an image
+file: §10.3. TM3 java.base's CLDR data as generated sources: §4.1, JRT-SOURCES.md. TM4 the
+locale providers and `ResourceBundle` as jrt's own Java, the root and English locale data (a
+deviation for other locales), `Locale`'s extension queries and constants: §4.1, §9.1. TM5
+jdk26u's `TimeZone` family, jrt's `GregorianCalendar` over `ZoneInfo`'s offsets, `Date` in the
+default zone: §4.1. TM6 the host's zone (`TimeZone_md.c`'s rules, the optional `HostLinks`) and
+clock: §9.4. TM7 the rename table's `Calendar_Era` and the first package-private pair resolved
+by a variant: §4.4. TM8 root instance methods as virtual calls, reachability indexed: §10.6. TM9
+`bin/jrt-convert`'s shape check takes jrt's own replacing classes from source: JRT-SOURCES.md.
+TM4 replaces the hand-written locale shims of R17 with Java (§12); TM8 refines P2 and RD2.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

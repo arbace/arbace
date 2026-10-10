@@ -22,6 +22,7 @@
 # Environment:
 #   ARBACE_GO_ARCH    the architecture run (default amd64)
 #   ARBACE_GO_ARCHES  the architectures built and smoke-tested (default amd64,arm64)
+#   ARBACE_GO_SYMBOLS 1: keep the executables' symbol table and DWARF (stripped by default)
 #   ARBACE_PATH       directories (separated by :) where RT.load finds namespaces after the
 #                     sources embedded in the executable (the JVM's class path)
 #   C2G_JVM_OPTS      bin/c2g's JVM options
@@ -40,6 +41,12 @@ go_env() { # go_env ARCH
     GOEXPERIMENT= CGO_ENABLED=0 GOOS=linux GOARCH="$a" \
     "$( [ "$a" = amd64 ] && echo GOAMD64=v1 || echo GOARM64=v8.0 )"
 }
+
+# the linker's flags of the executables: without the symbol table and DWARF (-s -w; amendment
+# SZ1): Go's own tables (pclntab), which panics' traces, jrt's stack traces and profiles read,
+# stay. ARBACE_GO_SYMBOLS=1 keeps them (go tool nm, debuggers).
+ldflags=()
+[ "${ARBACE_GO_SYMBOLS:-}" = 1 ] || ldflags=("-ldflags=-s -w")
 
 # the seconds since $1 (date +%s)
 since() { echo "$(( $(date +%s) - $1 )) s"; }
@@ -84,7 +91,7 @@ pgo_build() {
   for a in $(build_order); do
     t0=$(date +%s)
     (cd "$dir/work-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
-       -buildvcs=false -overlay "$overlay" -pgo "$dir/pgo.pprof" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
+       -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -pgo "$dir/pgo.pprof" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
       || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: the profile-guided build failed" >&2; return 1; }
     echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes, profile-guided; built in $(since "$t0"))" >&2
   done
@@ -116,7 +123,7 @@ image() {
     [ -d "$dir/work-$a/mod" ] || { echo "arbace-go: $a: not built" >&2; return 1; }
     cp "$main/image.bin" "$dir/work-$a/mod/cmd/arbace/image.bin"
     (cd "$dir/work-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
-       -buildvcs=false -overlay "$overlay" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
+       -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
       || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
     echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes; linked in $(since "$t0"))" >&2
   done
@@ -128,8 +135,8 @@ image() {
 prepare() {
   local exe=$1 image=$2 res=$dir/c2g/prog/go/arbace/cmd/arbace/res nss
   echo "== prepare the namespaces (the image)" >&2
-  nss=$(cd "$res" && grep -lE '^\(ns( |$)' $(find arbace -name '*.clj' | sort) \
-          | sed -e 's/\.clj$//' -e 's|/|.|g' -e 's/_/-/g' | tr '\n' ' ')
+  # the embedded namespaces, as c2g lists them (its sources may be compressed: amendment SZ2)
+  nss=$(tr '\n' ' ' < "$dir/c2g/prog/namespaces.txt")
   rm -f "$image"
   printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
     > "$dir/prepare.clj"

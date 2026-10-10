@@ -573,8 +573,44 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
   "Whether member tables list the public methods that do not exist in Go (bin/c2g --program)."
   false)
 
+(defn- dotted-desc
+  "A descriptor with binary names (java.util.Map$Entry), as jrt's member tables hold them."
+  [d]
+  (str/replace d "/" "."))
+
+(defn member-table-form
+  "The MemberTable of class g's tables {:methods :ctors :fields} (amendment SZ3): the members'
+  lines as data, and per kind one dispatch function, a switch over the member's index among
+  its kind's (a member without a :body has none: jrt throws); [the dispatch functions' forms,
+  the table's form], nil when there are no members."
+  [pkg g {:keys [methods ctors fields cut]}]
+  (when (or (seq methods) (seq ctors) (seq fields))
+    (let [dispatch (fn [kind params ret bodies]
+                     (let [cases (keep-indexed (fn [i b] (when b (apply list 'case [i] b))) bodies)]
+                       (when (seq cases)
+                         (let [sym (symbol (str g "_" kind))]
+                           [sym (list* 'go/func sym (if ret (with-meta params {:tag ret}) params)
+                                       (apply list 'switch 'i cases)
+                                       (when ret ['(return nil)]))]))))
+          inv (dispatch "invoke" [(tag 'i 'int32) (tag 'this 'any) (tag 'args '(slice any))] 'any (map :body methods))
+          nw (dispatch "new" [(tag 'i 'int32) (tag 'args '(slice any))] 'any (map :body ctors))
+          gt (dispatch "get" [(tag 'i 'int32) (tag 'o 'any)] 'any (map :get fields))
+          st (dispatch "set" [(tag 'i 'int32) (tag 'o 'any) (tag 'v 'any)] nil (map :set fields))]
+      [(keep second [inv nw gt st])
+       (list 'addr
+             (apply list 'lit (m/jrt-sym pkg "MemberTable")
+                    (concat
+                      [:Data (str/join "\n" (map :line (concat methods ctors fields)))]
+                      (when cut [:Cut true])
+                      (when inv [:Invoke (first inv)])
+                      (when nw [:New (first nw)])
+                      (when gt [:Get (first gt)])
+                      (when st [:Set (first st)]))))])))
+
 (defn member-tables
-  "The member tables (§5.11, amendment R12) of translated class n: its public members."
+  "The member tables (§5.11, amendment R12) of translated class n: its public members, as
+  {:methods :ctors :fields} of {:line (data) :body (the dispatch case's statements; none:
+  absent)} (fields: :get, :set)."
   [pkg n]
   (binding [c/*f* {:pkg pkg}]
     (let [g (m/go-name n)
@@ -592,13 +628,10 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                               args (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)
                               call (cond static (apply list (symbol (str g "_" base)) args)
                                          :else (apply list (symbol (str "." base)) (list 'assert rty 'this) args))
-                              body (if (= "V" r) [call nil] [(result-any pkg r call)])]]
-                    (list 'lit (m/jrt-sym pkg "MethodInfo")
-                          :Name (:name mm)
-                          :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
-                          :Return (cls r)
-                          :Modifiers (bit-and (:flags mm) 0x1fff)
-                          :Invoke (list* 'fn (with-meta [(tag 'this 'any) (tag 'args '(slice any))] {:tag 'any}) body)))
+                              ]]
+                    (do (run! cls ps) (cls r)
+                        {:line (str "M" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))
+                         :body (if (= "V" r) [call '(return nil)] [(list 'return (result-any pkg r call))])}))
           ;; --program: the public methods that do not exist in Go (their descriptors name
           ;; classes outside the world), as entries that throw, so that code naming them
           ;; analyzes (RT/toUrl) and fails when run (EVAL-NOTES.md, "Cut classes")
@@ -608,17 +641,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                            :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
                                       (not (present [(:name mm) (:desc mm)])))
                            :let [[ps r] (t/parse-method-desc (:desc mm))]]
-                       (list 'lit (m/jrt-sym pkg "MethodInfo")
-                             :Name (:name mm)
-                             :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
-                             :Return (cls r)
-                             :Modifiers (bit-and (:flags mm) 0x1fff)
-                             :Invoke (list 'fn (with-meta [(tag 'this 'any) (tag 'args '(slice any))] {:tag 'any})
-                                           (list 'panic (list (m/jrt-sym pkg "Thrown")
-                                                              (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
-                                                                    (list (m/jrt-sym pkg "Str")
-                                                                          (str (java-name n) "." (:name mm) (:desc mm)
-                                                                               " is not in the Go build"))))))))))
+                       (do (run! cls ps) (cls r)
+                           ;; m: absent, jrt makes the throwing function (MemberTable)
+                           {:line (str "m" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))}))))
           methods (concat methods absent)
           ;; a name's overloads in the order the JVM's getDeclaredMethods gives them (when the
           ;; class is on this JVM), which Reflector's choice among applicable overloads follows
@@ -652,27 +677,18 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                            (for [mm (:methods (a/decl n))
                                  :when (and (public? mm) (= "<init>" (:name mm)) (not (present (:desc mm))))
                                  :let [[ps _] (t/parse-method-desc (:desc mm))]]
-                             (list 'lit (m/jrt-sym pkg "CtorInfo")
-                                   :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
-                                   :Modifiers (bit-and (:flags mm) 0x1fff)
-                                   :New (list 'fn (with-meta [(tag 'args '(slice any))] {:tag 'any})
-                                              (list 'panic (list (m/jrt-sym pkg "Thrown")
-                                                                 (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
-                                                                       (list (m/jrt-sym pkg "Str")
-                                                                             (str (java-name n) ".<init>" (:desc mm)
-                                                                                  " is not in the Go build"))))))))))
+                             (do (run! cls ps)
+                                 {:line (str "c" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))}))))
           ctors (for [mm (d/class-methods n)
                       :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
                       :let [real (e/ctor-real-desc n mm)
                             [ps _] (t/parse-method-desc (:desc mm))
                             [rps _] (t/parse-method-desc real)]
                       :when (= (count ps) (count rps))]
-                  (list 'lit (m/jrt-sym pkg "CtorInfo")
-                        :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (map cls ps)))
-                        :Modifiers (bit-and (:flags mm) 0x1fff)
-                        :New (list 'fn (with-meta [(tag 'args '(slice any))] {:tag 'any})
-                                   (apply list (symbol (nm/new-name g real))
-                                          (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))))
+                  (do (run! cls ps)
+                      {:line (str "C" (bit-and (:flags mm) 0x1fff) " " (dotted-desc (:desc mm)))
+                       :body [(list 'return (apply list (symbol (nm/new-name g real))
+                                                   (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)))]}))
           fields (for [f (d/class-fields n)
                        :when (public? f)
                        :let [static (m/static? f)
@@ -683,16 +699,14 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                              vol (c/volatile-field? f)
                              cval (env/const-value f)
                              final (m/has? (:flags f) Opcodes/ACC_FINAL)]]
-                   (list* 'lit (m/jrt-sym pkg "FieldInfo")
-                          :Name (:name f) :Type (cls (:desc f)) :Modifiers (bit-and (:flags f) 0x5fff)
-                          :Get (list 'fn (with-meta [(tag 'o 'any)] {:tag 'any})
-                                     (let [r (if vol (c/volatile-read place (:desc f)) place)]
-                                       (or (result-any pkg (:desc f) r) r)))
-                          (when-not final
-                            [:Set (list 'fn [(tag 'o 'any) (tag 'v 'any)]
-                                        (if vol
-                                          (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
-                                          (list 'set! place (arg-conv pkg (:desc f) 'v))))])))]
+                   (do (cls (:desc f))
+                       {:line (str (if final "G" "F") (bit-and (:flags f) 0x5fff) " " (:name f) " " (dotted-desc (:desc f)))
+                        :get [(list 'return (let [r (if vol (c/volatile-read place (:desc f)) place)]
+                                              (or (result-any pkg (:desc f) r) r)))]
+                        :set (when-not final
+                               [(if vol
+                                  (c/volatile-write place (:desc f) (arg-conv pkg (:desc f) 'v))
+                                  (list 'set! place (arg-conv pkg (:desc f) 'v)))])}))]
       {:methods methods :ctors (concat ctors absent-ctors) :fields fields})))
 
 (defn class-registration
@@ -712,7 +726,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                    (:interfaces dd)))
           tables (if (:reflected dd) {} (member-tables pkg n))
           cls-sym (symbol (str g "_class"))]
-      [(list 'go/var cls-sym
+      (vec (remove nil? (concat (when-let [[fns t] (member-table-form pkg g tables)]
+         (conj (vec fns) (list 'go/var (tag (symbol (str g "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) t)))
+       [(list 'go/var cls-sym
              (list (m/jrt-sym pkg "Define")
                    (list 'addr
                          (apply list 'lit (m/jrt-sym pkg "ClassInfo")
@@ -738,14 +754,10 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                (list* 'fn (with-meta [] {:tag (list '* (m/jrt-sym pkg "RefArray"))})
                                       (concat (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
                                               [(symbol (str g "__VALUES"))])))])
-                      (when (seq (:methods tables))
-                        [(list 'set! (list '.-Methods 'i) (apply list 'lit (list 'slice (m/jrt-sym pkg "MethodInfo")) (:methods tables)))])
-                      (when (seq (:ctors tables))
-                        [(list 'set! (list '.-Ctors 'i) (apply list 'lit (list 'slice (m/jrt-sym pkg "CtorInfo")) (:ctors tables)))])
-                      (when (seq (:fields tables))
-                        [(list 'set! (list '.-Fields 'i) (apply list 'lit (list 'slice (m/jrt-sym pkg "FieldInfo")) (:fields tables)))])
+                      (when (member-table-form pkg g tables)
+                        [(list 'set! (list '.-Table 'i) (symbol (str g "_members")))])
                       (when-not iface
-                        [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))])))
+                        [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))]))))))
 
 (defn cut-forms
   "Class objects of classes outside the closed world that code names (class literals):
@@ -939,53 +951,45 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
   "The member tables of the cut classes of pkg (C2G-SPEC §4.1, D6; doc/go/EVAL-NOTES.md): their
   public members as the JVM reports them, whose types the Go build can name, each throwing
   UnsupportedOperationException when called, so that code naming them analyzes (core's
-  annotation support names ASM's Type) and fails only when run."
+  annotation support names ASM's Type) and fails only when run. As MemberTables (amendment
+  SZ3) whose functions are nil (jrt throws, MemberTable.Cut) but for a constant's getter."
   [pkg cuts classes]
-  (let [stub (fn [what]
-               (list 'panic (list (m/jrt-sym pkg "Thrown")
-                                  (list (m/jrt-sym pkg "UnsupportedOperationException_New_String")
-                                        (list (m/jrt-sym pkg "Str") (str what " is not in the Go build"))))))
+  (let [desc (fn [^Class c] (str/replace (.descriptorString c) "/" "."))
+        mdesc (fn [ps r] (str "(" (apply str (map desc ps)) ")" (desc r)))
         tables (for [n (sort classes)
                      :let [^Class c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
                                          (catch Throwable _ nil))]
                      :when c
-                     :let [cls (m/class-sym pkg n "_class")
-                           texpr #(cut-type-expr pkg cuts %)
+                     :let [texpr #(cut-type-expr pkg cuts %)
                            ms (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %))))
                                                                          (.getMethods c))
                                     :when (= c (.getDeclaringClass mt))
                                     :let [ps (map texpr (.getParameterTypes mt))
                                           r (texpr (.getReturnType mt))]
                                     :when (and r (every? some? ps))]
-                                (list 'lit (m/jrt-sym pkg "MethodInfo") :Name (.getName mt)
-                                      :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) ps))
-                                      :Return r :Modifiers (.getModifiers mt)
-                                      :Invoke (list 'fn (with-meta [(with-meta 'this {:tag 'any}) (with-meta 'args {:tag '(slice any)})] {:tag 'any})
-                                                    (stub (str (.getName c) "." (.getName mt))))))
+                                {:line (str "m" (.getModifiers mt) " " (.getName mt) " "
+                                            (mdesc (.getParameterTypes mt) (.getReturnType mt)))})
                            fs (for [^java.lang.reflect.Field fd (sort-by #(.getName ^java.lang.reflect.Field %) (.getFields c))
                                     :when (= c (.getDeclaringClass fd))
                                     :let [t (texpr (.getType fd))]
                                     :when t]
-                                (list 'lit (m/jrt-sym pkg "FieldInfo") :Name (.getName fd) :Type t :Modifiers (.getModifiers fd)
-                                      :Get (list 'fn (with-meta [(with-meta 'o {:tag 'any})] {:tag 'any})
-                                                 (if-let [k (cut-constant pkg fd)]
-                                                   k
-                                                   (stub (str (.getName c) "." (.getName fd)))))))
+                                (let [k (cut-constant pkg fd)]
+                                  {:line (str (if k "G" "f") (.getModifiers fd) " " (.getName fd) " " (desc (.getType fd)))
+                                   :get (when k [(list 'return k)])}))
                            ks (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))
                                     :let [ps (map texpr (.getParameterTypes k))]
                                     :when (every? some? ps)]
-                                (list 'lit (m/jrt-sym pkg "CtorInfo")
-                                      :Params (when (seq ps) (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) ps))
-                                      :Modifiers (.getModifiers k)
-                                      :New (list 'fn (with-meta [(with-meta 'args {:tag '(slice any)})] {:tag 'any})
-                                                 (stub (str (.getName c) "'s constructor")))))]
+                                {:line (str "c" (.getModifiers k) " " (mdesc (.getParameterTypes k) Void/TYPE))})]
                      :when (or (seq ms) (seq fs) (seq ks))]
-                 (concat
-                   (when (seq ms) [(list 'set! (list '.-Methods (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "MethodInfo")) ms))])
-                   (when (seq fs) [(list 'set! (list '.-Fields (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "FieldInfo")) fs))])
-                   (when (seq ks) [(list 'set! (list '.-Ctors (list '.Info cls)) (apply list 'lit (list 'slice (m/jrt-sym pkg "CtorInfo")) ks))])))]
-    (when (seq tables)
-      [(apply list 'go/func 'init [] (apply concat tables))])))
+                 [n (member-table-form pkg (m/go-name n) {:methods ms :ctors ks :fields fs :cut true})])]
+    (concat
+      (mapcat (fn [[n [fns t]]]
+                (conj (vec fns) (list 'go/var (tag (symbol (str (m/go-name n) "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) t)))
+              tables)
+      (when (seq tables)
+        [(apply list 'go/func 'init []
+                (for [[n _] tables]
+                  (list 'set! (list '.-Table (list '.Info (m/class-sym pkg n "_class"))) (symbol (str (m/go-name n) "_members")))))]))))
 
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
