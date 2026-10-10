@@ -5,8 +5,8 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "thread.go"
-  :imports [[runtime "runtime"] [strconv "strconv"] [sync "sync"] [atomic "sync/atomic"]
-            [time "time"] [unsafe "unsafe"]])
+  :imports [[reflect "reflect"] [runtime "runtime"] [strconv "strconv"] [sync "sync"]
+            [atomic "sync/atomic"] [time "time"] [unsafe "unsafe"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The goroutine-local slot (§9.3): two functions of the patched runtime (overlay/go/runtime,
@@ -121,11 +121,13 @@ LockSupport's permit.\n"
           ^{:tag (chan (struct))} done
           ^{:tag (chan (struct))} intr
           ^{:tag (chan (struct))} park
+          ^{:tag (Volatile any) :doc "LockSupport's blocker (getBlocker)\n"} parkBlocker
           ^{:tag (Volatile Thread_UncaughtExceptionHandler)} ueh
           ^{:tag (map (* ThreadLocal) any) :doc "thread locals, used by the thread itself only\n"} locals
           ^{:tag (map (* ThreadLocal) any)} inheritable
-          ^int32 probe
-          ^int64 seed
+          ^{:tag int64 :doc "ThreadLocalRandom's seed, probe and secondary seed, which it reaches through Unsafe (JC4)\n"} F_threadLocalRandomSeed
+          ^int32 F_threadLocalRandomProbe
+          ^int32 F_threadLocalRandomSecondarySeed
           ^{:tag (* ForkJoinPool) :doc "the pool whose worker the thread is (forkjoin.clj)\n"} fjPool))
 
 (go/var Thread_class
@@ -545,8 +547,27 @@ before it exits after main.\n"
     (.Wait nonDaemonCond))
   (.Unlock nonDaemonMu))
 
+(go/var ^{:tag sync/Once} keepAliveOnce)
+
+(go/func keepAlive
+  "keepAlive starts, once, a goroutine that waits on a ticker for the rest of the program, so
+that Go's run time never ends it with \"all goroutines are asleep - deadlock!\": a JVM whose
+threads all wait forever (a fixed pool's idle workers that no one shut down, which main's end
+waits for, or a deadlock) waits forever too, and the Go build does as the JVM does
+(JRT-NOTES.md, \"Concurrency\", JC9). A pending timer is what Go's deadlock check looks for;
+the ticker fires once an hour.\n"
+  []
+  (.Do keepAliveOnce
+       (fn []
+         (go ((fn []
+                (let [tk (time/NewTicker time/Hour)]
+                  (while true
+                    (<! (.-C tk))))))))))
+
 (go/func init []
   (set! (.-L nonDaemonCond) (addr nonDaemonMu))
+  ;; ThreadLocalRandom's fields, for Unsafe.objectFieldOffset (JC4)
+  (RegisterGoType Thread_class ((inst reflect/TypeFor Thread)))
   (set! (.-IsInstance (.Info Thread_class)) Thread_InstanceOf)
   (set! (.-IsInstance (.Info Thread_UncaughtExceptionHandler_class)) Thread_UncaughtExceptionHandler_InstanceOf)
   ;; Object.wait selects on the current thread's interrupt token (monitor.go)
@@ -566,6 +587,7 @@ threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns t
         (set! t (CurrentThread))
         (.Store (.-name t) (Str "main"))))
     (.Store (.-daemon t) false)
+    (keepAlive)
     (let [exc (runCatching run)
           status 0]
       (when (!= exc nil)

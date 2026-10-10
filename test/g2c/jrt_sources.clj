@@ -159,6 +159,47 @@
                  "sun/net/www/protocol/jar/Handler"])
            ["src/java.base/unix/classes/sun/net/www/protocol/file/Handler.java"]))))
 
+(def concurrent-sources
+  "The rest of java.util.concurrent in the Go build (the user's decision of 2026-10-10;
+  doc/go/JRT-NOTES.md, \"Concurrency\"): jdk26u's classes over VarHandles, which c2g compiles to
+  atomic operations on the fields they name (C2G-SPEC §8.5), and over Unsafe. Paths relative
+  to src/java.base/share/classes."
+  (vec (sort
+         (concat
+           ;; the concurrent collections and queues, with the interfaces they implement
+           (map #(str "java/util/concurrent/" % ".java")
+                ["ConcurrentLinkedQueue" "ConcurrentLinkedDeque" "ConcurrentSkipListMap"
+                 "ConcurrentSkipListSet" "ConcurrentNavigableMap" "CopyOnWriteArrayList"
+                 "CopyOnWriteArraySet" "LinkedBlockingDeque" "BlockingDeque" "PriorityBlockingQueue"
+                 "DelayQueue" "Delayed" "SynchronousQueue" "LinkedTransferQueue" "TransferQueue"])
+           ;; the synchronizers and CompletableFuture
+           (map #(str "java/util/concurrent/" % ".java")
+                ["Exchanger" "Phaser" "CompletableFuture" "CompletionStage" "CompletionException"])
+           ;; the atomic arrays, the adders and accumulators, the stamped and markable references
+           (map #(str "java/util/concurrent/atomic/" % ".java")
+                ["AtomicReferenceArray" "AtomicIntegerArray" "AtomicLongArray" "Striped64" "LongAdder"
+                 "DoubleAdder" "LongAccumulator" "DoubleAccumulator" "AtomicStampedReference"
+                 "AtomicMarkableReference"])
+           ;; StampedLock (over Unsafe and LockSupport), and the interface of its read-write view
+           ["java/util/concurrent/locks/StampedLock.java" "java/util/concurrent/locks/ReadWriteLock.java"]
+           ;; what they use of java.util: DelayQueue's PriorityQueue, the SortedSet that
+           ;; ConcurrentSkipListSet's views are (both also on java.util's own list of gaps,
+           ;; JAVA-BASE.md; a file named twice is translated once)
+           ["java/util/PriorityQueue.java" "java/util/SortedSet.java"]
+           ;; ThreadLocalRandom whole (jrt had its probes only), over Unsafe on the Thread's
+           ;; seed and probe fields, with RandomSupport, its bounded and stream algorithms
+           ["java/util/concurrent/ThreadLocalRandom.java" "jdk/internal/util/random/RandomSupport.java"]
+           ;; the executors: ThreadPoolExecutor (its workers are AbstractQueuedSynchronizers),
+           ;; ScheduledThreadPoolExecutor, FutureTask, Executors' factories, the completion
+           ;; service (jrt's hand-written pools and FutureTask are gone; jrt keeps the
+           ;; interfaces, which its ForkJoinPool implements)
+           (map #(str "java/util/concurrent/" % ".java")
+                ["ThreadPoolExecutor" "ScheduledThreadPoolExecutor" "AbstractExecutorService" "FutureTask"
+                 "Executors" "RejectedExecutionHandler" "ExecutorCompletionService" "CompletionService"
+                 "RunnableFuture" "ScheduledExecutorService" "ScheduledFuture" "RunnableScheduledFuture"])
+           (map #(str "java/util/concurrent/locks/" % ".java")
+                ["AbstractQueuedSynchronizer" "AbstractOwnableSynchronizer"])))))
+
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
   whose JDK sources need what is cut (java.nio's encoders and channels), written for jrt.
@@ -179,6 +220,7 @@
   [f]
   (vec (sort (distinct (concat (keys (get-in (read-data f) [:closure :repl :sources]))
                                (map #(str "src/java.base/share/classes/" %) added-sources)
+                               (map #(str "src/java.base/share/classes/" %) concurrent-sources)
                                added-module-sources
                                file-sources)))))
 

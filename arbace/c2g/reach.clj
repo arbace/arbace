@@ -209,6 +209,23 @@
 
 (defn- class-of-desc [d] (first (m/desc-classes d)))
 
+(defn- vh-const?
+  "Is field f a constant VarHandle of the world (C2G-SPEC §8.5)?"
+  [f]
+  (contains? (:handles (:vh m/*w*)) [(or (:declarer f) (:owner f)) (:name f)]))
+
+(defn- vh-call?
+  "A VarHandle call c2g compiles statically (C2G-SPEC §8.5): a fence, MethodHandles.lookup(),
+  or an access mode on a constant handle; it names no class of java.lang.invoke in Go."
+  [node]
+  (let [{:keys [owner kind name]} node]
+    (or (and (= :static kind) (= "java/lang/invoke/VarHandle" owner)
+             (#{"fullFence" "acquireFence" "releaseFence" "loadLoadFence" "storeStoreFence"} name))
+        (and (= :static kind) (= "java/lang/invoke/MethodHandles" owner) (= "lookup" name))
+        (and (not= :static kind) (= "java/lang/invoke/VarHandle" owner)
+             (let [tg (acc/unaccess (:target node))]
+               (and (= :get-static (:op tg)) (vh-const? (:field tg))))))))
+
 (defn- scan-node! [node]
   (let [node (acc/unaccess node)]
     (case (:op node)
@@ -218,6 +235,7 @@
             {:keys [name desc]} node]
         (cond
           (:array-clone node) (use-desc! (:owner node))
+          (vh-call? node) (doseq [c (m/method-desc-classes desc)] (use! c))
           :else
           (do
             (use! (:owner node))
@@ -248,7 +266,7 @@
       (:get-static :set-static)
       (let [f (:field node)
             o (or (:declarer f) (:owner f))]
-        (when (use! o)
+        (when (and (not (vh-const? f)) (use! o))
           (init! o)
           (use-desc! (:desc f))
           (when (and (m/hand-written? o) (not (hw-has-field? o (:name f) true)))

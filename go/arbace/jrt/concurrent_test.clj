@@ -4,8 +4,8 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "concurrent_test.go"
-  :imports [[bits "math/bits"] [reflect "reflect"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"]
-            [testing "testing"] [time "time"]])
+  :imports [[math "math"] [bits "math/bits"] [reflect "reflect"] [strings "strings"] [sync "sync"]
+            [atomic "sync/atomic"] [testing "testing"] [time "time"]])
 
 (go/func parallel "parallel runs f(0) ... f(n-1) in n jrt threads and waits for them.\n"
   [^int n ^{:tag (func [int])} f]
@@ -321,17 +321,6 @@ unaligned reads of ArraysSupport.mismatch and the writes of DecimalDigits.\n"
       (.Error t "tryLock of the free write lock"))
     (.Unlock__V w)))
 
-(go/type countingFactory "countingFactory names its daemon threads and counts them.\n"
-  (struct Object ^string prefix ^{:tag atomic/Int32} n))
-(go/method NewThread_Runnable__Thread ^Thread_I [^{:tag (* countingFactory)} f ^Runnable r]
-  (let [th (Thread_New_Runnable_String r (Str (+ (.-prefix f) (.String (StrOfInt (.Add (.-n f) 1))))))]
-    (.SetDaemon_Z__V th true)
-    th))
-(go/method Is_ThreadFactory [^{:tag (* countingFactory)} f])
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* countingFactory)} f] Object_class)
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* countingFactory)} f] (Object_toString f))
-(go/method Clone__O ^any [^{:tag (* countingFactory)} f] nil)
-
 (go/type testCallable (struct Object ^{:tag (func [] [any])} f))
 (go/method Call__O ^any [^{:tag (* testCallable)} c] ((.-f c)))
 (go/method Is_Callable [^{:tag (* testCallable)} c])
@@ -340,88 +329,156 @@ unaligned reads of ArraysSupport.mismatch and the writes of DecimalDigits.\n"
 (go/method Clone__O ^any [^{:tag (* testCallable)} c] nil)
 (go/func callableOf ^Callable [^{:tag (func [] [any])} f] (addr (lit testCallable :f f)))
 
-(go/func TestExecutors [^{:tag (* testing/T)} t]
-  ;; a fixed pool: at most n tasks at once, all run, futures' results
-  (let [f (addr (lit countingFactory :prefix "fixed-"))
-        p (Executors_NewFixedThreadPool_I_ThreadFactory__ExecutorService 3 f)
-        ^atomic/Int32 running (zero atomic/Int32)
-        ^atomic/Int32 most (zero atomic/Int32)
-        futs (make (slice Future) 20)]
-    (for [i 0] (< i 20) (inc! i)
-      (aset futs i (.Submit_Callable__Future p (callableOf (fn ^any []
-                                                             (let [n (.Add running 1)]
-                                                               (when (> n (.Load most)) (.Store most n)))
-                                                             (time/Sleep time/Millisecond)
-                                                             (.Add running -1)
-                                                             (StrOfInt (conv int32 i)))))))
-    (range [i fu futs]
-      (when (!= (.String (StrOfObj (.Get__O fu))) (.String (StrOfInt (conv int32 i))))
-        (.Errorf t "future %d" i)))
-    (when (or (> (.Load most) 3) (> (.Load (.-n f)) 3))
-      (.Errorf t "fixed pool: %d at once, %d threads" (.Load most) (.Load (.-n f))))
+(go/type vhCell
+  "vhCell holds fields in their volatile representations (C2G-SPEC §8.2, §8.5).\n"
+  (struct ^{:tag atomic/Int32} i ^{:tag atomic/Int64} j ^{:tag atomic/Bool} z ^{:tag atomic/Uint32} f
+          ^{:tag atomic/Uint64} d ^{:tag (atomic/Pointer String)} s ^{:tag (Volatile any)} o))
+
+(go/func TestVarHandles [^{:tag (* testing/T)} t]
+  ;; the field operations c2g calls for VarHandle access modes (§8.5)
+  (let [c (addr (lit vhCell))]
+    (.Store (.-i c) 5)
+    (when (or (!= (VhCmpXchgInt32 (addr (.-i c)) 4 9) 5) (!= (VhCmpXchgInt32 (addr (.-i c)) 5 9) 5) (!= (.Load (.-i c)) 9))
+      (.Error t "compareAndExchange on an int"))
+    (when (or (!= (VhGetAndAddInt32 (addr (.-i c)) 3) 9) (!= (.Load (.-i c)) 12))
+      (.Error t "getAndAdd on an int"))
+    (when (or (!= (VhGetAndXorInt32 (addr (.-i c)) 5) 12) (!= (.Load (.-i c)) 9))
+      (.Error t "getAndBitwiseXor on an int"))
+    (.Store (.-j c) -1)
+    (when (or (!= (VhCmpXchgInt64 (addr (.-j c)) -1 7) -1) (!= (VhGetAndAddInt64 (addr (.-j c)) 1) 7)
+              (!= (VhGetAndXorInt64 (addr (.-j c)) 8) 8) (!= (.Load (.-j c)) 0))
+      (.Error t "long operations"))
+    (when (or (VhCmpXchgBool (addr (.-z c)) true false) (VhGetAndOrBool (addr (.-z c)) true)
+              (not (VhGetAndAndBool (addr (.-z c)) false)) (VhGetAndXorBool (addr (.-z c)) true)
+              (not (.Load (.-z c))))
+      (.Error t "boolean operations"))
+    (.Store (.-f c) (math/Float32bits 1.5))
+    (when (or (!= (VhGetAndAddFloat32 (addr (.-f c)) 1) 1.5) (!= (math/Float32frombits (.Load (.-f c))) 2.5)
+              (!= (VhCmpXchgUint32 (addr (.-f c)) (math/Float32bits 2.5) (math/Float32bits 0)) (math/Float32bits 2.5)))
+      (.Error t "float operations"))
+    (.Store (.-d c) (math/Float64bits 0.25))
+    (when (or (!= (VhGetAndAddFloat64 (addr (.-d c)) 0.5) 0.25) (!= (math/Float64frombits (.Load (.-d c))) 0.75)
+              (!= (VhCmpXchgUint64 (addr (.-d c)) 0 1) (math/Float64bits 0.75)))
+      (.Error t "double operations"))
+    (let [a (Str "a") b (Str "b")]
+      (.Store (.-s c) a)
+      (when (or (!= (VhCmpXchgPtr (addr (.-s c)) b a) a) (!= (VhCmpXchgPtr (addr (.-s c)) a b) a) (!= (.Load (.-s c)) b))
+        (.Error t "compareAndExchange on a pointer field"))
+      ;; references by identity: an equal string is not the same reference
+      (.Store (.-o c) (conv any a))
+      (when (or (!= (VhCmpXchgVol (addr (.-o c)) (conv any (Str "a")) (conv any b)) (conv any a)) (!= (.Load (.-o c)) (conv any a))
+                (!= (VhCmpXchgVol (addr (.-o c)) (conv any a) (conv any b)) (conv any a)) (!= (.Load (.-o c)) (conv any b)))
+        (.Error t "compareAndExchange on an interface field"))))
+  ;; array elements: bounds, null, store checks, and the operations under contention
+  (let [ia (NewIntArray 4)
+        la (NewLongArray 2)
+        ra (NewRefArray String_class 3)
+        oa (NewRefArray Object_class 2)]
+    (when (!= (res (fn ^string [] (VhIntArrayGet ia 4) "x")) "!java.lang.ArrayIndexOutOfBoundsException: Index 4 out of bounds for length 4")
+      (.Error t "an int element out of bounds"))
+    (when (!= (res (fn ^string [] (VhRefArrayGet nil 0) "x")) "!java.lang.NullPointerException")
+      (.Error t "a null array"))
+    (when (not (strings/HasPrefix (res (fn ^string [] (VhRefArraySet ra 0 (Long_ValueOf_J__Long 1)) "x")) "!java.lang.ArrayStoreException"))
+      (.Error t "a reference store of the wrong class"))
+    (parallel 8 (fn [^int _]
+                  (for [n 0] (< n 1000) (inc! n)
+                    (VhIntArrayGetAndAdd ia (conv int32 (% n 4)) 1)
+                    (VhLongArrayGetAndAdd la 1 2)
+                    (while true
+                      (let [v (VhRefArrayGet oa 1)
+                            ^int64 m 0]
+                        (when (!= v nil)
+                          (set! m (.LongValue__J (assert (* Long) v))))
+                        (when (VhRefArrayCas oa 1 v (Long_ValueOf_J__Long (+ m 1)))
+                          (break)))))))
+    (when (or (!= (VhIntArrayGet ia 0) 2000) (!= (VhIntArrayGet ia 3) 2000) (!= (VhLongArrayGet la 1) 16000)
+              (!= (.LongValue__J (assert (* Long) (VhRefArrayGet oa 1))) 8000))
+      (.Errorf t "contended elements: %d %d %d %v" (VhIntArrayGet ia 0) (VhIntArrayGet ia 3) (VhLongArrayGet la 1) (VhRefArrayGet oa 1)))
+    (when (or (!= (VhIntArrayCmpXchg ia 2 2000 -5) 2000) (!= (VhIntArrayGetAndOr ia 2 4) -5) (!= (VhIntArrayGetAndAnd ia 2 6) -1)
+              (!= (VhIntArrayGetAndXor ia 2 6) 6) (!= (VhIntArraySwap ia 2 1) 0) (not (VhIntArrayCas ia 2 1 3)) (!= (VhIntArrayGet ia 2) 3))
+      (.Error t "int element operations"))
+    (let [x (Str "x")]
+      (VhRefArraySet ra 2 x)
+      (when (or (!= (VhRefArrayCmpXchg ra 2 (Str "x") nil) (conv any x)) (!= (VhRefArraySwap ra 2 nil) (conv any x)) (!= (VhRefArrayGet ra 2) nil))
+        (.Error t "reference element operations")))))
+
+(go/type testBlocker "testBlocker is a ManagedBlocker releasable once its channel is closed.\n"
+  (struct Object ^{:tag (chan (struct))} ch ^{:tag atomic/Int32} blocks))
+(go/method Block__Z ^bool [^{:tag (* testBlocker)} b] (.Add (.-blocks b) 1) (<! (.-ch b)) true)
+(go/method IsReleasable__Z ^bool [^{:tag (* testBlocker)} b]
+  (select (case (<! (.-ch b)) (return true)) (default (return false))))
+(go/method Is_ForkJoinPool_ManagedBlocker [^{:tag (* testBlocker)} b])
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* testBlocker)} b] Object_class)
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* testBlocker)} b] (Object_toString b))
+(go/method Clone__O ^any [^{:tag (* testBlocker)} b] nil)
+
+(go/func TestForkJoinExecutorService [^{:tag (* testing/T)} t]
+  ;; the ExecutorService API of jrt's ForkJoinPool (CompletableFuture's default executor)
+  (let [p (ForkJoinPool_New_I 2)
+        ^ExecutorService es p
+        latch (CountDownLatch_New_I 3)
+        f (.Submit_Callable__Future es (callableOf (fn ^any [] (Str "called"))))]
+    (when (!= (.String (StrOfObj (.Get__O f))) "called")
+      (.Error t "submit(Callable)"))
+    (for [i 0] (< i 3) (inc! i)
+      (.Execute_Runnable__V es (RunnableOf (fn [] (.CountDown__V latch)))))
+    (when (not (.Await_J_TimeUnit__Z latch 5 TimeUnit_SECONDS))
+      (.Error t "execute(Runnable)"))
+    (let [r (Str "r")]
+      (when (!= (.Get__O (.Submit_Runnable_O__Future es (RunnableOf (fn [])) r)) (conv any r))
+        (.Error t "submit(Runnable, result)")))
+    (.Shutdown__V es)
+    (when (or (not (.AwaitTermination_J_TimeUnit__Z es 5 TimeUnit_SECONDS)) (not (.IsTerminated__Z es)))
+      (.Error t "shutdown and awaitTermination"))
+    (when (!= (res (fn ^string [] (.Execute_Runnable__V es (RunnableOf (fn []))) "x")) "!java.util.concurrent.RejectedExecutionException")
+      (.Error t "execute after shutdown")))
+  ;; awaitTermination times out while a task runs
+  (let [p (ForkJoinPool_New_I 2)
+        release (make (chan (struct)))]
+    (.Execute_Runnable__V p (RunnableOf (fn [] (<! release))))
     (.Shutdown__V p)
-    (when (not (strings/HasPrefix (res (fn ^string [] (.Execute_Runnable__V p (RunnableOf (fn []))) "x"))
-                                  "!java.util.concurrent.RejectedExecutionException: Task "))
-      (.Error t "execute after shutdown"))
-    (when (or (not (.AwaitTermination_J_TimeUnit__Z p 5 TimeUnit_SECONDS)) (not (.IsTerminated__Z p)))
-      (.Error t "awaitTermination")))
-  ;; a cached pool reuses idle workers; exceptions, cancellation, timeouts
-  (let [f (addr (lit countingFactory :prefix "cached-"))
-        p (Executors_NewCachedThreadPool_ThreadFactory__ExecutorService f)]
-    (for [i 0] (< i 5) (inc! i)
-      (.Get__O (.Submit_Runnable__Future p (RunnableOf (fn [])))))
-    (when (!= (.Load (.-n f)) 1)
-      (.Errorf t "cached pool: %d threads for 5 sequential tasks" (.Load (.-n f))))
-    (let [failing (.Submit_Callable__Future p (callableOf (fn ^any [] (panic (Thrown (IllegalStateException_New_String (Str "bad")))))))]
-      (when (!= (res (fn ^string [] (.Get__O failing) "x")) "!java.util.concurrent.ExecutionException: java.lang.IllegalStateException: bad")
-        (.Errorf t "a failing task: %s" (res (fn ^string [] (.Get__O failing) "x")))))
-    (let [started (make (chan (struct)))
-          ^atomic/Bool interrupted (zero atomic/Bool)
-          slow (.Submit_Callable__Future p (callableOf (fn ^any []
-                                                          (close started)
-                                                          (.Store interrupted (!= (res (fn ^string [] (Thread_Sleep_J__V 5000) "")) ""))
-                                                          nil)))]
-      (when (!= (res (fn ^string [] (.Get_J_TimeUnit__O slow 10 TimeUnit_MILLISECONDS) "x")) "!java.util.concurrent.TimeoutException")
-        (.Error t "get with a timeout"))
-      (<! started)
-      (when (or (not (.Cancel_Z__Z slow true)) (not (.IsCancelled__Z slow)) (not (.IsDone__Z slow)) (.Cancel_Z__Z slow true))
-        (.Error t "cancel"))
-      (when (!= (res (fn ^string [] (.Get__O slow) "x")) "!java.util.concurrent.CancellationException")
-        (.Error t "get of a cancelled task"))
-      (time/Sleep (* 20 time/Millisecond))
-      (when (not (.Load interrupted))
-        (.Error t "cancel(true) interrupts the runner")))
-    ;; execute: a task that throws ends its worker; its exception goes to the handler
-    (let [(values out _) (withCapturedHost
-                           (fn []
-                             (.Execute_Runnable__V p (RunnableOf (fn [] (panic (Thrown (ArithmeticException_New_String (Str "in execute")))))))
-                             (time/Sleep (* 20 time/Millisecond))))]
-      (when (not (strings/Contains out "java.lang.ArithmeticException: in execute"))
-        (.Errorf t "an exception in execute: %q" out)))
+    (when (.AwaitTermination_J_TimeUnit__Z p 10 TimeUnit_MILLISECONDS)
+      (.Error t "terminated while a task runs"))
+    (close release)
     (.Close__V p)
     (when (not (.IsTerminated__Z p))
       (.Error t "close")))
-  ;; thread per task, with virtual threads (Agent's)
-  (let [p (Executors_NewThreadPerTaskExecutor_ThreadFactory__ExecutorService
-            (.Factory__ThreadFactory (.Name_String_J__Thread_Builder_OfVirtual (Thread_OfVirtual__Thread_Builder_OfVirtual) (Str "agent-") 0)))
-        ^sync/Mutex mu (zero sync/Mutex)
-        names (make (map string bool))
-        latch (CountDownLatch_New_I 10)]
-    (for [i 0] (< i 10) (inc! i)
-      (.Execute_Runnable__V p (RunnableOf (fn []
-                                            (.Lock mu)
-                                            (aset names (.String (.GetName__String (Thread_CurrentThread__Thread))) (.IsVirtual__Z (Thread_CurrentThread__Thread)))
-                                            (.Unlock mu)
-                                            (.CountDown__V latch)))))
-    (when (not (.Await_J_TimeUnit__Z latch 5 TimeUnit_SECONDS))
-      (.Error t "the latch"))
-    (.Lock mu)
-    (when (or (!= (len names) 10) (not (aget names "agent-0")) (not (aget names "agent-9")))
-      (.Errorf t "per-task threads: %v" names))
-    (.Unlock mu)
-    (when (or (!= (.GetCount__J latch) 0) (not (strings/HasSuffix (.String (.ToString__String latch)) "[Count = 0]")))
-      (.Error t "latch count"))
-    (.Close__V p)))
+  ;; managedBlock: block until releasable
+  (let [b (addr (lit testBlocker :ch (make (chan (struct)))))]
+    (go ((fn [] (time/Sleep (* 5 time/Millisecond)) (close (.-ch b)))))
+    (ForkJoinPool_ManagedBlock_ForkJoinPool_ManagedBlocker__V b)
+    (when (!= (.Load (.-blocks b)) 1)
+      (.Errorf t "managedBlock: %d blocks" (.Load (.-blocks b))))
+    (ForkJoinPool_ManagedBlock_ForkJoinPool_ManagedBlocker__V b)
+    (when (!= (.Load (.-blocks b)) 1)
+      (.Error t "managedBlock of a releasable blocker"))
+    (when (or (not (ForkJoinPool_ManagedBlocker_InstanceOf b)) (ForkJoinPool_ManagedBlocker_InstanceOf (Str "")))
+      (.Error t "ManagedBlocker instanceof")))
+  (when (!= (ForkJoinPool_AsyncCommonPool__ForkJoinPool) (ForkJoinPool_CommonPool__ForkJoinPool))
+    (.Error t "asyncCommonPool")))
+
+(go/func TestLockSupportBlocker [^{:tag (* testing/T)} t]
+  (let [blocker (Str "blocker")
+        parked (make (chan (* Thread)) 1)
+        th (Go "parker" (fn []
+                          (>! parked (CurrentThread))
+                          (LockSupport_Park_O__V blocker)))
+        me (<! parked)]
+    ;; wait until it parks with its blocker
+    (for [i 0] (and (< i 1000) (== (LockSupport_GetBlocker_Thread__O me) nil)) (inc! i)
+      (time/Sleep time/Millisecond))
+    (when (!= (LockSupport_GetBlocker_Thread__O me) (conv any blocker))
+      (.Error t "getBlocker while parked"))
+    (LockSupport_Unpark_Thread__V th)
+    (.Join__V th)
+    (when (!= (LockSupport_GetBlocker_Thread__O me) nil)
+      (.Error t "getBlocker after park"))
+    (LockSupport_SetCurrentBlocker_O__V blocker)
+    (when (!= (LockSupport_GetBlocker_Thread__O (CurrentThread)) (conv any blocker))
+      (.Error t "setCurrentBlocker"))
+    (LockSupport_SetCurrentBlocker_O__V nil)
+    (when (!= (res (fn ^string [] (LockSupport_GetBlocker_Thread__O nil) "x")) "!java.lang.NullPointerException")
+      (.Error t "getBlocker(null)"))))
 
 (go/func TestCountDownLatch [^{:tag (* testing/T)} t]
   (let [l (CountDownLatch_New_I 3)

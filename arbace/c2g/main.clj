@@ -37,6 +37,7 @@
             [arbace.c2g.reach :as r]
             [arbace.c2g.access :as acc]
             [arbace.c2g.code :as c]
+            [arbace.c2g.vh :as vh]
             [arbace.c2g.decls :as d]
             [arbace.c2g.out :as out]
             [arbace.c2g.dyn :as dyn]
@@ -307,7 +308,11 @@
         cs (:compile-set world)]
     (w/with-world world
       (let [wst {:jrt scan :jrt-classes jc :T #{} :vmethods-cache (atom {}) :trivial-cache (atom {})
-                 :erased (:erased world)}
+                 :erased (:erased world)
+                 ;; the constant VarHandles of the world and the fields they name (§8.5)
+                 :vh (vh/handles @(:order a/*unit*))}
+            _ (println (str "c2g: " (count (:handles (:vh wst))) " constant VarHandles, on "
+                            (count (:fields (:vh wst))) " fields"))
             t1 (now)
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))
                                                          ;; --program: the REPL's world, every public

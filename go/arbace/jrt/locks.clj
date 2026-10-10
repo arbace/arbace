@@ -600,17 +600,41 @@ spuriously, as Java's park.\n"
       (case (<! (.-intr me)) (.Impl_Interrupt__V me me))
       (case (<! tc)))))
 
+(go/func parkBlocked
+  "parkBlocked parks the current thread for d (as parkFor) with blocker recorded as the object
+it is blocked on (getBlocker) while it is parked.\n"
+  [^any blocker ^{:tag time/Duration} d]
+  (let [me (CurrentThread)]
+    (.Store (.-parkBlocker me) blocker)
+    (parkFor d)
+    (.Store (.-parkBlocker me) nil)))
+
 (go/func LockSupport_Park__V [] (parkFor -1))
-(go/func LockSupport_Park_O__V "LockSupport_Park_O__V is LockSupport.park(blocker): the blocker is not kept.\n"
-  [^any blocker] (parkFor -1))
+(go/func LockSupport_Park_O__V "LockSupport_Park_O__V is LockSupport.park(blocker).\n"
+  [^any blocker] (parkBlocked blocker -1))
 (go/func LockSupport_ParkNanos_J__V [^int64 nanos]
   (when (> nanos 0) (parkFor (conv time/Duration nanos))))
 (go/func LockSupport_ParkNanos_O_J__V [^any blocker ^int64 nanos]
-  (when (> nanos 0) (parkFor (conv time/Duration nanos))))
+  (when (> nanos 0) (parkBlocked blocker (conv time/Duration nanos))))
 (go/func LockSupport_ParkUntil_J__V "LockSupport_ParkUntil_J__V: the deadline in epoch milliseconds.\n"
   [^int64 deadline]
   (let [d (- deadline (System_CurrentTimeMillis__J))]
     (when (> d 0) (parkFor (* (conv time/Duration d) time/Millisecond)))))
+(go/func LockSupport_ParkUntil_O_J__V [^any blocker ^int64 deadline]
+  (let [d (- deadline (System_CurrentTimeMillis__J))]
+    (when (> d 0) (parkBlocked blocker (* (conv time/Duration d) time/Millisecond)))))
+(go/func LockSupport_GetBlocker_Thread__O
+  "LockSupport_GetBlocker_Thread__O is LockSupport.getBlocker: the blocker the thread is parked
+on (or was given by setCurrentBlocker), null when none.\n"
+  ^any [^Thread_I t]
+  (when (== t nil)
+    (panic (NPE)))
+  (.Load (.-parkBlocker (.Self_Thread t))))
+(go/func LockSupport_SetCurrentBlocker_O__V
+  "LockSupport_SetCurrentBlocker_O__V is LockSupport.setCurrentBlocker (JDK 14): the current
+thread's blocker, for a park that follows.\n"
+  [^any blocker]
+  (.Store (.-parkBlocker (CurrentThread)) blocker))
 (go/func LockSupport_Unpark_Thread__V "LockSupport_Unpark_Thread__V is LockSupport.unpark: gives the permit.\n"
   [^Thread_I t]
   (when (== t nil)

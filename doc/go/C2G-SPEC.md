@@ -1824,6 +1824,76 @@ this only matters for racy publication, which the race detector also finds.
   `ReferenceQueue`. A `SoftReference` holds its referent strongly and is cleared only by
   `clear()` (V12).
 
+### 8.5 VarHandles
+
+(Proposed amendment JC1, for the user's review; [JRT-NOTES.md](JRT-NOTES.md),
+"Concurrency".) `java.lang.invoke` is not in the Go build (§12), but JDK 26's concurrent classes
+do their atomic work through `VarHandle`s, and always in one shape: a class makes its handles
+once, in its static initializer, into `static final` fields, and uses them only through those
+fields, as receivers of the handles' access modes:
+
+```java
+private static final VarHandle NEXT;      // in a static initializer:
+NEXT = MethodHandles.lookup().findVarHandle(Node.class, "next", Node.class);
+private static final VarHandle AA = MethodHandles.arrayElementVarHandle(Object[].class);
+...
+NEXT.compareAndSet(p, null, newNode)      // javac: invokevirtual VarHandle.compareAndSet
+                                          //   (LNode;LNode;LNode;)Z, a polymorphic signature
+```
+
+c2g compiles them statically (`arbace.c2g.vh`):
+
+- **The constant handles.** c2g reads every class's static initializer (field initializers
+  included) for stores into `static final VarHandle` fields of the class whose value is
+  `findVarHandle(C.class, "f", T.class)` on any lookup, `MhUtil.findVarHandle(lookup, "f",
+  T.class)` (the class of the code that made the lookup, the initializer's class) or
+  `MhUtil.findVarHandle(lookup, C.class, "f", T.class)`, or
+  `MethodHandles.arrayElementVarHandle(T[].class)`. The class arguments may be class literals,
+  `Integer.TYPE` and its kin, or final locals bound to them; the field `f` must be an instance
+  field of `C` or a superclass whose type is `T`, as `findVarHandle` requires. Each such field
+  is a **constant handle**: on a field `C.f`, or on the elements of arrays of type `T[]`.
+- **The initializers.** The stores of constant handles are dropped with their values (§4.1's
+  rule for a static initializer's store into a field of a type outside the world), so the
+  lookups never run; `MethodHandles.lookup()` itself, bound to a local before them, is a `nil`
+  of no use.
+- **The access modes.** A call of an access mode on a constant handle (`get`, `set`,
+  `compareAndSet`, `compareAndExchange`, `getAndSet`, `getAndAdd`, `getAndBitwiseOr`/`And`/`Xor`
+  and their `Volatile`, `Acquire`, `Release`, `Opaque`, `Plain` and weak variants) is the
+  atomic operation on the field of the receiver (the call's first argument) or on the array
+  element (the first two). The arguments are converted to the field's (the component's) type
+  as the handle converts them (a checked cast when their static type is not assignable), and
+  the result to the call's descriptor type (the JVM's `checkcast` after a polymorphic call).
+  `VarHandle`'s static fences are `jrt.VhFence()`, an atomic operation.
+- **Fields a handle names are volatile in Go.** Their Go type is the volatile representation
+  of §8.2 (`atomic.Int32`, `atomic.Pointer[T]`, `jrt.Volatile[T]` ...) whether or not Java
+  declares them `volatile`, and every access to them, plain or by the handle, is atomic:
+  `ConcurrentSkipListMap`'s `Node.next` and `val` are plain fields the JDK reads plainly and
+  writes by its handles; a two-word interface value read while a handle writes it would tear
+  (§8.3). Plain accesses become sequentially consistent ones: stronger than Java, correct.
+- **The operations**, per volatile representation: `get` is `Load` (narrowing the `int32`
+  of a `byte`, `short` or `char`, a float's bits back), `set` is `Store`, `compareAndSet` is
+  `CompareAndSwap` (a float's or double's bits compared, as the JVM's handles compare them;
+  `Volatile`'s `CompareAndSet`, by identity), `getAndSet` is `Swap`, `getAndBitwiseOr` and
+  `And` of an `int` or `long` are the atomic types' `Or` and `And` (Go 1.23); the others are
+  jrt's functions: `VhCmpXchg{Int32,Int64,Uint32,Uint64,Bool,Ptr,Vol}`,
+  `VhGetAndAdd{Int32,Int64,Float32,Float64}`, `VhGetAndXor{Int32,Int64}`,
+  `VhGetAnd{Or,And,Xor}Bool`. Array handles call `Vh{Int,Long,Ref}Array{Get,Set,Cas,CmpXchg,Swap}`
+  and, for `int[]` and `long[]`, `...GetAndAdd`, `GetAndOr`, `GetAndAnd`, `GetAndXor`: int
+  and long elements by `sync/atomic` on the slice element, reference elements (`any` slots)
+  under the striped locks of `Unsafe`'s reference slots (§9.2), with Java's
+  `NullPointerException`, `ArrayIndexOutOfBoundsException` and `ArrayStoreException`.
+- **Memory order.** Go's atomics are sequentially consistent, so every access mode is the
+  volatile one; a weak compare-and-set never fails spuriously. Java allows both.
+- **Not compiled.** A handle that is not a constant handle (passed around, made outside a
+  static initializer, `findStaticVarHandle`, `byteArrayViewVarHandle`), an access mode on
+  element types other than `int`, `long` and references, and `getAndAdd` on `boolean` or
+  `byte`/`short`/`char` fields are operation-level stubs (§4.1) that name this section.
+- **Reachability** (§4.1) follows the access modes into the field's class and the
+  arguments' classes, not into `java.lang.invoke`.
+- As with `Unsafe` (§9.2), plain reads of an array's reference elements that race with a
+  handle's writes of them are two-word races; the JDK's classes access such arrays only through
+  their handles (`AtomicReferenceArray`, `Exchanger`'s arena).
+
 ## 9. The boundary to jrt
 
 ### 9.1 The manifest

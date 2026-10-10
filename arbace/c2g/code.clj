@@ -11,7 +11,8 @@
             [arbace.classes.emit :as e]
             [arbace.c2g.model :as m]
             [arbace.c2g.names :as nm]
-            [arbace.c2g.access :as acc]))
+            [arbace.c2g.access :as acc]
+            [arbace.c2g.vh :as vh]))
 
 ;; ---------------------------------------------------------------------------------------
 ;; state
@@ -408,6 +409,43 @@
 (defn- hw-static-exists? [cls base]
   (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base)))
 
+(defn- lookup-call?
+  "MethodHandles.lookup(): the lookup VarHandle constants are found with (C2G-SPEC §8.5); in Go
+  a nil of no use, the handles being compiled statically."
+  [node]
+  (and (= :invoke (:op node)) (= :static (:kind node)) (= "java/lang/invoke/MethodHandles" (:owner node))
+       (= "lookup" (:name node)) (empty? (:args node))))
+
+(defn vh-op
+  "The constant VarHandle and access mode of a VarHandle call (C2G-SPEC §8.5), or nil."
+  [node]
+  (vh/op-handle (:handles (:vh m/*w*)) node))
+
+(defn- vh-supported?
+  "Can c2g translate access mode m of a handle of kind k on values of descriptor d?"
+  [k m d]
+  (case m
+    (:get :set :cas :cmpxchg :swap) (or (= k :field) (#{"I" "J"} d) (t/ref? d))
+    :add (#{"I" "J" "F" "D"} d)
+    (:or :and :xor) (if (= k :field) (#{"Z" "I" "J"} d) (#{"I" "J"} d))
+    false))
+
+(defn- vh-missing
+  "For a VarHandle call or MethodHandles.lookup(): ::vh-ok when c2g translates it, else why
+  not; nil for any other node."
+  [node]
+  (cond
+    (vh/fence? node) ::vh-ok
+    (lookup-call? node) ::vh-ok
+    (and (= :invoke (:op node)) (= vh/varhandle (:owner node)))
+    (if-let [h (vh-op node)]
+      (let [d (if (= :array (:kind h)) (t/elem-type (:desc h)) (:desc h))]
+        (if (vh-supported? (:kind h) (:mode h) d)
+          ::vh-ok
+          (str "VarHandle." (:name node) " on " d " (C2G-SPEC §8.5)")))
+      (str "VarHandle." (:name node) " on a handle that is not a constant of its class (C2G-SPEC §8.5)"))
+    :else nil))
+
 (defn missing-reason
   "Why node cannot be translated in this world (a class or member it needs does not exist in
   Go), or nil."
@@ -418,6 +456,8 @@
       (let [mm (:method node)
             owner (:owner node)
             mowner (or (:owner mm) owner)]
+        (if-let [why (vh-missing node)]
+          (when-not (= why ::vh-ok) why)
         (or (when-not (:array-clone node) (or (class-missing owner) (class-missing mowner)))
             (mdesc-missing (:desc node))
             (when (and (= :special (:kind node)) (:outer-super node)) "an outer class's super call")
@@ -432,7 +472,7 @@
                                       (cons owner (m/all-supertypes owner))))
                     (str "jrt lacks " (str/replace mowner "/" ".") "." (:name node) (:desc node))))))
             (when (and (m/translated? mowner) (not (m/member-in-world? mowner (assoc (or mm node) :desc (:desc node)))))
-              (str "method " (:name node) (:desc node) " is not in the closed world"))))
+              (str "method " (:name node) (:desc node) " is not in the closed world")))))
       :new (or (class-missing (:class node)) (mdesc-missing (:desc (:ctor node)))
                (when (and (m/hand-written? (:class node)) (not= "java/lang/Object" (:class node)))
                  (let [n (nm/new-name (m/go-name (:class node)) (:desc (:ctor node)))]
@@ -509,7 +549,13 @@
 
 (def ^:private volatile-flag 0x40)
 
-(defn volatile-field? [f] (m/has? (:flags f) volatile-flag))
+(defn vh-field?
+  "Does a constant VarHandle of the world name field f (C2G-SPEC §8.5)? It then has the
+  volatile representation."
+  [f]
+  (contains? (:fields (:vh m/*w*)) [(or (:declarer f) (:owner f)) (:name f)]))
+
+(defn volatile-field? [f] (or (m/has? (:flags f) volatile-flag) (vh-field? f)))
 
 (defn volatile-read [place d]
   (let [ld (list '.Load place)]
@@ -858,6 +904,100 @@
   (let [sup (:super (a/decl (:class *f*)))]
     (list (symbol (str ".-" (m/go-name sup))) (:t *f*))))
 
+(defn- vh-arg
+  "An argument node of a VarHandle call converted to descriptor d as the handle does: a
+  checked cast unless its static type is assignable."
+  [node d]
+  (let [t0 (vt node)]
+    (if (or (t/prim? d) (= t0 :null) (= t0 :none) (env/assignable? t0 d))
+      node
+      {:op :cast :class d :expr node :type d})))
+
+(defn- vh-result
+  "A VarHandle call's result form x of descriptor d as the call's return type r (the JVM's
+  checkcast of a polymorphic call's result)."
+  [x d r]
+  (cond
+    (= r "V") (v x "V")
+    (or (= d r) (t/prim? r)) (v x d)
+    :else (cast-val {:op :cast :class r :expr {:op ::go :x x :t d} :type r})))
+
+(defn- vh-field-form
+  "The Go form of access mode m on the atomic field place (the volatile representation of a
+  field of descriptor d, §8.2) with argument forms xs."
+  [m place d xs]
+  (let [[a b] xs
+        cat (cond (= d "Z") :bool (= d "I") :i32 (#{"B" "S" "C"} d) :narrow (= d "J") :i64
+                  (= d "F") :f32 (= d "D") :f64 (m/pointer-desc? d) :ptr :else :vol)
+        narrow (fn [x] (list 'conv 'int32 x))
+        widen (fn [x] (case d "B" (list 'conv 'int8 x) "S" (list 'conv 'int16 x) "C" (list 'conv 'uint16 x) x))
+        bits (fn [x] (case cat :f32 (list 'math/Float32bits x) :f64 (list 'math/Float64bits x) x))
+        unbits (fn [x] (case cat :f32 (list 'math/Float32frombits x) :f64 (list 'math/Float64frombits x) x))
+        p (list 'addr place)]
+    (case m
+      :get (volatile-read place d)
+      :set (volatile-write place d a)
+      :cas (case cat
+             :narrow (list '.CompareAndSwap place (narrow a) (narrow b))
+             (:f32 :f64) (list '.CompareAndSwap place (bits a) (bits b))
+             :vol (list '.CompareAndSet place a b)
+             (list '.CompareAndSwap place a b))
+      :cmpxchg (case cat
+                 :bool (list (jsym "VhCmpXchgBool") p a b)
+                 :i32 (list (jsym "VhCmpXchgInt32") p a b)
+                 :narrow (widen (list (jsym "VhCmpXchgInt32") p (narrow a) (narrow b)))
+                 :i64 (list (jsym "VhCmpXchgInt64") p a b)
+                 :f32 (unbits (list (jsym "VhCmpXchgUint32") p (bits a) (bits b)))
+                 :f64 (unbits (list (jsym "VhCmpXchgUint64") p (bits a) (bits b)))
+                 :ptr (list (jsym "VhCmpXchgPtr") p a b)
+                 :vol (list (jsym "VhCmpXchgVol") p a b))
+      :swap (case cat
+              :narrow (widen (list '.Swap place (narrow a)))
+              (:f32 :f64) (unbits (list '.Swap place (bits a)))
+              (list '.Swap place a))
+      :add (case cat
+             :i32 (list (jsym "VhGetAndAddInt32") p a)
+             :i64 (list (jsym "VhGetAndAddInt64") p a)
+             :f32 (list (jsym "VhGetAndAddFloat32") p a)
+             :f64 (list (jsym "VhGetAndAddFloat64") p a))
+      (:or :and :xor)
+      (let [op (case m :or "Or" :and "And" :xor "Xor")]
+        (case cat
+          :bool (list (jsym (str "VhGetAnd" op "Bool")) p a)
+          (:i32 :i64) (if (= m :xor)
+                        (list (jsym (if (= cat :i32) "VhGetAndXorInt32" "VhGetAndXorInt64")) p a)
+                        (list (symbol (str "." op)) place a)))))))
+
+(defn vh-val
+  "A VarHandle access-mode call on a constant handle (C2G-SPEC §8.5): the atomic operation on
+  the field it names, or on the array element (jrt's Vh functions)."
+  [node h]
+  (let [[_ r] (t/parse-method-desc (:desc node))
+        m (:mode h)
+        args (:args node)]
+    (case (:kind h)
+      :field
+      (let [f (:field h)
+            d (:desc f)
+            cdesc (str "L" (:class h) ";")
+            [tv & vs] (operands (cons (vh-arg (first args) cdesc) (map #(vh-arg % d) (rest args)))
+                                (cons cdesc (repeat d)))
+            place (field-place tv f)]
+        (vh-result (vh-field-form m place d (map :x vs)) (case m :set "V" :cas "Z" d) r))
+      :array
+      (let [ad (:desc h)
+            et (t/elem-type ad)
+            ref? (t/ref? et)
+            vd (if ref? "Ljava/lang/Object;" et)
+            [av iv & vs] (operands (concat [(vh-arg (first args) ad) (second args)]
+                                           (map #(vh-arg % (if ref? et vd)) (drop 2 args)))
+                                   (concat [ad "I"] (repeat vd)))
+            kind (cond (= et "I") "IntArray" (= et "J") "LongArray" :else "RefArray")
+            op (case m :get "Get" :set "Set" :cas "Cas" :cmpxchg "CmpXchg" :swap "Swap" :add "GetAndAdd"
+                     :or "GetAndOr" :and "GetAndAnd" :xor "GetAndXor")
+            x (apply list (jsym (str "Vh" kind op)) (:x av) (:x iv) (map :x vs))]
+        (vh-result x (case m :set "V" :cas "Z" vd) r)))))
+
 (defn invoke-val [node]
   (let [{:keys [kind owner name desc]} node
         mm (:method node)
@@ -866,6 +1006,11 @@
         base (nm/method-base name desc)
         rv (fn [x] (v x (if (= r "V") "V" r)))]
     (cond
+      ;; VarHandles (§8.5): fences, the lookup, access modes on constant handles
+      (vh/fence? node) (v (list (jsym "VhFence")) "V")
+      (lookup-call? node) (v (list 'conv 'any nil) r)
+      (vh-op node) (vh-val node (vh-op node))
+
       ;; an array's clone
       (:array-clone node)
       (let [x (expr (:target node))]
