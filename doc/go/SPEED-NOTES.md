@@ -20,8 +20,9 @@ not changed here. Summary:
   hot interface calls a training run shows; 5-15% more, opt-in (it doubles the build).
 
 Overall, on linux/amd64: `bin/c2g-perf`'s workloads went from 3.7-49 times the JVM's time to
-2.3-32 times (1.7 to 4.7 times faster); the executable starts (`-e nil`) in 3.0 s against
-4.3 s (2.8 s with PGO), and its evaluator workloads run 1.3-1.5 times faster with a third of the CPU.
+2.3-32 times (1.7 to 4.7 times faster); the executable's evaluator workloads run 1.4-1.65 times
+faster with a third of the CPU. Before main's namespace image it started (`-e nil`) in 3.0 s
+against 4.3 s (2.8 s with PGO); merged with main, 0.27 s against main's 0.35 s.
 
 ## Method
 
@@ -107,12 +108,13 @@ were the thread-bound deref (a `MapEntry` allocated per lookup), equivalence of 
 
 ### 1. The collector's settings (D7) — kept
 
-`jrt.StartRuntime`, called first by `jrt.RunMain` (`go/arbace/jrt/tuning.clj`): `GOGC` is 200
-unless the environment sets `GOGC`, and a 64 MiB minimum heap unless `ARBACE_MIN_HEAP_MB` sets
-another (0: none). The minimum heap is a ballast: a 64 MiB byte slice, never written, without
-pointers, so neither scanned nor resident (its pages are never touched); it raises the
-collector's goal as a JVM's initial heap (`-Xms`) does. Go has no minimum-heap setting
-(`GOMEMLIMIT` only lowers the goal).
+jrt's package initialization (`go/arbace/jrt/tuning.clj`, `init`, so before the main
+package's own start-up setting, amendment U4, which raises `GOGC` to 400 until `arbace.main` is
+loaded and then restores this one): `GOGC` is 200 unless the environment sets `GOGC`, and a
+64 MiB minimum heap unless `ARBACE_MIN_HEAP_MB` sets another (0: none). The minimum heap is a
+ballast: a 64 MiB byte slice, never written, without pointers, so neither scanned nor resident
+(its pages are never touched); it raises the collector's goal as a JVM's initial heap (`-Xms`)
+does. Go has no minimum-heap setting (`GOMEMLIMIT` only lowers the goal).
 
 The executable, `ev.clj` (`loop` to 1M, `map-inc` to 300k, `hashmap` to 100k; ms, wall and
 CPU, maximum resident set):
@@ -189,7 +191,7 @@ The evaluator calls static and instance methods through `Method.invoke` (step 7b
 that); each call asked `getParameterTypes()` twice (the evaluator's `typedArgs`, the
 Reflector's `boxArgs`), and Java's contract is a fresh array each time; `convertArgs` copied
 the arguments into a new slice. Now `getParameterTypes()` returns one array per `Method`
-(made on first use; a deviation, amendment Z3) and `convertArgs` passes the arguments' own
+(made on first use; a deviation, amendment O3) and `convertArgs` passes the arguments' own
 slice unless a primitive parameter converts one. This removed 21% of the bytes the evaluator
 workloads allocated.
 
@@ -217,16 +219,17 @@ evaluator).
 ### 9. Allocation sampling off — kept
 
 Linking `runtime/pprof` (for the profiles above) turns on Go's allocation sampling, whose
-stack walks over the evaluator's deep stacks cost 1.8% of the `str` workload; `StartRuntime`
+stack walks over the evaluator's deep stacks cost 1.8% of the `str` workload; jrt's `init`
 sets `runtime.MemProfileRate` to 0 unless `ARBACE_MEMPROFILE` is set.
 
 ### 10. Profile-guided optimization — kept, opt-in
 
-`bin/arbace-go --build --pgo` builds as before, runs the amd64 executable on
+`bin/arbace-go --build --pgo` builds as before (with the namespaces' image), runs the host's executable on
 `test/arbace-go-pgo.clj` (a training workload in the spirit of `test/aot-training.clj`: the
 common libraries, collections, seqs and transducers, numbers, strings, regexes, printing,
 protocols, dynamic vars, exceptions, futures and agents; about 15 s) with a CPU profile, and
-builds every executable again with `go build -pgo` (`bin/g2c build --pgo FILE`, new). gc then
+builds every executable again in its work module with `go build -pgo` (as the image's link
+does; `bin/g2c build --pgo FILE` is new too, for other programs). gc then
 devirtualizes the hot interface calls (a type test and a direct, inlinable call) and inlines
 more on hot paths. Micro workloads (fixed work, user Mcycles, a profile of the same
 workloads): hashing -37%, numbers -15%, vecEquiv -20%, hashMapAssoc -10%, the others -1 to
@@ -234,7 +237,7 @@ workloads): hashing -37%, numbers -15%, vecEquiv -20%, hashMapAssoc -10%, the ot
 `w.clj` total 46.3 → 43.2 s (-7%), `hashmap` -18%, `fib` -9%. Opt-in because the second build
 is a full one (about 11 minutes of CPU for the c2g step, both builds and the training run, against
 about 8 without) and the training run needs the amd64 executable; proposed for the
-freeze's builds (amendment Z5).
+freeze's builds (amendment O5).
 
 ### Tried and dropped
 
@@ -296,7 +299,43 @@ The JVM's `bin/arbace` on the same script, for scale: reduce-range 156, map-inc 
 
 ### The suite's slow namespaces
 
-FINAL_SUITE_TABLE
+Each namespace in its own process through the suite's runner (`bin/clojure-tests
+NAMESPACE` with `CLOJURE_TESTS_GO`, which sets `GOGC=400`; the time includes the renaming and
+the JVM's report, about 10 s), two runs each, before the namespaces' image:
+
+| namespace | before | after | after, `--pgo` |
+|---|---:|---:|---:|
+| `clearing` | 76.7 / 78.7 s | 69.3 / 69.7 s | 66.1 / 67.0 s |
+| `transducers` | the runner's 900 s timeout | the same | the same |
+
+`transducers` times out in every build (its reference says so: 200,000 test.check trials
+through the evaluator); it needs step 7b.
+
+### After merging main (the namespaces' image, U4)
+
+Main's executable (`ad06cda`, with the image: `arbace.core` and the namespaces decoded, not
+read and analyzed) against this branch merged with it; same method:
+
+| | main | this branch | speedup |
+|---|---:|---:|---:|
+| `-e nil` | 0.35 s | 0.27 s | 1.30 |
+| `-e nil` CPU | 0.57 s | 0.33 s | 1.74 |
+| `-e nil` resident | 152 MB | 208 MB | |
+| reduce-range | 15,645 | 10,464 | 1.50 |
+| map-inc | 6,976 | 4,741 | 1.47 |
+| into-xf | 7,273 | 5,228 | 1.39 |
+| hashmap | 1,155 | 700 | 1.65 |
+| vec-conj | 1,989 | 1,332 | 1.49 |
+| str | 2,237 | 1,491 | 1.50 |
+| fib | 620 | 400 | 1.55 |
+| loop | 7,302 | 4,838 | 1.51 |
+| binding | 1,268 | 788 | 1.61 |
+| sort | 6,815 | 4,764 | 1.43 |
+| keyword-map | 2,376 | 1,456 | 1.63 |
+| atom-swap | 2,303 | 1,583 | 1.45 |
+| lazy-seq-str | 549 | 357 | 1.54 |
+| `w.clj` total | 58.1 s | 38.7 s | 1.50 |
+| `w.clj` CPU | 174 s | 56.3 s | 3.09 |
 
 ### Size
 
@@ -306,7 +345,22 @@ instantiations of the array and string buffers, the profiling hooks), 58,925,445
 
 ## Checks
 
-FINAL_CHECKS
+Before merging main (the branch at `14a9553`, linux/amd64 unless said):
+
+| check | result |
+|---|---|
+| `bin/jrt test` amd64, arm64 (qemu), `--race` | pass (arm64 after the test's fix above) |
+| `bin/c2g-check -- --program` | 9,010 of 9,010 steps on each architecture |
+| `bin/c2g-regex` | 1,204 of 1,233 cases, 11,365 of 11,682 inputs, as on main |
+| `bin/c2g-evalproof` | as expected on amd64 and arm64 |
+| the oracle on the Go build | 20,221 of 20,253, as on main (the same 32 mismatches) |
+| Clojure's suite on the Go build | no regressions against `test/arbace-go-results.edn` (18,781 of 18,806) |
+| `bin/arbace-go --smoke` | pass (the `--pgo` build) |
+
+After merging main (`ad06cda`): `bin/jrt test` amd64 passes; the oracle 20,243 of 20,276
+against `test/oracle/known-go-amd64.edn`: 33 known, 0 new, 0 now passing; SMOKE_AFTER.
+`bin/gate` was not run: no source the bootstrap compiles changed (`arbace/c2g`, `arbace/g2c`
+and `arbace/lang/go` are read by the tools, not compiled into the stages).
 
 Found on the way: gc for linux/arm64 (go1.27.1) reports a *constant* negative index into a
 slice whose length it does not know as index 0 (`index out of range [0] with length 0`; a
@@ -317,36 +371,37 @@ A Java program indexing with a negative constant would show `Index 0` in the mes
 
 ## Proposed amendments to C2G-SPEC (for the user's review)
 
-Letter Z (unused in doc/).
+Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1` (the Go name of an `Object[]` parameter), never for amendments.
 
-- **Z1 (§13.4, D7) The collector's settings.** jrt starts programs (`jrt.RunMain` →
-  `StartRuntime`) with `GOGC=200` unless `GOGC` is set, and a 64 MiB minimum heap (a ballast
-  without pointers, never written) unless `ARBACE_MIN_HEAP_MB` sets another (0: none); D7's
+- **O1 (§13.4, D7) The collector's settings.** jrt's package initialization sets `GOGC=200`
+  unless `GOGC` is set, and a 64 MiB minimum heap (a ballast without pointers, never written)
+  unless `ARBACE_MIN_HEAP_MB` sets another (0: none); the main package's start-up setting
+  (U4: `GOGC=400` until `arbace.main` is loaded) then raises it and restores jrt's. D7's
   "planned" paragraph becomes this rule, with the measurements above.
-- **Z2 (§5.9, §13.2, D7) Reference arrays and strings in one allocation.** A reference array of
+- **O2 (§5.9, §13.2, D7) Reference arrays and strings in one allocation.** A reference array of
   up to 32 slots and a `String` of up to 108 code units are one Go object, the slots or units
   after the header (`unsafe.Slice` over a trailing array, the length rounded to Go's size
   classes); `new StringBuilder()` holds its first 16 units in itself. The Go types stay
   (`*jrt.RefArray`, `*jrt.String`, a slice `A`/`value`); c2g's output does not change.
-- **Z3 (§3.2, §5.11) Shared parameter classes (new deviation V14).**
+- **O3 (§3.2, §5.11) Shared parameter classes (new deviation V14).**
   `Method.getParameterTypes()` and `Constructor.getParameterTypes()` return the same array on
   every call (Java: a fresh copy). Nothing in the closed world writes to it; a program that
   does would change the method's reported parameters. Alternative: keep Java's contract and let
   step 7b's evaluator stop asking for the array on every call (then this deviation can go).
-- **Z4 (§5.5, §5.7, §5.8, §5.12) The dynamic flag.** Bit 31 of the header's low word marks
+- **O4 (§5.5, §5.7, §5.8, §5.12) The dynamic flag.** Bit 31 of the header's low word marks
   objects of classes made at run time (set by `MarkDynamic` when c2g's `Dyn` and `DynSub_C`
   objects are made; the identity hash keeps its 31 bits); interface `instanceof` and checkcast
   ask `jrt.Dynamic` only for flagged objects (`jrt.IsDynamic`, which reads the header through
   the interface's data word: every Java object is a pointer to a struct whose first field is
   the header, §5.2).
-- **Z5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2c build --pgo FILE` and
+- **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2c build --pgo FILE` and
   `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.clj` with
   `ARBACE_CPUPROFILE`, then `go build -pgo`). Proposed: the freeze's executables are built so;
   the default build stays without, for build time.
-- **Z6 (§7.9.2, §7.9.4) A `try` with nothing to catch** (no catch clause naming a class of the
+- **O6 (§7.9.2, §7.9.4) A `try` with nothing to catch** (no catch clause naming a class of the
   world, no normal-completion code) has no function literal of its own: its body is in place,
   inside the `finally`'s literal when there is one.
-- **Z7 (§9.4) Profiles.** `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU
+- **O7 (§9.4) Profiles.** `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU
   and heap profiles of any program run under `jrt.RunMain`; allocation sampling is off
   otherwise.
 
