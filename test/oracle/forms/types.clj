@@ -524,3 +524,18 @@ rp
 (setx ts 10)
 (getx ts)
 (.-x ts)
+;; a proxy of BufferedWriter (pprint's tests count its flushes): proxy-super, buffering, PrintWriter
+(def bwn (atom 0))
+(def bsw (java.io.StringWriter.))
+(def bw (proxy [java.io.BufferedWriter] [bsw]
+          (flush [] (proxy-super flush) (swap! bwn inc))))
+(do (.write bw "buffered") [(str bsw) @bwn])
+(do (.flush bw) [(str bsw) @bwn])
+(do (.newLine bw) (.write bw "x" 0 1) (.flush bw) [(str bsw) @bwn])
+[(instance? java.io.BufferedWriter bw) (instance? java.io.Writer bw) (.getSuperclass (class bw))]
+(binding [*out* bw *flush-on-newline* true] (prn [1 2]) (prn :b) [(str bsw) @bwn])
+(binding [*out* bw *flush-on-newline* nil] (prn :c) [(str bsw) @bwn])
+(binding [*out* bw *flush-on-newline* true] (arbace.pprint/pprint (range 30)) [(count (str bsw)) @bwn])
+(binding [*out* bw] (arbace.pprint/cl-format true "~:(~a~)~%" "two words") (.flush bw) [(subs (str bsw) (- (count (str bsw)) 10)) @bwn])
+(let [u (java.io.StringWriter.) p (proxy [java.io.BufferedWriter] [u 4] (write ([s o l] (proxy-super write (.toUpperCase (str s)) (int o) (int l)))))] (.write p "abcdef" 1 3) (.close p) (str u))
+(let [p (proxy [java.io.BufferedWriter] [(java.io.StringWriter.)])] (.close p) (try (.write p "x") (catch java.io.IOException e (.getMessage e))))

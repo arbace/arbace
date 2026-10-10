@@ -72,7 +72,7 @@ the pace of the class forms and g2c work, rough, growing with the step number.
 | **3 jrt** | the Java runtime subset in Go forms: `Object` protocol, `String`/`StringBuilder`, boxed numbers, `Math`, per [JAVA-SURFACE.md](JAVA-SURFACE.md) and its decisions: the plain Java of the measured closure translated from jdk26u's source with j2c (collections, `BigInteger`/`BigDecimal`, `Character`, `Formatter`, `java.util.regex` (D5), `ConcurrentHashMap`), hand-written the VM's edge (UTF-16 `String`/`StringBuilder`, reflection over c2g's member tables, atomics, locks, executors and threads over Go's `sync` and goroutines, `ThreadLocal` over a goroutine-local slot in the Go runtime, a small `Date` on Go's `time`); the host interface | its own tests (regex: Java's behaviour, checked against the JVM on a corpus of patterns); the round trip of its forms | 10-15 |
 | **4 c2g converter** | class forms → Go forms, in dependency order: `Util`, `Murmur3`, `Numbers`, the persistent collections, `Symbol`/`Keyword`/`Var`/`Namespace`, seqs, `LispReader`, printing, `RT` | per class, differential tests against the JVM Arbace: the same operations, the same results | 6-10 |
 | **5 The evaluator** | `Compiler`'s analyser through c2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch) | `arbace/core.clj` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
-| **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM `bin/arbace` and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
+| **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM `bin/arbace` and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
 | **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable | benchmarks (`bin/arbace-bench`'s workload) against the JVM Arbace; the suite still passes | open |
 | **8 The `.ae` rename** | Arbace's sources move from `.clj` to `.ae`, as one self-contained change (the user's decision, 2026-10-09: the last step before the freeze; AGENDA.md) | `bin/gate --full`; the oracle and the suite on both builds as before | 1 |
 | **9 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26` | the user's confirmation | 1 |
@@ -81,7 +81,11 @@ Rough total: 25-43 days.
 
 **Checks.** Step 0 adds the `linux/amd64` round trip to `bin/gate --full`; steps 3 and 4 add
 jrt's tests and the differential tests; step 6 adds the executable's smoke test to `bin/gate`
-and its suite run to `--full`.
+and its suite run to `--full`. The essential gate's smoke test (amendment U5, accepted
+2026-10-09) runs on an executable cached by a hash of its inputs (`bin/arbace-go --gate`,
+`.tmp/arbace-go-gate`), built again, beside the suite, only when they changed.
+**D7** (performance, deferred to step 7; C2G-SPEC §13.4): the start's collector setting is step
+6's (amendment U4: `GOGC=400` while the program starts); the running program's stays step 7's.
 
 ## B1b, later: the box
 

@@ -991,3 +991,80 @@ decision (2026-10-08).
   the file system, and sockets with the socket REPL (`arbace.core.server`), both reversing parts
   of D6; the suite's last failures (`clearing`, `api`, `transducers`' time) with periodic arm64
   checks.
+
+## 2026-10-09: amendments Y1-Y4 accepted and folded
+
+- The user accepted the small items' amendments Y1-Y4 (EVAL-NOTES.md, "Phase 2B follow-up"),
+  folded by the main session: Y1 (c2g names a jrt-provided class by jrt's registered Go name)
+  into C2G-SPEC §4.4; Y2 (`Dyn` implements jrt's hand-written interfaces with a cast function,
+  with the nominal check; narrows E4) into §5.12; Y3 (`Semaphore` hand-written in jrt, AQS
+  measured and not taken) into §8.4 and JAVA-SURFACE.md decision 4; Y4 (the harvest keeps
+  `java_interop`'s proxy assertions) into ORACLE.md; all listed in C2G-SPEC §16.
+
+## 2026-10-09: B1a step 6, the executable: an image of prepared namespaces
+
+- Agent, branch `step6` (4 commits on `42552a0`), merged: measured first, start (4.18 s) was
+  macroexpansion and analysis, not reading (about 0.1 s), with GC at 60% of CPU. Now
+  `bin/arbace-go --build` runs the built executable once with `ARBACE_PREPARE`, requiring every
+  embedded namespace (about 32 s), and records per top-level form the analyzed `Expr` tree plus
+  the side effects of its analysis (deftype stubs and classes, `gen-interface`'s interfaces,
+  proxy classes, the boot `ns` macro's `*ns*`): an image of 3.8 MB, reproducible, the same for
+  both architectures, linked into the executables (`go/arbace/cmd/arbace/image.clj`, the type
+  table `image_types.go` from `bin/c2g --program`; `Compiler$Image` in the Compiler variant). At
+  run time `RT.load` replays an embedded source from the image. A class's hash comes from its
+  name (the image needs the same hashes in every run). `GOGC=400` during start unless `GOGC`
+  is set (a new `Main` variant). The smoke test adds a REPL session checked against the JVM's
+  transcript. Considered (EXEC-NOTES.md): pre-read forms, macroexpanded forms, a heap snapshot
+  (as Joker), Go code instead of data, lazy decoding.
+- Start to `-e nil` on amd64: 4.18 s → 0.32 s (JVM `bin/arbace` 0.17 s, Joker 1.10.0 under
+  0.01 s); arm64 under qemu 44 s → 5.2 s; size 58.4 → 63.5 MB (Joker 29 MB). The rest is mostly
+  each `ns`'s `refer` of `arbace.core`'s vars (step 7).
+- The class hash by name reordered `polymorphism.clj:176`'s message on the agent's branch; on
+  main, MultiFn's sort by class name (hand change 14) makes it moot: the case passes.
+- Main session on the merge: Go build, `--smoke`, the Go oracle 20,230 of 20,263 as recorded
+  (`--expected`), Clojure's suite on Go 19,251 of 19,280 with no regressions; start 0.35 s.
+- The user's decisions: amendments U1-U5 accepted (to fold); the smoke test joins the
+  essential `bin/gate` with the executable cached by a hash of its inputs (rebuilt only when
+  they change). Step 7b (the evaluator's closure compilation) can start.
+
+## 2026-10-09: a proxy of BufferedWriter; pprint passes on Go
+
+- Agent, branch `pprint-bw` (`38cd59a`, `88aaca9`), merged: c2g's proxy list moves to
+  `arbace.c2g.model` and gains `java/io/BufferedWriter`; a translated non-final class on it is
+  not a leaf (its `DynSub_C` extends it), while hand-written classes keep jrt's leafness. 13 new
+  forms at the end of `test/oracle/forms/types.clj` (proxy-super, buffering, prn, pprint and
+  cl-format through a proxied BufferedWriter, a write after close). The suite's pprint namespace
+  passes 474 of 474; the suite on Go 19,255 of 19,280. Executable +981 KB. Amendment Z1
+  proposed (EVAL-NOTES.md).
+- Main session on the merge (over step 6): Go build, `--smoke`, the Go oracle's forms 10,097 of
+  10,100 as recorded, Clojure's suite on Go with no regressions.
+
+## 2026-10-09: step 6's follow-up: the smoke test in the essential gate; U1-U5 folded
+
+- Agent, branch `step6` (`2ed50fd`, `e380a5e`, `e9f296b`), merged: `bin/gate` runs a check `go`
+  (`bin/arbace-go --gate`, not with `--full`) beside the suite on stage 2 and the class forms
+  tests: the smoke test on amd64 of an executable cached in `.tmp/arbace-go-gate`, keyed by a
+  SHA-256 of `arbace/`, `go/`, `overlay/`, `bin/lib/`, the Java surface, the seed's hash, the
+  build's scripts and the toolchains (TamaGo's VERSION, `java -version`, jdk26u's commit). A miss
+  runs `bin/jrt-convert`'s steps sources, generate, convert and the amd64 build with the image.
+  Measured: the essential gate 3m38s on a hit, about 7 minutes on a miss (the check itself 5m13s
+  to 5m37s). Alternative considered: always building (the user chose the cache). CLAUDE.md's
+  gate paragraph describes it.
+- Amendments U1-U5 folded: C2G-SPEC §5.8 (a class's hash from its name), §10.3 (the prepared
+  namespaces), §10.6 (the main package and jrt's hooks), §13.4 (`GOGC` at start), §16; B1-PLAN
+  (step 6 done, the cached check, a D7 note); EVAL-PLAN §2.7; EXEC-NOTES.
+- Correction to the step 6 entries: while cleaning up after the pprint merge the main session
+  force-removed this agent's worktree while it worked, losing its uncommitted edits; the
+  worktree was recreated on the branch and the agent redid them. Worktrees are now removed only
+  after their agent has reported and stopped.
+- Main session on the merge: scripts only and docs; the agent's two essential gate runs (a miss
+  and a hit) passed with no regressions; `--full` not run, by the user's policy until the freeze.
+
+## 2026-10-10: amendment Z1 accepted and folded
+
+- The user accepted Z1 (EVAL-NOTES.md, "Proxies of BufferedWriter"): a translated, non-final
+  class on c2g's proxy list is not a leaf, since its `DynSub_C` subclasses it; the list lives in
+  `arbace.c2g.model/proxy-supers` and includes `java.io.BufferedWriter`. Folded into C2G-SPEC
+  §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
+  considered: keeping leafness a condition on the list (a listed class must already be
+  non-leaf), which excluded BufferedWriter.

@@ -165,3 +165,32 @@
             (for [^File f (file-seq base)
                   :when (.isFile f)]
               [(str/replace (str (.relativize (.toPath base) (.toPath f))) File/separator "/") f])))))
+
+;; ---------------------------------------------------------------------------------------
+;; The image of prepared namespaces (doc/go/EXEC-NOTES.md): its encoding is hand-written forms
+;; of the main package; decoding makes objects of the program's struct types by name, so the
+;; main package lists them
+
+(def image-forms
+  "The image's encoding: Go forms of the main package, copied into the program."
+  "go/arbace/cmd/arbace/image.clj")
+
+(defn image-type-forms
+  "The main package's table of the program's struct types (image_types.go): every exported,
+  non-generic struct type of arbace/lang and arbace/jrt, as declared by the forms under
+  prog-dir, registered by name for the image's decoder."
+  [prog-dir]
+  (let [re #"\(go/type ([A-Z][A-Za-z0-9_]*)\s+(?:\"(?:[^\"\\]|\\.)*\"\s+)?\(struct[ )]"
+        types (for [[pkg alias] [["lang" "lang"] ["jrt" "jrt"]]
+                    :let [dir (io/file prog-dir "go/arbace" pkg)]
+                    ^File f (sort (.listFiles dir))
+                    :when (and (.isFile f) (str/ends-with? (.getName f) ".clj")
+                               (not (str/ends-with? (.getName f) "_test.clj")))
+                    [_ n] (re-seq re (slurp f))]
+                (symbol alias n))]
+    [(list 'go/file "image_types.go" :imports '[[reflect "reflect"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+     (list 'go/func 'init []
+           (list 'registerImageTypes
+                 (apply list 'lit '(slice reflect/Type)
+                        (for [t (sort-by str (distinct types))]
+                          (list 'reflect/TypeOf (list 'lit t))))))]))

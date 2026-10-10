@@ -136,8 +136,15 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Done (2026-10-09, the user's decision): the determinism issue at `polymorphism.clj:176`: a
     multimethod's ambiguity message names two classes in the order of their names
     (VENDOR-NOTES.md, hand change 14), on the JVM as on Go.
-  - Then: step 6 (the executables), step 7 (speed, D7), step 8 (the `.ae` rename), step 9 (the
-    freeze).
+  - Step 6 done (2026-10-09): the executable with an image of the prepared core namespaces (start
+    4.2 s → 0.35 s, [go/EXEC-NOTES.md](go/EXEC-NOTES.md)); amendments U1-U5 accepted and folded;
+    the essential `bin/gate` smoke-tests the Go executable, cached by a hash of its inputs
+    (seconds on a hit, about 5 minutes beside the suite on a miss).
+  - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
+    compilation), and feature completion: class forms in the REPL, `java.io.File`, sockets and
+    the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
+    (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
+  - Then: step 8 (the `.ae` rename), step 9 (the freeze, with `bin/gate --full`).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`

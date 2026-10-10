@@ -167,15 +167,12 @@
 ;; proxies of a class (EVAL-NOTES.md, phase 2A): proxy over Dyn
 
 (def proxy-supers
-  "The classes besides Object that a proxy may extend in the Go build: each gets a Go type
-  DynSub_C, which embeds C's struct (so it is a C_I) and has Dyn's methods (every interface
-  of the world) and C's virtual methods, each calling its slot's fn and, when unset or
-  answering SUPER, C's implementation. A class must be translated, non-final and not a leaf
-  (its values are C_I, §5.3)."
-  ["java/io/Writer" "java/io/Reader" "java/io/PushbackReader" "java/io/InputStream"
-   "java/io/OutputStream" "arbace/lang/APersistentMap"
-   ;; jrt's hand-written ThreadLocal (test.check's random, arbace.instant on the JVM)
-   "java/lang/ThreadLocal"])
+  "The classes besides Object that a proxy may extend in the Go build (model/proxy-supers): each
+  gets a Go type DynSub_C, which embeds C's struct (so it is a C_I) and has Dyn's methods (every
+  interface of the world) and C's virtual methods, each calling its slot's fn and, when unset or
+  answering SUPER, C's implementation. A class must be translated or hand-written and non-final;
+  a translated one is not a leaf for being listed (its values are C_I, §5.3)."
+  m/proxy-supers)
 
 (defn proxy-classes
   "The classes of proxy-supers a proxy may extend in this world (translated)."
