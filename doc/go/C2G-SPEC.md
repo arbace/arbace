@@ -1519,6 +1519,9 @@ writes the converted value instead (`4294967288`). The prototype of §15 met thi
 - Exhaustive switches carry the converter's explicit `MatchException` default (classes/SPEC.md
   §5.8).
 
+An enum `switch` whose enum class is outside the closed world switches on an operation-level
+stub (`C2g_Missing[int32]`), its arms kept for Go's flow analysis (proposed amendment JC2).
+
 ### 7.9 Exceptions
 
 #### 7.9.1 Throwing
@@ -1861,7 +1864,10 @@ this only matters for racy publication, which the race detector also finds.
     the status 1; then it waits for the non-daemon threads (`jrt.WaitNonDaemon()`), runs the
     shutdown hooks as the JVM's `DestroyJavaVM` does (amendment FS5, accepted 2026-10-10:
     before, only `System.exit` ran them, so `deleteOnExit` did not delete at a normal end) and
-    returns the status (`System.exit` ends the process before).
+    returns the status (`System.exit` ends the process before). It also keeps a ticker pending
+    for the program's life, so that Go's run time never ends a program whose threads all wait
+    forever with "all goroutines are asleep - deadlock!": it waits, as the JVM does (proposed
+    amendment JC9, JRT-NOTES.md, "Concurrency").
   - `jrt.Go(name, f func()) *jrt.Thread` starts a Go function as a daemon jrt thread;
     `jrt.RunnableOf(f func())` is a `Runnable` of a Go function; `Thread_defaultHandler` holds
     the default uncaught exception handler.
@@ -1884,7 +1890,13 @@ this only matters for racy publication, which the race detector also finds.
   accepted 2026-10-09: the full public API with Java's messages, fairness not kept, as for
   `ReentrantLock`; `AbstractQueuedSynchronizer` translated was measured and not taken: it needs
   `Unsafe` additions and has a two-word race on `Node.waiter`, §8.3); `ConcurrentHashMap` and the blocking
-  queues are translated over `Unsafe`'s compare-and-set (§9.2).
+  queues are translated over `Unsafe`'s compare-and-set (§9.2). *Proposed amendments JC5, JC6
+  (JRT-NOTES.md, "Concurrency"):* the executors (`ThreadPoolExecutor`,
+  `ScheduledThreadPoolExecutor`, `FutureTask`, `Executors`, `ExecutorService` over a stand-in) are
+  translated from jdk26u and jrt's hand-written pools go; `AbstractQueuedSynchronizer` is
+  translated for their workers, `Node.waiter` and the exclusive owner volatile by variants, while
+  jrt's `ReentrantLock`, `ReentrantReadWriteLock`, `Semaphore` and `CountDownLatch` stay
+  hand-written; the rest of `java.util.concurrent` is translated over §8.5's `VarHandle`s.
 - **The fork-join pool** (amendment S5, accepted 2026-10-09; it reverses the cut of
   `ForkJoinPool` under D6, JAVA-SURFACE.md "What the cut leaves out") is jrt's hand-written
   `ForkJoinTask` (non-leaf, §5.3) and `ForkJoinPool` (`forkjoin.clj`), with the JDK's semantics
