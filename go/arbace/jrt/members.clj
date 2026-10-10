@@ -1,10 +1,9 @@
 ;; jrt: member tables as data (doc/go/JRT-NOTES.md, "Size", amendment SZ3). c2g gives a
 ;; translated class its member table as a MemberTable: the members' names, descriptors and
-;; modifiers as one string, and their functions (invokers, constructors, field accessors) as
-;; slices that Go initializes statically. The table is decoded into the ClassInfo's Methods,
+;; modifiers as one string, and one dispatch function per kind (invoke, new, get, set), a switch
+;; over the member's index. The table is decoded into the ClassInfo's Methods,
 ;; Ctors and Fields the first time reflection reads them (EnsureMembers), not at the program's
-;; start; a member's function is a closure over its class's dispatch function and its index
-;; (one function per class and kind, a switch, instead of one closure per member).
+;; start; a member's function is a closure over its class's dispatch function and its index.
 (in-ns 'go.arbace.jrt)
 
 (go/file "members.go"
