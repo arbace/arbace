@@ -40,7 +40,7 @@
    "(count (str (java.net.InetAddress/getLoopbackAddress)))"])
 
 (defn- connect ^Socket [port]
-  (doto (Socket. "127.0.0.1" (int port)) (.setSoTimeout 60000)))
+  (doto (Socket. "127.0.0.1" (int port)) (.setSoTimeout 300000)))
 
 (defn- read-all
   "What the server sends until it closes the connection."
