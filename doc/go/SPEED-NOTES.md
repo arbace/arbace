@@ -13,10 +13,11 @@ its first call, into a tree of `Code` nodes. On the benchmarks below the Go exec
 69 times faster than before (geometric mean 12.8x), now 6 to 500 times slower than the JVM's
 compiled code (geometric mean 54x, from about 700x). Start to `-e nil`: 0.33 s → 0.21 s; a
 load from source (`ARBACE_NO_IMAGE`) 3.5 s → 1.8 s; a namespace's `refer` of `arbace.core`
-18.6 → 5.7 ms. Clojure's suite on Go: no regressions (19,255 of 19,280 assertions), and its
+18.6 → 5.7 ms. Clojure's suite on Go: no regressions (19,379 of 19,398 assertions, on main
+with `java.io.File`), and its
 slowest namespaces run 4 to 5 times faster (reducers 345 → 67 s, parse 306 → 78 s);
 `transducers`, skipped for timing out at 900 s, now passes in full in 574 s. The oracle on Go:
-20,243 of 20,276, exactly its 33 known mismatches.
+20,566 of 20,600, exactly its 34 known mismatches.
 
 ## The design
 
@@ -137,11 +138,12 @@ settings are part a's (D7).
 - `bin/arbace-go --smoke` (amd64) passes.
 - `bin/c2g-evalproof`: as expected on amd64 and arm64 (31 forms).
 - The oracle on Go (`bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900
-  --expected test/oracle/known-go-amd64.edn`): 20,243 of 20,276, the 33 recorded mismatches, 0
-  new, 0 now passing.
-- Clojure's suite on Go (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 12`): 19,255 of 19,280
-  assertions (646 tests), no regressions against `test/arbace-go-results.edn`; `transducers`
-  alone (not skipped) 108 of 108.
+  --expected test/oracle/known-go-amd64.edn`): 20,566 of 20,600, the 34 recorded mismatches, 0
+  new, 0 now passing (main merged at `b20b577`, with `java.io.File`; before that merge 20,243 of
+  20,276, the 33 then recorded).
+- Clojure's suite on Go (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 12`): 19,379 of 19,398
+  assertions (646 tests, 0 errors), no regressions against `test/arbace-go-results.edn` (before
+  that merge 19,255 of 19,280); `transducers` alone (not skipped) 108 of 108.
 - `bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
   read by c2g only).
 
