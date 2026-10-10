@@ -64,11 +64,41 @@
   (let [(values v ok) (assert Future x)]
     (when (not (dynNominal x Future_class ok)) (panic (ClassCast x Future_class)))
     v))
+(go/func Executor_Cast ^Executor [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Executor x)]
+    (when (not (dynNominal x Executor_class ok)) (panic (ClassCast x Executor_class)))
+    v))
+(go/func ThreadFactory_Cast ^ThreadFactory [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert ThreadFactory x)]
+    (when (not (dynNominal x ThreadFactory_class ok)) (panic (ClassCast x ThreadFactory_class)))
+    v))
 (go/func ExecutorService_Cast ^ExecutorService [^any x]
   (when (== x nil) (return nil))
   (let [(values v ok) (assert ExecutorService x)]
     (when (not (dynNominal x ExecutorService_class ok)) (panic (ClassCast x ExecutorService_class)))
     v))
+
+(go/func ExecutorService_Close__V
+  "ExecutorService_Close__V is ExecutorService's default close() (JDK 19): shutdown, then
+waiting for termination a day at a time; an interrupt while waiting is kept and set again at
+the end. The JDK's also calls shutdownNow at the first interrupt, which jrt's interface cannot
+name (its result is a List, a translated type): here the executor's tasks run on.\n"
+  [^ExecutorService this]
+  (let [terminated (.IsTerminated__Z this)]
+    (when terminated
+      (return))
+    (.Shutdown__V this)
+    (let [interrupted false]
+      (while (not terminated)
+        (let [exc (runCatching (fn [] (set! terminated (.AwaitTermination_J_TimeUnit__Z this 1 TimeUnit_DAYS))))]
+          (when (!= exc nil)
+            (if (InterruptedException_InstanceOf exc)
+              (set! interrupted true)
+              (panic exc)))))
+      (when interrupted
+        (.Interrupt__V (Thread_CurrentThread__Thread))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Executors, ThreadPoolExecutor, ScheduledThreadPoolExecutor and FutureTask are translated

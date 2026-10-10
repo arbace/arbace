@@ -119,6 +119,12 @@ that enqueues it.\n"
 
 (go/method Self_Reference ^{:tag (* Reference)} [^{:tag (* Reference)} r] r)
 
+(go/func Reference_ReachabilityFence_O__V
+  "Reference_ReachabilityFence_O__V is Reference.reachabilityFence: x stays reachable until here
+(runtime.KeepAlive; Executors' delegating executors).\n"
+  [^any x]
+  (runtime/KeepAlive x))
+
 (go/func Reference_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Reference_I x)] ok))
 (go/func Reference_Cast ^Reference_I [^any x]
   (when (== x nil) (return nil))

@@ -93,6 +93,7 @@
     (GetId__J ^int64 [])
     (ThreadId__J ^int64 [])
     (IsVirtual__Z ^bool [])
+    (GetState__Thread_State ^{:tag (* Thread_State)} [])
     (GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler ^Thread_UncaughtExceptionHandler [])
     (SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V [^Thread_UncaughtExceptionHandler h])
     (GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [])))
@@ -335,6 +336,52 @@ current thread is interrupted. A thread never started is not alive: join returns
 (go/method Impl_GetId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
 (go/method Impl_ThreadId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
 (go/method Impl_IsVirtual__Z ^bool [^{:tag (* Thread)} t ^Thread_I this] (.-virtual t))
+(go/method Impl_GetState__Thread_State
+  "Impl_GetState__Thread_State is getState: NEW before start, TERMINATED after the run, else
+RUNNABLE (jrt does not tell a thread blocked or waiting from a running one: JC8).\n"
+  ^{:tag (* Thread_State)} [^{:tag (* Thread)} t ^Thread_I this]
+  (switch (.Load (.-state t))
+    (case [threadNew] (return Thread_State_NEW))
+    (case [threadTerminated] (return Thread_State_TERMINATED)))
+  Thread_State_RUNNABLE)
+
+;; ---- java.lang.Thread.State, an enum (§7.13)
+
+(go/type Thread_State "Thread_State is the enum java.lang.Thread.State.\n" (struct Enum))
+
+(go/var Thread_State_class
+  (Define (addr (lit ClassInfo :Name "java.lang.Thread$State" :Kind KindEnum
+                     :Modifiers (bit-or AccPublic AccStatic AccFinal AccEnum) :Super Enum_class
+                     :Declaring Thread_class :Simple "State" :Go "arbace/jrt.Thread_State"))))
+
+(go/func newThreadState ^{:tag (* Thread_State)} [^string n ^int32 o]
+  (let [t (addr (lit Thread_State))]
+    (.Ctor_String_I (.-Enum t) t (Intern n) o)
+    t))
+
+(go/var
+  [^{:tag (* Thread_State) :doc "Thread_State_NEW is Thread.State.NEW.\n"} Thread_State_NEW (newThreadState "NEW" 0)]
+  [^{:tag (* Thread_State)} Thread_State_RUNNABLE (newThreadState "RUNNABLE" 1)]
+  [^{:tag (* Thread_State)} Thread_State_BLOCKED (newThreadState "BLOCKED" 2)]
+  [^{:tag (* Thread_State)} Thread_State_WAITING (newThreadState "WAITING" 3)]
+  [^{:tag (* Thread_State)} Thread_State_TIMED_WAITING (newThreadState "TIMED_WAITING" 4)]
+  [^{:tag (* Thread_State)} Thread_State_TERMINATED (newThreadState "TERMINATED" 5)])
+
+(go/func Thread_State_Values__Thread_State1 ^{:tag (* RefArray)} []
+  (RefArrayOf Thread_State_class Thread_State_NEW Thread_State_RUNNABLE Thread_State_BLOCKED
+              Thread_State_WAITING Thread_State_TIMED_WAITING Thread_State_TERMINATED))
+
+(go/func Thread_State_ValueOf_String__Thread_State ^{:tag (* Thread_State)} [^{:tag (* String)} n]
+  (assert (* Thread_State) (Enum_ValueOf_Class_String__Enum Thread_State_class n)))
+
+(go/method Ref ^any [^{:tag (* Thread_State)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Thread_State)} t] Thread_State_class)
+(go/method Clone__O ^any [^{:tag (* Thread_State)} t] (.Impl_Clone__O t t))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* Thread_State)} t] (.Impl_ToString__String t t))
+(go/method CompareTo_Enum__I ^int32 [^{:tag (* Thread_State)} t ^Enum_I o] (.Impl_CompareTo_Enum__I t t o))
+(go/method CompareTo_O__I ^int32 [^{:tag (* Thread_State)} t ^any o] (.Impl_CompareTo_O__I t t o))
+(go/method GetDeclaringClass__Class ^{:tag (* Class)} [^{:tag (* Thread_State)} t] (.Impl_GetDeclaringClass__Class t t))
+(go/func Thread_State_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Thread_State) x)] ok))
 
 (go/method Impl_GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler
   ^Thread_UncaughtExceptionHandler [^{:tag (* Thread)} t ^Thread_I this]
@@ -392,6 +439,7 @@ main for every platform thread), VirtualThread[#id,name]/state for a virtual one
 (go/method GetId__J ^int64 [^{:tag (* Thread)} t] (.Impl_GetId__J t t))
 (go/method ThreadId__J ^int64 [^{:tag (* Thread)} t] (.Impl_ThreadId__J t t))
 (go/method IsVirtual__Z ^bool [^{:tag (* Thread)} t] (.Impl_IsVirtual__Z t t))
+(go/method GetState__Thread_State ^{:tag (* Thread_State)} [^{:tag (* Thread)} t] (.Impl_GetState__Thread_State t t))
 (go/method GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler ^Thread_UncaughtExceptionHandler
   [^{:tag (* Thread)} t] (.Impl_GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler t t))
 (go/method SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V
@@ -633,19 +681,31 @@ returns the Thread.\n"
 ;; ---------------------------------------------------------------------------------------
 ;; Virtual threads: Thread.ofVirtual() (Agent's executor); goroutines, as every thread
 
-(go/type Thread_Builder_OfVirtual
-  "Thread_Builder_OfVirtual is java.lang.Thread$Builder$OfVirtual (the members Arbace uses).\n"
+(go/type Thread_Builder
+  "Thread_Builder is java.lang.Thread$Builder (the members of it jrt has: the builder's thread
+factory and threads; Executors.newVirtualThreadPerTaskExecutor calls factory() on it).\n"
   (interface Object_I
-    (Is_Thread_Builder_OfVirtual [])
-    (Name_String__Thread_Builder_OfVirtual ^Thread_Builder_OfVirtual [^{:tag (* String)} name])
-    (Name_String_J__Thread_Builder_OfVirtual ^Thread_Builder_OfVirtual [^{:tag (* String)} prefix ^int64 start])
+    (Is_Thread_Builder [])
     (Factory__ThreadFactory ^ThreadFactory [])
     (Unstarted_Runnable__Thread ^Thread_I [^Runnable task])
     (Start_Runnable__Thread ^Thread_I [^Runnable task])))
 
+(go/var Thread_Builder_class
+  (Define (addr (lit ClassInfo :Name "java.lang.Thread$Builder" :Kind KindInterface
+                     :Modifiers (bit-or AccPublic AccStatic AccInterface AccAbstract)
+                     :Declaring Thread_class :Simple "Builder" :Go "arbace/jrt.Thread_Builder"))))
+
+(go/type Thread_Builder_OfVirtual
+  "Thread_Builder_OfVirtual is java.lang.Thread$Builder$OfVirtual (the members Arbace uses).\n"
+  (interface Thread_Builder
+    (Is_Thread_Builder_OfVirtual [])
+    (Name_String__Thread_Builder_OfVirtual ^Thread_Builder_OfVirtual [^{:tag (* String)} name])
+    (Name_String_J__Thread_Builder_OfVirtual ^Thread_Builder_OfVirtual [^{:tag (* String)} prefix ^int64 start])))
+
 (go/var Thread_Builder_OfVirtual_class
   (Define (addr (lit ClassInfo :Name "java.lang.Thread$Builder$OfVirtual" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccStatic AccInterface AccAbstract)
+                     :Interfaces (lit (slice (* Class)) Thread_Builder_class)
                      :Simple "OfVirtual" :Go "arbace/jrt.Thread_Builder_OfVirtual"))))
 
 (go/type virtualBuilder
@@ -709,6 +769,7 @@ returns the Thread.\n"
     (addr (lit virtualFactory :b f))))
 
 (go/method Is_Thread_Builder_OfVirtual [^{:tag (* virtualBuilder)} b])
+(go/method Is_Thread_Builder [^{:tag (* virtualBuilder)} b])
 (go/method Ref ^any [^{:tag (* virtualBuilder)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* virtualBuilder)} t] virtualBuilder_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* virtualBuilder)} t] (Object_toString t))
@@ -732,6 +793,10 @@ returns the Thread.\n"
 (go/method Clone__O ^any [^{:tag (* virtualFactory)} t] (panic (CloneNotSupported t)))
 
 (go/func init []
+  (set! (.-IsInstance (.Info Thread_State_class)) Thread_State_InstanceOf)
+  (set! (.-Enum (.Info Thread_State_class)) Thread_State_Values__Thread_State1)
+  (set! (.-IsInstance (.Info Thread_Builder_class))
+        (fn ^bool [^any x] (let [(values _ ok) (assert Thread_Builder x)] ok)))
   (set! (.-IsInstance (.Info Thread_Builder_OfVirtual_class))
         (fn ^bool [^any x] (let [(values _ ok) (assert Thread_Builder_OfVirtual x)] ok))))
 

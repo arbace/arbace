@@ -73,6 +73,18 @@ covers what.
   below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other
   files of the change (`Path.java`, `Files.java`, the variants) are written from the documented
   APIs, as the overlay's other files.
+- `overlay/jdk/java.base/jdk/internal/jrt/ThreadPerTaskExecutor.java` (doc/go/JRT-NOTES.md,
+  "Concurrency": its states and their transitions, `ensureNotShutdown`, `tryTerminate`,
+  `tryShutdownAndTerminate`, `shutdown`, `shutdownNow`), the methods `DefaultThreadFactory.newThread`
+  and `AutoShutdownDelegatedExecutorService`'s of `overlay/jdk/variants/Executors.clj`,
+  `arrangeTimeout` of `overlay/jdk/variants/CompletableFuture.clj`, and `ExecutorService_Close__V`
+  in `go/arbace/jrt/executor.clj` (`ExecutorService.close`) follow the code of
+  https://github.com/openjdk/jdk26u at `baf63fb`
+  (`src/java.base/share/classes/java/util/concurrent/ThreadPerTaskExecutor.java`,
+  `Executors.java`, `CompletableFuture.java`, `ExecutorService.java`): Copyright (c) Oracle and/or
+  its affiliates, under the GNU General Public License version 2 with the Classpath Exception
+  (text below); recorded as ports to be safe, by the rule of B7. The rest of the concurrency
+  work's files (the other variants and overlay classes, `varhandle.clj`) is Arbace's own.
 - `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

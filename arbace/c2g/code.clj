@@ -1686,8 +1686,13 @@
       :enum
       (let [e (t/desc->internal (:sel-type node))
             sel (expr (:sel node))
-            ord (if (m/leaf? e) (list '.-F_ordinal (list (jsym "NN") (:x sel)))
-                    (list '.-F_ordinal (list '.Self_Enum (:x sel))))]
+            ord (cond
+                  ;; an enum outside the closed world (Future.State, whose class is a name
+                  ;; only): the switch throws when reached, its arms kept for Go's analysis
+                  (not (m/in-world? e))
+                  (missing-expr (str "class " (str/replace e "/" ".") " is not in the closed world") "I")
+                  (m/leaf? e) (list '.-F_ordinal (list (jsym "NN") (:x sel)))
+                  :else (list '.-F_ordinal (list '.Self_Enum (:x sel))))]
         (emit! (apply list 'switch ord
                       (concat
                         (for [c cases :let [ls (remove :default (:labels c))] :when (seq ls)]

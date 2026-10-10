@@ -1958,3 +1958,89 @@ All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16,
   `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
   the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
   from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).*
+
+# Concurrency: the rest of java.util.concurrent
+
+The user's decision of 2026-10-10 (branch `go-juc`): the rest of `java.util.concurrent` in the Go
+build, as far as is sound, with c2g compiling `VarHandle`s; and the end of a program whose
+agents were never shut down. Before, the Go build had 29 of the package's 81 API classes
+(JAVA-BASE.md): `ConcurrentHashMap`, the array and linked blocking queues, `CyclicBarrier`,
+`CountedCompleter` translated, and jrt's hand-written executors, `FutureTask`, `ForkJoinPool`,
+latches, semaphores, locks and four atomics.
+
+## What was done
+
+**c2g compiles `VarHandle`s statically** (C2G-SPEC §8.5, amendment JC1; `arbace/c2g/vh.clj`).
+JDK 26's concurrent classes make their handles once, in static initializers, into `static final`
+fields (`MethodHandles.lookup().findVarHandle(C.class, "f", T.class)`,
+`MhUtil.findVarHandle`, `MethodHandles.arrayElementVarHandle(T[].class)`), and only call access
+modes on those fields. c2g reads the initializers into a table of constant handles (37 in the
+world first, on 33 fields), drops their stores and lookups (`java.lang.invoke` stays outside the
+world), and translates each access-mode call on a constant handle into the atomic operation on
+the field or array element; the fields a handle names get the volatile representation (§8.2)
+whether Java declares them volatile or not, so plain accesses to them are atomic too
+(`ConcurrentSkipListMap`'s `Node.next` and `val` are plain fields written by handles). The
+operations c2g cannot write as the atomic types' own methods are jrt's (`varhandle.clj`:
+`VhCmpXchg*`, `VhGetAndAdd*`, `VhGetAndXor*`, the boolean bitwise modes, and the `int[]`,
+`long[]` and reference array elements, the last under `Unsafe`'s striped locks). The generated
+code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
+`(.CompareAndSwap (.-F_next p) nil newNode)` on an `atomic.Pointer[ConcurrentLinkedQueue_Node]`.
+
+**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/g2c/jrt_sources.clj`):
+`ConcurrentLinkedQueue`, `ConcurrentLinkedDeque`, `ConcurrentSkipListMap`,
+`ConcurrentSkipListSet`, `CopyOnWriteArrayList`, `CopyOnWriteArraySet`, `LinkedBlockingDeque`,
+`PriorityBlockingQueue`, `DelayQueue`, `SynchronousQueue`, `LinkedTransferQueue`, `Exchanger`,
+`Phaser`, `CompletableFuture`, `ThreadPoolExecutor`, `ScheduledThreadPoolExecutor`,
+`AbstractExecutorService`, `FutureTask`, `Executors`, `ExecutorCompletionService`,
+`ThreadLocalRandom` (with `RandomSupport`), `AtomicReferenceArray`, `AtomicIntegerArray`,
+`AtomicLongArray`, `Striped64`, `LongAdder`, `DoubleAdder`, `LongAccumulator`,
+`DoubleAccumulator`, `AtomicStampedReference`, `AtomicMarkableReference`, `StampedLock`,
+`AbstractQueuedSynchronizer` (`ThreadPoolExecutor`'s workers), `AbstractOwnableSynchronizer`,
+and the interfaces they implement (`BlockingDeque`, `TransferQueue`, `ConcurrentNavigableMap`,
+`Delayed`, `CompletionStage`, `RunnableFuture`, `ScheduledExecutorService`, `ScheduledFuture`,
+`RunnableScheduledFuture`, `RejectedExecutionHandler`, `CompletionService`, `ReadWriteLock`),
+`CompletionException`, and of `java.util` `PriorityQueue` (`DelayQueue`'s) and `SortedSet`
+(`ConcurrentSkipListSet`'s views; both also on `java.util`'s list of gaps, JAVA-BASE.md).
+
+**jrt's hand-written executors and `FutureTask` are gone** (JC5): `Executors`,
+`ThreadPoolExecutor`, `ScheduledThreadPoolExecutor` and `FutureTask` are the JDK's, so
+`shutdownNow`, `invokeAll`, `invokeAny`, the pool's sizes and counters, rejection policies and
+scheduled tasks behave as on the JVM, and Arbace's agents run on the JDK's pools. jrt keeps the
+interfaces (`Executor`, `ExecutorService`, `Future`, `ThreadFactory`), which its `ForkJoinPool`
+implements, with `ExecutorService`'s default `close()` (`ExecutorService_Close__V`). jrt's own
+Java for what jdk26u's code reaches beyond the world: `jdk.internal.vm.SharedThreadContainer`
+(`ThreadPoolExecutor`'s container: starts threads, keeps nothing),
+`jdk.internal.jrt.ThreadPerTaskExecutor` (`newThreadPerTaskExecutor`,
+`newVirtualThreadPerTaskExecutor`: jdk26u's is a thread container), `jdk.internal.jrt.Delays`
+(`CompletableFuture`'s delays), `java.util.concurrent.ThreadLocalRandomProbes` (`Striped64`'s
+probe). Variants (`overlay/jdk/variants/`): `Executors` (the thread-per-task executor,
+`newWorkStealingPool` over jrt's `ForkJoinPool(int)`, `DefaultThreadFactory` without
+`ThreadGroup`, `AutoShutdownDelegatedExecutorService` without its `Cleaner`), `CompletableFuture`
+(`orTimeout`, `completeOnTimeout`, `delayedExecutor` through `Delays`),
+`AbstractQueuedSynchronizer$Node` and `AbstractOwnableSynchronizer` (the waiter and the owner
+volatile, JC6), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` (no
+offsets of the thread-local maps).
+
+**`ThreadLocalRandom` translated** (JC4): jrt's `Thread` has the JDK's fields
+`F_threadLocalRandomSeed`, `F_threadLocalRandomProbe` and `F_threadLocalRandomSecondarySeed`
+and registers its Go type for `Unsafe.objectFieldOffset`, so the JDK's class reads and writes
+them as on the JVM; jrt's hand-written probes are gone. `ThreadLocalRandom.current()`, its
+bounded and stream methods (`RandomSupport`) work.
+
+**jrt's additions**: `ForkJoinPool` is an `ExecutorService` (`execute(Runnable)`, the three
+`submit`s, `isTerminated`, `awaitTermination`, `close`, `isQuiescent`), with
+`ForkJoinPool.ManagedBlocker`, `managedBlock` and the package-private `asyncCommonPool`
+(`CompletableFuture`'s default executor) (JC7); `LockSupport` keeps the blocker
+(`getBlocker`, `setCurrentBlocker`, `parkUntil(Object, long)`); `Unsafe` has
+`weakCompareAndSetReference`, `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`,
+`storeStoreFence`, `park` and `unpark` (`AbstractQueuedSynchronizer`, `StampedLock`);
+`Reference.reachabilityFence`.
+
+**A program that never shuts its agents down** (JC9). Agents' `send` runs on a fixed pool whose
+workers, non-daemon threads, wait forever for tasks; without `shutdown-agents` the JVM waits
+for them forever after main, and the Go build waited too, until Go's run time found every
+goroutine asleep and ended the process with "fatal error: all goroutines are asleep -
+deadlock!" (exit status 2). `send-off` and `future` run on a cached pool whose idle workers end
+after 60 s, after which the JVM and the Go build both exit normally. `jrt.RunMain` now starts,
+once, a goroutine waiting on an hourly ticker: Go's deadlock check never fires while a timer is
+pending, so a Go program whose threads all wait forever waits forever, as the JVM does.

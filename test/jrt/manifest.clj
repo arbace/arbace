@@ -147,7 +147,9 @@
    ;; phase 2a: threads, concurrency, Unsafe, the VM's services
    ["java.lang.Thread" ["java.lang.Runnable"] true]
    ["java.lang.Thread$UncaughtExceptionHandler" [] false]
-   ["java.lang.Thread$Builder$OfVirtual" [] false]
+   ["java.lang.Thread$State" [] false]
+   ["java.lang.Thread$Builder" [] false]
+   ["java.lang.Thread$Builder$OfVirtual" ["java.lang.Thread$Builder"] false]
    ["java.lang.ThreadLocal" [] true]
    ["java.lang.InheritableThreadLocal" [] false]
    ["java.lang.Runtime" [] false]
