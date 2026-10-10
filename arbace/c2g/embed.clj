@@ -190,6 +190,11 @@
   "The image's encoding: Go forms of the main package, copied into the program."
   "go/arbace/cmd/arbace/image.clj")
 
+(def rlwrap-forms
+  "The interactive REPL under rlwrap (EXEC-NOTES.md, \"Line editing: rlwrap\"): Go forms of the
+  main package, copied into the program, Linux's and the other systems' (an empty execRlwrap)."
+  ["go/arbace/cmd/arbace/rlwrap_linux.clj" "go/arbace/cmd/arbace/rlwrap_other.clj"])
+
 (defn image-type-forms
   "The main package's table of the program's struct types (image_types.go): every exported,
   non-generic struct type of arbace/lang and arbace/jrt, as declared by the forms under
