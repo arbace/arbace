@@ -348,6 +348,13 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   value answers that value (read by reflection when c2g runs) instead of throwing; its other
   members still throw. The class forms' analysis reads ASM's `Opcodes` this way
   (CLASSFORMS-REPL.md; `arbace.c2g.out/cut-constant`).
+- **Library cuts** (amendment SL7, accepted 2026-10-10). Besides the classes the embedded
+  namespaces name, `--program` cuts a fixed list of JDK classes that libraries loaded from
+  `ARBACE_PATH` import, when the world lacks them (`arbace.c2g.embed/library-cuts`:
+  `java.util.jar.JarFile`, `JarEntry`, `java.net.URLClassLoader`, `java.io.FileReader`,
+  `java.text.SimpleDateFormat`, named by test.generative's runner, tools.namespace,
+  java.classpath and tools.reader), so that those libraries load on the Go build (Clojure's suite
+  runs its test.generative phase there).
 
 ### 4.2 Go packages
 
@@ -2119,6 +2126,13 @@ the fn's class (`arbace.core$map`, `user$eval12$fn__13`), held in `EvalFn`'s fie
 which `getClass` answers (§5.11): messages, `class`, printing and stack traces show the JVM's
 names.
 
+**A fn's class declares its closed-over locals** (amendment SL1, accepted 2026-10-10): one field
+per closed-over local, named and typed as `ObjExpr.compile` declares them (not public; a primitive
+local's field of its primitive type), whose reflective `get` reads the `EvalFn`'s captured value
+(and `set`, for a reference type, writes it): `Compiler$Dyn.defineFnField`, a native c2g writes
+(`arbace/c2g/dyn.clj`). The evaluator clears locals as compiled code does (EVAL-PLAN §2.1), so
+such a field of a `^:once` fn reads null once the fn has run (Clojure's `clearing` tests).
+
 **Primitive fns are evaluated boxed** (EVAL-PLAN Q1, decided 2026-10-09). An `EvalFn` cannot
 answer `invokePrim`: one Go type cannot implement, per fn, whichever of `IFn`'s 322 primitive
 interfaces (`IFn$LL` ...) the analyzer picks, and `Dyn` covers only the interfaces the world
@@ -2319,6 +2333,11 @@ export** (`jdk.internal.*`, `sun.*`; the running JDK's boot layer decides): the 
 Clojure code access to them (`IllegalAccessError`), so rooting them only grew the executable;
 classes of no JDK module (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted (amendment RD2,
 accepted 2026-10-10; `arbace.c2g.main/repl-visible?`).
+
+**The Java API** (amendment SL6, accepted 2026-10-10): `--program` also translates
+`arbace/java/api/Clojure.clj`, so `arbace.java.api.Clojure` (`Clojure/var`, `Clojure/read`; its
+static initializer requires `arbace.edn` at first use) exists in the Go build as on the JVM. It is
+a class of the program, not an embedded namespace's source.
 
 ### 10.7 Stack traces
 
@@ -3583,6 +3602,16 @@ B1-PLAN.md D6. CF4 `DynClass.CF`, the DynSub types of `class-supers`, the native
 `Compiler$CFGo`: §5.12. CF5 `generics.edn` embedded: §10.3. CF6 the oracle's `defclass` forms:
 ORACLE.md. CF3 reverses D6 for `defclass`; CF4 extends X1 (the classes a proxy may extend gain
 `class-supers`).
+
+**The suite's last failures** (EVAL-NOTES.md, "The suite's last failures"; accepted by the user
+2026-10-10): SL1 locals clearing in the evaluator and a fn class's fields for its closed-over
+locals: EVAL-PLAN §2.1, §10.2. SL2 hinted calls through the member table's invoker:
+EVAL-PLAN §2.6. SL3 single tests skipped and per-namespace timeouts in the Go build's suite
+reference: EVAL-NOTES.md, "Phase 2C" (the runner). SL6 `arbace.java.api.Clojure` in the program:
+§10.6. SL7 library cuts: §4.1. SL1 settles phase 2's "locals clearing" (EVAL-NOTES.md, "A split
+for phase 2"); SL2 does part of EVAL-PLAN §2.6's "the invoker directly" ahead of step 7; SL7
+extends M3. SL4 (the suite's Java fixtures in a test build) and SL5 (D6's namespaces embedded
+with their classes cut) were not taken.
 
 Each with a recommendation, which the text above follows, for the user's review.
 
