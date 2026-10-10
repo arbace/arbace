@@ -36,6 +36,14 @@ StringBuffer.\n"
   (.ensure b (+ (len (.-value b)) (len s)))
   (set! (.-value b) (append (.-value b) (spread s))))
 
+(go/method appendLong "appendLong appends String.valueOf(l), without making the String.\n"
+  [^{:tag (* sbuf)} b ^int64 l]
+  (let [^{:tag (array 20 byte)} buf (zero (array 20 byte))
+        d (strconv/AppendInt (subslice buf _ 0) l 10)]
+    (.ensure b (+ (len (.-value b)) (len d)))
+    (range [_ c d]
+      (set! (.-value b) (append (.-value b) (conv uint16 c))))))
+
 (go/method appendStr [^{:tag (* sbuf)} b ^{:tag (* String)} s]
   (if (== s nil)
     (.appendUnits b (.-value litNull))
@@ -255,8 +263,10 @@ then the range (StringIndexOutOfBoundsException).\n"
 ;; ---------------------------------------------------------------------------------------
 ;; java.lang.StringBuilder
 
-(go/type StringBuilder "StringBuilder is java.lang.StringBuilder (final: *StringBuilder).\n"
-  (struct Object sbuf))
+(go/type StringBuilder "StringBuilder is java.lang.StringBuilder (final: *StringBuilder). init
+holds the first 16 code units in the object itself (one allocation for new StringBuilder() and
+what fits its default capacity, doc/go/SPEED-NOTES.md).\n"
+  (struct Object sbuf ^{:tag (array 16 uint16)} init))
 
 (go/var StringBuilder_class
   (Define (addr (lit ClassInfo :Name "java.lang.StringBuilder" :Kind KindClass
@@ -265,8 +275,12 @@ then the range (StringIndexOutOfBoundsException).\n"
                      :Go "arbace/jrt.StringBuilder"))))
 
 (go/func StringBuilder_New "StringBuilder_New is new StringBuilder(): capacity 16.\n" ^{:tag (* StringBuilder)} []
-  (addr (lit StringBuilder :sbuf (newSbuf 16))))
+  (let [t (addr (lit StringBuilder))]
+    (set! (.-value t) (subslice (.-init t) _ 0))
+    t))
 (go/func StringBuilder_New_I ^{:tag (* StringBuilder)} [^int32 capacity]
+  (when (and (>= capacity 0) (<= capacity 16))
+    (return (StringBuilder_New)))
   (addr (lit StringBuilder :sbuf (newSbuf capacity))))
 (go/func StringBuilder_New_String ^{:tag (* StringBuilder)} [^{:tag (* String)} s]
   (let [t (addr (lit StringBuilder :sbuf (newSbuf (+ (conv int32 (len (.-value (NN s)))) 16))))]
@@ -294,10 +308,10 @@ then the range (StringIndexOutOfBoundsException).\n"
   (.appendStr (addr (.-sbuf t)) (StrOfFloat f))
   t)
 (go/method Append_I__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int32 i]
-  (.appendStr (addr (.-sbuf t)) (StrOfInt i))
+  (.appendLong (addr (.-sbuf t)) (conv int64 i))
   t)
 (go/method Append_J__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^int64 l]
-  (.appendStr (addr (.-sbuf t)) (StrOfLong l))
+  (.appendLong (addr (.-sbuf t)) l)
   t)
 (go/method Append_Z__StringBuilder ^{:tag (* StringBuilder)} [^{:tag (* StringBuilder)} t ^bool z]
   (.appendStr (addr (.-sbuf t)) (StrOfBool z))

@@ -2,7 +2,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "array.go"
-  :imports [[strconv "strconv"]])
+  :imports [[strconv "strconv"] [unsafe "unsafe"]])
 
 (go/func negativeArraySize ^Throwable_I [^int32 n]
   (NegativeArraySizeException_New_String (Str (strconv/Itoa (conv int n)))))
@@ -240,6 +240,50 @@ covariant, Go's slices are not. Comp is the component class.\n"
   ^{:tag (* RefArray)} [^{:tag (* Class)} comp ^int32 n]
   (when (< n 0)
     (panic (negativeArraySize n)))
+  (newRefArray comp n))
+
+(go/type refArrayBuf
+  "refArrayBuf is a reference array whose slots follow its header in the same allocation
+(C2G-SPEC §13.4, D7; doc/go/SPEED-NOTES.md): B is an array type [N]any.\n"
+  :type-params [B]
+  (struct RefArray ^B buf))
+
+(go/func newRefBuf
+  "newRefBuf allocates a RefArray of n <= N slots in one object, its slots the array B.\n"
+  :type-params [B] ^{:tag (* RefArray)} [^{:tag (* Class)} comp ^int32 n]
+  (let [p (addr (lit (refArrayBuf B)))]
+    (set! (.-Comp p) comp)
+    (set! (.-A p) (unsafe/Slice (conv (* any) (conv unsafe/Pointer (addr (.-buf p)))) n))
+    (addr (.-RefArray p))))
+
+(go/func newRefArray
+  "newRefArray is new T[n] (n >= 0): up to 32 slots in one allocation with the header, the
+lengths rounded up to Go's size classes, larger arrays as a header and a slice.\n"
+  ^{:tag (* RefArray)} [^{:tag (* Class)} comp ^int32 n]
+  (switch
+    (case [(== n 0)] (return (addr (lit RefArray :Comp comp :A (lit (slice any))))))
+    (case [(== n 1)] (return ((inst newRefBuf (array 1 any)) comp n)))
+    (case [(== n 2)] (return ((inst newRefBuf (array 2 any)) comp n)))
+    (case [(== n 3)] (return ((inst newRefBuf (array 3 any)) comp n)))
+    (case [(== n 4)] (return ((inst newRefBuf (array 4 any)) comp n)))
+    (case [(== n 5)] (return ((inst newRefBuf (array 5 any)) comp n)))
+    (case [(== n 6)] (return ((inst newRefBuf (array 6 any)) comp n)))
+    (case [(== n 7)] (return ((inst newRefBuf (array 7 any)) comp n)))
+    (case [(== n 8)] (return ((inst newRefBuf (array 8 any)) comp n)))
+    (case [(== n 9)] (return ((inst newRefBuf (array 9 any)) comp n)))
+    (case [(== n 10)] (return ((inst newRefBuf (array 10 any)) comp n)))
+    (case [(== n 11)] (return ((inst newRefBuf (array 11 any)) comp n)))
+    (case [(== n 12)] (return ((inst newRefBuf (array 12 any)) comp n)))
+    (case [(== n 13)] (return ((inst newRefBuf (array 13 any)) comp n)))
+    (case [(<= n 15)] (return ((inst newRefBuf (array 15 any)) comp n)))
+    (case [(<= n 17)] (return ((inst newRefBuf (array 17 any)) comp n)))
+    (case [(<= n 19)] (return ((inst newRefBuf (array 19 any)) comp n)))
+    (case [(<= n 21)] (return ((inst newRefBuf (array 21 any)) comp n)))
+    (case [(<= n 23)] (return ((inst newRefBuf (array 23 any)) comp n)))
+    (case [(<= n 25)] (return ((inst newRefBuf (array 25 any)) comp n)))
+    (case [(<= n 27)] (return ((inst newRefBuf (array 27 any)) comp n)))
+    (case [(<= n 29)] (return ((inst newRefBuf (array 29 any)) comp n)))
+    (case [(<= n 32)] (return ((inst newRefBuf (array 32 any)) comp n))))
   (addr (lit RefArray :Comp comp :A (make (slice any) n))))
 
 (go/func RefArrayOf "RefArrayOf is an array initializer of T[], comp T's class.\n"
@@ -256,13 +300,21 @@ covariant, Go's slices are not. Comp is the component class.\n"
 (go/method Clone__O ^any [^{:tag (* RefArray)} t] (.Copy t))
 (go/method Copy "Copy is clone() at the array's type.\n"
   ^{:tag (* RefArray)} [^{:tag (* RefArray)} t]
-  (let [a (make (slice any) (len (.-A t)))]
-    (copy a (.-A t))
-    (addr (lit RefArray :Comp (.-Comp t) :A a))))
+  (let [r (newRefArray (.-Comp t) (conv int32 (len (.-A t))))]
+    (copy (.-A r) (.-A t))
+    r))
 
 (go/method Store
   "Store is aastore, a[i] = v with Java's checks in Java's order: the index
-(ArrayIndexOutOfBoundsException), then the store (ArrayStoreException naming v's class).\n"
+(ArrayIndexOutOfBoundsException), then the store (ArrayStoreException naming v's class). The
+common case (in range, null or an Object[]) is small enough for gc to inline.\n"
+  [^{:tag (* RefArray)} t ^int32 i ^any v]
+  (when (and (< (conv uint32 i) (conv uint32 (len (.-A t)))) (or (== v nil) (== (.-Comp t) Object_class)))
+    (aset (.-A t) i v)
+    (return))
+  (.storeChecked t i v))
+
+(go/method storeChecked "storeChecked is Store's checks and store, out of line.\n"
   [^{:tag (* RefArray)} t ^int32 i ^any v]
   (when (>= (conv uint32 i) (conv uint32 (len (.-A t))))
     (panic (IndexOutOfBounds (conv int i) (len (.-A t)))))

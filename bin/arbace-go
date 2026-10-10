@@ -7,6 +7,10 @@
 #                                      missing); arm64 runs under qemu-aarch64
 #        bin/arbace-go --build         translate (bin/c2g --program) and build the executables
 #                                      of $ARBACE_GO_ARCHES into target/arbace-go/<arch>/arbace
+#        bin/arbace-go --build --pgo   the same, then a profile-guided build (doc/go/SPEED-NOTES.md):
+#                                      the host's executable runs test/arbace-go-pgo.clj with a
+#                                      CPU profile (target/arbace-go/pgo.pprof), and every
+#                                      executable is built again with it (go build -pgo)
 #        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
 #                                      forms, doc/go/EXEC-NOTES.md) with the built executables
 #                                      and link them again with it
@@ -60,7 +64,30 @@ build() {
       || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "   g2c build $a: $(since "$t0")" >&2
   done
-  image
+  image || return 1
+  [ "${pgo:-}" ] || return 0
+  pgo_build
+}
+
+# pgo_build: the training run of the host's executable with a CPU profile, then each
+# architecture's executable built again with it (the profile names functions, so the host's
+# serves the others; the image stays in each work module)
+pgo_build() {
+  local overlay t0 a
+  overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  t0=$(date +%s)
+  echo "== the training run (test/arbace-go-pgo.clj)" >&2
+  rm -f "$dir/pgo.pprof"
+  ARBACE_CPUPROFILE=$dir/pgo.pprof "$dir/$(host_arch)/arbace" "$root/test/arbace-go-pgo.clj" > "$dir/pgo.log" 2>&1 \
+    || { tail -20 "$dir/pgo.log" >&2; echo "arbace-go: the training run failed ($dir/pgo.log)" >&2; return 1; }
+  echo "   training: $(since "$t0")" >&2
+  for a in $(build_order); do
+    t0=$(date +%s)
+    (cd "$dir/work-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+       -buildvcs=false -overlay "$overlay" -pgo "$dir/pgo.pprof" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
+      || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: the profile-guided build failed" >&2; return 1; }
+    echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes, profile-guided; built in $(since "$t0"))" >&2
+  done
 }
 
 host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; }
@@ -225,7 +252,7 @@ gate() {
 
 case ${1:-} in
   --gate) gate ;;
-  --build) build ;;
+  --build) [ "${2:-}" = --pgo ] && pgo=1; build ;;
   --image) image ;;
   --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
   *)

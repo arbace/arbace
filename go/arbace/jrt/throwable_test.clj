@@ -54,7 +54,9 @@
                         "!java.lang.ArrayIndexOutOfBoundsException: Index 7 out of bounds for length 3")
                    (lit _ (fn ^string [] (let [a (NewIntArray 3) i (conv int32 -1)] (ires (aget (.-A a) i))))
                         "!java.lang.ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 3")
-                   (lit _ (fn ^string [] (let [a (NewRefArray Object_class 0) i (conv int64 -5)] (sres (StrOfObj (aget (.-A a) i)))))
+                   ;; the index computed: gc for arm64 (go1.27.1) reports a constant negative index against a
+                   ;; length it does not know as 0 (SPEED-NOTES.md)
+                   (lit _ (fn ^string [] (let [a (NewRefArray Object_class 0) i (- (conv int64 (len (.-A a))) 5)] (sres (StrOfObj (aget (.-A a) i)))))
                         "!java.lang.ArrayIndexOutOfBoundsException: Index -5 out of bounds for length 0")
                    (lit _ (fn ^string [] (let [a (NewRefArray String_class 2)] (.Store a 3 (Object_New)) "x"))
                         "!java.lang.ArrayIndexOutOfBoundsException: Index 3 out of bounds for length 2")
