@@ -164,6 +164,9 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Then: step 8, the freeze (`bin/gate --full`, PGO executables, the branch `arbace-for-golang`,
     the tag `arbace-for-go1.27.1-v1`, the READMEs' "Arbace for Golang" sections: main's pointing to the branch,
     the branch's own; main's journal starts over, as at the JVM freeze); right after it, as the first task, the `.ae` rename.
+  - After the freeze (the user, 2026-10-10): the `.ae` rename, then the focus is TamaGo, B1b (the
+    box). Not to be done: XML (SAX), `gen-class`, Java serialization: they stay out of the Go build
+    for good (D6). AOT of namespaces to Go is not scheduled.
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`

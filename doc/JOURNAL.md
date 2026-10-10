@@ -1393,3 +1393,11 @@ decision (2026-10-08).
   `arbace-for-go1.27.1-v1` and in git; main's new journal opens with a paragraph pointing to
   them, as this one points to `arbace-for-java-26`. Part of B1-PLAN step 8; CLAUDE.md's Records
   paragraph is updated then to name both freezes.
+
+## 2026-10-10: what comes after the freeze
+
+- The user's decisions: XML (SAX, `arbace.xml`), `gen-class` and Java serialization will not be
+  done: they stay out of the Go build for good (D6; the suite's `clojure-xml`, `genclass` and
+  `serialization` namespaces stay skipped, the oracle's serialization case stays a known
+  mismatch). After the freeze, the `.ae` rename comes first, then the focus is TamaGo: B1b, the
+  box. AOT of namespaces to Go (the throughput gap) is not scheduled.

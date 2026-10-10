@@ -94,7 +94,10 @@ pseudo-terminal under rlwrap on amd64 (amendment RL3, accepted 2026-10-10; about
 *Closed by amendment O1 (accepted 2026-10-10, SPEED-NOTES.md):* `GOGC=200` and a 64 MiB
 minimum heap set by jrt's initialization, reference arrays and strings in one allocation (O2).
 
-## B1b, later: the box
+## B1b, after the freeze: the box
+
+The focus right after the `arbace-for-golang` freeze and the `.ae` rename (the user,
+2026-10-10).
 
 From the executable: the configuration becomes `GOOS=tamago` (TamaGo's go1.27.1), jrt's host
 interface is answered by go-whim's doorbell through its TamaGo board, and the image runs on its
