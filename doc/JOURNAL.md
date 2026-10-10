@@ -1292,3 +1292,7 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
   `bean`'s key order. The APKBUILD moves to v4 (`arbace-java26-4-r0`): built and checked with
   `bin/alpine-package` (31 MiB; start 190 ms with the cache), the two fixes checked in the
   installed package. README and FREEZE.md name v4.
+- Hand change 17 recorded as a dialect divergence, not a bug fix (the user's decision): upstream
+  does not support `reduce` without an init on an `IReduceInit`-only reducible, by design
+  (clojure-dev 2017; ask.clojure.org #11138); the eduction's run-to-run difference is upstream's
+  CLJ-2656 (open). VENDOR-NOTES gains a section "Dialect divergences". Docs only, after v4.

@@ -772,6 +772,26 @@ step 4 (2026-10-07); the others came with later work, as each says:
     pick; the choice itself (`find-protocol-impl`, upstream's) is unchanged. Regression test:
     `test/native/reduce_test.clj` (run by the bootstrap on stage 1). (Main: hand change 18.)
 
+    **A dialect divergence, not a bug fix** (recorded 2026-10-10, the user's decision): upstream
+    does not support `reduce` without an init on an `IReduceInit` that is not an `IReduce`, by
+    design (Alex Miller on clojure-dev, 2017: the `ClassCastException` is "your clue that you
+    should implement IReduce or use an init value"; ask.clojure.org #11138, 2021: "eduction has
+    always been implemented only with IReduceInit"). The run-to-run difference is upstream's
+    CLJ-2656, "Protocol dispatch via interfaces is nondeterministic" (open; its patch, sorting
+    the interfaces by name, would make the eduction case always throw). Arbace gives `reduce`
+    without an init its documented meaning on every reducible: code relying on it works on
+    Arbace from v4 and not reliably on Clojure. Listed under "Dialect divergences" below.
+
+## Dialect divergences
+
+Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
+(`clojure.*` → `arbace.*`) and Java 26: code written for one may not behave the same on the
+other.
+
+- **`reduce` without an init on an `IReduceInit`-only reducible** (hand change 17, from v4):
+  Arbace reduces it, seeded with the first item; upstream throws `ClassCastException` by
+  design, or, for `eduction`, works or throws depending on the JVM's class archive (CLJ-2656).
+
 ## Spec (2026-10-07)
 
 The seed stubbed clojure.spec out of the baseline (journal, 2026-10-06), so 32 assertions of
