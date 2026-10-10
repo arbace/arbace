@@ -9,7 +9,8 @@ the evaluator's decisions Q1-Q7 ([EVAL-PLAN.md](EVAL-PLAN.md)) that touch §10, 
 W1-W6, [C2G-NOTES.md](C2G-NOTES.md)), accepted 2026-10-09 and folded in (§16), with part D's
 performance work deferred to step 7 (§13.4), and the amendments of the evaluator, B1a step 5
 (M1-M8, X1-X3, S1, S3-S6, [EVAL-NOTES.md](EVAL-NOTES.md)), accepted 2026-10-09 and folded in
-(§16). The
+(§16), and the amendments of java.util's completion (JB1-JB5,
+[JAVA-BASE.md](JAVA-BASE.md)), accepted 2026-10-10 and folded in (§16). The
 decisions it builds on: D1 (c2g + jrt), D2 (an evaluator first), D4 (Java's UTF-16 strings), D5
 (a port of `java.util.regex`), D6 (the first REPL without class forms, `gen-class`, `proxy`,
 interop beyond jrt's classes; `proxy` came back with amendment X2, and the fork-join pool with
@@ -635,7 +636,13 @@ amendment K1, accepted 2026-10-09), read by c2g only:
   String)`), `URI` and `ReferencePipeline`, `Collectors` (no `SharedSecrets`), `GathererOp` and
   `Gatherers` (`Stream.gather`'s evaluation and `mapConcurrent` throw), `Instant` (`toString`,
   `now`) and `UUID.nameUUIDFromBytes` (MD5 from the host, a native): JRT-NOTES.md, "Phase 2B
-  (step 5)".
+  (step 5)". java.util's completion added `TreeMap` (its sorted build without the
+  `ObjectInputStream` parameter, for the copy constructor, `clone`, `putAll` and
+  `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and `toByteArray` by shifts, no
+  `ByteBuffer`) and `RandomGenerator` (`isDeprecated` false: no annotations, §12) (amendment
+  JB2, accepted 2026-10-10). A replacing member's parameter tags are written as j2c writes the
+  original's, generics included (`^{:tag (SortedMap K (? extends V))}`): the variant finds the
+  member by them.
 - Variants are class forms like any other and are analyzed with the class. c2g reports the
   number of replaced, cut and added members per class, and the differential tests (§3.1) cover
   them as the rest.
@@ -1649,8 +1656,14 @@ each check; c2g may generate them later.
   receiver (`expr::m`) is evaluated once and null-checked (`Objects.requireNonNull`, as javac)
   before the literal captures it; an unbound one takes the receiver from the first argument;
   `C/new` allocates; the analyzer's lambda form of array constructor references is a lambda.
-- Marker interfaces of intersection targets (`(& Runnable Serializable)`) give the adapter their
-  markers; serializability itself is cut (§12).
+- Marker interfaces of intersection targets (`(& Comparator Serializable)`, javac's
+  `(Comparator<T> & Serializable)`) give the lambda an adapter of its own, `F_Fn_M1_..._Mn`,
+  registered as `F$$Lambda$M1...`, that also implements the markers in the world which `F` does
+  not already extend (Serializable when the target is serializable, then the others, sorted), as
+  `altMetafactory` makes the lambda's class implement them; javac's cast to `Serializable`
+  after such a lambda then succeeds (`Comparator.comparing`, `thenComparing`,
+  `Map.Entry.comparingByKey`) (amendment JB5, accepted 2026-10-10). Serializability itself is
+  cut (§12).
 - `FromFn` in the functional interface's class (§5.11) wraps an `IFn` into the adapter, `Fn`
   calling `invoke`: that is how jrt's `Reflector` support adapts a Clojure function passed where
   a functional interface is expected, without `java.lang.reflect.Proxy` (cut).
@@ -1665,7 +1678,9 @@ each check; c2g may generate them later.
   sets `FromFn` of every `@FunctionalInterface` interface translated, jrt's included (the
   annotation of a class with class forms is read from its declaration, §4.1). The adapter
   behaves as the JVM's `Reflector` proxy does: the arguments boxed, the fn called with
-  `applyTo`, the result converted as `Reflector.coerceAdapterReturn` converts it. Reachability
+  `applyTo`, the result converted as `Reflector.coerceAdapterReturn` converts it; an array
+  result is checked against the return type's array class, as `Dyn`'s results are (amendment
+  JB3, accepted 2026-10-10). Reachability
   treats these interfaces as lambda targets (their adapters and default methods are reached).
 - **`:fi-adapter`** (the analyzer's conversion of a Clojure `fn` to a functional interface
   inside class bodies) is the interface's adapter whose `Fn` calls the `FnInvokers` invoker the
@@ -1860,7 +1875,10 @@ this only matters for racy publication, which the race detector also finds.
   threads (goroutines) that know their pool (`inForkJoinPool`, `getPool`), not
   `ForkJoinWorkerThread`s. A task runs once: whoever claims it first (the forked worker,
   `join`, `invoke`) runs it, the others wait for its completion; a task whose `exec` returns
-  false (a `CountedCompleter`) is done when completed explicitly. `commonPool` has the
+  false (a `CountedCompleter`) is done when completed explicitly, and runs `exec` again when it
+  is forked again before then, as the JDK's `doExec` runs any task not done
+  (`ArrayPrefixHelpers` reforks a parent to continue its cumulation; amendment JB4, accepted
+  2026-10-10). `commonPool` has the
   processors less one. So reducers' `fold` and parallel streams run in parallel.
 - **References** are jrt's: a `WeakReference` holds a `weak.Pointer` to the referent's header
   and its type word, and a `runtime.AddCleanup` on the referent enqueues it on its
@@ -3646,6 +3664,13 @@ the `Compiler_Code*` frames in jrt's stack-trace mapping: §10.1, §10.7. EC6 th
 the analyzed trees, methods compiled lazily: EXEC-NOTES.md, "The image of prepared
 namespaces". EC7 (un-skipping `transducers`' `seq-and-transducer`) not taken. EC1 refines §10.1's
 "the evaluator may call one with Go values directly" and EVAL-PLAN Q3's per-arity `invoke`.
+
+**java.util completed** (JAVA-BASE.md, "java.util completed"; accepted by the user 2026-10-10):
+JB1 the java.util files of the closure, `util-sources`: JRT-SOURCES.md. JB2 the variants of
+`TreeMap`, `BitSet` and `RandomGenerator`, and a replacing member's tags as j2c writes them:
+§4.6. JB3 FromFn's array results: §7.11. JB4 a forked task not yet done runs again: §8.4.
+JB5 lambdas with marker interfaces get adapters implementing them: §7.11. JB4 refines S5's "a
+task runs once".
 
 Each with a recommendation, which the text above follows, for the user's review.
 

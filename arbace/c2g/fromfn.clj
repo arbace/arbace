@@ -55,8 +55,15 @@
     (casts d) (list (m/class-sym :lang "arbace/lang/RT" (str "_" (nm/method-base (casts d) (str "(Ljava/lang/Object;)" d)))) r)
     (= "C" d) (list 'fromFnChar r)
     (= "Ljava/lang/Object;" d) r
+    ;; checked against the array class of the return type, as dyn's results are (it was the
+    ;; result's own class, through the generic NN, which Go cannot instantiate on an any, and
+    ;; with the call written twice; amendment JB3)
     (t/array? d) (list (list 'inst 'jrt/C2g_CastArray (m/go-type :lang d)) r
-                       (list '.GetClass__Class (list 'jrt/NN r)))
+                       (loop [d d n 0] (if (t/array? d) (recur (t/elem-type d) (inc n))
+                                         (nth (iterate #(list '.ArrayClass %) (if (t/prim? d)
+                                                                                 (symbol (str "jrt/Prim_" (t/prim-desc->name d)))
+                                                                                 (m/class-sym :lang (t/desc->internal d) "_class")))
+                                              n))))
     :else (list (m/class-sym :lang (t/desc->internal d) "_Cast") r)))
 
 (defn set-form

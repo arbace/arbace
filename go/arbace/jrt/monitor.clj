@@ -60,9 +60,19 @@ owning it (entering, waiting): a monitor is deflated only with no owner and no r
       (aset monitors idx m)
       m)))
 
-(go/func freeMonitor [^{:tag (* monitor)} m]
+(go/func freeMonitor "freeMonitor removes the live monitor m from the table (monMu held).\n"
+  [^{:tag (* monitor)} m]
   (delete monitors (.-idx m))
   (set! monFree (append monFree (.-idx m))))
+
+(go/func monitorAt
+  "monitorAt is the table's monitor at idx, nil when none. Every section under monMu unlocks
+it by defer: a panic there (out of memory, a broken invariant) must not leave the table locked
+for every other thread.\n"
+  ^{:tag (* monitor)} [^uint32 idx]
+  (.Lock monMu)
+  (defer (.Unlock monMu))
+  (aget monitors idx))
 
 (go/method inflate
   "inflate turns the header word w (thin, or unlocked when owner is the caller) into an
@@ -70,14 +80,13 @@ inflated lock owned by owner with count recursions, and returns the monitor, wit
 taken when ref; nil when the header changed meanwhile.\n"
   ^{:tag (* monitor)} [^{:tag (* Object)} o ^uint64 w ^uint64 owner ^int64 count ^bool ref]
   (.Lock monMu)
+  (defer (.Unlock monMu))
   (let [m (newMonitor o owner count)]
     (when ref
       (set! (.-refs m) 1))
     (when (not (atomic/CompareAndSwapUint64 (addr (.-hdr o)) w (withLock w (bit-or (<< (.-idx m) 2) lockInflated))))
       (freeMonitor m)
-      (.Unlock monMu)
       (return nil))
-    (.Unlock monMu)
     (.Add Inflated 1)
     m))
 
@@ -86,14 +95,15 @@ taken when ref; nil when the header changed meanwhile.\n"
 when the header changed meanwhile.\n"
   ^{:tag (* monitor)} [^{:tag (* Object)} o ^uint64 w]
   (.Lock monMu)
+  (defer (.Unlock monMu))
   (when (!= (atomic/LoadUint64 (addr (.-hdr o))) w)
-    (.Unlock monMu)
     (return nil))
   (let [m (aget monitors (>> (lockWord w) 2))]
+    (when (or (== m nil) (!= (.-obj m) o))
+      (panic "jrt: an inflated header without its monitor"))
     (.Lock (.-mu m))
     (inc! (.-refs m))
     (.Unlock (.-mu m))
-    (.Unlock monMu)
     m))
 
 (go/method enter "enter takes the monitor for me, then drops the ref the caller took.\n"
@@ -111,18 +121,26 @@ when the header changed meanwhile.\n"
 
 (go/method tryDeflate
   "tryDeflate returns a free monitor without refs or waiters to the table and the header to
-the unlocked state (the identity hash kept).\n"
+the unlocked state (the identity hash kept). m may be dead already: monitorExit releases m.mu
+before calling this, and meanwhile another thread may enter, exit and deflate m, and o be
+locked again (thin, or inflated with a new monitor, maybe at m's recycled index). Only the live
+monitor o's header names is deflated; the inflated lock word changes only under monMu.\n"
   [^{:tag (* Object)} o ^{:tag (* monitor)} m]
   (.Lock monMu)
+  (defer (.Unlock monMu))
+  (when (!= (aget monitors (.-idx m)) m)
+    (return))
   (.Lock (.-mu m))
+  (defer (.Unlock (.-mu m)))
   (when (and (== (.-owner m) 0) (== (.-refs m) 0) (== (len (.-waiters m)) 0))
-    (while true
-      (let [w (atomic/LoadUint64 (addr (.-hdr o)))]
-        (when (atomic/CompareAndSwapUint64 (addr (.-hdr o)) w (withLock w 0))
-          (break))))
-    (freeMonitor m))
-  (.Unlock (.-mu m))
-  (.Unlock monMu))
+    (let [l (bit-or (<< (.-idx m) 2) lockInflated)]
+      (while true
+        (let [w (atomic/LoadUint64 (addr (.-hdr o)))]
+          (when (!= (lockWord w) l)
+            (panic "jrt: a live monitor its object's header does not name"))
+          (when (atomic/CompareAndSwapUint64 (addr (.-hdr o)) w (withLock w 0))
+            (break)))))
+    (freeMonitor m)))
 
 (go/method monitorEnter [^{:tag (* Object)} o]
   (let [me (currentThreadID)]
@@ -175,9 +193,7 @@ the unlocked state (the identity hash kept).\n"
               (when (atomic/CompareAndSwapUint64 (addr (.-hdr o)) w (withLock w nl))
                 (return))))
           (case [lockInflated]
-            (.Lock monMu)
-            (let [m (aget monitors (>> l 2))]
-              (.Unlock monMu)
+            (let [m (monitorAt (>> l 2))]
               (when (or (== m nil) (!= (.-obj m) o))
                 (continue))
               (.Lock (.-mu m))
@@ -276,9 +292,7 @@ ready) until phase 2's Thread sets it; a receive means the thread was interrupte
         (when (!= (conv uint64 (>> l 10)) me)
           (panic (illegalMonitorState))))
       (case [lockInflated]
-        (.Lock monMu)
-        (let [m (aget monitors (>> l 2))]
-          (.Unlock monMu)
+        (let [m (monitorAt (>> l 2))]
           (when (or (== m nil) (!= (.-obj m) o))
             (panic (illegalMonitorState)))
           (.Lock (.-mu m))
@@ -342,9 +356,7 @@ own x's monitor.\n"
       (case [lockThin]
         (return (== (conv uint64 (>> l 10)) me)))
       (case [lockInflated]
-        (.Lock monMu)
-        (let [m (aget monitors (>> l 2))]
-          (.Unlock monMu)
+        (let [m (monitorAt (>> l 2))]
           (when (or (== m nil) (!= (.-obj m) o))
             (return false))
           (.Lock (.-mu m))

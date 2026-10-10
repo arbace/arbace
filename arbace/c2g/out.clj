@@ -199,9 +199,10 @@
 (defn adapter-forms
   "The adapter F_Fn of functional interface fi (§7.11): its SAM calls Fn, default methods
   forward to their functions."
-  [pkg fi]
-  (let [g (m/go-name fi)
-        a (str g "_Fn")
+  [pkg key]
+  (let [[fi & markers] (if (vector? key) key [key])
+        g (m/go-name fi)
+        a (apply str g "_Fn" (map #(str "_" (m/go-name %)) markers))
         sam (a/find-sam fi)
         [ps r] (t/parse-method-desc (:desc sam))
         pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
@@ -211,13 +212,15 @@
                 (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
         call (apply list (list '.-Fn 't) pn)]
     (concat
-      [(list 'c2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")))
+      [(list 'c2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
+                               (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
        (list 'go/type (symbol a) (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype)))
        (list 'go/method (symbol (nm/method-base (:name sam) (:desc sam)))
              (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn ps)))
                (not= "V" r) (vary-meta assoc :tag (m/go-type pkg r)))
              (if (= "V" r) call (list 'return call)))]
-      (for [j (cons fi (d/interface-closure fi))]
+      (for [j (distinct (concat (cons fi (d/interface-closure fi))
+                                (mapcat #(cons % (d/interface-closure %)) markers)))]
         (list 'go/method (symbol (str "Is_" (m/go-name j))) [recv]))
       ;; default methods of the interface and its superinterfaces
       (for [[[name desc :as k] mm] (m/vmethods fi)
@@ -240,10 +243,12 @@
        (list 'go/var (symbol (str a "_class"))
              (list (m/jrt-sym pkg "Define")
                    (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
-                                     :Name (str (str/replace fi "/" ".") "$$Lambda")
+                                     :Name (apply str (str/replace fi "/" ".") "$$Lambda"
+                                                  (map #(str "$" (m/go-name %)) markers))
                                      :Modifiers 0x1010 :Kind (m/jrt-sym pkg "KindClass")
                                      :Super (m/jrt-sym pkg "Object_class")
-                                     :Interfaces (list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (m/class-sym pkg fi "_class"))
+                                     :Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
+                                                        (map #(m/class-sym pkg % "_class") (cons fi markers)))
                                      :Go (str (nm/pkg-path pkg) "." a)))))])))
 
 (def string-regex-methods

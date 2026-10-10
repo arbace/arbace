@@ -433,7 +433,7 @@
             (let [todo (doall (distinct (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))))]
               (when (seq todo)
                 (doseq [fi todo]
-                  (let [pkg (m/pkg fi)]
+                  (let [pkg (m/pkg (if (vector? fi) (first fi) fi))]
                     (binding [c/*pkgstate* (get pkgstates pkg)]
                       (swap! files update [pkg "c2g_lambdas.go"] (fnil into []) (out/adapter-forms pkg fi)))))
                 (recur (into done todo)))))

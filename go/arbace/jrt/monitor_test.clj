@@ -3,7 +3,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "monitor_test.go"
-  :imports [[sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
+  :imports [[runtime "runtime"] [sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
 
 (go/func monitorCount ^int []
   (.Lock monMu)
@@ -120,3 +120,93 @@ detector, bin/jrt test --race, sees the happens-before edges).\n"
       (.Error t "notify without the monitor"))
     (when (!= (monitorCount) 0)
       (.Errorf t "%d monitors left inflated" (monitorCount)))))
+
+(go/func monFreeDuplicates
+  "monFreeDuplicates counts the indexes the free list holds twice or that a live monitor
+holds.\n"
+  ^int []
+  (.Lock monMu)
+  (defer (.Unlock monMu))
+  (let [seen (make (map uint32 bool))
+        n 0]
+    (range [_ i monFree]
+      (let [(values _ live) (aget monitors i)]
+        (when (or (aget seen i) live)
+          (inc! n)))
+      (aset seen i true))
+    n))
+
+(go/func TestMonitorStaleDeflate
+  "A monitorExit that frees an inflated monitor calls tryDeflate after releasing the
+monitor's mutex; meanwhile other threads may enter, exit and deflate it, and lock the object
+again, thin or inflated with a new monitor at the recycled index. The late tryDeflate must
+leave all that alone: it used to reset the header (dropping another thread's lock) and free
+the index a second time, so that two monitors shared an index, the table lost the live one,
+and lookupMonitor's nil dereference left monMu locked: every thread then blocked on it (the
+deadlock in test.generative on Go, 2026-10-10).\n"
+  [^{:tag (* testing/T)} t]
+  (let [o (Object_New)
+        ob (header o)
+        h (IdentityHash o)
+        m (.inflate ob (atomic/LoadUint64 (addr (.-hdr ob))) 0 0 false)]
+    (.tryDeflate ob m)
+    (when (!= (monitorCount) 0)
+      (.Fatal t "not deflated"))
+    ;; locked thin again by this thread: the stale deflate must keep the lock
+    (MonitorEnter o)
+    (.tryDeflate ob m)
+    (when (not (HoldsLock o))
+      (.Error t "a stale tryDeflate dropped a thin lock"))
+    (MonitorExit o)
+    ;; inflated again at the recycled index: the stale deflate must keep the new monitor
+    (let [m2 (.inflate ob (atomic/LoadUint64 (addr (.-hdr ob))) 0 0 false)]
+      (when (!= (.-idx m2) (.-idx m))
+        (.Logf t "index not recycled: %d, %d" (.-idx m) (.-idx m2)))
+      (.tryDeflate ob m)
+      (when (!= (monitorAt (.-idx m2)) m2)
+        (.Error t "a stale tryDeflate freed the live monitor"))
+      (when (!= (bit-and (lockWord (atomic/LoadUint64 (addr (.-hdr ob)))) lockStateMask) lockInflated)
+        (.Error t "a stale tryDeflate reset an inflated header"))
+      (MonitorEnter o)
+      (MonitorExit o))
+    (when (!= (IdentityHash o) h)
+      (.Error t "identity hash lost"))
+    (when (!= (monitorCount) 0)
+      (.Errorf t "%d monitors left inflated" (monitorCount)))
+    (when (!= (monFreeDuplicates) 0)
+      (.Errorf t "%d indexes freed twice" (monFreeDuplicates)))))
+
+(go/func TestMonitorContention
+  "Many goroutines contending for a few monitors, short critical sections: inflation and
+deflation race with entries and late tryDeflates (see TestMonitorStaleDeflate).\n"
+  [^{:tag (* testing/T)} t]
+  (let [^{:tag (slice any)} objs (make (slice any) 3)
+        ^{:tag (slice int)} counters (make (slice int) 3)
+        ^sync/WaitGroup wg (zero sync/WaitGroup)
+        n 20000
+        before (.Load Inflated)]
+    (when (testing/Short)
+      (set! n 2000))
+    (for [i 0] (< i 3) (inc! i)
+      (aset objs i (Object_New)))
+    (for [g 0] (< g 24) (inc! g)
+      (.Add wg 1)
+      (let [g g]
+        (go ((fn []
+               (defer (.Done wg))
+               (for [i 0] (< i n) (inc! i)
+                 (let [k (% (+ i g) 3)
+                       o (aget objs k)]
+                   (MonitorEnter o)
+                   (aset counters k (+ (aget counters k) 1))
+                   (MonitorExit o)
+                   (when (== (% i 16) 0)
+                     (runtime/Gosched)))))))))
+    (.Wait wg)
+    (when (!= (+ (aget counters 0) (aget counters 1) (aget counters 2)) (* 24 n))
+      (.Errorf t "counters %v" counters))
+    (.Logf t "inflations: %d" (- (.Load Inflated) before))
+    (when (!= (monitorCount) 0)
+      (.Errorf t "%d monitors left inflated" (monitorCount)))
+    (when (!= (monFreeDuplicates) 0)
+      (.Errorf t "%d indexes freed twice" (monFreeDuplicates)))))

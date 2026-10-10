@@ -6,23 +6,24 @@ jdk26u sources translated by `bin/jrt-convert` (j2c) and c2g, jrt's own Java in 
 translated the same way, and hand-written Go forms in `go/arbace/jrt/`; c2g stubs what it does
 not translate ([JRT-SOURCES.md](JRT-SOURCES.md), [JRT-NOTES.md](JRT-NOTES.md),
 [C2G-SPEC.md](C2G-SPEC.md) §4.1).
-Measured on the branch `jbase` from main at `6a33be8` (2026-10-10): c2g's program output made
-there (`bin/jrt-convert`, then `bin/c2g --program`, as `bin/arbace-go --build` does), JDK
-26.0.2.1 built from `/root/jdk26u`.
+Measured on the branch `jbase` (2026-10-10), first from main at `6a33be8`, then after
+"java.util completed" (from main at `8ace8b1`): c2g's program output made there
+(`bin/arbace-go --build`), JDK 26.0.2.1 built from `/root/jdk26u`.
 
 Summary: java.base exports **1,636 API classes with 17,546 members** (public and protected
-methods, constructors and fields, of its 58 exported packages). The Go build has **384 of the
-classes (23.5%)**, and 91 more as names only, and provides **5,598 of the members (31.9%)**:
-4,414 translated with their bodies, 108 translated with an operation that throws (it names
-something outside the build), 1,076 hand-written in jrt; 15 more exist as stubs that throw.
-The classes the Go build has are nearly complete (90.5% of their members); the rest is whole
+methods, constructors and fields, of its 58 exported packages). The Go build has **405 of the
+classes (24.8%)**, and 100 more as names only, and provides **5,787 of the members (33.0%)**:
+4,686 translated with their bodies, 25 translated with an operation that throws (it names
+something outside the build), 1,076 hand-written in jrt; 12 more exist as stubs that throw.
+The classes the Go build has are nearly complete (90.9% of their members); the rest is whole
 packages left out: `java.lang.classfile`, `java.security` and `javax.*`, `java.time` but
 `Instant`, `java.text`, `java.nio` buffers and channels, `java.lang.invoke`,
 `java.lang.foreign`, most of `java.net` and of `java.util.concurrent`. Of the **896 members
 Arbace's runtime and REPL namespaces reference, 793 are provided (88.5%)**; the others are
-D6's cuts and reworks (processes, sockets, method handles, class loading). Two gaps found on
-the way are worth closing before the freeze: primitive `Arrays.sort` and
-`Comparator.naturalOrder` throw on Go ("Notable gaps").
+D6's cuts and reworks (processes, sockets, method handles, class loading). The first
+measurement (main at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
+`Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
+plain Java ("java.util completed"; the numbers below are after it).
 
 ## Method
 
@@ -97,9 +98,9 @@ status ("cut or absent" together).
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **java.base** | 1,636 | 384 | 91 | 17,546 | 5,598 | 31.9% | 4,414 | 108 | 1,076 | 15 | 79 | 11,854 |
+| **java.base** | 1,636 | 405 | 100 | 17,546 | 5,787 | 33.0% | 4,686 | 25 | 1,076 | 12 | 72 | 11,675 |
 
-The 384 classes in Go have 6,185 API members, of which 5,598 (90.5%) are provided. Of the
+The 405 classes in Go have 6,364 API members, of which 5,787 (90.9%) are provided. Of the
 translated classes, 10 are jrt's own Java rather than jdk26u's (provided of members):
 `FileDescriptor` 6/6, `FileInputStream` 13/14, `FileOutputStream` 10/11, `InputStreamReader`
 8/10, `OutputStreamWriter` 11/12, `java.nio.file.Files` 41/70, `Path` 30/33, `Calendar`
@@ -107,32 +108,33 @@ translated classes, 10 are jrt's own Java rather than jdk26u's (provided of memb
 
 | kind | members | provided | % |
 |---|---:|---:|---:|
-| ctor | 1,597 | 522 | 32.7% |
-| field | 2,300 | 855 | 37.2% |
-| method | 13,649 | 4,221 | 30.9% |
+| ctor | 1,597 | 560 | 35.1% |
+| field | 2,300 | 859 | 37.3% |
+| method | 13,649 | 4,368 | 32.0% |
 
 ### The big packages
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | `java.io` | 86 | 41 | 4 | 922 | 466 | 50.5% | 463 | 3 | 0 | 6 | 8 | 442 |
-| `java.lang` | 129 | 77 | 32 | 2,226 | 1,738 | 78.1% | 1,117 | 4 | 617 | 3 | 4 | 481 |
+| `java.lang` | 129 | 77 | 32 | 2,226 | 1,741 | 78.2% | 1,120 | 4 | 617 | 0 | 4 | 481 |
 | `java.lang.invoke` | 25 | 0 | 2 | 331 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 331 |
 | `java.lang.ref` | 7 | 4 | 0 | 22 | 14 | 63.6% | 0 | 0 | 14 | 0 | 0 | 8 |
-| `java.lang.reflect` | 34 | 12 | 0 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
-| `java.math` | 4 | 4 | 0 | 177 | 177 | 100.0% | 176 | 1 | 0 | 0 | 0 | 0 |
+| `java.lang.reflect` | 34 | 12 | 7 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
+| `java.math` | 4 | 4 | 0 | 177 | 177 | 100.0% | 177 | 0 | 0 | 0 | 0 | 0 |
 | `java.net` | 66 | 11 | 10 | 760 | 150 | 19.7% | 148 | 2 | 0 | 0 | 5 | 605 |
-| `java.nio` | 14 | 0 | 2 | 365 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 365 |
+| `java.nio` | 14 | 0 | 3 | 365 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 365 |
 | `java.nio.charset` | 12 | 4 | 0 | 106 | 24 | 22.6% | 4 | 0 | 20 | 0 | 0 | 82 |
 | `java.nio.file` | 47 | 15 | 0 | 252 | 114 | 45.2% | 114 | 0 | 0 | 0 | 20 | 118 |
 | `java.security` | 98 | 0 | 2 | 663 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 663 |
 | `java.text` | 35 | 1 | 8 | 559 | 22 | 3.9% | 0 | 0 | 22 | 0 | 0 | 537 |
 | `java.time` | 19 | 2 | 8 | 794 | 25 | 3.1% | 24 | 1 | 0 | 0 | 21 | 748 |
-| `java.util` | 134 | 96 | 1 | 2,239 | 1,731 | 77.3% | 1,615 | 65 | 51 | 1 | 15 | 492 |
-| `java.util.concurrent` | 81 | 29 | 0 | 1,199 | 324 | 27.0% | 223 | 4 | 97 | 5 | 4 | 866 |
+| `java.util` | 134 | 117 | 0 | 2,239 | 1,916 | 85.6% | 1,860 | 5 | 51 | 2 | 8 | 313 |
+| `java.util.concurrent` | 81 | 29 | 0 | 1,199 | 325 | 27.1% | 224 | 4 | 97 | 4 | 4 | 866 |
 | `java.util.concurrent.atomic` | 16 | 4 | 0 | 319 | 108 | 33.9% | 0 | 0 | 108 | 0 | 0 | 211 |
 | `java.util.concurrent.locks` | 14 | 8 | 0 | 201 | 65 | 32.3% | 0 | 0 | 65 | 0 | 0 | 136 |
 | `java.util.function` | 43 | 43 | 0 | 79 | 79 | 100.0% | 79 | 0 | 0 | 0 | 0 | 0 |
+| `java.util.random` | 7 | 6 | 0 | 90 | 70 | 77.8% | 64 | 6 | 0 | 0 | 0 | 20 |
 | `java.util.regex` | 4 | 3 | 1 | 82 | 69 | 84.1% | 69 | 0 | 0 | 0 | 1 | 12 |
 | `java.util.stream` | 21 | 21 | 0 | 300 | 300 | 100.0% | 300 | 0 | 0 | 0 | 0 | 0 |
 
@@ -144,9 +146,9 @@ Each package with its subpackages, except those counted as families of their own
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `java.util` | 180 | 102 | 6 | 2,695 | 1,801 | 66.8% | 1,657 | 93 | 51 | 1 | 15 | 878 |
-| `java.lang` | 129 | 77 | 32 | 2,226 | 1,738 | 78.1% | 1,117 | 4 | 617 | 3 | 4 | 481 |
-| `java.util.concurrent` | 111 | 41 | 0 | 1,719 | 497 | 28.9% | 223 | 4 | 270 | 5 | 4 | 1,213 |
+| `java.util` | 180 | 123 | 5 | 2,695 | 1,986 | 73.7% | 1,924 | 11 | 51 | 2 | 8 | 699 |
+| `java.lang` | 129 | 77 | 32 | 2,226 | 1,741 | 78.2% | 1,120 | 4 | 617 | 0 | 4 | 481 |
+| `java.util.concurrent` | 111 | 41 | 0 | 1,719 | 498 | 29.0% | 224 | 4 | 270 | 4 | 4 | 1,213 |
 | `java.lang.classfile` | 220 | 0 | 0 | 1,628 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 1,628 |
 | `java.time` | 70 | 2 | 17 | 1,565 | 25 | 1.6% | 24 | 1 | 0 | 0 | 21 | 1,519 |
 | `java.security` | 206 | 0 | 3 | 1,307 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 1,307 |
@@ -155,21 +157,21 @@ Each package with its subpackages, except those counted as families of their own
 | `java.text` | 41 | 1 | 9 | 580 | 22 | 3.8% | 0 | 0 | 22 | 0 | 0 | 558 |
 | `javax.crypto` | 62 | 0 | 0 | 407 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 407 |
 | `java.nio.file` | 74 | 16 | 1 | 405 | 116 | 28.6% | 116 | 0 | 0 | 0 | 20 | 269 |
-| `java.nio` | 14 | 0 | 2 | 365 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 365 |
-| `java.lang.reflect` | 34 | 12 | 0 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
+| `java.nio` | 14 | 0 | 3 | 365 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 365 |
+| `java.lang.reflect` | 34 | 12 | 7 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
 | `javax.net` | 45 | 0 | 0 | 338 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 338 |
 | `java.lang.invoke` | 25 | 0 | 2 | 331 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 331 |
 | `java.nio.channels` | 62 | 0 | 1 | 323 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 323 |
 | `java.util.stream` | 21 | 21 | 0 | 300 | 300 | 100.0% | 300 | 0 | 0 | 0 | 0 | 0 |
 | `java.lang.foreign` | 25 | 0 | 0 | 261 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 261 |
 | `javax.security` | 43 | 0 | 0 | 209 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 209 |
-| `java.math` | 4 | 4 | 0 | 177 | 177 | 100.0% | 176 | 1 | 0 | 0 | 0 | 0 |
+| `java.math` | 4 | 4 | 0 | 177 | 177 | 100.0% | 177 | 0 | 0 | 0 | 0 | 0 |
 | `java.lang.constant` | 12 | 2 | 0 | 168 | 1 | 0.6% | 1 | 0 | 0 | 0 | 1 | 166 |
 | `java.lang.module` | 19 | 0 | 0 | 148 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 148 |
 | `java.nio.charset` | 13 | 4 | 0 | 109 | 24 | 22.0% | 4 | 0 | 20 | 0 | 0 | 85 |
 | `java.util.regex` | 4 | 3 | 1 | 82 | 69 | 84.1% | 69 | 0 | 0 | 0 | 1 | 12 |
 | `java.util.function` | 43 | 43 | 0 | 79 | 79 | 100.0% | 79 | 0 | 0 | 0 | 0 | 0 |
-| `java.lang.annotation` | 12 | 0 | 3 | 35 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 35 |
+| `java.lang.annotation` | 12 | 0 | 5 | 35 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 35 |
 | `java.lang.runtime` | 3 | 0 | 0 | 24 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 24 |
 | `java.lang.ref` | 7 | 4 | 0 | 22 | 14 | 63.6% | 0 | 0 | 14 | 0 | 0 | 8 |
 
@@ -200,7 +202,10 @@ processes (`Process`, `ProcessBuilder`, its `Redirect`, 21), class loading and r
   JDK 26's Unicode tables, the exceptions and errors of `java.lang`; `java.math` whole;
   `java.util`'s collections (lists, sets, maps, deques, `Hashtable`/`Vector`/`Stack`,
   `IdentityHashMap`, `EnumSet`/`EnumMap`, the sequenced and immutable collections),
-  `Arrays` (but its primitive sorts), `Collections`, `Objects`, `Optional*`, `Formatter`, `Properties`, `Random`,
+  `Arrays` (with the primitive and parallel sorts since JB1), `Collections`, `Objects`,
+  `Optional*`, `Comparator`'s natural-order comparators, `SortedSet`, `BitSet`,
+  `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, `SplittableRandom`, the event
+  classes, `Formatter`, `Properties`, `Random`,
   `UUID`, `HexFormat`, `StringJoiner`, `Spliterators`; `java.util.stream` and
   `java.util.function` whole; `java.util.regex` (D5); `java.util.random`'s
   `RandomGenerator`; in `java.util.concurrent`: `ConcurrentHashMap`, `ArrayBlockingQueue`,
@@ -221,36 +226,35 @@ processes (`Process`, `ProcessBuilder`, its `Redirect`, 21), class loading and r
 
 ## Stubbed and partial
 
-**Stubs (15 members).** Every public member of a translated class is a root, so the stubs are
+**Stubs (12 members).** Every public member of a translated class is a root, so the stubs are
 protected members and constructors nothing reaches: `ObjectStreamException`'s two cause
-constructors, `PrintStream`'s and `PrintWriter`'s `setError`/`clearError`, the
-`(String, Throwable, boolean, boolean)` constructors of `Error`, `Exception` and
-`RuntimeException`, `Calendar()`, `CountedCompleter(CountedCompleter, int)`,
-`ForkJoinWorkerThread(ForkJoinPool)`, `onStart`, `onTermination`, `TimeUnit.timedWait`. A
-subclass the evaluator makes (`proxy`) calling one of them throws.
+constructors, `PrintStream`'s and `PrintWriter`'s `setError`/`clearError`, `Calendar()`,
+`Observable.setChanged`, `ForkJoinWorkerThread(ForkJoinPool)`, `onStart`, `onTermination`,
+`TimeUnit.timedWait`. A subclass the evaluator makes (`proxy`) calling one of them throws.
 
-**Partial (108 members).** Translated, with one operation that names a class outside the build
-and throws when that path runs (c2g's report, `:unavailable`, gives each reason):
+**Partial (25 members).** Translated, with one operation that names a class or member outside
+the build and throws when that path runs (c2g's report, `:unavailable`, gives each reason):
 
 | members | outside the build | what throws |
 |---|---|---|
-| `Arrays.sort` of the primitive arrays (14), `parallelSort` (18), `parallelPrefix` (8) | `DualPivotQuicksort`, `ArrayPrefixHelpers` | always (`Arrays.sort` of objects works, and with it Clojure's `sort`) |
-| `RandomGenerator`'s bounded and stream defaults (22), the `of(String)` factories (6), `Random`'s 12 stream methods | `RandomSupport`, `RandomGeneratorFactory` | `RandomGenerator`'s defaults (`Random` overrides `nextInt(int)` and the like) and the factories always; `Random.ints`/`longs`/`doubles` always |
-| `Comparator.naturalOrder`, `nullsFirst`, `nullsLast`, `Collections.reverseOrder(Comparator)` | `Comparators` | always; `reverseOrder(c)` only to reverse `reverseOrder()` |
-| `TreeMap(SortedMap)`, `TreeMap.clone`, `TreeMap.putAll`; `TreeSet.addAll` | `ObjectInputStream` (in `buildFromSorted`'s signature); `SortedSet` | the constructor and `clone` always, `putAll` of a `SortedMap` into an empty map; `addAll` never (`instanceof SortedSet` is false on Go: the slow path, the same result) |
+| the six `RandomGenerator` `of(String)` factories | `RandomGeneratorFactory` | always |
 | `describeConstable` of `Boolean`, `Byte`, `Character`, `Short` | `ConstantDescs` | always |
-| `BigInteger.nextProbablePrime` | `BitSieve` | for large numbers |
 | `DataInputStream.readLine`, `readUTF` | `PushbackInputStream`, `DataInput` | `readLine` on a lone `\r` (`\r` not followed by `\n`), `readUTF` always |
 | `UUID.ofEpochMillis`, `List.ofLazy`, `Map.ofLazy`, `Properties.loadFromXML`/`storeToXML`, `Instant.parse`, `ByteArrayInputStream.transferTo`, `URLConnection.getHeaderFieldDate`, `URLStreamHandler.setURL`, `CountedCompleter.helpComplete`, three of `ForkJoinWorkerThread` | `SecureRandom`, `LazyCollections`, XML, `DateTimeFormatter`, ... | when the path runs |
 
-**Outside type (79 members).** Members of translated classes whose descriptors name a class
+The status is per method: a method whose own code is complete but which calls a partial private
+method is counted as translated. One such case is known: `BigInteger.nextProbablePrime` (and
+`isProbablePrime` of large numbers) reach `passesMillerRabin`, which needs
+`ThreadLocalRandom.current()`, not in jrt (java.util.concurrent's branch).
+
+**Outside type (72 members).** Members of translated classes whose descriptors name a class
 outside the build do not exist in Go: `Instant`'s 21 `java.time.temporal` members, `Files`' 17
-attribute, channel and directory-stream members, `TreeSet`, `NavigableSet` and `Collections`'
-11 `SortedSet` members, `getChannel`, the `CharBuffer` and coder overloads of the readers and
-writers, `TimeUnit`'s and `TimeZone`'s `java.time` conversions, `resolveConstantDesc`,
-`Matcher.toMatchResult` (`MatchResult` is cut), `URL`'s `Proxy` overloads. A further 14 are
-absent from jrt's own Java (`Files.list`, `isSymbolicLink`, links, attributes, `mismatch`,
-`probeContentType`; `TimeZone.availableIDs`).
+attribute, channel and directory-stream members, `getChannel`, the `ByteBuffer`, `LongBuffer`,
+`CharBuffer` and coder overloads (`Base64`, `BitSet`, the readers and writers), `TimeUnit`'s and
+`TimeZone`'s `java.time` conversions, `resolveConstantDesc`, `Matcher.toMatchResult`
+(`MatchResult` is cut), `URL`'s `Proxy` overloads. A further 14 are absent from jrt's own Java
+(`Files.list`, `isSymbolicLink`, links, attributes, `mismatch`, `probeContentType`;
+`TimeZone.availableIDs`).
 
 ## Cut, and why
 
@@ -273,22 +277,14 @@ cut classes Arbace names exist as names whose members throw; everything else is 
 
 ## Notable gaps
 
-- **Sorting primitive arrays and natural-order comparators throw**:
-  `(java.util.Arrays/sort (int-array [3 1 2]))` throws `UnsupportedOperationException ("c2g:
-  class java.util.DualPivotQuicksort is not in the closed world")`, likewise every primitive
-  `sort`, `parallelSort` and `parallelPrefix`; `(java.util.Comparator/naturalOrder)` throws
-  (`Comparators`). Checked on the executable. Both are files outside the closure, stubbed per
-  the decision of 2026-10-08 (JRT-SOURCES.md, "Decided"); Clojure's `sort` is unaffected
-  (it sorts an `Object[]`). Also checked: `TreeMap`'s copy constructor from a `SortedMap`
-  and `clone` throw (`buildFromSorted` names `ObjectInputStream`).
-- **`SortedSet` is cut** (its file is not in the closure; `NavigableSet` and `TreeSet` are):
-  `(instance? java.util.SortedSet (java.util.TreeSet.))` is false on Go, and `TreeSet`'s
-  `headSet`/`subSet`/`tailSet` of one or two arguments, its `SortedSet` constructor and
-  `Collections`' four `SortedSet` methods are missing (outside type).
-- **`java.util`**: no `BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`,
-  `Scanner`, `Currency`, `ResourceBundle`, `ServiceLoader`, `Timer`, `SplittableRandom`;
-  `Locale` 21 of 75 members (no `Builder`, `forLanguageTag`, display names, ISO lists, extensions, `setDefault`, most locale constants); `Date` 26 of
-  35 (no deprecated setters, `parse`, `toLocaleString`).
+- **Fixed on this branch** ("java.util completed" below): primitive `Arrays.sort`,
+  `parallelSort`, `parallelPrefix`, `Comparator.naturalOrder`/`nullsFirst`/`nullsLast`,
+  `Comparator.comparing` and every other serializable lambda (they threw
+  `ClassCastException`), `SortedSet`, `TreeMap`'s copies from sorted maps.
+- **`java.util`**: no `Scanner` (`CharBuffer`), `Currency` (its data file), `ResourceBundle`,
+  `ServiceLoader`, `Timer` (`Cleaner`), `SimpleTimeZone`, `Locale.Builder`; `Locale` 21 of 75
+  members (no `forLanguageTag`, display names, ISO lists, extensions, `setDefault`, most locale
+  constants); `Date` 26 of 35 (no deprecated setters, `parse`, `toLocaleString`).
 - **`java.util.concurrent`**: 29 of 81 classes; no `CompletableFuture`,
   `ConcurrentLinkedQueue`/`Deque`, `ConcurrentSkipListMap`/`Set`, `CopyOnWriteArrayList`/`Set`,
   `PriorityBlockingQueue`, `LinkedBlockingDeque`, `SynchronousQueue`, `Phaser`, `Exchanger`,
@@ -310,15 +306,9 @@ cut classes Arbace names exist as names whose members throw; everything else is 
 
 What it would take, roughly by cost (agent-assisted days at the pace of B1a):
 
-1. **More plain Java of `java.util`** (cheap, about 1 day): first the files whose absence makes
-   translated members throw: `DualPivotQuicksort` (primitive `Arrays.sort`), `Comparators`,
-   `SortedSet`, `ArrayPrefixHelpers`, `ArraysParallelSortHelpers`, `RandomSupport`,
-   `BitSieve`; then `BitSet`, `PriorityQueue`,
-   `WeakHashMap` (over jrt's references), `StringTokenizer`, `Base64`, `SplittableRandom`,
-   `Timer`, `Scanner` (needs `CharBuffer`, or a variant): `added-sources` in
-   `test/g2c/jrt_sources.clj`, then c2g; no VarHandle, no natives. `SortedSet` is cut (an
-   interface with methods outside the closure), which costs `TreeSet`'s and `Collections`'
-   `SortedSet` members: adding its file restores them.
+1. **More plain Java of `java.util`**: done on this branch (below). What is left of
+   `java.util` needs other parts: `Scanner` (`CharBuffer`), `Currency` and `ResourceBundle`
+   (data files, class loading), `Timer` (`Cleaner`), `Locale`'s rest (locale data).
 2. **`java.util.concurrent` beyond the shims** (2-4 days): JDK 26's concurrent classes use
    `VarHandle` (`ConcurrentLinkedQueue`, `ConcurrentSkipListMap`, `CompletableFuture`,
    `Exchanger`, the atomic arrays and field updaters, `Striped64`/`LongAdder`) or AQS over
@@ -344,15 +334,76 @@ What it would take, roughly by cost (agent-assisted days at the pace of B1a):
    `javax.crypto` (portable Java, but large: providers in `sun.security.*`; Go's `crypto` would
    back a small provider), modules.
 
+## java.util completed (branch `jbase`, 2026-10-10)
+
+The user's decision of 2026-10-10: close the gaps above and add the plain Java of `java.util`
+before the freeze (java.time and java.util.concurrent are other branches'). Done, from main at
+`8ace8b1`:
+
+- **25 jdk26u files added to the closure** (`util-sources` in `test/g2c/jrt_sources.clj`,
+  amendment JB1): `DualPivotQuicksort`, `ArraysParallelSortHelpers`, `ArrayPrefixHelpers`,
+  `Comparators`, `SortedSet`, `jdk.internal.util.random.RandomSupport`, `java.math.BitSieve`,
+  `BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, `SplittableRandom`,
+  `EventObject`, `EventListener`, `EventListenerProxy`, `Observable`, `Observer`, and the
+  exceptions and constants `TooManyListenersException`, `InputMismatchException`,
+  `MissingResourceException`, `IllformedLocaleException`, `InvalidPropertiesFormatException`,
+  `FormattableFlags`, `ServiceConfigurationError`. `bin/jrt-convert`: 414 files, all compiled to
+  javac's class shapes (410 identical, the 4 known differences).
+- **Three Go-build variants** (`overlay/jdk/variants/`, amendment JB2): `TreeMap` (its
+  sorted-build methods without the `ObjectInputStream` parameter, called from the copy
+  constructor, `clone`, `putAll` and `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and
+  `toByteArray` by shifts instead of a little-endian `ByteBuffer`), `RandomGenerator`
+  (`isDeprecated` is false: no annotations in the Go build, R16).
+- **c2g**: FromFn's array results (amendment JB3) and lambdas with marker interfaces
+  (amendment JB5); **jrt**: forked tasks not yet done run again (amendment JB4).
+- **The oracle**: `test/oracle/forms/java_util.clj`, 161 cases recorded on the JVM: all pass on
+  Go but the three `nextProbablePrime` cases (`ThreadLocalRandom.current`, listed in
+  `known-go-amd64.edn` with that reason).
+
+| | before (main `8ace8b1`) | after |
+|---|---:|---:|
+| java.base members provided | 5,598 (31.9%) | 5,787 (33.0%) |
+| of which partial | 108 | 25 |
+| classes in Go | 384 | 405 |
+| `java.util` (the package) provided | 1,731 of 2,239 (77.3%) | 1,916 (85.6%) |
+| executable, amd64 | 80,126,079 bytes | 82,283,432 bytes (+2.16 MB, +2.7%) |
+
+Checks (amd64; arm64 not built on this branch): `bin/jrt-convert` (414 files, shape check as
+above), `bin/c2g --program`, `bin/arbace-go --build` and `--smoke` pass; Clojure's suite on Go
+19,506 of 19,506 assertions, no regression against `test/arbace-go-results.edn`; the oracle
+against `known-go-amd64.edn`: the only new mismatches besides the three recorded above are the
+271 `defclass`/`defclass_corpus` cases that main at `8ace8b1` has too (the class forms at the
+REPL, checked on an executable built from `8ace8b1`: the same 271), not recorded here.
+
+### Amendments (JB)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "java.util
+completed"):
+
+- **JB1 (JRT-SOURCES.md, "The closure as grown") The java.util files**: the list above, as
+  `util-sources` beside `added-sources`, each group with its reason. *Accepted 2026-10-10, folded into JRT-SOURCES.md, "The closure as grown".*
+- **JB2 (C2G-SPEC §4.6, the JDK's variants) `TreeMap`, `BitSet`, `RandomGenerator`**, as above.
+  A replacing member's parameter tags are written as j2c writes the original's (generic tags
+  included: `^{:tag (SortedMap K (? extends V))}`), since the variant finds the member by them. *Accepted 2026-10-10, folded into C2G-SPEC §4.6.*
+- **JB3 (C2G-SPEC §7.11, FromFn) An array result is checked against the return type's array
+  class**, as `Dyn`'s results are. Before, the adapter checked the result against its own class
+  through the generic `jrt.NN`, which Go cannot instantiate on an `any`, and wrote the call
+  twice; no functional interface with an array result had been in the world
+  (`DualPivotQuicksort`'s private `PartitionOperation` is the first). *Accepted 2026-10-10, folded into C2G-SPEC §7.11.*
+- **JB4 (C2G-SPEC §8.4, the fork-join pool) A forked task not yet done runs again.** jrt ran a
+  task once (claimed `fjNew` to `fjRunning`); a `CountedCompleter` whose `exec` returned
+  without completing and that is forked again (`ArrayPrefixHelpers`' cumulation reforks its
+  parent) never ran again, and `parallelPrefix` deadlocked. Forking now runs `exec` whenever
+  the task is not done, as the JDK's `doExec`; joining is unchanged. (A change to jrt's
+  `forkjoin.clj`, which the java.util.concurrent branch also owns.) *Accepted 2026-10-10, folded into C2G-SPEC §8.4.*
+- **JB5 (C2G-SPEC §7.11, lambdas) A lambda whose target is an intersection with marker
+  interfaces** (`(lambda (& Comparator Serializable) ...)`, javac's
+  `(Comparator<T> & Serializable)`) gets an adapter that implements them, `F_Fn_M1_..._Mn`,
+  registered as `F$$Lambda$M1...`. Before, the adapter implemented only `F`, and the cast to
+  `Serializable` that javac writes threw `ClassCastException`: `Comparator.comparing`,
+  `comparingInt`, `thenComparing`, `Map.Entry.comparingByKey` and the like failed on Go. *Accepted 2026-10-10, folded into C2G-SPEC §7.11.*
+
 ## Decisions for the user
 
-- **The two throwing gaps** (primitive `Arrays.sort`, `parallelSort`, `parallelPrefix`;
-  `Comparator.naturalOrder`/`nullsFirst`/`nullsLast`; and `TreeMap`'s copy from a
-  `SortedMap`): add their files to the closure before the freeze (`DualPivotQuicksort`,
-  `Comparators`, `ArrayPrefixHelpers`, `ArraysParallelSortHelpers`, and a variant or
-  `ObjectInputStream`-free `buildFromSorted` for `TreeMap`), or record them as known. This
-  revisits, for these few files, the decision of 2026-10-08 to stub rather than grow the
-  closure (JRT-SOURCES.md, "Decided").
 - Whether `doc/go/java-base-coverage.edn` is regenerated in the freeze's checklist (it needs
   c2g's output: `bin/arbace-go --build`, then `bin/jrt-coverage`), or kept as this measurement.
-- Whether any other item of "Going further" belongs before the freeze.
