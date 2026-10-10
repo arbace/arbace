@@ -159,8 +159,11 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - Before the freeze: an assessment of how much of `java.base` jrt implements (the user's
     request, an agent; `doc/go/JAVA-BASE.md`); SL3's per-namespace timeouts once step 7 lands;
     the agents-without-`shutdown-agents` deadlock found by step 7a.
+  - Main's README is brought up to date after the `baseimage` merge (the Go executable, v3 and the
+    Alpine package, `bin/arbace-j`, the licences).
   - Then: step 8, the freeze (`bin/gate --full`, PGO executables, the branch `arbace-for-golang`,
-    the tag `arbace-for-go1.27.1-v1`); right after it, as the first task, the `.ae` rename.
+    the tag `arbace-for-go1.27.1-v1`, the READMEs' "Arbace for Golang" sections: main's pointing to the branch,
+    the branch's own); right after it, as the first task, the `.ae` rename.
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`

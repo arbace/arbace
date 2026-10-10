@@ -1378,3 +1378,13 @@ decision (2026-10-08).
 - Main session on the merge (over the size trimming): `bin/jrt-convert`, the amd64 build (61.9
   MB), the smoke test 36 of 36 with the terminal checks, the Go oracle 21,792 of 21,800 as
   recorded.
+
+## 2026-10-10: the READMEs
+
+- The user's request: both READMEs up to date, and the divergence prepared for the next freeze.
+  `arbace-for-java-26`'s README and FREEZE.md now name v1-v3, the base image and the Alpine
+  package (`b07fdf9`, pushed). Main's README follows the `baseimage` merge (the Go executable,
+  v3, `bin/arbace-j`, the licences). At the Go freeze (B1-PLAN step 8) the READMEs diverge as at
+  the JVM freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26",
+  pointing to the branch `arbace-for-golang`, its tags and the branch's freeze document; the
+  branch's README describes the frozen executables locally.
