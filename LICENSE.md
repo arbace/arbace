@@ -87,13 +87,14 @@ covers what.
   (`src/java.base/share/classes/javax/crypto/JceSecurity.java.template`),
   `overlay/jdk/java.base/sun/security/provider/SeedGenerator.java` its `getSystemEntropy` and
   `longToByteArray` (`sun/security/provider/SeedGenerator.java`), and the variants
-  `overlay/jdk/variants/Provider.clj`, `Security.clj`, `ProviderConfig.clj`, `SunEntries.clj`
-  and `SunJCE.clj` keep the code of the jdk26u methods they replace
+  `overlay/jdk/variants/Provider.clj`, `Security.clj`, `ProviderConfig.clj`, `SunEntries.clj`,
+  `SunJCE.clj` and `DigestBase.clj` keep the code of the jdk26u methods they replace
   (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
-  `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`) where they
-  keep it: Copyright (c) Oracle and/or its
+  `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`,
+  `sun/security/provider/DigestBase.java`) where they keep it: Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); the rest of those files, `NativePRNG.clj`, `jdk/internal/jrt/HostRandom.java`,
+  below); the rest of those files, `NativePRNG.clj`, the digests' variants (`MD5.clj`, `SHA.clj`, `SHA2.clj`,
+  `SHA5.clj`, `SHA3.clj`), `jdk/internal/jrt/HostRandom.java`,
   `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
   own.
 - `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds

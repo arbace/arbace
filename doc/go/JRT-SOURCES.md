@@ -446,8 +446,8 @@ accepted on 2026-10-10 (C2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Proce
 
 ## Security (2026-10-10)
 
-java.security's basics in the Go build (JRT-NOTES.md, "Security"; proposed amendments SC4,
-SC5), from jdk26u at `baf63fb`: `test/g2c/jrt_sources.clj`'s `security-sources`, 75 files (74 of
+java.security's basics in the Go build (JRT-NOTES.md, "Security"; amendments SC4,
+SC5, accepted 2026-10-10; C2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`: `test/g2c/jrt_sources.clj`'s `security-sources`, 75 files (74 of
 `src/java.base/share/classes`, `NativePRNG` of `src/java.base/unix/classes`), and jrt's own
 `javax/crypto/JceSecurity.java`, `sun/security/provider/SeedGenerator.java`,
 `sun/security/provider/JrtServices.java`, `com/sun/crypto/provider/JceServices.java` and
