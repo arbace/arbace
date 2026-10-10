@@ -379,11 +379,19 @@
               *slice?* (or slice? (constantly true))
               m/*w* (assoc m/*w* :T (:T st))]
       (doseq [c classes] (use! c))
-      (doseq [[c :as k] roots]
+      (doseq [[c name desc :as k] roots]
         (when (use! c)
           (reach! k)
           ;; a root constructor: its class is instantiated (by the caller of the roots)
-          (when (and (= "<init>" (second k)) (*slice?* c)) (instantiate! c))))
+          (when (and (= "<init>" name) (*slice?* c)) (instantiate! c))
+          ;; a root instance method is a virtual call too: its callers (the REPL's reflection,
+          ;; the evaluator) call it on instances of any subclass, whose overrides must be
+          ;; translated, those of classes that are not roots themselves included (JRT-NOTES.md,
+          ;; "Time": ZoneInfo's, in a package java.base does not export)
+          (when-not (#{"<init>" "<clinit>"} name)
+            (when-let [mm (m/find-method c name desc)]
+              (when-not (or (m/static? mm) (m/private? mm))
+                (vcall! c name desc))))))
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
       ;; functional interfaces whose adapters exist without a lambda (FromFn, C2G-SPEC §7.11)
       (doseq [fi fis] (when (use! fi) (lambda! fi)))

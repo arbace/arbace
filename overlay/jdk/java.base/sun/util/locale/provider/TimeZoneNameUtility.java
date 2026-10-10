@@ -207,10 +207,14 @@ public final class TimeZoneNameUtility {
 
     private static final String NO_INHERITANCE_MARKER = "∅∅∅";
     private static class AVAILABLE_IDS {
-        static final String[] INSTANCE =
-                ZoneInfoFile.zoneIds()
-                .sorted()
-                .toArray(String[]::new);
+        static final String[] INSTANCE = sortedZoneIds();
+    }
+
+    // ZoneInfoFile.zoneIds().sorted().toArray(String[]::new), sorted by Arrays.sort
+    private static String[] sortedZoneIds() {
+        String[] ids = ZoneInfoFile.zoneIds().toArray(String[]::new);
+        Arrays.sort(ids);
+        return ids;
     }
 
     // name indexes

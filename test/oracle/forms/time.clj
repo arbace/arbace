@@ -251,7 +251,9 @@
          DateTimeFormatter/ISO_WEEK_DATE DateTimeFormatter/ISO_INSTANT DateTimeFormatter/BASIC_ISO_DATE
          DateTimeFormatter/RFC_1123_DATE_TIME]))
 (.format DateTimeFormatter/RFC_1123_DATE_TIME (OffsetDateTime/parse "2020-01-05T03:04:05-08:00"))
-(str (.parse DateTimeFormatter/RFC_1123_DATE_TIME "Tue, 3 Jun 2008 11:05:30 GMT"))
+;; (a Parsed prints its fields in the order of a HashMap keyed by enums, by identity hashes: not printed)
+(let [p (.parse DateTimeFormatter/RFC_1123_DATE_TIME "Tue, 3 Jun 2008 11:05:30 GMT")]
+  [(.getLong p ChronoField/INSTANT_SECONDS) (.getLong p ChronoField/OFFSET_SECONDS) (str (.query p (TemporalQueries/localDate)))])
 (str (.parse DateTimeFormatter/ISO_WEEK_DATE "2020-W53-5"))
 (str (LocalDate/parse "2020-W53-5" DateTimeFormatter/ISO_WEEK_DATE))
 (str (LocalDate/parse "20200615" DateTimeFormatter/BASIC_ISO_DATE))
@@ -300,15 +302,18 @@
 (str (LocalDate/parse "2020-2-30" (.withResolverStyle (DateTimeFormatter/ofPattern "uuuu-M-d") ResolverStyle/SMART)))
 (ex-msg #(LocalDate/parse "2020-2-30" (.withResolverStyle (DateTimeFormatter/ofPattern "uuuu-M-d") ResolverStyle/STRICT)))
 (str (LocalDate/parse "2020-14-35" (.withResolverStyle (DateTimeFormatter/ofPattern "uuuu-M-d") ResolverStyle/LENIENT)))
-(ex-msg #(LocalDate/parse "2020-2-28" (.withResolverStyle (DateTimeFormatter/ofPattern "yyyy-M-d") ResolverStyle/STRICT)))
+(let [[c m] (ex-msg #(LocalDate/parse "2020-2-28" (.withResolverStyle (DateTimeFormatter/ofPattern "yyyy-M-d") ResolverStyle/STRICT)))]
+  [c (subs m 0 (.indexOf ^String m "{"))])
 (str (.parseBest (DateTimeFormatter/ofPattern "uuuu-MM-dd[ HH:mm]") "2020-06-15"
                  (into-array java.time.temporal.TemporalQuery
                              [(reify java.time.temporal.TemporalQuery (queryFrom [_ t] (LocalDateTime/from t)))
                               (reify java.time.temporal.TemporalQuery (queryFrom [_ t] (LocalDate/from t)))])))
-(str (.parseUnresolved (DateTimeFormatter/ofPattern "uuuu-MM-dd") "2020-06-99" (java.text.ParsePosition. 0)))
+(let [p (.parseUnresolved (DateTimeFormatter/ofPattern "uuuu-MM-dd") "2020-06-99" (java.text.ParsePosition. 0))]
+  (mapv #(.getLong p %) [ChronoField/YEAR ChronoField/MONTH_OF_YEAR ChronoField/DAY_OF_MONTH]))
 (let [p (java.text.ParsePosition. 3)]
   [(str (.parse DateTimeFormatter/ISO_LOCAL_DATE "xx 2020-06-15 yy" p)) (.getIndex p) (.getErrorIndex p)])
-(str (.parse (DateTimeFormatter/ofPattern "yyyy MM") "2020 06"))
+(let [p (.parse (DateTimeFormatter/ofPattern "yyyy MM") "2020 06")]
+  [(.isSupported p ChronoField/YEAR) (.getLong p ChronoField/YEAR) (.getLong p ChronoField/MONTH_OF_YEAR) (str (.query p (TemporalQueries/chronology)))])
 (.format (.withDecimalStyle (DateTimeFormatter/ofPattern "yyyy-MM-dd") (.withZeroDigit DecimalStyle/STANDARD \٠)) (LocalDate/of 2020 6 15))
 (str (DecimalStyle/ofDefaultLocale))
 (str (DecimalStyle/of Locale/ROOT))

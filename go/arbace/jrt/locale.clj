@@ -33,7 +33,28 @@ variant; scripts and extensions are not kept.\n"
   [^{:tag (* Locale) :doc "Locale_ROOT is Locale.ROOT.\n"} Locale_ROOT (newLocale "" "" "")]
   [^{:tag (* Locale)} Locale_ENGLISH (newLocale "en" "" "")]
   [^{:tag (* Locale)} Locale_US (newLocale "en" "US" "")]
-  [^{:tag (* Locale)} Locale_UK (newLocale "en" "GB" "")])
+  [^{:tag (* Locale)} Locale_UK (newLocale "en" "GB" "")]
+  ;; the JDK's other locale constants (java.time's forms name them; JRT-NOTES.md, "Time")
+  [^{:tag (* Locale)} Locale_FRENCH (newLocale "fr" "" "")]
+  [^{:tag (* Locale)} Locale_GERMAN (newLocale "de" "" "")]
+  [^{:tag (* Locale)} Locale_ITALIAN (newLocale "it" "" "")]
+  [^{:tag (* Locale)} Locale_JAPANESE (newLocale "ja" "" "")]
+  [^{:tag (* Locale)} Locale_KOREAN (newLocale "ko" "" "")]
+  [^{:tag (* Locale)} Locale_CHINESE (newLocale "zh" "" "")]
+  [^{:tag (* Locale)} Locale_SIMPLIFIED_CHINESE (newLocale "zh" "CN" "")]
+  [^{:tag (* Locale)} Locale_TRADITIONAL_CHINESE (newLocale "zh" "TW" "")]
+  [^{:tag (* Locale)} Locale_FRANCE (newLocale "fr" "FR" "")]
+  [^{:tag (* Locale)} Locale_GERMANY (newLocale "de" "DE" "")]
+  [^{:tag (* Locale)} Locale_ITALY (newLocale "it" "IT" "")]
+  [^{:tag (* Locale)} Locale_JAPAN (newLocale "ja" "JP" "")]
+  [^{:tag (* Locale)} Locale_KOREA (newLocale "ko" "KR" "")]
+  [^{:tag (* Locale)} Locale_CANADA (newLocale "en" "CA" "")]
+  [^{:tag (* Locale)} Locale_CANADA_FRENCH (newLocale "fr" "CA" "")])
+
+(go/var
+  [^{:tag (* Locale) :doc "Locale_CHINA is Locale.CHINA, Locale.SIMPLIFIED_CHINESE.\n"} Locale_CHINA Locale_SIMPLIFIED_CHINESE]
+  [^{:tag (* Locale)} Locale_PRC Locale_SIMPLIFIED_CHINESE]
+  [^{:tag (* Locale)} Locale_TAIWAN Locale_TRADITIONAL_CHINESE])
 
 (go/func Locale_Of_String__Locale "Locale_Of_String__Locale is Locale.of(language).\n"
   ^{:tag (* Locale)} [^{:tag (* String)} l]

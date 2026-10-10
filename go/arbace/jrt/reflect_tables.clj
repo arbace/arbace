@@ -1466,10 +1466,46 @@
          :New (fn ^any [^{:tag (slice any)} args] (Locale_New_String_String_String ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)) ((inst As (* String)) (aget args 2)))))))
   (set! (.-Fields (.Info Locale_class))
     (lit (slice FieldInfo)
+        (lit FieldInfo :Name "CANADA" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_CANADA))
+        (lit FieldInfo :Name "CANADA_FRENCH" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_CANADA_FRENCH))
+        (lit FieldInfo :Name "CHINA" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_CHINA))
+        (lit FieldInfo :Name "CHINESE" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_CHINESE))
         (lit FieldInfo :Name "ENGLISH" :Type Locale_class :Modifiers 0x19
          :Get (fn ^any [^any o] Locale_ENGLISH))
+        (lit FieldInfo :Name "FRANCE" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_FRANCE))
+        (lit FieldInfo :Name "FRENCH" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_FRENCH))
+        (lit FieldInfo :Name "GERMAN" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_GERMAN))
+        (lit FieldInfo :Name "GERMANY" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_GERMANY))
+        (lit FieldInfo :Name "ITALIAN" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_ITALIAN))
+        (lit FieldInfo :Name "ITALY" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_ITALY))
+        (lit FieldInfo :Name "JAPAN" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_JAPAN))
+        (lit FieldInfo :Name "JAPANESE" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_JAPANESE))
+        (lit FieldInfo :Name "KOREA" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_KOREA))
+        (lit FieldInfo :Name "KOREAN" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_KOREAN))
+        (lit FieldInfo :Name "PRC" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_PRC))
         (lit FieldInfo :Name "ROOT" :Type Locale_class :Modifiers 0x19
          :Get (fn ^any [^any o] Locale_ROOT))
+        (lit FieldInfo :Name "SIMPLIFIED_CHINESE" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_SIMPLIFIED_CHINESE))
+        (lit FieldInfo :Name "TAIWAN" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_TAIWAN))
+        (lit FieldInfo :Name "TRADITIONAL_CHINESE" :Type Locale_class :Modifiers 0x19
+         :Get (fn ^any [^any o] Locale_TRADITIONAL_CHINESE))
         (lit FieldInfo :Name "UK" :Type Locale_class :Modifiers 0x19
          :Get (fn ^any [^any o] Locale_UK))
         (lit FieldInfo :Name "US" :Type Locale_class :Modifiers 0x19

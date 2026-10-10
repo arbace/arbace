@@ -813,8 +813,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                 (when instant?
                   [(list 'set! '(.-Methods (.Info Date_class))
                          (list 'append '(.-Methods (.Info Date_class))
+                               ;; jdk26u's Date.from: toEpochMilli's ArithmeticException
+                               ;; becomes the cause of an IllegalArgumentException
                                (sig "from" '[Instant_class] 'Date_class 0x9
-                                    '(Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                                    '(let [^any d nil
+                                           exc ((fn [] :results [^Throwable_I exc]
+                                                  (defer (Catch (addr exc)))
+                                                  (set! d (Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                                                  (return nil)))]
+                                       (when (!= exc nil)
+                                         (when (ArithmeticException_InstanceOf exc)
+                                           (panic (IllegalArgumentException_New_Throwable exc)))
+                                         (panic exc))
+                                       (return d)))
                                (sig "toInstant" [] 'Instant_class 0x1
                                     '(Instant_OfEpochMilli_J__Instant (.GetTime__J (assert Date_I this))))))])
                 (when (seq str-ms)
