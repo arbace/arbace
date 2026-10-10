@@ -1088,7 +1088,13 @@ c2g's cut classes (the classes the embedded namespaces name outside the world) d
 them. `arbace.c2g.embed/library-cuts` adds them to the cut classes (their members throw when
 called; the runner, given the namespace list, calls none).
 
-GENERATIVE-RESULT
+Result (amd64, `-e` setting `clojure.test.generative.msec` to 60,000 as upstream's build does):
+26 specs, 500,513 iterations, no failure; the one load error is `java.io` (`java.net.ServerSocket`,
+the sockets work's), whose spec makes the JVM's 27. The api specs pass: `Clojure/read` reads
+back what `pr-str` printed and `Clojure/var` finds the vars test.generative generates.
+`bin/clojure-tests` now runs this phase on the Go build too (it was off), and the reference
+records it (`:generative {:tests 26 ...}`); it adds one process to the suite's run (all test
+namespaces loaded, then 60 s of specs, about 3 minutes).
 
 ### transducers: the time of seq-and-transducer
 
@@ -1151,7 +1157,20 @@ the next best value (about 450 assertions in five namespaces for half a day), th
 
 ### arm64
 
-ARM64-RESULT
+Before the merge of main (step 6's image not yet in), `linux/arm64` under `qemu-aarch64` (the
+executable of this branch), under the shared lock:
+
+- the oracle's forms corpus less `harvest/reducers` (70 minutes there alone): **10,079 of
+  10,082**, the 3 mismatches those of amd64's reference (`known-go-amd64.edn`: `deftype Foo/2`'s
+  error source, the `StringBuilder`'s identity hash, the proxy's serialization); 6 minutes with
+  16 runs at a time;
+- Clojure's suite, 14 namespaces chosen for breadth (`clearing`, `api`, `transducers`, `math`,
+  `numbers`, `data-structures`, `reader`, `string`, `protocols`, `sequences`, `control`,
+  `evaluation`, `agents`, `printer`; 14,904 assertions): the same counts as on amd64 (the 3
+  errors are `java.io.File`'s, the `File` work's); 22 minutes, a namespace taking
+  13 to 22 minutes under qemu.
+
+No difference specific to arm64 was found, so nothing was fixed for it.
 
 ### Results
 
