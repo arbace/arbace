@@ -165,6 +165,11 @@ JDK's ArrayBlockingQueue.Itrs.Node).\n"
 (go/method Clone__O ^any [^{:tag (* WeakReference)} t] (panic (CloneNotSupportedException_New)))
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* WeakReference)} t] (Object_toString t))
 (go/func WeakReference_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* WeakReference) x)] ok))
+(go/func WeakReference_Cast ^{:tag (* WeakReference)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* WeakReference) x)]
+    (when (not ok) (panic (ClassCast x WeakReference_class)))
+    v))
 
 (go/type SoftReference (struct Reference))
 
@@ -193,6 +198,14 @@ JDK's ArrayBlockingQueue.Itrs.Node).\n"
 (go/method Clone__O ^any [^{:tag (* SoftReference)} t] (panic (CloneNotSupportedException_New)))
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* SoftReference)} t] (Object_toString t))
 (go/func SoftReference_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* SoftReference) x)] ok))
+(go/func SoftReference_Cast
+  "SoftReference_Cast is a cast to SoftReference (java.time's caches of zone names keep their
+maps in soft references; JRT-NOTES.md, \"Time\").\n"
+  ^{:tag (* SoftReference)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* SoftReference) x)]
+    (when (not ok) (panic (ClassCast x SoftReference_class)))
+    v))
 
 ;; ---------------------------------------------------------------------------------------
 ;; ReferenceQueue

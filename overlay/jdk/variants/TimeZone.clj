@@ -1,8 +1,10 @@
 ;; Go-build variant of java.util.TimeZone (C2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Time"): read by
 ;; c2g only. TimeZone is jdk26u's; the default zone is set as the JDK sets it, with the
 ;; property user.timezone read and written through System.getProperty and setProperty (jrt's
-;; System has no Properties object) and without StaticProperty (java.home is not used by jrt's
-;; natives, which detect the host's zone as TimeZone_md.c does on Linux: TZ, /etc/localtime).
+;; System.getProperties is a copy, which a setProperty on it does not change; the property can
+;; be set with JAVA_TOOL_OPTIONS' -Duser.timezone, as on the JVM) and without StaticProperty
+;; (java.home is not used by jrt's natives, which detect the host's zone as TimeZone_md.c does
+;; on Linux: TZ, /etc/localtime).
 ;; The package-private getOffsets(long, int[]) is cut: in Go, ZoneInfo's public method of that
 ;; name (another Java package) would override it (C2G-SPEC §4.4, W4), and nothing in the Go
 ;; build calls it on a TimeZone (the JDK's calendars of java.util do, which jrt's own

@@ -13,7 +13,7 @@
           "threadlocal.go" "throwable.go" "timezone.go" "tooloptions.go" "unsafe.go" "volatile.go" "vm.go"]
   :test-files ["bench_test.go" "concurrent_test.go" "enum_test.go" "filesystem_test.go" "manifest_test.go" "math_test.go"
                "monitor_test.go" "net_test.go" "object_test.go" "reflect_test.go" "shims_test.go" "string_test.go"
-               "system_test.go" "testutil_test.go" "thread_test.go" "throwable_test.go"])
+               "system_test.go" "testutil_test.go" "thread_test.go" "throwable_test.go" "timezone_test.go"])
 
 (load "jrt/access")
 (load "jrt/array")
@@ -78,3 +78,4 @@
 (load "jrt/testutil_test")
 (load "jrt/thread_test")
 (load "jrt/throwable_test")
+(load "jrt/timezone_test")
