@@ -142,7 +142,8 @@ the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the imag
 Environment of the executable: `ARBACE_NO_IMAGE` (load from the sources, as before),
 `ARBACE_PREPARE=FILE` (record the image into FILE), `ARBACE_IMAGE_STATS` (with
 `ARBACE_PREPARE`: each source's objects by type), `ARBACE_IMAGE_TIMES` (each source's decoding
-time, and the units whose evaluation takes more than 3 ms), and `ARBACE_LOAD_TIMES` as before.
+time, and the units whose evaluation takes more than 3 ms), and `ARBACE_LOAD_TIMES` as before;
+`ARBACE_RLWRAP` (`off`: the REPL never under rlwrap; "Line editing: rlwrap").
 
 ## The start's garbage collector
 
@@ -192,6 +193,66 @@ was 5.1 MB and 380,000 objects for the start.
 transcript (`bin/arbace` gives the same, but for the number of the `eval` class in the error
 message): reading and printing, multi-line input, `doc`, an error that the REPL reports and goes
 on after, `*1`, `*2`, `*3` and `*e`, and the end of input ending the REPL with status 0.
+
+## Line editing: rlwrap
+
+The user's decision (2026-10-10): the executable's interactive REPL runs under `rlwrap`, as
+Alpine's `clj` runs `clojure` and the JVM package's `arb` runs `arbace`
+(`exec rlwrap -m -r -q '\"' -b "(){}[],^%#@\";:'" "$bin_dir/clojure" "$@"`; the quote
+characters are `\` and `"`). Branch `gorl`; amendments RL1-RL3
+below.
+
+**When.** The main package's `main` calls `execRlwrap` first, before jrt's host is set and the
+image is replayed (`rlwrap_linux.go`, hand-written forms `go/arbace/cmd/arbace/rlwrap_linux.clj`,
+copied by `bin/c2g --program` beside `image.clj`). It replaces the process with rlwrap only when
+all of these hold, else it returns and the program runs as before, silently:
+
+1. `ARBACE_RLWRAP` is not `off` (the user's switch) and not `wrapped` (the marker the
+   executable sets for its child: no loop); any other value, or none, means the default;
+2. `TERM` is set and not `dumb` (Emacs' shells; rlwrap warns without `TERM`);
+3. the arguments start arbace.main's REPL (`startsREPL`, read off `arbace.main/main`): no
+   arguments, or init options (`-i`/`--init`, `-e`/`--eval`, `--report`, each with its
+   argument) followed by `-r`/`--repl`. Init options alone (null-opt), `-m`, `-h`/`-?`/`--help`,
+   a script and `-` do not start a REPL, so `-e` and scripts never see rlwrap;
+4. standard input and output are terminals (`ioctl` `TCGETS` on fds 0 and 1), and standard
+   input's terminal has a width (`TIOCGWINSZ`: rlwrap refuses a width of 0, and the REPL would
+   then not start at all);
+5. the parent process is not rlwrap (`/proc/PPID/comm`: `rlwrap arbace` typed by hand, which
+   does not set the marker);
+6. `rlwrap` is a regular executable file in one of `PATH`'s absolute directories;
+7. `os.Executable` (`/proc/self/exe`, resolved) names the executable.
+
+Then `syscall.Exec` (execve, no lingering parent) of rlwrap with clj's flags, the executable's
+resolved path and the original arguments, the environment unchanged but for
+`ARBACE_RLWRAP=wrapped`. rlwrap names its history after the command's base name:
+`~/.arbace_history` (the reason for the resolved path rather than `/proc/self/exe`, which would
+give `~/.exe_history`). `GOGC` and the other settings reach the child as they were; the start's
+collector setting (U4) is made after `execRlwrap`, in the process that runs. If the exec fails
+the program goes on without rlwrap.
+
+**Cost.** The checks are a few system calls and one small file read, made only when 1 to 3
+hold; when rlwrap applies, the first process has done only the Go packages' initialization
+(about 11 ms) before the exec, none of the image's replay.
+
+**No message when rlwrap is missing.** clj prints "Please install rlwrap for command editing
+or use "clojure" instead." and exits 1: it is only a front for `clojure`, which stays the way
+without rlwrap. This executable is the only way to its REPL and a complete REPL without
+rlwrap, so it runs it; a line at every start would be noise for those who do not want rlwrap. Documented here and in RL1 instead. arbace.main's `--help` text is the JVM's too
+(`arbace.main/main`'s doc string, shared by both builds), so it is not changed.
+
+**Other systems.** `rlwrap_other.go` (`//go:build !linux`) has an empty `execRlwrap`: TamaGo's
+programs (B1b) have no rlwrap, no `execve` and no terminal of this kind.
+
+**The check** (`test/arbace-go-rlwrap.py`, run by `bin/arbace-go --smoke` on amd64 when
+`python3` and `rlwrap` are installed). Python's `pty` runs the executable on a pseudo-terminal
+of 24x80 (`TIOCSWINSZ`), `TERM=xterm`, a scratch `HOME`: with no arguments and with
+`-e ... -r` the process on the pty is rlwrap and its one child `arbace`, the REPL sees
+`ARBACE_RLWRAP` `"wrapped"`, the up arrow recalls the last input (`42` twice), the end of input
+ends it with status 0 and nothing about rlwrap is printed; with `ARBACE_RLWRAP=off`,
+`TERM=dumb` and `PATH=/nonexistent` the process on the pty is the executable itself, without
+child; `-e` alone on the pty prints its value, without rlwrap. The smoke test's other checks run
+with pipes, so without rlwrap. arm64 is not checked on a terminal: under `qemu-aarch64`, rlwrap
+would execute the arm64 executable directly.
 
 ## The smoke test in the essential gate
 
@@ -323,6 +384,33 @@ into their home documents, as noted under each.
   implemented as the essential gate's check `go` ("The smoke test in the essential gate"
   above), folded into B1-PLAN's "Checks", C2G-SPEC §16 and CLAUDE.md.*
 
+### The REPL under rlwrap (RL)
+
+Numbered RL (a prefix not used in `doc/`); proposed on branch `gorl` (2026-10-10), for the
+user's acceptance.
+
+- **RL1 (C2G-SPEC §10.6; the executable's environment) The interactive REPL under rlwrap.**
+  The program's `main` first calls `execRlwrap`, which replaces the process (execve) with
+  `rlwrap -m -r -q '\"' -b "(){}[],^%#@\";:'" EXE ARG...` (clj's flags, the executable's resolved
+  path, the original arguments, `ARBACE_RLWRAP=wrapped` added) when the arguments start
+  arbace.main's REPL, standard input and output are terminals with a width, `TERM` is set and
+  not `dumb`, the parent is not rlwrap, `ARBACE_RLWRAP` is neither `off` nor `wrapped`, and
+  `rlwrap` is on `PATH`; otherwise the program runs as before. New environment variable:
+  `ARBACE_RLWRAP` (`off`: never; `wrapped`: set by the executable for its child). No message
+  when rlwrap is missing ("Line editing: rlwrap" above, for why).
+- **RL2 (C2G-SPEC §10.6, U3) The main package's files**: besides `main.go`, `image.go`,
+  `image_types.go`, `image.bin` and `res/`, `rlwrap_linux.go` and `rlwrap_other.go`
+  (`//go:build linux` and `!linux`), from the hand-written forms
+  `go/arbace/cmd/arbace/rlwrap_linux.clj` and `rlwrap_other.clj`, copied by
+  `bin/c2g --program` (`arbace.c2g.embed/rlwrap-forms`). The terminal checks are the main
+  package's, over `syscall`: they are the launcher's decision, before jrt is set up, so jrt's
+  `Host` and its optional interfaces (§9.4) are unchanged and gain none.
+- **RL3 (B1-PLAN, "Checks") The smoke test on a terminal**: `bin/arbace-go --smoke` runs
+  `test/arbace-go-rlwrap.py` on amd64 when `python3` and `rlwrap` are installed (skipped with a
+  line otherwise): the REPL under rlwrap on a pseudo-terminal, and not under it when turned off,
+  with `TERM=dumb`, without rlwrap on `PATH`, and for `-e`. It adds about 5 s to the smoke test
+  on amd64 (now about 13 s in all, most of it the agents' checks of 5 s and the pty's checks).
+
 ## Sources
 
 Nothing vendored. Studied: candid82/joker at `v1.10.0` (commit `eed70a3c`), `DEVELOPER.md`
@@ -331,3 +419,7 @@ as Native Go Data Structures"), `core/gen_code/gen_code.go`, `core/pack.go`: Jok
 of preparing namespaces at build time; Arbace's `Compiler.clj` (`eval`, `load`, the boot `ns`
 macro of `RT.clj`). Joker's release binaries `joker-linux-amd64.zip` and
 `joker-linux-arm64.zip` of v1.10.0 were run for the measurements (in `.tmp/`, not kept).
+
+The REPL under rlwrap: Alpine's `clojure` package's `clj` script (`/usr/bin/clj` on this host,
+its rlwrap command line and flags) and the rlwrap installed here (`rlwrap` 0.48, Alpine's
+package; its manual for `-m`, `-r`, `-q`, `-b` and the history file `~/.COMMAND_history`).
