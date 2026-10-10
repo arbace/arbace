@@ -224,6 +224,22 @@ of a hand-written one) is registered under the JDK's name, by c2g's table `java-
 `java.lang.String$CaseInsensitiveComparator`. The JDK's Go-build variants are in
 `overlay/jdk/variants/` (§4.6), read whenever the JDK closure is an input.
 
+**Files in the closed world** (amendment FS6, accepted 2026-10-10; JRT-NOTES.md, "Files"). D6's
+cut of `java.io.File` is reversed: `File`, `FileSystem` and its Unix implementation
+(`UnixFileSystem`, `DefaultFileSystem`, files of `src/java.base/unix/classes`, KIND `unix`:
+JRT-SOURCES.md, FS1), `FileReader`, `FileWriter`, `java.net.URL` with its handlers (`file:`,
+and `http:`, `https:`, `jar:` for their syntax only) and the `file:` connection, and a subset of
+`java.nio.file` (jrt's own `Path`, `Files` and `jdk.internal.jrt.HostPath`, with jdk26u's
+`Paths`, options and exceptions; decision FS2 in JRT-NOTES.md) are in the world. Their Go-build
+variants: `UnixFileSystem` (its natives replaced by static natives on path strings, §9.1, over
+§9.4's `HostFS`), `File` (`toPath`; `TempDirectory` without `StaticProperty` and
+`SecureRandom`), `DeleteOnExitHook` (a `Runtime` shutdown hook), `URL`, `URL$DefaultFactory`,
+`URLStreamHandler` (`hashCode` and `hostsEqual` by host name: no `InetAddress`),
+`URLConnection` (no MIME table), `sun.net.www.ParseUtil` and `URI` (`decode` without
+`CharsetDecoder`), the `file:` handler (no `Proxy`), `HexFormat`, `jdk.internal.util.Exceptions`
+(the JDK's default `jdk.includeInExceptions`). Connections other than `file:`,
+`RandomAccessFile`, channels and `java.nio`'s coders stay outside the world.
+
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
 (the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
@@ -472,11 +488,15 @@ overload with the same Go name from different packages, and a class whose name c
 colliding with a nested class (`A_B` against `A$B`). c2g checks every Go package and every
 struct and interface for duplicate names and fails with both sources named. A **rename table**
 in c2g (data, `arbace.c2g.names/renames`) resolves a reported collision by giving one class or
-member another name. It holds three entries: `jdk/internal/util/ByteArray` → `Jdk_ByteArray`,
+member another name. It holds these entries: `jdk/internal/util/ByteArray` → `Jdk_ByteArray`,
 since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 `java/sql/Date` → `Sql_Date`, since jrt's `java.util.Date` is `Date`, and
 `java/util/stream/Tripwire` → `Stream_Tripwire`, since `java.util.Tripwire` is `Tripwire`
-(amendment S1, accepted 2026-10-09).
+(amendment S1, accepted 2026-10-09); `sun/net/www/URLConnection` → `Www_URLConnection`
+(`java.net.URLConnection`'s subclass), the URL handlers, all named `Handler`, →
+`File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler`, and `java/net/Proxy` →
+`Net_Proxy`, since jrt's `Proxy` is `java.lang.reflect`'s (amendment FS4, accepted
+2026-10-10).
 The check runs after translation (`arbace.c2g.checks`) over every Go package's package-level
 names and every type's method names, across c2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -1741,8 +1761,10 @@ this only matters for racy publication, which the race detector also finds.
     is non-leaf: `ForkJoinWorkerThread` extends it).
   - `jrt.RunMain(run func()) int` runs the program's main as the JVM does (§10.6): the calling
     goroutine becomes the thread `main`; an uncaught exception is reported (§7.9.6) and makes
-    the status 1; then it waits for the non-daemon threads (`jrt.WaitNonDaemon()`) and returns
-    the status (`System.exit` ends the process before).
+    the status 1; then it waits for the non-daemon threads (`jrt.WaitNonDaemon()`), runs the
+    shutdown hooks as the JVM's `DestroyJavaVM` does (amendment FS5, accepted 2026-10-10:
+    before, only `System.exit` ran them, so `deleteOnExit` did not delete at a normal end) and
+    returns the status (`System.exit` ends the process before).
   - `jrt.Go(name, f func()) *jrt.Thread` starts a Go function as a daemon jrt thread;
     `jrt.RunnableOf(f func())` is a `Runnable` of a Go function; `Thread_defaultHandler` holds
     the default uncaught exception handler.
@@ -1931,6 +1953,16 @@ standard streams, files (`Open` with `os.O_*` flags, `Stat`, `ReadDir`, `Remove`
 `StderrPrint` goes through `System.err`, so that `setErr` redirects it. jrt's timed waits use
 Go's runtime timers, which TamaGo's runtime provides too.
 
+**An optional `HostFS`** (amendment FS3, accepted 2026-10-10; JRT-NOTES.md, "Files"). What
+`java.io.File` asks beyond `Host`'s file calls is a second interface, `jrt.HostFS` (in
+`hostfs.clj`): `Access` (`access(2)`), `Chmod`, `Chtimes` (the modification time, the access
+time kept), `Realpath` and `Statfs` (space and the longest name). A host implements it when it
+can; `jrt.CurrentHostFS()` is the current host as one, or nil. `OSHost` implements it on Linux
+(`hostfs_linux.clj`, `//go:build linux`, over `syscall`, `os` and `path/filepath`). Without it
+the natives of `UnixFileSystem`'s variant (`filesystem.clj`) answer as the JDK does when the
+system call fails (no permission or time changes, canonical paths only collapsed, no space).
+`Host` itself is unchanged, so B1b's host and other additions (sockets) are not touched by it.
+
 **`RT`'s streams, for now** (amendment P4, accepted 2026-10-09). Until jrt has `System`'s
 streams with `OutputStreamWriter` and `InputStreamReader` (whose `StreamEncoder` and
 `StreamDecoder` are `java.nio`'s, cut by R18), `RT`'s variant binds `*out*` to an `RT$HostWriter`
@@ -2069,8 +2101,12 @@ namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds t
 strings `[old new ...]`, replaces each `old`, which must occur exactly once. They are
 `genclass.clj` (`gen-interface` at run time, `gen-class` throws), `core_proxy.clj` (§10.4),
 `instant.clj` (JAVA-SURFACE.md decision 7), `main.after.clj` and `main.subst.clj` (the REPL's
-trimmed start, no `DynamicClassLoader`, the error report through `FileOutputStream`), and
-`java/io.subst.clj`.
+trimmed start, no `DynamicClassLoader`, the error report printed with `prn`), and
+`java/io.subst.clj` (no reflection warnings; `copy` between two files through their streams,
+not their channels; the escape of `+` written out as `"%2B"`, not computed with `URLEncoder`).
+Since files are in the world (amendment FS6, accepted 2026-10-10), the error report goes to a
+temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
+variant: `load-file` is the JVM's, with `File`'s absolute path and name.
 
 ### 10.4 Types made at run time
 
@@ -3391,6 +3427,15 @@ executable cached by a hash of its inputs: B1-PLAN.md, "Checks". U1 refines M5's
 2026-10-10): Z1 a translated, non-final class of `proxy-supers` is not a leaf, and the list moves
 to `arbace.c2g.model` and gains `java.io.BufferedWriter`: §5.3, §5.12. Z1 refines X1 (leafness
 is a property of the closed world and of the proxy types c2g adds to it).
+
+**Files** (JRT-NOTES.md, "Files"; accepted by the user 2026-10-10): FS1 files of
+`src/java.base/unix/classes` in the closure, KIND `unix`: JRT-SOURCES.md. FS2 `java.nio.file` as
+jrt's own `Path`, `Files` and `HostPath`, and no `RandomAccessFile`: JRT-NOTES.md, "Files",
+Decisions. FS3 the optional `HostFS`: §9.4. FS4 the rename table's entries for the URL classes
+and `java.net.Proxy`: §4.4. FS5 shutdown hooks at the end of `RunMain`: §8.4. FS6 `File`, `URL`
+and the `java.nio.file` subset in the closed world, with their variants and the namespace
+variants' changes: §4.1, §10.3. FS7 the code transcribed from jdk26u in `HostPath.java` and
+`filesystem.clj`: LICENSE.md.
 
 Each with a recommendation, which the text above follows, for the user's review.
 
