@@ -562,6 +562,36 @@ read and analyzed) against this branch merged with it; same method:
 | `w.clj` total | 58.1 s | 38.7 s | 1.50 |
 | `w.clj` CPU | 174 s | 56.3 s | 3.09 |
 
+### After merging step 7b (closure compilation)
+
+Main at `48ba45c` (step 7b's compiled evaluator, cf-repl, jbase, go-net, regex-res) against this
+branch merged with it (`bfedb18`); same method, ms unless noted. With the evaluator 7-12 times
+faster, the runtime's share grew; this branch's part is now 1.25 times on the whole script
+(up to 1.7 on maps and vectors) and half the CPU:
+
+| | main | this branch | speedup |
+|---|---:|---:|---:|
+| `-e nil` | 0.22 s | 0.20 s | 1.10 |
+| `-e nil` CPU | 0.46 s | 0.20 s | 2.30 |
+| `-e nil` resident | 124 MB | 154 MB |  |
+| reduce-range | 2,420 | 2,088 | 1.16 |
+| map-inc | 1,215 | 954 | 1.27 |
+| into-xf | 1,131 | 943 | 1.20 |
+| hashmap | 583 | 344 | 1.69 |
+| vec-conj | 603 | 381 | 1.58 |
+| str | 414 | 342 | 1.21 |
+| fib | 61 | 54 | 1.13 |
+| loop | 144 | 144 | 1.00 |
+| binding | 118 | 85 | 1.39 |
+| sort | 908 | 707 | 1.28 |
+| keyword-map | 131 | 126 | 1.04 |
+| atom-swap | 329 | 268 | 1.23 |
+| lazy-seq-str | 118 | 88 | 1.34 |
+| `w.clj` total | 8.58 s | 6.89 s | 1.25 |
+| `w.clj` CPU | 17.1 s | 8.6 s | 1.99 |
+
+The executable: 86,085,515 bytes on main, 86,338,259 here (+0.3%).
+
 ### Size
 
 The amd64 executable: 58,378,956 bytes before, 58,733,769 after (+0.6%: the size-class
