@@ -1447,3 +1447,26 @@ decision (2026-10-08).
   `-buildvcs` does not apply: the program builds from a generated directory), the jar as a
   resource, as Clojure's `version.properties`. `*clojure-version*` stays 1.13 for the libraries
   that test it. On the agenda after the `.ae` rename.
+
+## 2026-10-10: reduce without an init over an IReduceInit-only reducible
+
+- Agent, branch `edu-main` (`8037a06`), merged; VENDOR-NOTES hand change 18. The bug is
+  upstream's: `CollReduce`'s implementation for `IReduceInit` (arbace/core/protocols.clj, as
+  Clojure 1.12.6's) casts to `IReduce` in its two-argument arity. `Eduction` implements
+  `IReduceInit`, `Iterable` and `Sequential`, not `IReduce`; `find-protocol-impl` picks among
+  `(supers Eduction)`, a hash set of classes ordered by identity hash, so `Iterable` (works) or
+  `IReduceInit` (throws) wins by hash. With a CDS or AOT archive `Iterable` won; without one it
+  varies (upstream with `-Xshare:off` throws too). The oracle recorded 55 through
+  `bin/arbace-j` with the AOT cache; `ARBACE_AOT=off` reproduces the failure. `iteration` and
+  any `reify` of `IReduceInit` alone always threw, upstream too (the oracle had recorded the
+  exception for `seqs.clj:465`). Fixed: the arity calls `IReduce.reduce` only on an `IReduce`,
+  otherwise reduces through `IReduceInit.reduce` from a fresh sentinel (empty → `(f)`, one item
+  returned without calling `f`, `reduced` honoured). `find-protocol-impl`'s rule is unchanged
+  (changing it would change upstream's dispatch). New `test/native/reduce_test.clj`; 8 oracle
+  forms after `seqs.clj:420`, `seqs.edn` re-recorded (`iteration` now 45).
+- The agent's checks on exactly this code (main adds only documents): `bin/gate` passed
+  (stage 2 = stage 3, Clojure's suite 20,750 of 20,750, the Go smoke); `bin/oracle check jvm`
+  with and without the cache: only `strings.clj:408`; the Go oracle as recorded (8).
+- On `arbace-for-java-26`, the same fix (hand change 17) with v3's `bean` key order (`84da2dc`):
+  branch `edu-26` (`840f0af`, `d83d628`), checked with the branch's gate; a release is the
+  user's call.
