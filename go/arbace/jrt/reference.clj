@@ -126,6 +126,13 @@ that enqueues it.\n"
     (when (not ok) (panic (ClassCast x Reference_class)))
     v))
 
+(go/func Reference_ReachabilityFence_O__V
+  "Reference_ReachabilityFence_O__V is Reference.reachabilityFence: o stays reachable until
+here (Go's runtime.KeepAlive; ScopedMemoryAccess's accesses, JRT-NOTES.md \"The JDK's resource
+data\").\n"
+  [^any o]
+  (runtime/KeepAlive o))
+
 ;; ---------------------------------------------------------------------------------------
 ;; WeakReference and SoftReference (leaves here)
 

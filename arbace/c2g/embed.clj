@@ -163,6 +163,21 @@
     (sort (distinct (concat cands more)))))
 
 ;; ---------------------------------------------------------------------------------------
+;; The JDK's resource data
+
+(defn data
+  "The resource data the executable embeds besides the sources (JRT-NOTES.md, \"The JDK's
+  resource data\"): the files under dir (bin/jrt-convert's .tmp/jrt/data: uniName.dat, ICU's
+  normalization data), {resource-path File}, sorted; empty when dir does not exist."
+  [dir]
+  (let [base (io/file dir)]
+    (into (sorted-map)
+          (when (.isDirectory base)
+            (for [^File f (file-seq base)
+                  :when (.isFile f)]
+              [(str/replace (str (.relativize (.toPath base) (.toPath f))) File/separator "/") f])))))
+
+;; ---------------------------------------------------------------------------------------
 ;; The image of prepared namespaces (doc/go/EXEC-NOTES.md): its encoding is hand-written forms
 ;; of the main package; decoding makes objects of the program's struct types by name, so the
 ;; main package lists them
