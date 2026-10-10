@@ -852,7 +852,11 @@
    "java/util/stream/Gatherers.clj" [:local-class-capture-order 9]
    "java/util/stream/MatchOps.clj" [:local-class-capture-order 12]
    ;; InnerClasses: a nested class javac's stack map frames name (Spliterator$OfPrimitive)
-   "java/util/stream/Nodes.clj" [:inner-classes-of-frames 2]})
+   "java/util/stream/Nodes.clj" [:inner-classes-of-frames 2]
+   ;; a switch expression of String arms as an argument of a varargs call (Locale's
+   ;; getDisplayKeyTypeExtensionString): javac checkcasts the switch's value to String, the
+   ;; class forms do not (its arms are Strings already; JRT-NOTES.md, "Text and locales")
+   "java/util/Locale.clj" [:switch-expression-checkcast 1]})
 
 (defn known-difference? [r]
   (when-let [[_ n] (known-differences (:file r))]
