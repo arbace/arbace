@@ -3016,3 +3016,115 @@ Numbered SZ (size); no SZ appears elsewhere in doc/.
 - **SZ4 (C2G-SPEC §5.12, `Dyn`; E4, X1)** `Dyn` and the `DynSub_C` types embed a `dynCore` (`D`,
   `F`, `Self`) that has the interfaces' methods; a `DynSub_C` defines only Object's methods, its
   class's and those whose names its class's struct shares, and its slots begin with `Dyn`'s.
+
+# Processes
+
+Branch `goproc` (2026-10-10, the user's decision of that day, reversing D6 for processes):
+`java.lang.ProcessBuilder` (with `Redirect`, the environment, the directory, `inheritIO`,
+`redirectErrorStream`, `startPipeline`), `Process`, `ProcessHandle` and `Runtime.exec` in the Go
+build, over a new optional host interface `HostProc`; `arbace.java.shell` and
+`arbace.java.process` embedded. Sources: JRT-SOURCES.md, "Processes"; licences: LICENSE.md.
+
+## Translated, hand-written, and why
+
+**jdk26u's Java translated, the fork and exec jrt's over the host.** As for sockets and files:
+`Process`, `ProcessBuilder` (and `Redirect`, `Redirect.Type`, `NullInputStream`,
+`NullOutputStream`, `RedirectPipeImpl`), `ProcessHandle`, `ProcessHandle.Info` and
+`ProcessHandleImpl` of `src/java.base/share/classes/java/lang`, and `ProcessImpl` and
+`ProcessEnvironment` of `src/java.base/unix/classes/java/lang` (KIND `unix`, amendment FS1) are
+translated as they are, so that the JVM's behaviour where Java decides it is kept: the redirect
+checks and their texts, `Cannot run program "p" (in directory "d"): ...`, the environment map's
+validation (`Invalid environment variable name: ...`), the exit-status bookkeeping of
+`ProcessImpl` (its lock and condition, `waitFor` with a timeout, `exitValue`'s `process hasn't
+exited`, `toString`), the pipe streams that drain what a child left when it ends
+(`ProcessPipeInputStream.processExited`), the reaper threads and `CompletableFuture`s of
+`ProcessHandleImpl.completion`, `onExit`, `startPipeline`'s chaining. The seams are the natives:
+`ProcessImpl.forkAndExec` (the JDK's `posix_spawn` of `jspawnhelper`), `ProcessHandleImpl`'s
+nine natives and `ProcessEnvironment.environ`.
+
+- **`go/arbace/jrt/hostproc.clj`: `HostProc`**, the processes as a host gives them: an
+  interface of its own beside `Host` (`host.clj` is unchanged), as `HostFS`, `NetHost` and
+  `HostLinks` are: `Start` (a path, the arguments, the environment or nil, the directory, each
+  standard stream a pipe, the program's own or an open file of the host, and error output to
+  standard output), `Pid`, `ProcStat` (parent, CPU time, start), `ProcInfo` (command, arguments,
+  command line, user), `Pids`, `Kill`; a child is a `HostChild` (`Pid`, `Wait`, `Signal`). A host
+  without it starts nothing: `ProcessBuilder.start` throws the JVM's IOException with ENOSYS
+  (`Cannot run program "sh": Exec failed, error: 38 (Function not implemented) `), and
+  `ProcessHandle` knows no process (B1b's box until its monitor gives processes).
+- **`hostproc_linux.clj`: B1a's `OSHost` as a `HostProc`.** `os.StartProcess` forks and execs
+  from the multi-threaded Go program the way Go does it (clone with `CLONE_VFORK`, the exec's
+  errno reported through a close-on-exec pipe, a failed child reaped by Go); the pipes are
+  `os.Pipe`'s, close-on-exec, so a child gets its three streams only. **A goroutine waits for
+  each child** (`os.Process.Wait`, over a pidfd) and keeps its status: a child that ends is
+  reaped at once, whether or not the program ever waits for it, so no zombie is left (jrt's test
+  `TestProcessReapedUnwaited`), and a reused pid is never signalled (`Signal` goes through the
+  pidfd, and fails once the child is reaped). `destroy` is SIGTERM, `destroyForcibly` SIGKILL;
+  the status is the JDK's encoding (the exit status, or 0x80 plus the signal: 143, 137). The
+  processes are read from `/proc` as `ProcessHandleImpl_linux.c` reads them (the fields of
+  `stat` after the last `)`, `btime` of `/proc/stat`, 100 clock ticks a second; `exe` and
+  `cmdline`, the arguments up to the first empty one, the command line with every NUL a space
+  when the command is unknown or the arguments cut at a page; the user by the uid of
+  `/proc/pid` in `/etc/passwd`, as musl's `getpwuid`). The program's ends of the pipes are
+  `procPipe`s: reads and writes fail with the C library's texts (`Broken pipe`), a read on an
+  end another thread closed ends the stream, and `Available` is `FIONREAD`'s count, so that
+  `processExited` drains a child's last output as on the JVM.
+- **`process.clj`: the natives**, generic over `HostProc`. `ProcessImpl`'s variant passes
+  `forkAndExec`'s arguments to `hostForkAndExec`, which looks for the program as this machine's
+  JVM does: a name with a slash is executed as it is, else it is looked for on the search path
+  (with the environment inherited, musl's `execvp`: `PATH`, else `/usr/local/bin:/bin:/usr/bin`;
+  with the environment given, `childproc.c`'s `JDK_execvpe` over the program's `PATH` at its
+  first use, else `:/bin:/usr/bin`; an empty component `.`), going on after ENOENT, ENOTDIR and
+  EACCES (and ELOOP, ESTALE, ENODEV, ETIMEDOUT with the environment given), EACCES sticky; no
+  `/bin/sh` fallback on ENOEXEC (musl's `execvp` has none). A candidate the host's `Stat` does not
+  find is passed over without a fork; the directory is checked first, as the child changes to it
+  before the exec. The errors are `ProcessImpl_md.c`'s texts, `IOE_FORMAT` (`"%s, error: %d (%s)
+  %s"`, a trailing space) with musl's `strerror`: `Exec failed, error: 2 (No such file or
+  directory) `, `Failed to access working directory, error: 20 (Not a directory) `. (These are the
+  texts this machine's JVM prints, checked by the oracle; older JDKs printed `error=2, No such file
+  or directory`.) The children are kept in a table by pid until `waitForProcessExit0` reaps them;
+  the pipes are entries of jrt's file table (`files.clj`), so the process streams are the JDK's
+  `FileInputStream` and `FileOutputStream` subclasses over `FileDescriptor`s naming them.
+  `ProcessEnvironment.environ` is the host's environment as name and value bytes.
+
+**Variants** (`overlay/jdk/variants/`):
+
+| class | what |
+|---|---|
+| `ProcessImpl` | no launch mechanism, helper path or native `init`; `forkAndExec` calls the static native `hostForkAndExec`; `start` and `newFileDescriptor` use `HostFiles.handle` and `HostFiles.setHandle` for SharedSecrets' `JavaIOFileDescriptorAccess`; `initStreams` and `destroy` keep their Linux branches (`OperatingSystem` is not in the world); `JNU_CHARSET` from `sun.jnu.encoding` |
+| `Process` | the pipe streams without `Blocker`; the native charset from `native.encoding` (`StaticProperty` is not in the world) |
+| `ProcessBuilder` | `start` without the JFR event and the `System.Logger` (both outside the world); `Redirect`'s null file `/dev/null` |
+| `ProcessHandleImpl` | no `initNative`; the reaper threads plain daemon threads (`InnocuousThread` is not in the world); `Info.info0` sets its fields from the static native `hostInfo` (the JDK's C sets them through JNI field IDs) |
+
+**jrt's own Java.** `FileDescriptor` gives `HostFiles` the setting of its number in its static
+initializer (`HostFiles.DescriptorAccess`, as the JDK's gives `SharedSecrets` its
+`JavaIOFileDescriptorAccess`). `jdk.internal.jrt.RuntimeExec` holds `Runtime.exec`'s six
+overloads (jdk26u's code, through `ProcessBuilder`'s public API: the package-private
+`environment(String[])` is a clear and puts); jrt's `Runtime` is hand-written Go, which cannot
+name the translated `ProcessBuilder`, so c2g gives `Runtime`'s member table the six `exec`
+methods, each a call of `RuntimeExec`'s (`out.clj`, rooted in `main.clj`), as it gives `System`
+its `getenv` and `getProperties`.
+
+**Found on the way (c2g).** A bound method reference to a private method of a non-leaf class
+(`Process.onExit`'s `this::waitForInternal`) called the method on the interface, where a private
+method is not: it now calls its `Impl_` with the receiver's struct and the receiver, as an
+invocation does (`code.clj`, `method-ref-val`).
+
+**What is out.** `ProcessHandle.Info` of other users' processes has what `/proc` lets one read
+(as on the JVM); `ProcessHandle.allProcesses`, `children` and `descendants` scan `/proc` as the
+JDK does. The launch mechanisms (`jdk.lang.Process.launchMechanism`) and `jspawnhelper` have no
+meaning in the Go build. No `/bin/sh` fallback for ENOEXEC (this machine's JVM has none either).
+
+## Decisions
+
+- Translate jdk26u's process classes and write only the natives (as for sockets and files),
+  rather than a hand-written `Process` over Go's `os/exec`: the JVM's texts, states, stream
+  classes and reaping protocol come with the translation, and the seam is small. `os/exec` itself
+  is not used: its `Cmd` copies non-file streams through goroutines and waits for them; the JDK
+  passes descriptors, which `os.StartProcess` does.
+- The children's pipes live in jrt's file table (not a table of their own): the JDK's process
+  streams are `FileInputStream`s and `FileOutputStream`s over `FileDescriptor`s, and
+  `startPipeline` passes a pipe's descriptor from one process to the next.
+- A goroutine per child reaps it at its end (the JVM reaps through its reaper thread, which
+  `ProcessImpl` always starts): the Java reaper thread waits on the host's record instead of
+  `waitpid`, so the child is reaped even when the Java side is slow, and its pid cannot be
+  reused under a later `destroy`.
