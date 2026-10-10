@@ -240,6 +240,23 @@ variants: `UnixFileSystem` (its natives replaced by static natives on path strin
 (the JDK's default `jdk.includeInExceptions`). Connections other than `file:`,
 `RandomAccessFile`, channels and `java.nio`'s coders stay outside the world.
 
+**The JDK's resource data** (amendments RD3, RD4, accepted 2026-10-10; JRT-NOTES.md, "The JDK's
+resource data"). For `\N{name}` and `CANON_EQ`, `java.text.Normalizer` and `jdk.internal.icu`'s
+normalizer are in the world, with java.nio's heap buffers through which ICU's loader reads its
+data: `Buffer`, `ByteOrder`, `StringCharBuffer`, the buffer exceptions, and files the JDK build
+generates beyond the measured closure's (`added-gensrc`: `ByteBuffer`, `CharBuffer`, `IntBuffer`,
+their heap classes, the char and int views of a byte buffer in either byte order, and
+`jdk.internal.misc.ScopedMemoryAccess`), which `bin/jrt-convert` generates as the JDK build does
+and compares byte for byte with the build's (RD4; JRT-SOURCES.md). `MemorySegment` and
+`MemorySessionImpl` are in the world as the types the buffers name. Variants: `Buffer` without
+its static initializer (`SharedSecrets`' `JavaNioAccess`), `ScopedMemoryAccess` without its VM
+natives (`closeScope0` throws). jrt's own Java gains `java.util.zip.InflaterInputStream` (RD3),
+the `InputStream` constructor only, which inflates its whole input at the first read through a
+native over Go's `compress/zlib`, so that `CharacterName` reads `uniName.dat` unchanged; the
+VM's `Inflater` stays outside the world. `bin/jrt-convert` also makes the data these classes read
+(RD4): `uniName.dat` as the JDK build's `Gendata.gmk` makes it, ICU's `nfc.nrm` and `nfkc.nrm`,
+into `.tmp/jrt/data`, compared with the build's module image; the program embeds them (§10.3).
+
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
 (the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
@@ -496,7 +513,8 @@ since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 (`java.net.URLConnection`'s subclass), the URL handlers, all named `Handler`, →
 `File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler`, and `java/net/Proxy` →
 `Net_Proxy`, since jrt's `Proxy` is `java.lang.reflect`'s (amendment FS4, accepted
-2026-10-10).
+2026-10-10); `sun/text/Normalizer` → `Sun_Normalizer`, since `java.text.Normalizer` is
+`Normalizer` (amendment RD5, accepted 2026-10-10).
 The check runs after translation (`arbace.c2g.checks`) over every Go package's package-level
 names and every type's method names, across c2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -2075,6 +2093,18 @@ embedded sources, then in the directories of the environment variable `ARBACE_PA
 path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
 the same places. RT's initialization loads `arbace.core` when the program has its sources.
 
+**The JDK's resource data** (amendment RD1, accepted 2026-10-10; JRT-NOTES.md, "The JDK's
+resource data"). Besides the sources, `--program` embeds the data that `bin/jrt-convert` makes
+(the directory `data` beside the `--jdk` input, `.tmp/jrt/data`: `java/lang/uniName.dat`,
+`jdk/internal/icu/impl/data/icudata/nfc.nrm` and `nfkc.nrm`), as binary files under their
+resource paths (`arbace.c2g.embed/data`). `Class.getResourceAsStream` is a method c2g writes on
+jrt's `Class` (in `c2g_support`, when `ByteArrayInputStream` is translated; jrt cannot name the
+translated stream): the name resolved as `Class.resolveName` resolves it (absolute without its
+`/`, else in the package of the class or of an array class's element class), then searched as
+`ClassLoader.getResourceAsStream` searches (`jrt.ResourceOrPath`), the bytes as a
+`ByteArrayInputStream`, null when absent. Deviation: no module encapsulation of resources (the
+JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as on the JVM).
+
 **Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
 image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
 image holds replays it instead of reading and analyzing it (`Compiler$Image`, in the `Compiler`
@@ -2196,7 +2226,11 @@ it through `jrt.ImageHooks` (`jrt.Image`), which `Compiler$Image`'s natives call
 is the closed world, and it reaches members by reflection, which reachability does not follow
 (§4.1). So the REPL's program roots **every public member of every built-in class** (all of
 `arbace.lang` and the JDK closure's public API, each class `--root C`), so that reflection finds
-translated code, not stubs that throw.
+translated code, not stubs that throw. **Except the classes of JDK packages their module does not
+export** (`jdk.internal.*`, `sun.*`; the running JDK's boot layer decides): the JVM refuses
+Clojure code access to them (`IllegalAccessError`), so rooting them only grew the executable;
+classes of no JDK module (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted (amendment RD2,
+accepted 2026-10-10; `arbace.c2g.main/repl-visible?`).
 
 ### 10.7 Stack traces
 
@@ -3436,6 +3470,14 @@ and `java.net.Proxy`: §4.4. FS5 shutdown hooks at the end of `RunMain`: §8.4. 
 and the `java.nio.file` subset in the closed world, with their variants and the namespace
 variants' changes: §4.1, §10.3. FS7 the code transcribed from jdk26u in `HostPath.java` and
 `filesystem.clj`: LICENSE.md.
+
+**The JDK's resource data** (JRT-NOTES.md, "The JDK's resource data"; accepted by the user
+2026-10-10): RD1 the program embeds the JDK's resource data, and `Class.getResourceAsStream`:
+§10.3. RD2 the REPL's world roots no member of a JDK package its module does not export: §10.6.
+RD3 jrt's own `InflaterInputStream` over Go's zlib: §4.1. RD4 generated sources beyond the
+measured closure's and the resource data, made as the JDK build makes them and compared with its
+output: §4.1, JRT-SOURCES.md. RD5 the rename table's `Sun_Normalizer`: §4.4. With them, fixed
+(not amended): §6.2's benign initialization counts a static read in a `switch` arm.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

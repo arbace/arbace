@@ -256,13 +256,15 @@ more with the JDK's resource data (below). Besides the measured closure (`test/g
   `bin/jrt-convert` translates **389 files** (all 389 compiled to javac's class shapes; 385
   identical, the 4 known differences as before).
 - **Generated files added** (`added-gensrc`, paths below `gensrc/java.base`; JRT-NOTES.md, "The
-  JDK's resource data", amendment RD4): java.nio's `ByteBuffer`, `CharBuffer`, `IntBuffer`, their
+  JDK's resource data", amendment RD4, accepted 2026-10-10; C2G-SPEC §4.1): java.nio's `ByteBuffer`, `CharBuffer`, `IntBuffer`, their
   heap classes `HeapByteBuffer`, `HeapCharBuffer`, `HeapIntBuffer`, the views
   `ByteBufferAsCharBufferB`/`L` and `ByteBufferAsIntBufferB`/`L`, and
   `jdk.internal.misc.ScopedMemoryAccess`: KIND `gensrc`, made by the `generate` step below.
 
 ## The JDK's resource data (2026-10-09)
 
+Amendment RD4 (accepted 2026-10-10; C2G-SPEC §4.1, §16): generated sources beyond the measured
+closure's and the resource data, made as the JDK build makes them and compared with its output.
 For the regex's `\N{name}` and `CANON_EQ` (JRT-NOTES.md, "The JDK's resource data"), from
 jdk26u at `baf63fb`:
 
