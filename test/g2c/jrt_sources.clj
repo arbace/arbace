@@ -142,7 +142,9 @@
                "StrongReferenceKey" "WeakReferenceKey" "SoftReferenceKey"])
          ["java/lang/LazyConstant.java" "jdk/internal/lang/LazyConstantImpl.java"]
          ;; the class data sharing queries BaseLocale and the caches make (natives jrt's: no archive)
-         ["jdk/internal/misc/CDS.java"])))
+         ["jdk/internal/misc/CDS.java"]
+         ;; CompactNumberFormat's pattern parsing
+         ["java/util/regex/MatchResult.java"])))
 
 (def text-locales
   "The locales of jdk.localedata's CLDR data in the Go build by default (JRT_LOCALES unset
@@ -492,7 +494,9 @@
                ;; java.text's (JRT-NOTES.md, \"Text and locales\"): java.base's CLDR currency and
                ;; locale names of the root and English locales
                ["sun/util/resources/cldr/CurrencyNames.java" "sun/util/resources/cldr/CurrencyNames_en.java"
-                "sun/util/resources/cldr/LocaleNames.java" "sun/util/resources/cldr/LocaleNames_en.java"])))
+                "sun/util/resources/cldr/LocaleNames.java" "sun/util/resources/cldr/LocaleNames_en.java"
+                ;; Locale's language equivalences (filter, lookup), from the language subtag registry
+                "sun/util/locale/LocaleEquivalentMaps.java"])))
 
 (def util-sources
   "Files of src/java.base/share/classes added for java.util's plain Java (doc/go/JAVA-BASE.md,

@@ -188,6 +188,18 @@ JDK's ArrayBlockingQueue.Itrs.Node).\n"
     (set! (.-queue (.-Reference r)) q)
     r))
 
+(go/method Ctor_O
+  "Ctor_O is SoftReference(referent) as a translated subclass's constructor calls it
+(jdk.internal.util.SoftReferenceKey, JRT-NOTES.md \"Text and locales\").\n"
+  [^{:tag (* SoftReference)} r ^Reference_I this ^any o]
+  (set! (.-strong (.-Reference r)) o)
+  (set! (.-self (.-Reference r)) this)
+  (set! (.-cleared (.-Reference r)) (== o nil)))
+(go/method Ctor_O_ReferenceQueue
+  [^{:tag (* SoftReference)} r ^Reference_I this ^any o ^{:tag (* ReferenceQueue)} q]
+  (.Ctor_O r this o)
+  (set! (.-queue (.-Reference r)) q))
+
 (go/method Get__O ^any [^{:tag (* SoftReference)} r] (.Impl_Get__O r r))
 (go/method Clear__V [^{:tag (* SoftReference)} r] (.Impl_Clear__V r r))
 (go/method Enqueue__Z ^bool [^{:tag (* SoftReference)} r] (.Impl_Enqueue__Z r r))
