@@ -251,6 +251,8 @@
   [n]
   (vec (filter in-world? (env/all-supertypes n))))
 
+(declare c2g-method?)
+
 (defn hw-method-exists?
   "Does jrt's hand-written class or interface n have method m (name desc) in Go?"
   [n m]
@@ -263,7 +265,17 @@
                          ;; a default method is a package function J_m
                          (contains? (:funcs scan) (str g "_" base)))
       :else (let [ms (jrt/struct-methods scan g)]
-              (or (contains? ms base) (contains? ms (nm/impl-name base)))))))
+              (or (contains? ms base) (contains? ms (nm/impl-name base))
+                  (c2g-method? n base))))))
+
+(defn c2g-method?
+  "An instance method of jrt's hand-written class n (Go base name base) that c2g writes in the
+  program's support code (out.clj), because it returns a translated class jrt cannot name:
+  String's chars() and codePoints(), CharSequence's default methods (JRT-NOTES.md, \"Text and
+  locales\": CompactNumberFormat and java.time's text use them)."
+  [n base]
+  (and (= n "java/lang/String") (#{"Chars__IntStream" "CodePoints__IntStream"} base)
+       (translated? "java/lang/CharSequence") (translated? "java/util/stream/IntStream")))
 
 (defn member-in-world?
   "Does method m of class n exist in Go: its descriptor's classes exist, and for a jrt class

@@ -80,8 +80,8 @@ public abstract class LocaleProviderAdapter {
         }
     }
 
-    /** java.base's CLDR locales (CLDRBaseLocaleDataMetaInfo.availableLanguageTags). */
-    private static final String BASE_TAGS = " en en-Latn-US en-US en-US-POSIX";
+    /** java.base's CLDR locales (CLDRBaseLocaleDataMetaInfo.availableLanguageTags), and the root locale, which the JDK's fallback adapter supports. */
+    private static final String BASE_TAGS = "und en en-Latn-US en-US en-US-POSIX";
 
     private static final LocaleProviderAdapter INSTANCE = new Base();
 

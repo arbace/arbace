@@ -156,7 +156,7 @@
   always in. JRT_LOCALES=all takes every locale CLDRConverter writes for jdk.localedata;
   JRT_LOCALES=none none; a comma-separated list of tags those."
   ["ar" "de" "es" "fr" "hi" "id" "it" "ja" "ko" "nl" "pl" "pt" "ru" "sv" "tr" "uk" "zh"
-   "en-GB" "en-CA" "en-AU" "en-IN" "fr-CA" "de-CH" "es-MX" "pt-PT" "zh-TW"])
+   "en-GB" "en-CA" "en-AU" "en-IN" "fr-CA" "de-CH" "es-MX" "pt-PT" "zh-TW" "ar-EG"])
 
 (def ^:private cldr-kinds
   "jdk.localedata's CLDR bundle kinds, with the directory of their generated files."
