@@ -1188,3 +1188,11 @@ decision (2026-10-08).
   Alpine package agent (branch `apk26`) makes the change, re-examines the AOT linking workaround
   and measures; main's `bin/arbace-image` (identical to the frozen branch's) takes the same
   change after. The Go build already leaves Swing/AWT out (D6).
+- `java.beans` is in the java.desktop module and `arbace.core/bean` (core_proxy.clj) uses its
+  `Introspector`, so a headless image would break `bean`. The user's choice (of: port the Go
+  build's reflection-based `bean`; keep java.desktop run headless; accept a broken `bean`): port
+  the Go build's variant (`arbace/lang/go/ns/core_proxy.clj`: Introspector's decapitalize and
+  readable properties by reflection) into the JVM core, a hand change (VENDOR-NOTES). The
+  projected headless modules: java.base, java.sql (`#inst`'s `Timestamp` guard and printing,
+  `resultset-seq`) with java.logging, java.transaction.xa and java.xml, and jdk.unsupported. The
+  Alpine package agent does it on `apk26`; main follows.
