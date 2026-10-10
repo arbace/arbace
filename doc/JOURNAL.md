@@ -1322,3 +1322,9 @@ decision (2026-10-08).
   a terminal (as Alpine's `clj` and the JVM package's `arb`). An agent designs and builds it
   (branch `gorl`): only for the interactive REPL, with a marker against re-wrapping and a way to
   turn it off.
+- The user's decision: on main, `bin/arbace` is renamed `bin/arbace-j` (the JVM launcher, beside
+  the Go executable) and runs its interactive REPL under `rlwrap` as the Go executable does. One
+  convention for both: `ARBACE_RLWRAP=off` disables it, `ARBACE_RLWRAP=wrapped` marks the
+  child; wrap only for the interactive REPL with stdin and stdout terminals, `rlwrap` on PATH and
+  TERM not `dumb`; `clj`'s flags. Done with the base-image port (branch `baseimage`); historical
+  records keep the old name. The `arbace-for-java-26` line keeps `bin/arbace`.
