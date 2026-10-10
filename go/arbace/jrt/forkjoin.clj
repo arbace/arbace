@@ -60,6 +60,12 @@ and the channel its waiters receive from (made by the first waiter, closed when 
 (go/method Ctor "Ctor is ForkJoinTask().\n" [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this])
 (go/method Self_ForkJoinTask ^{:tag (* ForkJoinTask)} [^{:tag (* ForkJoinTask)} t] t)
 (go/method Is_Future [^{:tag (* ForkJoinTask)} t])
+(go/method Impl_ResultNow__O "Impl_ResultNow__O is resultNow: Future's default (JDK 19).\n"
+  ^any [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this] (Future_ResultNow__O this))
+(go/method Impl_ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
+  (Future_ExceptionNow__Throwable this))
+(go/method Impl_State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
+  (Future_State__Future_State this))
 (go/method Is_Serializable [^{:tag (* ForkJoinTask)} t])
 
 (go/method tryRun
@@ -309,6 +315,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedCallable)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedCallable)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedCallable)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t] ForkJoinTask_AdaptedCallable_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedCallable)} t]
@@ -331,6 +340,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedRunnable)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedRunnable)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t] ForkJoinTask_AdaptedRunnable_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedRunnable)} t]
@@ -353,6 +365,9 @@ checked exception wrapped in a RuntimeException.\n"
 (go/method Complete_O__V [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
 (go/method CompleteExceptionally_Throwable__V [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
 (go/method TryUnfork__Z ^bool [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
 (go/method Ref ^any [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t] ForkJoinTask_AdaptedRunnableAction_class)
 (go/method ToString__String ^{:tag (* String)} [^{:tag (* ForkJoinTask_AdaptedRunnableAction)} t]

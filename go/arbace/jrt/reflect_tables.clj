@@ -2354,6 +2354,8 @@
     (lit (slice MethodInfo)
         (lit MethodInfo :Name "cancel" :Params (lit (slice (* Class)) Prim_boolean) :Return Prim_boolean :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Cancel_Z__Z (assert Future this) (assert bool (aget args 0)))))
+        (lit MethodInfo :Name "exceptionNow" :Params nil :Return Throwable_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ExceptionNow__Throwable (assert Future this))))
         (lit MethodInfo :Name "get" :Params (lit (slice (* Class)) Prim_long TimeUnit_class) :Return Object_class :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Get_J_TimeUnit__O (assert Future this) (assert int64 (aget args 0)) ((inst As (* TimeUnit)) (aget args 1)))))
         (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x401
@@ -2361,7 +2363,28 @@
         (lit MethodInfo :Name "isCancelled" :Params nil :Return Prim_boolean :Modifiers 0x401
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsCancelled__Z (assert Future this))))
         (lit MethodInfo :Name "isDone" :Params nil :Return Prim_boolean :Modifiers 0x401
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDone__Z (assert Future this))))))
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.IsDone__Z (assert Future this))))
+        (lit MethodInfo :Name "resultNow" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ResultNow__O (assert Future this))))
+        (lit MethodInfo :Name "state" :Params nil :Return Future_State_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.State__Future_State (assert Future this))))))
+  ;; java.util.concurrent.Future$State
+  (set! (.-Methods (.Info Future_State_class))
+    (lit (slice MethodInfo)
+        (lit MethodInfo :Name "valueOf" :Params (lit (slice (* Class)) String_class) :Return Future_State_class :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Future_State_ValueOf_String__Future_State ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "values" :Params nil :Return (.ArrayClass Future_State_class) :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Future_State_Values__Future_State1)))))
+  (set! (.-Fields (.Info Future_State_class))
+    (lit (slice FieldInfo)
+        (lit FieldInfo :Name "CANCELLED" :Type Future_State_class :Modifiers 0x4019
+         :Get (fn ^any [^any o] Future_State_CANCELLED))
+        (lit FieldInfo :Name "FAILED" :Type Future_State_class :Modifiers 0x4019
+         :Get (fn ^any [^any o] Future_State_FAILED))
+        (lit FieldInfo :Name "RUNNING" :Type Future_State_class :Modifiers 0x4019
+         :Get (fn ^any [^any o] Future_State_RUNNING))
+        (lit FieldInfo :Name "SUCCESS" :Type Future_State_class :Modifiers 0x4019
+         :Get (fn ^any [^any o] Future_State_SUCCESS))))
   ;; java.util.concurrent.ForkJoinTask
   (set! (.-Methods (.Info ForkJoinTask_class))
     (lit (slice MethodInfo)
@@ -2377,6 +2400,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Complete_O__V (assert ForkJoinTask_I this) (aget args 0)) nil))
         (lit MethodInfo :Name "completeExceptionally" :Params (lit (slice (* Class)) Throwable_class) :Return Prim_void :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompleteExceptionally_Throwable__V (assert ForkJoinTask_I this) ((inst As Throwable_I) (aget args 0))) nil))
+        (lit MethodInfo :Name "exceptionNow" :Params nil :Return Throwable_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ExceptionNow__Throwable (assert ForkJoinTask_I this))))
         (lit MethodInfo :Name "fork" :Params nil :Return ForkJoinTask_class :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Fork__ForkJoinTask (assert ForkJoinTask_I this))))
         (lit MethodInfo :Name "get" :Params nil :Return Object_class :Modifiers 0x11
@@ -2409,6 +2434,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.QuietlyInvoke__V (assert ForkJoinTask_I this)) nil))
         (lit MethodInfo :Name "quietlyJoin" :Params nil :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.QuietlyJoin__V (assert ForkJoinTask_I this)) nil))
+        (lit MethodInfo :Name "resultNow" :Params nil :Return Object_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ResultNow__O (assert ForkJoinTask_I this))))
+        (lit MethodInfo :Name "state" :Params nil :Return Future_State_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.State__Future_State (assert ForkJoinTask_I this))))
         (lit MethodInfo :Name "tryUnfork" :Params nil :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.TryUnfork__Z (assert ForkJoinTask_I this))))))
   ;; java.util.concurrent.ForkJoinPool

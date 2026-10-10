@@ -174,6 +174,7 @@
    ["java.util.concurrent.ExecutorService" ["java.util.concurrent.Executor"] false]
    ;; Executors, FutureTask and ThreadLocalRandom are translated (JRT-NOTES.md, "Concurrency")
    ["java.util.concurrent.Future" [] false]
+   ["java.util.concurrent.Future$State" [] false]
    ;; step 5 phase 2B: the fork-join pool (reducers' fold), an ExecutorService since JC7
    ["java.util.concurrent.ForkJoinTask" ["java.util.concurrent.Future" "java.io.Serializable"] true]
    ["java.util.concurrent.ForkJoinPool" ["java.util.concurrent.ExecutorService"] false]

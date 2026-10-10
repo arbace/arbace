@@ -39,7 +39,10 @@
     (Get_J_TimeUnit__O ^any [^int64 timeout ^{:tag (* TimeUnit)} unit])
     (Cancel_Z__Z ^bool [^bool mayInterruptIfRunning])
     (IsCancelled__Z ^bool [])
-    (IsDone__Z ^bool [])))
+    (IsDone__Z ^bool [])
+    (ResultNow__O ^any [])
+    (ExceptionNow__Throwable ^Throwable_I [])
+    (State__Future_State ^{:tag (* Future_State)} [])))
 
 (go/var ThreadFactory_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.ThreadFactory" :Kind KindInterface
@@ -79,6 +82,102 @@
   (let [(values v ok) (assert ExecutorService x)]
     (when (not (dynNominal x ExecutorService_class ok)) (panic (ClassCast x ExecutorService_class)))
     v))
+
+;; ---- Future's default methods (JDK 19) and Future.State
+
+(go/type Future_State "Future_State is the enum java.util.concurrent.Future.State.\n" (struct Enum))
+
+(go/var Future_State_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.Future$State" :Kind KindEnum
+                     :Modifiers (bit-or AccPublic AccStatic AccFinal AccEnum) :Super Enum_class
+                     :Declaring Future_class :Simple "State" :Go "arbace/jrt.Future_State"))))
+
+(go/func newFutureState ^{:tag (* Future_State)} [^string n ^int32 o]
+  (let [t (addr (lit Future_State))]
+    (.Ctor_String_I (.-Enum t) t (Intern n) o)
+    t))
+
+(go/var
+  [^{:tag (* Future_State) :doc "Future_State_RUNNING is Future.State.RUNNING.\n"} Future_State_RUNNING (newFutureState "RUNNING" 0)]
+  [^{:tag (* Future_State)} Future_State_SUCCESS (newFutureState "SUCCESS" 1)]
+  [^{:tag (* Future_State)} Future_State_FAILED (newFutureState "FAILED" 2)]
+  [^{:tag (* Future_State)} Future_State_CANCELLED (newFutureState "CANCELLED" 3)])
+
+(go/func Future_State_Values__Future_State1 ^{:tag (* RefArray)} []
+  (RefArrayOf Future_State_class Future_State_RUNNING Future_State_SUCCESS Future_State_FAILED Future_State_CANCELLED))
+
+(go/func Future_State_ValueOf_String__Future_State ^{:tag (* Future_State)} [^{:tag (* String)} n]
+  (assert (* Future_State) (Enum_ValueOf_Class_String__Enum Future_State_class n)))
+
+(go/method Ref ^any [^{:tag (* Future_State)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Future_State)} t] Future_State_class)
+(go/method Clone__O ^any [^{:tag (* Future_State)} t] (.Impl_Clone__O t t))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* Future_State)} t] (.Impl_ToString__String t t))
+(go/method CompareTo_Enum__I ^int32 [^{:tag (* Future_State)} t ^Enum_I o] (.Impl_CompareTo_Enum__I t t o))
+(go/method CompareTo_O__I ^int32 [^{:tag (* Future_State)} t ^any o] (.Impl_CompareTo_O__I t t o))
+(go/method GetDeclaringClass__Class ^{:tag (* Class)} [^{:tag (* Future_State)} t] (.Impl_GetDeclaringClass__Class t t))
+(go/func Future_State_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Future_State) x)] ok))
+
+(go/func futureGet
+  "futureGet is f.get() for Future's defaults: its result, its exception (ExecutionException,
+CancellationException: exc), whether an interrupt was taken (Java's loops retry get then and
+set the status again at the end).\n"
+  [^Future f] :results [^any v ^Throwable_I exc ^bool interrupted]
+  (while true
+    (set! exc (runCatching (fn [] (set! v (.Get__O f)))))
+    (if (and (!= exc nil) (InterruptedException_InstanceOf exc))
+      (set! interrupted true)
+      (return))))
+
+(go/func Future_ResultNow__O
+  "Future_ResultNow__O is Future's default resultNow(): the result of a task done normally, else
+IllegalStateException.\n"
+  ^any [^Future this]
+  (when (not (.IsDone__Z this))
+    (panic (IllegalStateException_New_String (Str "Task has not completed"))))
+  (let [(values v exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (return v))
+    (when (ExecutionException_InstanceOf exc)
+      (panic (IllegalStateException_New_String (Str "Task completed with exception"))))
+    (when (CancellationException_InstanceOf exc)
+      (panic (IllegalStateException_New_String (Str "Task was cancelled"))))
+    (panic exc)))
+
+(go/func Future_ExceptionNow__Throwable
+  "Future_ExceptionNow__Throwable is Future's default exceptionNow(): the exception of a task
+that failed, else IllegalStateException.\n"
+  ^Throwable_I [^Future this]
+  (when (not (.IsDone__Z this))
+    (panic (IllegalStateException_New_String (Str "Task has not completed"))))
+  (when (.IsCancelled__Z this)
+    (panic (IllegalStateException_New_String (Str "Task was cancelled"))))
+  (let [(values _ exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (panic (IllegalStateException_New_String (Str "Task completed with a result"))))
+    (when (ExecutionException_InstanceOf exc)
+      (return (.GetCause__Throwable exc)))
+    (panic exc)))
+
+(go/func Future_State__Future_State
+  "Future_State__Future_State is Future's default state().\n"
+  ^{:tag (* Future_State)} [^Future this]
+  (when (not (.IsDone__Z this))
+    (return Future_State_RUNNING))
+  (when (.IsCancelled__Z this)
+    (return Future_State_CANCELLED))
+  (let [(values _ exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (return Future_State_SUCCESS))
+    (when (ExecutionException_InstanceOf exc)
+      (return Future_State_FAILED))
+    (panic exc)))
 
 (go/func ExecutorService_Close__V
   "ExecutorService_Close__V is ExecutorService's default close() (JDK 19): shutdown, then
@@ -297,5 +396,7 @@ zero or less tries once.\n"
   (set! (.-IsInstance (.Info Executor_class)) Executor_InstanceOf)
   (set! (.-IsInstance (.Info ExecutorService_class)) ExecutorService_InstanceOf)
   (set! (.-IsInstance (.Info Future_class)) Future_InstanceOf)
+  (set! (.-IsInstance (.Info Future_State_class)) Future_State_InstanceOf)
+  (set! (.-Enum (.Info Future_State_class)) Future_State_Values__Future_State1)
   (set! (.-IsInstance (.Info CountDownLatch_class)) CountDownLatch_InstanceOf)
   (set! (.-IsInstance (.Info Semaphore_class)) Semaphore_InstanceOf))
