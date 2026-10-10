@@ -1181,3 +1181,58 @@ recommended:
   native tests 49/2,847, Clojure's suite 20,750/20,750 on stages 1 and 2,
   `bin/class-forms-tests` 64/133, `bin/j2c-check --suite` without regressions; the push runs
   the branch's CI.
+
+## 2026-10-10: An Alpine package of Arbace for Java 26; the image down to java.base
+
+Work on the branch `apk26` (from `arbace-for-java-26` at `398f01b`, tag
+`arbace-for-java-26-v2`), not merged, tagged or pushed: the user decides on a release.
+Details, alternatives and measurements: `doc/ALPINE.md`.
+
+- The package `arbace-java26` (`dist/alpine/APKBUILD`, made like aports' `community/clojure`,
+  aports master, `pkgver=1.12.6`): source the tag's GitHub archive
+  (`https://github.com/arbace/arbace/archive/refs/tags/arbace-for-java-26-v2.tar.gz`, sha512
+  `2db89aad…`; `git archive --format=tar --prefix=arbace-<tag>/ <tag> | gzip -n` reproduces it
+  byte for byte) and Eclipse Temurin `jdk-26.0.2.1+1` for `alpine-linux` (x64 and aarch64,
+  `https://github.com/adoptium/temurin26-binaries/releases`, pinned by sha512); `build()` runs
+  `bin/build-arbace` and `bin/arbace-image`; the image goes to `/usr/lib/arbace-java26`,
+  `/usr/bin/arbace` is a `sh` wrapper, docs in `-doc`. `pkgver` is the tag's number, the name
+  leaves `arbace` to a later standalone package. Alternatives for the build JDK (jdk26u built
+  in `build()`, an `openjdk26` APKBUILD modelled on aports' `community/openjdk25`) were
+  rejected for this repository and kept as the aports path. Temurin 26 has no `jmods/`, so
+  jlink links from the JDK's run-time image (JEP 493) and cannot cross-link.
+- apk installs every file with mtime `$SOURCE_DATE_EPOCH` and the JVM takes the AOT cache only
+  with the jar's training-time mtime (jdk26u `src/hotspot/share/cds/aotClassLocation.cpp`), so
+  `build()` dates the image's jar and trains the cache again, and `bin/arbace` now takes the
+  cache when it is not older than the jar (it required newer). `bin/alpine-package` builds and
+  tests the package here with a throwaway key and all abuild state under `.tmp/alpine/`
+  (`SOURCE_DATE_EPOCH` = the tag's commit time), installing it into a fresh root run with
+  `proot`. Host packages added: `cpio` (GNU, a makedepend), `proot`.
+- By the user's decision (Arbace targets the server side), the jlink'ed image holds `java.base`
+  and `jdk.unsupported` only; everything else is optional. Hand changes 14-16
+  (`doc/VENDOR-NOTES.md`): `bean` finds properties by reflection with
+  `java.beans.Introspector`'s rules (jdk26u `com/sun/beans/introspect/MethodInfo.java`,
+  `PropertyInfo.java`, `com/sun/beans/finder/MethodFinder.java`, `java/beans/Introspector.java`;
+  ported from main's Go-build variant `arbace/lang/go/ns/core_proxy.clj` and extended), equal to
+  the Introspector on 76 of 77 classes (583 properties; the exception, `javax.swing.JLabel`,
+  comes from `java.awt.Component`'s explicit BeanInfo); `#inst` no longer needs `java.sql`
+  (`java.sql.Timestamp`'s part moved to `arbace/instant_timestamp.clj`, loaded when the class
+  exists); `arbace.xml`, `arbace.inspector`, `arbace.java.browse-ui` throw a clear
+  `UnsupportedOperationException` without their module. `bin/arbace-image` drops jdeps and
+  `jdk.unsupported.desktop`: the JDK 26.0.2 AOT class-linking failure it worked around does not
+  occur for `java.base,jdk.unsupported` (it does for `java.base,java.sql,jdk.unsupported`; the
+  fallback stays). Image 133 → 100 MB, start time unchanged (about 185 ms with the cache).
+- Checks: `bin/build-arbace --suite --image` (stages identical at 5,780 classes, verifier
+  clean, native tests 49/2,847, Clojure's suite 20,750/20,750 on stage 2 with test.generative
+  27/27; on stage 1 three namespaces were killed while the machine was loaded and passed when
+  rerun alone), `bin/class-forms-tests` passing. `bin/j2c-check --suite` was not run: nothing
+  it covers changed.
+- x86_64: `arbace-java26-2-r0.apk` 31.9 MiB (installed 98 MiB; with the ten-module image 42 MiB
+  and 132 MiB), depends `bash` and musl only; `-e`, a REPL on stdin, the cache (with
+  `-XX:AOTMode=on`) and the base-image checks pass in a root with no Java package; start 194 ms
+  with the cache, 620 ms without.
+- aarch64, built here by emulation (`bin/alpine-package --arch aarch64`: `abuild` inside Alpine
+  edge's aarch64 minirootfs `20260805` under `proot -q qemu-aarch64`, no binfmt change):
+  37 min 13 s against 1 min 52 s natively; stages identical, the verifier clean, the jar byte for
+  byte the x86_64 one (and the development JDK's); `arbace-java26-2-r0.apk` 31.1 MiB, installed
+  96 MiB, tested in an aarch64 root under qemu. A first attempt with the ten-module image failed
+  at dependency tracing (`libasound.so.2` for `java.desktop`'s `libjsound.so`).

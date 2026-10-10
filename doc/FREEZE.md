@@ -50,7 +50,8 @@ unzip, on Linux. About 64 GB of memory and many cores make the checks fast, but 
 find clojure -name '*.class' -exec touch {} +   # once, in a fresh checkout
 bin/build-arbace                 # stages 1-3, verifier, native tests, target/arbace.jar + .aot
 bin/arbace                       # a REPL; also bin/arbace -e '(+ 1 2)', bin/arbace script.clj
-bin/arbace-image                 # target/arbace-image: a self-contained runtime (about 130 MB)
+bin/arbace-image                 # target/arbace-image: self-contained, java.base and
+                                 # jdk.unsupported (100 MB)
 ```
 
 `bin/arbace` runs `target/arbace.jar` with the JDK AOT cache `target/arbace.aot` when the cache

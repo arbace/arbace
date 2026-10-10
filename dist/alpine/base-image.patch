@@ -1,0 +1,431 @@
+diff --git a/arbace/core.clj b/arbace/core.clj
+index 7d01d7d..98c4010 100644
+--- a/arbace/core.clj
++++ b/arbace/core.clj
+@@ -7023,8 +7023,9 @@ fails, attempts to require sym's namespace and retries."
+      ~@body
+      (catch ClassNotFoundException _#)))
+ 
+-(when-class "java.sql.Timestamp"
+-  (load "instant"))
++;; Arbace (hand change 15): #inst needs only java.base, its java.sql.Timestamp part is loaded by
++;; instant.clj when the runtime has java.sql
++(load "instant")
+ 
+ (defprotocol Inst
+   (inst-ms* [inst]))
+@@ -8152,8 +8153,7 @@ fails, attempts to require sym's namespace and retries."
+   overridden by binding *data-readers*."
+   (merge
+     {'uuid #'arbace.uuid/default-uuid-reader}
+-    (when-class "java.sql.Timestamp"
+-      {'inst #'arbace.instant/read-instant-date})))
++    {'inst #'arbace.instant/read-instant-date}))
+ 
+ (def ^{:added "1.4" :dynamic true} *data-readers*
+   "Map from reader tag symbols to data reader Vars.
+diff --git a/arbace/core_proxy.clj b/arbace/core_proxy.clj
+index 69c103d..f08e9ec 100644
+--- a/arbace/core_proxy.clj
++++ b/arbace/core_proxy.clj
+@@ -402,22 +402,119 @@
+   [meth & args]
+  `(proxy-call-with-super (fn [] (. ~'this ~meth ~@args))  ~'this ~(name meth)))
+ 
++;; Arbace (hand change 14, doc/VENDOR-NOTES.md): bean finds the readable JavaBean properties by
++;; reflection, as java.beans.Introspector does, without java.beans (module java.desktop), so
++;; that it works on a runtime of java.base alone
++
++(defn- bean-decapitalize
++  "java.beans.Introspector/decapitalize."
++  [^String s]
++  (if (and (> (count s) 1) (Character/isUpperCase (.charAt s 1)) (Character/isUpperCase (.charAt s 0)))
++    s
++    (str (Character/toLowerCase (.charAt s 0)) (subs s 1))))
++
++(defn- bean-accessible-method
++  "The method of a public, exported class or interface that m (declared by a class that is not
++  public) implements, as com.sun.beans.finder.MethodFinder/findAccessibleMethod finds it for
++  a method without parameters, or nil."
++  ^java.lang.reflect.Method [^java.lang.reflect.Method m]
++  (let [c (.getDeclaringClass m)]
++    (cond
++      (not (.isExported (.getModule c) (.getPackageName c))) nil
++      (Modifier/isPublic (.getModifiers c)) m
++      (Modifier/isStatic (.getModifiers m)) nil
++      :else (let [in (fn [^Class t]
++                       (when t
++                         (when-let [^java.lang.reflect.Method tm
++                                    (try (.getMethod t (.getName m) (make-array Class 0))
++                                         (catch NoSuchMethodException _ nil))]
++                           (bean-accessible-method tm))))]
++              (or (some in (.getInterfaces c)) (in (.getSuperclass c)))))))
++
++(defn- bean-class-methods
++  "The methods without parameters java.beans.Introspector takes from class c itself
++  (com.sun.beans.introspect.MethodInfo/get): the public ones c declares (for a class that is
++  not public, the public interface method each implements, ignored when it comes from a
++  superclass, or the method itself when there is none), then the default methods of its
++  interfaces, in MethodInfo's order (name, then return type name)."
++  [^Class c]
++  (let [no-params? (fn [^java.lang.reflect.Method m] (zero? (.getParameterCount m)))
++        public? (Modifier/isPublic (.getModifiers c))
++        own (remove nil? (map (fn [^java.lang.reflect.Method m]
++                    (when (and (no-params? m) (= c (.getDeclaringClass m)))
++                      (if public?
++                        m
++                        (let [a (bean-accessible-method m)]
++                          (cond (nil? a) m
++                                (.isInterface (.getDeclaringClass a)) a)))))
++                  (.getMethods c)))
++        ignorable #{AutoCloseable Cloneable java.io.Closeable Comparable}
++        defaults (loop [q (vec (.getInterfaces c)) acc []]
++                   (if-let [^Class i (peek q)]
++                     (if (ignorable i)
++                       (recur (pop q) acc)
++                       (recur (into1 (pop q) (.getInterfaces i))
++                              (into1 acc (filter (fn [^java.lang.reflect.Method m]
++                                                  (and (no-params? m)
++                                                       (not (Modifier/isAbstract (.getModifiers m)))
++                                                       (not (.isBridge m))))
++                                                (.getMethods i)))))
++                     acc))]
++    (sort-by (fn [^java.lang.reflect.Method m] [(.getName m) (.getName (.getReturnType m))])
++             (concat own defaults))))
++
++(defn- bean-class-reads
++  "{name getter} for class c itself, as com.sun.beans.introspect.PropertyInfo/get chooses the
++  read methods: isX() returning boolean first, else among the getX() with a result the last
++  in order whose type is assignable to the one chosen so far (not a default method)."
++  [^Class c]
++  (let [prefixed (fn [^String n ^String p] (when (and (> (count n) (count p)) (.startsWith n p))
++                                             (subs n (count p))))
++        [is gets] (reduce1
++                    (fn [[is gets] ^java.lang.reflect.Method m]
++                      (let [n (.getName m) t (.getReturnType m)]
++                        (cond
++                          (Modifier/isStatic (.getModifiers m)) [is gets]
++                          (and (= Boolean/TYPE t) (prefixed n "is"))
++                            [(assoc is (prefixed n "is") m) gets]
++                          (and (not= Void/TYPE t) (prefixed n "get"))
++                            [is (update gets (prefixed n "get") (fnil conj []) m)]
++                          :else [is gets])))
++                    [{} {}] (bean-class-methods c))
++        pick (fn [ms]
++               (reduce1 (fn [^java.lang.reflect.Method r ^java.lang.reflect.Method m]
++                          (if (and (not (.isDefault m))
++                                   (.isAssignableFrom (.getReturnType r) (.getReturnType m)))
++                            m r))
++                        ms))]
++    (into1 (into1 {} (map (fn [[k ms]] [(bean-decapitalize k) (pick ms)]) gets))
++           (map (fn [[k m]] [(bean-decapitalize k) m]) is))))
++
++(defn- bean-properties
++  "{name getter}: the readable JavaBean properties of class c with a getter without
++  parameters, as java.beans.Introspector/getBeanInfo finds them without an explicit BeanInfo:
++  each class from Object down to c contributes its own read methods, a later one replacing an
++  earlier one unless that one is an isX() of another name."
++  [^Class c]
++  (reduce1 (fn [props ^Class k]
++             (reduce1 (fn [props [n ^java.lang.reflect.Method m]]
++                        (let [^java.lang.reflect.Method g (props n)]
++                          (if (and g (not= (.getName g) (.getName m)) (.startsWith (.getName g) "is"))
++                            props
++                            (assoc props n m))))
++                      props (bean-class-reads k)))
++           {} (reverse (take-while some? (iterate #(.getSuperclass ^Class %) c)))))
++
+ (defn bean
+   "Takes a Java object and returns a read-only implementation of the
+   map abstraction based upon its JavaBean properties."
+   {:added "1.0"}
+   [^Object x]
+   (let [c (. x (getClass))
+-	pmap (reduce1 (fn [m ^java.beans.PropertyDescriptor pd]
+-			 (let [name (. pd (getName))
+-						 method (. pd (getReadMethod))]
+-				 (if (and method (zero? (alength (. method (getParameterTypes)))))
+-					 (assoc m (keyword name) (fn [] (arbace.lang.Reflector/prepRet (.getPropertyType pd) (. method (invoke x nil)))))
+-					 m)))
++	pmap (reduce1 (fn [m [name ^java.lang.reflect.Method method]]
++			(assoc m (keyword name) (fn [] (arbace.lang.Reflector/prepRet (.getReturnType method) (. method (invoke x nil))))))
+ 				 {}
+-				 (seq (.. java.beans.Introspector
+-						(getBeanInfo c)
+-						(getPropertyDescriptors))))
++				 (bean-properties c))
+ 	v (fn [k] ((pmap k)))
+         snapshot (fn []
+                    (reduce1 (fn [m e]
+diff --git a/arbace/inspector.clj b/arbace/inspector.clj
+index c0a85b4..119c692 100644
+--- a/arbace/inspector.clj
++++ b/arbace/inspector.clj
+@@ -6,6 +6,12 @@
+ ;   the terms of this license.
+ ;   You must not remove this notice, or any other, from this software.
+ 
++;; Arbace (hand change 16, doc/VENDOR-NOTES.md): this namespace needs the module java.desktop, which
++;; Arbace's runtime images leave out unless asked for (bin/arbace-image, ARBACE_IMAGE_MODULES)
++(when-not (.isPresent (.findModule (ModuleLayer/boot) "java.desktop"))
++  (throw (UnsupportedOperationException.
++           "arbace.inspector needs the module java.desktop, which this Java runtime does not have (an Arbace image holds java.base and jdk.unsupported; bin/arbace-image adds more with ARBACE_IMAGE_MODULES=java.desktop)")))
++
+ (ns ^{:doc "Graphical object inspector for Clojure data structures."
+        :author "Rich Hickey"}
+     arbace.inspector
+diff --git a/arbace/instant.clj b/arbace/instant.clj
+index 1a8e757..540fc2d 100644
+--- a/arbace/instant.clj
++++ b/arbace/instant.clj
+@@ -7,8 +7,7 @@
+ ;   You must not remove this notice, or any other, from this software.
+ 
+ (ns arbace.instant
+-  (:import [java.util Calendar Date GregorianCalendar TimeZone]
+-           [java.sql Timestamp]))
++  (:import [java.util Calendar Date GregorianCalendar TimeZone]))
+ 
+ (set! *warn-on-reflection* true)
+ 
+@@ -201,33 +200,6 @@ with invalid arguments."
+   [^java.util.Calendar c, ^java.io.Writer w]
+   (print-calendar c w))
+ 
+-(def ^:private ^ThreadLocal thread-local-utc-timestamp-format
+-  ;; SimpleDateFormat is not thread-safe, so we use a ThreadLocal proxy for access.
+-  ;; http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4228335
+-  (proxy [ThreadLocal] []
+-    (initialValue []
+-      (doto (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss")
+-        (.setTimeZone (java.util.TimeZone/getTimeZone "GMT"))))))
+-
+-(defn- print-timestamp
+-  "Print a java.sql.Timestamp as RFC3339 timestamp, always in UTC."
+-  [^java.sql.Timestamp ts, ^java.io.Writer w]
+-  (let [^java.text.DateFormat utc-format (.get thread-local-utc-timestamp-format)]
+-    (.write w "#inst \"")
+-    (.write w (.format utc-format ts))
+-    ;; add on nanos and offset
+-    ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
+-    (.write w (format ".%09d-00:00" (.getNanos ts)))
+-    (.write w "\"")))
+-
+-(defmethod print-method java.sql.Timestamp
+-  [^java.sql.Timestamp ts, ^java.io.Writer w]
+-  (print-timestamp ts w))
+-
+-(defmethod print-dup java.sql.Timestamp
+-  [^java.sql.Timestamp ts, ^java.io.Writer w]
+-  (print-timestamp ts w))
+-
+ ;;; ------------------------------------------------------------------------
+ ;;; reader integration
+ 
+@@ -253,18 +225,6 @@ milliseconds since the epoch, UTC."
+                                 hours minutes seconds nanoseconds
+                                 offset-sign offset-hours offset-minutes)))
+ 
+-(defn- construct-timestamp
+-  "Construct a java.sql.Timestamp, which has nanosecond precision."
+-  [years months days hours minutes seconds nanoseconds
+-   offset-sign offset-hours offset-minutes]
+-  (doto (Timestamp.
+-         (.getTimeInMillis
+-          (construct-calendar years months days
+-                              hours minutes seconds 0
+-                              offset-sign offset-hours offset-minutes)))
+-    ;; nanos must be set separately, pass 0 above for the base calendar
+-    (.setNanos nanoseconds)))
+-
+ (defn read-instant-date
+   "To read an instant as a java.util.Date, bind *data-readers* to a map with
+ this var as the value for the 'inst key. The timezone offset will be used
+@@ -279,10 +239,8 @@ offset."
+   [^CharSequence cs]
+   (parse-timestamp (validated construct-calendar) cs))
+ 
+-(defn read-instant-timestamp
+-  "To read an instant as a java.sql.Timestamp, bind *data-readers* to a
+-map with this var as the value for the 'inst key. Timestamp preserves
+-fractional seconds with nanosecond precision. The timezone offset will
+-be used to convert into UTC."
+-  [^CharSequence cs]
+-  (parse-timestamp (validated construct-timestamp) cs))
++;; Arbace (hand change 15, doc/VENDOR-NOTES.md): java.sql.Timestamp's printing and reader, only
++;; when the runtime has java.sql (a runtime image of java.base has not); #inst as
++;; java.util.Date, above, needs only java.base
++(when (try (Class/forName "java.sql.Timestamp") (catch ClassNotFoundException _ nil))
++  (load "instant_timestamp"))
+diff --git a/arbace/instant_timestamp.clj b/arbace/instant_timestamp.clj
+new file mode 100644
+index 0000000..ba05560
+--- /dev/null
++++ b/arbace/instant_timestamp.clj
+@@ -0,0 +1,60 @@
++;   Copyright (c) Rich Hickey. All rights reserved.
++;   The use and distribution terms for this software are covered by the
++;   Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
++;   which can be found in the file epl-v10.html at the root of this distribution.
++;   By using this software in any fashion, you are agreeing to be bound by
++;   the terms of this license.
++;   You must not remove this notice, or any other, from this software.
++
++;; Arbace (hand change 15, doc/VENDOR-NOTES.md): the java.sql.Timestamp part of arbace.instant
++;; (instant.clj upstream), loaded by instant.clj only when the runtime has java.sql
++
++(in-ns 'arbace.instant)
++(import '[java.sql Timestamp])
++
++(def ^:private ^ThreadLocal thread-local-utc-timestamp-format
++  ;; SimpleDateFormat is not thread-safe, so we use a ThreadLocal proxy for access.
++  ;; http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4228335
++  (proxy [ThreadLocal] []
++    (initialValue []
++      (doto (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss")
++        (.setTimeZone (java.util.TimeZone/getTimeZone "GMT"))))))
++
++(defn- print-timestamp
++  "Print a java.sql.Timestamp as RFC3339 timestamp, always in UTC."
++  [^java.sql.Timestamp ts, ^java.io.Writer w]
++  (let [^java.text.DateFormat utc-format (.get thread-local-utc-timestamp-format)]
++    (.write w "#inst \"")
++    (.write w (.format utc-format ts))
++    ;; add on nanos and offset
++    ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
++    (.write w (format ".%09d-00:00" (.getNanos ts)))
++    (.write w "\"")))
++
++(defmethod print-method java.sql.Timestamp
++  [^java.sql.Timestamp ts, ^java.io.Writer w]
++  (print-timestamp ts w))
++
++(defmethod print-dup java.sql.Timestamp
++  [^java.sql.Timestamp ts, ^java.io.Writer w]
++  (print-timestamp ts w))
++
++(defn- construct-timestamp
++  "Construct a java.sql.Timestamp, which has nanosecond precision."
++  [years months days hours minutes seconds nanoseconds
++   offset-sign offset-hours offset-minutes]
++  (doto (Timestamp.
++         (.getTimeInMillis
++          (construct-calendar years months days
++                              hours minutes seconds 0
++                              offset-sign offset-hours offset-minutes)))
++    ;; nanos must be set separately, pass 0 above for the base calendar
++    (.setNanos nanoseconds)))
++
++(defn read-instant-timestamp
++  "To read an instant as a java.sql.Timestamp, bind *data-readers* to a
++map with this var as the value for the 'inst key. Timestamp preserves
++fractional seconds with nanosecond precision. The timezone offset will
++be used to convert into UTC."
++  [^CharSequence cs]
++  (parse-timestamp (validated construct-timestamp) cs))
+diff --git a/arbace/java/browse_ui.clj b/arbace/java/browse_ui.clj
+index 6c794c6..cf57cd5 100644
+--- a/arbace/java/browse_ui.clj
++++ b/arbace/java/browse_ui.clj
+@@ -6,6 +6,12 @@
+ ;   the terms of this license.
+ ;   You must not remove this notice, or any other, from this software.
+ 
++;; Arbace (hand change 16, doc/VENDOR-NOTES.md): this namespace needs the module java.desktop, which
++;; Arbace's runtime images leave out unless asked for (bin/arbace-image, ARBACE_IMAGE_MODULES)
++(when-not (.isPresent (.findModule (ModuleLayer/boot) "java.desktop"))
++  (throw (UnsupportedOperationException.
++           "arbace.java.browse-ui needs the module java.desktop, which this Java runtime does not have (an Arbace image holds java.base and jdk.unsupported; bin/arbace-image adds more with ARBACE_IMAGE_MODULES=java.desktop)")))
++
+ (ns
+     ^{:author "Christophe Grand",
+       :doc "Helper namespace for arbace.java.browse.
+diff --git a/arbace/xml.clj b/arbace/xml.clj
+index 195b831..ce991b7 100644
+--- a/arbace/xml.clj
++++ b/arbace/xml.clj
+@@ -6,6 +6,12 @@
+ ;   the terms of this license.
+ ;   You must not remove this notice, or any other, from this software.
+ 
++;; Arbace (hand change 16, doc/VENDOR-NOTES.md): this namespace needs the module java.xml, which
++;; Arbace's runtime images leave out unless asked for (bin/arbace-image, ARBACE_IMAGE_MODULES)
++(when-not (.isPresent (.findModule (ModuleLayer/boot) "java.xml"))
++  (throw (UnsupportedOperationException.
++           "arbace.xml needs the module java.xml, which this Java runtime does not have (an Arbace image holds java.base and jdk.unsupported; bin/arbace-image adds more with ARBACE_IMAGE_MODULES=java.xml)")))
++
+ (ns ^{:doc "XML reading/writing."
+        :author "Rich Hickey"}
+   arbace.xml
+diff --git a/bin/arbace-image b/bin/arbace-image
+index a364ce8..5482997 100755
+--- a/bin/arbace-image
++++ b/bin/arbace-image
+@@ -7,20 +7,23 @@
+ #   target/arbace-image/lib/arbace/arbace.aot        its AOT cache (JEP 483, 514; no profiles)
+ #   target/arbace-image/bin/arbace                   this repository's bin/arbace, which runs
+ #                                                    the image's java and jar when it sits there
+-# The modules are those jdeps finds in the jar's classes (java.base, java.desktop for `bean`,
+-# the inspector and browse, java.sql for resultset-seq and instants, jdk.unsupported for the
+-# REPL's interrupt handler, and what they require), jdk.unsupported.desktop (see below), and any
+-# in ARBACE_IMAGE_MODULES. The JDK's own classes are stripped of debug information, and headers
+-# and man pages are left out. The image needs no JDK at run time: copy the directory anywhere and
+-# run its bin/arbace. The cache is tied to the image's JVM; it still applies after a move (the
+-# JVM matches the class path by its common prefix), and bin/arbace --aot-train in the image
+-# makes it anew.
++# The modules are java.base and jdk.unsupported (the REPL's interrupt handler, sun.misc.Signal),
++# the baseline of every Arbace image (the user's decision, 2026-10-10: Arbace targets the server
++# side), and any in ARBACE_IMAGE_MODULES. Arbace loads and works on them; what needs more is
++# optional and works when the runtime has it (VENDOR-NOTES, hand changes 14 and 15): java.sql
++# (java.sql.Timestamp's #inst, resultset-seq), java.xml (arbace.xml), java.desktop
++# (arbace.inspector, arbace.java.browse's Swing window). The JDK's own classes are stripped of
++# debug information, and headers and man pages are left out. The image needs no JDK at run
++# time: copy the directory anywhere and run its bin/arbace. The cache is tied to the image's
++# JVM; it still applies after a move (the JVM matches the class path by its common prefix), and
++# bin/arbace --aot-train in the image makes it anew.
+ #
+ # Usage: bin/arbace-image [OUTPUT-DIR]   default target/arbace-image; needs target/arbace.jar
+ # Environment:
+-#   ARBACE_IMAGE_MODULES  further modules, comma-separated (e.g. java.net.http,jdk.httpserver)
+-#   JAVA_HOME             the JDK whose jlink, jdeps and jmods are used (default: the one of
+-#                         the jlink on the PATH)
++#   ARBACE_IMAGE_MODULES  further modules, comma-separated (e.g. java.sql,java.xml for #inst as
++#                         java.sql.Timestamp and arbace.xml, or java.net.http,jdk.httpserver)
++#   JAVA_HOME             the JDK whose jlink (and jmods, or run-time image) is used
++#                         (default: the one of the jlink on the PATH)
+ set -euo pipefail
+ root=$(cd "$(dirname "$0")/.." && pwd)
+ cd "$root"
+@@ -28,12 +31,7 @@ out=${1:-target/arbace-image}
+ jar=target/arbace.jar
+ if [ ! -f "$jar" ]; then echo "bin/arbace-image: no $jar; build it with bin/build-arbace" >&2; exit 1; fi
+ bin=${JAVA_HOME:+$JAVA_HOME/bin/}
+-feature=$("${bin}java" -XshowSettings:properties -version 2>&1 |
+-            sed -n 's/^ *java.specification.version = //p')
+-mods=$("${bin}jdeps" --multi-release "$feature" --ignore-missing-deps --print-module-deps "$jar")
+-# jdk.unsupported.desktop (a few classes) only so that the cache keeps AOT class linking on JDK
+-# 26.0.2; see train below
+-mods=$mods,jdk.unsupported.desktop${ARBACE_IMAGE_MODULES:+,$ARBACE_IMAGE_MODULES}
++mods=java.base,jdk.unsupported${ARBACE_IMAGE_MODULES:+,$ARBACE_IMAGE_MODULES}
+ echo "== jlink: $mods"
+ rm -rf "$out"
+ "${bin}jlink" --add-modules "$mods" --output "$out" \
+@@ -52,11 +50,13 @@ train() {
+ }
+ echo "== AOT cache, trained by the image's java"
+ # JDK 26.0.2 (jdk26u): with AOT class linking, the cache of an image of some module sets (such
+-# as java.base with java.sql, or with java.compiler; Arbace's set too, unless a module such as
+-# jdk.unsupported.desktop or jdk.attach is added) stops the JVM at startup: the cache records ClassLoaders$AppClassLoader for initialization at
+-# run time, and its <clinit> fails in ClassLoader.registerAsParallelCapable (InternalError). The
+-# full JDK is not affected. Then the cache is made without class linking, which still loads the
+-# classes from the cache (JEP 483's linking is lost).
++# as java.base with java.sql, or with java.compiler) stops the JVM at startup: the cache records
++# ClassLoaders$AppClassLoader for initialization at run time, and its <clinit> fails in
++# ClassLoader.registerAsParallelCapable (InternalError). The default set, java.base and
++# jdk.unsupported, is not affected, nor is the full JDK; adding a module such as jdk.attach or
++# jdk.unsupported.desktop to an affected set avoids it. When it happens, the cache is made
++# without class linking, which still loads the classes from the cache (JEP 483's linking is
++# lost).
+ if ! train; then
+   echo "   the cache with AOT class linking stops the JVM; training with -XX:-AOTClassLinking"
+   if ! train -XX:-AOTClassLinking; then

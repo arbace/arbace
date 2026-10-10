@@ -1,0 +1,129 @@
+# Maintainer: rhz <robert.zawiasa@gmail.com>
+#
+# Arbace for Java 26 as an Alpine package: the self-contained runtime image of the release tag
+# (bin/arbace-image: a jlink'ed JDK 26, Arbace's jar and its JDK AOT cache), so it needs no Java
+# package (Alpine edge has openjdk21 and openjdk25, no 26). Design and decisions:
+# dist/alpine/README.md and doc/ALPINE.md. Build it here with bin/alpine-package.
+#
+# The release is the tag arbace-for-java-26-v$pkgver: its GitHub archive is the source, and
+# build() runs the bootstrap (bin/build-arbace: seed clojure/ -> stage 1 -> stage 2 -> stage 3
+# byte-identical, the verifier, the native tests, target/arbace.jar) and bin/arbace-image.
+# The JDK 26 of the build is Eclipse Temurin's for Alpine (musl), pinned by sha512; it is also
+# the JDK the image is linked from (Temurin 26 ships no jmods: jlink links from its own run-time
+# image, JEP 493, so the build JDK must be the target platform's).
+#
+# The image holds java.base and jdk.unsupported only (the user's decision, 2026-10-10: Arbace
+# targets the server side). The two patches bring the tag v2 to the branch apk26, where that
+# change was made (they go away with the next tag): base-image.patch (bin/arbace-image's
+# module set; bean, #inst and the optional namespaces on java.base: doc/VENDOR-NOTES.md, hand
+# changes 14-16) and launcher-aot-mtime.patch (bin/arbace takes the cache when it is not older
+# than the jar: apk gives every file the same mtime).
+#
+# Do not run `abuild checksum`: the JDK's checksum is chosen per architecture below, and
+# `bin/alpine-package --checksum` rewrites the sums.
+pkgname=arbace-java26
+pkgver=2
+_tag=arbace-for-java-26-v$pkgver
+# the JDK 26 the image is made from: Temurin jdk-26.0.2.1+1 (OpenJDK jdk26u 26.0.2.1)
+_jdkver=26.0.2.1_1
+_jdkdir=jdk-${_jdkver%_*}+${_jdkver#*_}
+pkgrel=0
+pkgdesc="Arbace for Java 26: a Clojure derivative written in Clojure (self-contained runtime)"
+url="https://github.com/arbace/arbace"
+arch="x86_64 aarch64"
+# Arbace (EPL-1.0; its ASM part BSD-3-Clause, Murmur3 Apache-2.0), the JDK in the image
+# (GPL-2.0-only WITH Classpath-exception-2.0) and the third-party code its java.base bundles:
+# zlib, Unicode/CLDR/ICU data, the Public Suffix List (MPL-2.0), SipHash (CC0-1.0 OR MIT),
+# c-libutl (BSD-3-Clause), the GCC runtime (GPL-3.0-or-later WITH GCC-exception-3.1); the
+# image's legal/ holds every notice
+license="EPL-1.0 AND BSD-3-Clause AND Apache-2.0 AND GPL-2.0-only WITH Classpath-exception-2.0 AND Zlib AND Unicode-3.0 AND MPL-2.0 AND (CC0-1.0 OR MIT) AND GPL-3.0-or-later WITH GCC-exception-3.1"
+depends="bash"
+makedepends="bash coreutils cpio diffutils findutils unzip"
+subpackages="$pkgname-doc"
+case "$CARCH" in
+x86_64)
+	_jdkarch=x64
+	_jdksum=c7576f1966726f8224b1e59d7696ad5294e635e1c225e22194ed4876c51e9706e66a495d6183e98233f54b36fe820f0d2d6eb6b2403aca51389cc1aa481fb80a
+	;;
+aarch64)
+	_jdkarch=aarch64
+	_jdksum=4a28209913b776718f2d148c214d9c47cc0432d9d2f3800d20b826811d3b6a2b431b0a80d6d9ad5b0db843b9d741f5e7d7cfbff2ee3f6cdf04be71dcaa03cf3e
+	;;
+esac
+_jdktar=OpenJDK26U-jdk_${_jdkarch}_alpine-linux_hotspot_$_jdkver.tar.gz
+source="$pkgname-$pkgver.tar.gz::https://github.com/arbace/arbace/archive/refs/tags/$_tag.tar.gz
+	$_jdktar::https://github.com/adoptium/temurin26-binaries/releases/download/${_jdkdir/+/%2B}/$_jdktar
+	arbace.sh
+	base-image.patch
+	launcher-aot-mtime.patch
+	"
+builddir="$srcdir/arbace-$_tag"
+# the image's own libraries (libjvm.so, libjava.so, ...) resolve inside it, under their own
+# names, as Alpine's openjdk packages do; they are not offered to other packages
+_home=/usr/lib/$pkgname
+sonameprefix="$pkgname:"
+ldpath="$_home/lib:$_home/lib/server"
+# !strip: the image stays as jlink made it and its cache was trained (Temurin's libraries are
+# stripped already)
+options="!strip"
+
+prepare() {
+	default_prepare
+	# the tracked classes of the frozen clojure/ (stage 0) newer than their sources, as in a
+	# fresh checkout (doc/FREEZE.md)
+	find clojure -name '*.class' -exec touch {} +
+}
+
+build() {
+	export JAVA_HOME="$srcdir/$_jdkdir"
+	export PATH="$JAVA_HOME/bin:$PATH"
+	bin/build-arbace
+	bin/arbace-image target/arbace-image
+
+	# apk installs every file with mtime $SOURCE_DATE_EPOCH, and the JVM uses the AOT cache
+	# only with the jar of the mtime it was trained with: date the jar so, then train the
+	# cache again (bin/arbace --aot-train, with the options bin/arbace-image found it needs)
+	local img=target/arbace-image
+	touch -d "@$SOURCE_DATE_EPOCH" $img/lib/arbace/arbace.jar
+	$img/bin/arbace --aot-train < test/aot-training.clj > target/arbace-image-aot.log 2>&1
+	[ -s $img/lib/arbace/arbace.aot ] || { cat target/arbace-image-aot.log; return 1; }
+}
+
+check() (
+	local img=target/arbace-image
+	# no JDK outside the image (in this subshell)
+	export PATH=/usr/bin:/bin JAVA_HOME=
+	[ "$($img/bin/arbace -e '(+ 1 2)')" = 3 ]
+	[ "$(echo '(println (reduce + (range 10)))' | $img/bin/arbace -)" = 45 ]
+	# the launcher passes the cache and the JVM takes it (AOTMode=on: fail rather than run
+	# without it)
+	ARBACE_JAVA_OPTS=-XX:AOTMode=on $img/bin/arbace -e '(println (clojure-version))'
+	# java.base and jdk.unsupported only; #inst and bean on them
+	grep -qx 'MODULES="java.base jdk.unsupported"' $img/release
+	[ "$($img/bin/arbace -e '(pr (read-string (pr-str #inst "2026-10-10T00:00:00Z")))')" = \
+		'#inst "2026-10-10T00:00:00.000-00:00"' ]
+	[ "$($img/bin/arbace -e '(pr (:absolute (bean (java.io.File. "/"))))')" = true ]
+)
+
+package() {
+	mkdir -p "$pkgdir"/usr/lib
+	cp -a target/arbace-image "$pkgdir"$_home
+	install -Dm755 "$srcdir"/arbace.sh "$pkgdir"/usr/bin/arbace
+	# Arbace's licenses next to the JDK's legal notices, which the image carries (legal/)
+	install -Dm644 LICENSE.md -t "$pkgdir"$_home/legal/arbace/
+	install -Dm644 LICENSE.md -t "$pkgdir"/usr/share/licenses/$pkgname/
+
+	local doc="$pkgdir"/usr/share/doc/$pkgname
+	install -Dm644 README.md -t "$doc"/
+	mkdir -p "$doc"/doc
+	cp -r doc/. "$doc"/doc/
+	find "$doc" -type f -exec chmod 644 {} +
+}
+
+sha512sums="
+2db89aade2f3afa430339891061848c0566c6f574e552072794cb134cb4c988695ebbd620d78d8760adc8225ab80f88e558d46930d3108bd0b2741345f9ab0f8  arbace-java26-2.tar.gz
+$_jdksum  $_jdktar
+27eb13c3907255364223e357e6262ca42619468d7f48822fe4b3598bab292f5f5e737a42dd3de37eaa197c0f15455a626b477df96e79d3b9460d51024bdb9273  arbace.sh
+54ca3c9079f766dea8904295fc68893b72e8720b78998ab165a833af81b03881b1f679e8cacebb5b36250653eca20d6c22d553c0be6628e1f4e8bf9453a3ae8f  base-image.patch
+77a33f24acf2b78c0efe64899a9ef88f9622166bb290b1d32c0f57d8431dc68449250390be18e8d33694deecf947bb3ca11c9744747fddc5253413e4ed94ff00  launcher-aot-mtime.patch
+"

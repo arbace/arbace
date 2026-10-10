@@ -307,6 +307,22 @@ instead of 89 MB, but `bean` and the inspector need it. Without the cache the im
 than the full JDK, which has its default CDS archive (`lib/server/classes.jsa`); `jlink
 --generate-cds-archive` would add one, but the image always has its own cache.
 
+### The runtime image: `java.base` and `jdk.unsupported` (2026-10-10)
+
+By the user's decision (Arbace targets the server side), `bin/arbace-image` no longer takes
+jdeps' module list: its modules are `java.base` and `jdk.unsupported` (`sun.misc.Signal` for the
+REPL's interrupt handler), plus `ARBACE_IMAGE_MODULES`. Hand changes 14 to 16 made the rest
+optional (`bean` without `java.beans`, `#inst` without `java.sql`, clear errors for
+`arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui`). With the new jar, jdeps finds
+`java.desktop` only in `arbace.inspector` and `arbace.java.browse-ui`, `java.sql` only in
+`resultset-seq` and the fns of `arbace/instant_timestamp.clj`, `java.xml` only in `arbace.xml`
+and `arbace.lang.XMLHandler`. The AOT class-linking problem above does not occur with this set (the
+cache keeps class linking, no extra module); it does with `java.base,java.sql,jdk.unsupported`,
+where adding `jdk.attach` avoids it and the script's fallback still applies. Measured with the
+development JDK, two rounds of 20 launches of `-e nil`: the image 133 → 100 MB (`lib/modules`
+54 → 25 MB, `.tar.gz` 43 → 32 MB), with the cache 186-188 → 180-186 ms, without 613-626 →
+607-622 ms. Details and the Alpine package: `doc/ALPINE.md`.
+
 ## Clojure's test suite on stages 1 and 2
 
 `bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace`:
@@ -681,6 +697,55 @@ step 4 (2026-10-07); the others came with later work, as each says:
     ns, with a `nil` 132-199 → 60-94 ns, with a primitive 162-199 → 68-108 ns); `bin/arbace -e
     1` unchanged (median 393 → 391 ms with the AOT cache, which pre-resolves these sites; 833 →
     842 ms without, noise ±20 ms).
+
+14. **`bean` without `java.beans`** (2026-10-10, the user's decision that Arbace's runtime
+    images hold `java.base` and `jdk.unsupported` only; `java.beans` is in `java.desktop`):
+    `bean` (`arbace/core_proxy.clj`) found the properties with
+    `java.beans.Introspector/getBeanInfo`; it now finds them by reflection, as the Introspector
+    does when no explicit `BeanInfo` exists, in the new private fns `bean-decapitalize`
+    (`Introspector/decapitalize`), `bean-accessible-method` (`com.sun.beans.finder.MethodFinder/
+    findAccessibleMethod`: for a class that is not public, the public interface method a getter
+    implements), `bean-class-methods` (`com.sun.beans.introspect.MethodInfo/get`: the public
+    methods a class declares, then its interfaces' default methods, `AutoCloseable`, `Cloneable`,
+    `Closeable` and `Comparable` ignored, in MethodInfo's order), `bean-class-reads`
+    (`PropertyInfo/get`: `isX()` returning `boolean` first, else the most specific `getX()`,
+    default methods not replacing; static methods ignored) and `bean-properties` (Introspector's
+    merge down the superclass chain: a subclass's getter replaces its superclass's, except an
+    `isX()` of another name). Only getters without parameters are considered, the only ones
+    `bean` ever used; the value conversion (`Reflector/prepRet` on the getter's type) is
+    unchanged. Ported from main's Go build (`arbace/lang/go/ns/core_proxy.clj`, whose simpler
+    version took `getMethods` as a whole) and extended to the Introspector's rules above. Checked
+    against the Introspector on the full JDK (`.tmp/bean/beancmp.clj`, the read method of every
+    property compared): 77 classes, 583 properties (JDK values: strings, numbers, files, dates,
+    collections and their non-public iterators and views, threads, URIs, URLs, `java.time`,
+    NIO buffers and paths, charsets, process handles, calendars, patterns, executors, futures,
+    MXBeans, loggers, reflection objects, exceptions; Arbace's: vectors, maps, atoms, agents,
+    refs, vars, namespaces, symbols, keywords, lazy seqs, ranges, fns, a record, a deftype, a
+    proxy, a reify): equal for 76; the one difference is `javax.swing.JLabel`, whose superclass
+    `java.awt.Component` has an explicit `BeanInfo` (`com.sun.beans.infos.ComponentBeanInfo`)
+    that limits the Introspector to a few of Component's properties; `bean` now lists all of
+    them. Explicit `BeanInfo` classes and `@JavaBean` annotations are not consulted; outside
+    `java.desktop` the JDK has none.
+
+15. **`#inst` on `java.base`; `java.sql.Timestamp` optional** (2026-10-10, same decision):
+    `core.clj` loaded `instant.clj` only when `java.sql.Timestamp` exists, and
+    `default-data-readers` held `'inst` only then, so without `java.sql` there was no `#inst`.
+    Now `instant.clj` is always loaded and `'inst` is always `read-instant-date`; the parts that
+    need `java.sql` (`print-method` and `print-dup` of `java.sql.Timestamp`, its formatter,
+    `construct-timestamp` and `read-instant-timestamp`) moved to the new file
+    `arbace/instant_timestamp.clj` (`(in-ns 'arbace.instant)`, so the vars keep their names),
+    which `instant.clj` loads when `java.sql.Timestamp` exists. On a full JDK everything is as
+    before. `resultset-seq`'s `^java.sql.ResultSet` hint needs no change: the class is resolved
+    only when `resultset-seq` runs (checked on a `java.base` image).
+
+16. **Clear errors for the namespaces that need an optional module** (2026-10-10, same
+    decision): `arbace.xml` (`java.xml`), `arbace.inspector` and `arbace.java.browse-ui`
+    (`java.desktop`) start with a check, before their `ns` form, that throws an
+    `UnsupportedOperationException` naming the module and `ARBACE_IMAGE_MODULES` when the
+    runtime lacks it, instead of a `NoClassDefFoundError` from deep in the namespace's
+    initialization. `arbace.java.browse/browse-url` already did without `java.awt.Desktop`
+    (reflection, `ClassNotFoundException` caught); it reaches `arbace.java.browse-ui`, and so
+    the error, only when there is no `xdg-open` either.
 
 ## Spec (2026-10-07)
 

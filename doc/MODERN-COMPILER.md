@@ -132,7 +132,8 @@ items were folded into the "do next" round:
   but one atom swapped by 8 threads became about 25% slower.
 - A `jlink` image without JPMS modules: **done** (`bin/arbace-image`, `doc/VENDOR-NOTES.md`, "The
   runtime image"). JDK 26.0.2's AOT class linking fails for some module sets of an image (for
-  example `java.base,java.sql`), so the image adds `jdk.unsupported.desktop` (same section).
+  example `java.base,java.sql`), so the image added `jdk.unsupported.desktop` (same section).
+  Since 2026-10-10 the image holds `java.base` and `jdk.unsupported` only, a set not affected.
 
 **Avoid**
 

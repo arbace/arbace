@@ -1,0 +1,216 @@
+#!/bin/bash
+# Build the Alpine package of Arbace for Java 26 (dist/alpine/APKBUILD, doc/ALPINE.md) here, with
+# abuild, from the release tag the APKBUILD names (arbace-for-java-26-v$pkgver), and test it in
+# a temporary root. Everything abuild keeps goes under .tmp/alpine/ (nothing in ~/.abuild or
+# /etc/apk/keys):
+#   .tmp/alpine/abuild/       ABUILD_USERDIR: abuild.conf and a throwaway signing key
+#   .tmp/alpine/keys/         its public key, the only one abuild's apk trusts (APK=...)
+#   .tmp/alpine/distfiles/    SRCDEST: the sources (the tag's tarball, the JDK)
+#   .tmp/alpine/aports/arbace/arbace-java26/   a copy of dist/alpine/ that abuild builds in
+#   .tmp/alpine/packages/     REPODEST: the repository arbace/<arch>/ with the .apk files
+# The tag's tarball is made from the local tag (git archive | gzip -n), which is byte for byte
+# GitHub's archive of the tag (checked for arbace-for-java-26-v2), so it builds offline; without
+# the local tag abuild downloads it. The JDK (Temurin, pinned in the APKBUILD) is downloaded
+# once.
+#
+# Usage: bin/alpine-package [--arch x86_64|aarch64] [--no-build] [--no-test]
+#        bin/alpine-package --checksum   rewrite dist/alpine/APKBUILD's sha512sums (the tag's
+#                                        tarball, both JDKs, the local files)
+#   --arch aarch64  build inside an Alpine edge aarch64 minirootfs (.tmp/alpine/rootfs-aarch64,
+#                   pinned below) under qemu-user, through proot -q qemu-aarch64 (no binfmt
+#                   change on the host): the bootstrap then runs emulated
+#   --no-build      only test the package already built
+#   --no-test       only build
+# The test installs the package into a fresh root (.tmp/alpine/root-<arch>, Alpine edge's
+# repositories plus the local one, trusting the throwaway key there only) and runs it with
+# proot (and qemu-aarch64 for aarch64): arbace -e, a REPL on stdin, the AOT cache taken
+# (-XX:AOTMode=on), startup times with and without the cache, no Java package installed, and
+# the sizes of the .apk and of the installation.
+# Needs abuild, proot, qemu-aarch64 (for aarch64), git, curl, and the APKBUILD's makedepends
+# (bash coreutils cpio diffutils findutils unzip). The build runs under flock on the main
+# checkout's .tmp/heavy.lock (ARBACE_HEAVY_LOCK).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+arch=$(uname -m) build=1 test=1 checksum=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) arch=$2; shift ;;
+    --no-build) build= ;;
+    --no-test) test= ;;
+    --checksum) checksum=1 ;;
+    *) sed -n '/^# Usage/,/^# Needs/p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+  shift
+done
+case $arch in x86_64|aarch64) ;; *) echo "bin/alpine-package: arch x86_64 or aarch64" >&2; exit 2 ;; esac
+
+state=$root/.tmp/alpine
+# the lock of heavy runs, shared by every worktree: the main checkout's .tmp/heavy.lock
+lock=${ARBACE_HEAVY_LOCK:-$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/.tmp/heavy.lock}
+export ABUILD_USERDIR=$state/abuild SRCDEST=$state/distfiles REPODEST=$state/packages
+mkdir -p "$ABUILD_USERDIR" "$SRCDEST" "$REPODEST"
+apkbuild=dist/alpine/APKBUILD
+pkgname=$(sed -n 's/^pkgname=//p' $apkbuild)
+pkgver=$(sed -n 's/^pkgver=//p' $apkbuild)
+pkgrel=$(sed -n 's/^pkgrel=//p' $apkbuild)
+tag=arbace-for-java-26-v$pkgver
+tarball=$SRCDEST/$pkgname-$pkgver.tar.gz
+# The packages' file times (abuild archives every file with mtime $SOURCE_DATE_EPOCH): the tag's
+# commit time when the tag is here, so that rebuilds of a release are alike (abuild's default is
+# the APKBUILD's last commit or mtime)
+if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+  export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct "$tag")}
+fi
+# The aarch64 minirootfs the aarch64 build and test run in (Alpine edge, its published sha512)
+minirootfs=alpine-minirootfs-20260805-aarch64.tar.gz
+minirootfs_sha512=5516723e8f12ff99297b62ac66545775beed3ce7b5cecdb1d4df252cbd694fb6eb2aa669465ec0e042e947b74308d41a16cc381d44238e036398e46ec8be9f52
+edge=https://dl-cdn.alpinelinux.org/alpine/edge
+
+# the tag's tarball, as GitHub serves https://github.com/arbace/arbace/archive/refs/tags/$tag.tar.gz
+if [ ! -f "$tarball" ] && git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+  git archive --format=tar --prefix="arbace-$tag/" "$tag" | gzip -n > "$tarball.part"
+  mv "$tarball.part" "$tarball"
+fi
+
+# jdk ARCH: the APKBUILD's JDK tarball name for ARCH (x64 or aarch64 in Temurin's names)
+jdk() {
+  local a=$1; [ "$a" = x86_64 ] && a=x64
+  local v; v=$(sed -n 's/^_jdkver=//p' $apkbuild)
+  echo "OpenJDK26U-jdk_${a}_alpine-linux_hotspot_$v.tar.gz"
+}
+fetch_jdk() {
+  local f v; f=$(jdk "$1"); v=$(sed -n 's/^_jdkver=//p' $apkbuild)
+  [ -f "$SRCDEST/$f" ] && return
+  curl -fsSL -o "$SRCDEST/$f.part" \
+    "https://github.com/adoptium/temurin26-binaries/releases/download/jdk-${v%_*}%2B${v#*_}/$f"
+  mv "$SRCDEST/$f.part" "$SRCDEST/$f"
+}
+
+if [ -n "$checksum" ]; then
+  [ -f "$tarball" ] || curl -fsSL -o "$tarball" \
+    "https://github.com/arbace/arbace/archive/refs/tags/$tag.tar.gz"
+  fetch_jdk x86_64; fetch_jdk aarch64
+  sum() { sha512sum "$1" | cut -d' ' -f1; }
+  t=$(sum "$tarball") x=$(sum "$SRCDEST/$(jdk x86_64)") a=$(sum "$SRCDEST/$(jdk aarch64)")
+  # the local sources: the APKBUILD's source entries without a URL, in order
+  locals=$(sed -n '/^source="/,/"$/p' $apkbuild | sed 's/^source="//; s/"$//' | tr -d '\t' |
+             grep -v '://' | grep .)
+  l=$(cd dist/alpine && sha512sum $locals)
+  awk -v t="$t" -v x="$x" -v a="$a" -v l="$l" -v tn="$pkgname-$pkgver.tar.gz" '
+    /^x86_64\)/ { arch = "x" } /^aarch64\)/ { arch = "a" }
+    /^\t_jdksum=/ { $0 = "\t_jdksum=" (arch == "x" ? x : a) }
+    /^sha512sums="/ { print; print t "  " tn; print "$_jdksum  $_jdktar"; print l
+                      skip = 1; next }
+    skip && /^"$/ { skip = 0 }
+    !skip { print }' $apkbuild > $apkbuild.new
+  mv $apkbuild.new $apkbuild
+  echo "== $apkbuild: sha512sums updated"; sed -n '/^sha512sums=/,$p' $apkbuild
+  exit 0
+fi
+
+# the throwaway signing key
+if [ ! -f "$ABUILD_USERDIR/abuild.conf" ] || ! grep -q '^PACKAGER_PRIVKEY=' "$ABUILD_USERDIR/abuild.conf"; then
+  echo "== a throwaway signing key in $ABUILD_USERDIR"
+  printf 'PACKAGER="Arbace local build <arbace@localhost>"\n' > "$ABUILD_USERDIR/abuild.conf"
+  abuild-keygen -a -n 2>&1 | sed 's/^/   /'
+fi
+pubkey=$(sed -n 's/^PACKAGER_PRIVKEY="\(.*\)"$/\1/p' "$ABUILD_USERDIR/abuild.conf").pub
+# abuild's apk checks the new packages' signatures when it indexes them: against this key only
+mkdir -p "$state/keys"; cp "$pubkey" "$state/keys/"
+export APK="apk --keys-dir $state/keys"
+
+# the APKBUILD's directory, copied where abuild may write (src/, pkg/); the repository is
+# named after its parent directory: arbace
+aport=$state/aports/arbace/$pkgname
+rm -rf "$aport"; mkdir -p "$aport"
+find dist/alpine -maxdepth 1 -type f ! -name README.md -exec cp {} "$aport/" \;
+fetch_jdk "$arch"
+
+in_root() { # in_root DIR ARCH COMMAND...: run COMMAND inside DIR (proot; qemu for aarch64)
+  local dir=$1 a=$2; shift 2
+  local q=(); [ "$a" = aarch64 ] && q=(-q qemu-aarch64)
+  proot "${q[@]}" -r "$dir" -0 -b /proc -b /dev -b /sys -b "$state:$state" -w / "$@"
+}
+
+# logged COMMAND...: run COMMAND into .tmp/alpine/build-ARCH.log, then show its outline
+logged() {
+  local log=$state/build-$arch.log s=$SECONDS
+  if ! "$@" > "$log" 2>&1; then tail -40 "$log"; echo "abuild failed: $log" >&2; exit 1; fi
+  grep -E '^>>>|^== |^   ' "$log" | grep -v 'Fetching\|Checking sha512' | sed 's/^/   /'
+  echo "   ($(( (SECONDS - s) / 60 )) min $(( (SECONDS - s) % 60 )) s)"
+}
+
+if [ -n "$build" ]; then
+  if [ "$arch" = "$(uname -m)" ]; then
+    echo "== abuild $pkgname-$pkgver-r$pkgrel ($arch) in $aport"
+    logged env -C "$aport" flock "$lock" abuild -F
+  else
+    r=$state/rootfs-$arch
+    if [ ! -x "$r/sbin/abuild" ] && [ ! -x "$r/usr/bin/abuild" ]; then
+      echo "== the $arch build root $r"
+      [ -f "$SRCDEST/$minirootfs" ] ||
+        curl -fsSL -o "$SRCDEST/$minirootfs" "$edge/releases/$arch/$minirootfs"
+      echo "$minirootfs_sha512  $SRCDEST/$minirootfs" | sha512sum -c --quiet
+      rm -rf "$r"; mkdir -p "$r"; tar xzf "$SRCDEST/$minirootfs" -C "$r"
+      cp /etc/resolv.conf "$r/etc/"
+      printf '%s/main\n%s/community\n' "$edge" "$edge" > "$r/etc/apk/repositories"
+      in_root "$r" "$arch" /sbin/apk add -q abuild build-base bash coreutils cpio diffutils findutils unzip
+    fi
+    echo "== abuild $pkgname-$pkgver-r$pkgrel ($arch, emulated) in $aport"
+    logged flock "$lock" proot -q qemu-aarch64 -r "$r" -0 -b /proc -b /dev -b /sys \
+      -b "$state:$state" -w "$aport" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+      HOME=/root SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-}" ABUILD_USERDIR="$ABUILD_USERDIR" SRCDEST="$SRCDEST" REPODEST="$REPODEST" APK="$APK" \
+      abuild -F
+  fi
+fi
+
+[ -n "$test" ] || exit 0
+apk=$REPODEST/arbace/$arch/$pkgname-$pkgver-r$pkgrel.apk
+[ -f "$apk" ] || { echo "bin/alpine-package: no $apk" >&2; exit 1; }
+t=$state/root-$arch
+echo "== install $(basename "$apk") into a fresh root $t"
+rm -rf "$t"; mkdir -p "$t/etc/apk/keys"
+# Alpine's keys of the architecture and the throwaway key, in the temporary root only
+cp /usr/share/apk/keys/"$arch"/*.pub "$t/etc/apk/keys/"
+cp "$pubkey" "$t/etc/apk/keys/"
+printf '%s/main\n%s/community\n%s/arbace\n' "$edge" "$edge" "$REPODEST" > "$t/etc/apk/repositories"
+apk --root "$t" --arch "$arch" --initdb --no-scripts --no-cache -q add \
+  alpine-baselayout busybox busybox-binsh apk-tools
+cp /etc/resolv.conf "$t/etc/"
+in_root "$t" "$arch" /bin/busybox --install -s
+in_root "$t" "$arch" /sbin/apk add -q --no-cache "$pkgname" 2>&1 | grep -v '^$' || true
+in_root "$t" "$arch" /sbin/apk add -q --no-cache "$pkgname-doc" > /dev/null 2>&1 || true
+
+say() { echo "   $*"; }
+run() { in_root "$t" "$arch" "$@"; }
+say "installed: $(run /sbin/apk info 2>/dev/null | grep -c .) packages; Java packages:" \
+    "$(run /sbin/apk info 2>/dev/null | grep -Ei 'openjdk|^java-|jre|jdk' | tr '\n' ' ')(none expected)"
+say "depends: $(run /sbin/apk info -R "$pkgname" 2>/dev/null | sed 1d | grep . | tr '\n' ' ')"
+say ".apk: $(( $(stat -c %s "$apk") / 1048576 )) MiB ($(basename "$apk")); installed:" \
+    "$(run /sbin/apk info -s "$pkgname" 2>/dev/null | sed -n 2p)"
+doc=$REPODEST/arbace/$arch/$pkgname-doc-$pkgver-r$pkgrel.apk
+[ -f "$doc" ] && say "-doc .apk: $(( $(stat -c %s "$doc") / 1024 )) KiB"
+out=$(run /usr/bin/arbace -e '(+ 1 2)'); say "arbace -e '(+ 1 2)': $out"; [ "$out" = 3 ]
+out=$(printf '(def x 20)\n(+ x 22)\n' | run /usr/bin/arbace 2>&1 | tr '\n' ' ')
+say "REPL on stdin: $out"; case $out in *42*) ;; *) exit 1 ;; esac
+out=$(run /usr/bin/env ARBACE_JAVA_OPTS=-XX:AOTMode=on /usr/bin/arbace -e \
+        '(println (clojure-version) (System/getProperty "java.home") (System/getProperty "java.vm.version"))' 2>&1) ||
+  { say "the AOT cache does not apply: $out"; exit 1; }
+say "with the cache required (-XX:AOTMode=on): $out"
+# ms N ENV...: the mean wall time of N launches of arbace -e nil, in milliseconds. On x86_64
+# the installed image runs straight from the host (proot's ptrace would weigh on the times; the
+# image needs nothing outside itself but bash), on aarch64 emulated in the root.
+ms() {
+  local n=$1 s e; shift
+  local cmd=(env -i PATH=/usr/bin:/bin "$@" "$t/usr/lib/$pkgname/bin/arbace" -e nil)
+  [ "$arch" = "$(uname -m)" ] || cmd=(run /usr/bin/env "$@" /usr/bin/arbace -e nil)
+  "${cmd[@]}"
+  s=$(date +%s%N)
+  for _ in $(seq "$n"); do "${cmd[@]}"; done
+  e=$(date +%s%N); echo $(( (e - s) / n / 1000000 ))
+}
+n=10; [ "$arch" = "$(uname -m)" ] || n=3
+say "startup, arbace -e nil, mean of $n: with the AOT cache $(ms $n A=1) ms," \
+    "without (ARBACE_AOT=off) $(ms $n ARBACE_AOT=off) ms"
+echo "== $apk: ok"
