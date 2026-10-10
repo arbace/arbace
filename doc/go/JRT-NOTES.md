@@ -2972,7 +2972,12 @@ of an uncaught `ArithmeticException` and of `printStackTrace`). What goes is for
 
 ## Checks
 
-RESULTS
+On the program with all four (amd64, main at `d97e0f9` merged): the whole Go oracle with
+`--expected test/oracle/known-go-amd64.edn` as recorded (21,792 of 21,800, the 8 known
+mismatches); `bin/arbace-go`'s smoke test; Clojure's suite on Go without regressions against
+`test/arbace-go-results.edn`; `bin/jrt test` on amd64 and on arm64 (qemu), `bin/jrt testdata`
+unchanged. The start (`-e nil`) is unchanged, 0.20 to 0.21 s, and the resident memory after it
+slightly lower (158 MB, 162 before), the member tables no longer built at the start.
 
 ## Not done, and why
 
