@@ -81,6 +81,18 @@
 (let [d (MessageDigest/getInstance "SHA-256")] (err #(.update d nil 0 0)))
 (let [d (MessageDigest/getInstance "SHA-256")] (.digest d) (hex (.digest d)))
 (let [d (MessageDigest/getInstance "SHA-256")] (.update d (java.nio.ByteBuffer/wrap (utf8 "abc"))) (hex (.digest d)))
+;; ----- many blocks in one update and in chunks, with a clone midway (the block function
+;; over Go's crypto in the Go build: JRT-NOTES.md, Security, SC7)
+(vec (for [alg (conj all-digests "SHAKE128-256" "SHAKE256-512")]
+       (let [data (bytes-range 3000) d (MessageDigest/getInstance alg)]
+         (.update d data 0 1) (.update d data 1 200)
+         (let [c (.clone d)]
+           (.update d data 201 999) (.update d data 1200 1800)
+           (.update c data 201 2799)
+           [(hex (.digest d)) (hex (.digest c)) (hex (.digest d data)) (hex (.digest (MessageDigest/getInstance alg) data))]))))
+(vec (for [alg ["HmacMD5" "HmacSHA1" "HmacSHA256" "HmacSHA512" "HmacSHA3-256"]]
+       (let [m (Mac/getInstance alg)] (.init m (SecretKeySpec. (utf8 "key") alg)) (hex (.doFinal m (bytes-range 5000))))))
+(let [d (MessageDigest/getInstance "SHA-256") data (bytes-range 640)] (.update d data) (.reset d) (.update d data 64 512) (hex (.digest d)))
 ;; ----- isEqual
 (MessageDigest/isEqual (utf8 "abc") (utf8 "abc"))
 (MessageDigest/isEqual (utf8 "abc") (utf8 "abd"))
