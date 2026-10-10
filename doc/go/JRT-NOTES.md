@@ -2506,6 +2506,33 @@ the world (C2G-SPEC §4.1, §7.8).
   track them); `newSingleThreadExecutor`'s shutdown when it becomes unreachable (the JDK's
   `Cleaner`); `ForkJoinPool`'s work stealing, `ForkJoinWorkerThread`s and its other 130 members.
 
+## Results
+
+On the branch `go-juc` after merging main (2026-10-10), amd64:
+
+| check | result |
+|---|---|
+| `bin/jrt-convert` | 532 files, all compiled to javac's class shapes (528 identical, the 4 known differences) |
+| `bin/c2g --program` | 2,479 classes, 21,973 methods reached; 45 constant `VarHandle`s on 40 fields |
+| `bin/jrt test` (amd64, `--race`, arm64 under `qemu-aarch64`) | pass; new: `TestVarHandles`, `TestForkJoinExecutorService`, `TestLockSupportBlocker` |
+| the oracle's new `forms/concurrency.clj`, 247 cases | the JVM 247 of 247 (recorded twice, identical); Go 247 of 247 |
+| `bin/oracle check ... --expected test/oracle/known-go-amd64.edn` | 21,430 of 21,435; the 3 `nextProbablePrime` cases now pass (`ThreadLocalRandom`) and leave the reference, the 5 others as known |
+| Clojure's suite on Go | 19,628 of 19,632 assertions, 0 failures, 4 errors, as main; test.generative 26 specs, 0 failures; no regressions |
+| `bin/arbace-go --smoke` | pass, with the three new checks of main's end |
+| size, amd64 | 95.66 MB against main's 88.25 MB (main at `70e6701`): +7.4 MB |
+
+Coverage (`bin/jrt-coverage`, JAVA-BASE.md's measure; before: main after `jbase`):
+
+| | classes in Go | members provided | before |
+|---|---:|---:|---:|
+| `java.util.concurrent` | 72 of 81 | 1,104 of 1,199 (92.1%) | 29 of 81, 325 (27.1%) |
+| `java.util.concurrent.atomic` | 13 of 16 | 259 of 319 (81.2%) | 4, 108 (33.9%) |
+| `java.util.concurrent.locks` | 14 of 14 | 170 of 201 (84.6%) | 8, 65 (32.3%) |
+| the family together | 99 of 111 | 1,533 of 1,719 (89.2%) | 41, 498 (29.0%) |
+
+What is left of the family: the field updaters, `StructuredTaskScope` and its kin, and
+`ForkJoinPool`'s members beyond jrt's (its work-stealing internals, `ForkJoinWorkerThreadFactory`).
+
 ## Amendments (JC), for the user's review
 
 - **JC1 (C2G-SPEC §8.5, new) VarHandles compiled statically**: constant handles read from
