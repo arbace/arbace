@@ -1178,7 +1178,54 @@ RESULTS
 
 ### Proposed amendments (for the user's review)
 
-AMENDMENTS
+Prefix SL (this branch). SL1, SL2, SL6 and SL7 are done on the branch and need the user's
+acceptance; SL3 is done in part (the skip) and proposes the rest; SL4 and SL5 are proposals,
+not done.
+
+- **SL1 (EVAL-PLAN §2.1; C2G-SPEC §10.2) Locals clearing.** The evaluator clears locals as
+  compiled code does: `ObjExpr.compile`'s variant makes `closesExprs` (the analysis's clear
+  sites of a closure's creation), `LocalBindingExpr.evalIn` and `Evaluator.capture` null a slot,
+  or a `^:once` fn's closed-over value, after a use the analyzer marks `shouldClear`; a local in
+  a statement position is not evaluated. An evaluated fn's class declares its closed-over locals
+  as (non-public) fields read by reflection from the `EvalFn` (the native
+  `Compiler$Dyn.defineFnField`). EVAL-PLAN §2.1 said nothing of clearing; "A split for phase 2"
+  listed it for part 4.
+- **SL2 (EVAL-PLAN §2.6) Hinted calls through the invoker.** A resolved method of a public class
+  is called through jrt's member-table invoker (`Evaluator.invokeResolved`, jrt's native
+  `Compiler_Evaluator_InvokeDirect_..._native`), not `Reflector.invokeMatchingMethod`: no
+  selection, no `boxArgs` copy, no `InvocationTargetException` wrapping and unwrapping; the
+  arguments as `typedArgs` makes them (which now adapts a fn passed for a functional interface,
+  as `Reflector.boxArg` does). Methods of non-public classes keep Reflector's path (its
+  accessible-base search). EVAL-PLAN §2.6 left "the invoker directly" to step 7; this is its
+  first part (boxed values, not Go values).
+- **SL3 (EVAL-NOTES "Phase 2C", the runner) Skipped tests.** The Go reference may list single
+  tests to skip, `:skipped-tests {ns {test reason}}` (`test/run_clojure_tests.clj` run mode
+  removes their `:test`; `bin/clojure-tests` passes the reference); used for `transducers`'
+  `seq-and-transducer` (about 1,700 s on the evaluator). Proposed, for when step 7's speed
+  lands: per-namespace timeouts in the reference (`:timeouts {ns seconds}`) so that the test
+  runs again, then the skip removed.
+- **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** j2c
+  converts `test/java` (12 files, done in 1 s, no error); `bin/arbace-go --build-tests` would
+  translate them with the program (`bin/c2g --program --input`) into a second executable
+  `arbace-tests` that `suite-go` uses: `generated-*` (297 assertions), `param-tags` (136),
+  `reflect` (7), `try-catch` (5) and most of `compilation` could run. Cost: half a day, and
+  about 3 minutes more in the gate's Go chain (a second link with the fixtures, or the fixtures
+  in every executable: smaller cost, but test classes in the product).
+- **SL5 (proposal; B1-PLAN D6) Embed D6's namespaces with their classes cut.** `arbace.inspector`,
+  `arbace.xml`, `arbace.java.browse`, `javadoc`, `shell` embedded, Swing, SAX, `Desktop` and
+  `ProcessBuilder` cut (their members throw): `metadata` (53) and `java.javadoc` (5) would pass,
+  `java-interop` gets past its `require`; a REPL user gets "not in the Go build" errors when
+  calling them instead of a missing namespace. Half a day; it reverses part of D6.
+- **SL6 (C2G-SPEC §10.6) The Java API in the program.** `bin/c2g --program` translates
+  `arbace/java/api/Clojure.clj` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
+  build as on the JVM (it is not among the embedded namespaces' sources).
+- **SL7 (C2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
+  classes the embedded namespaces name, c2g cuts a fixed list of JDK classes that libraries
+  loaded from `ARBACE_PATH` import (`arbace.c2g.embed/library-cuts`: `java.util.jar.JarFile`,
+  `JarEntry`, `java.net.URLClassLoader`, `java.io.FileReader`, `java.text.SimpleDateFormat`, for
+  test.generative's runner, tools.namespace, java.classpath and tools.reader), so test.generative
+  runs on the Go build; `bin/clojure-tests` runs its phase there by default, and the reference
+  holds its result.
 
 ## Sources
 
