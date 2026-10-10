@@ -1409,3 +1409,26 @@ decision (2026-10-08).
   j2c → j2a, g2c → g2a, and c2g → a2g if it is still needed then. Arbace runs Clojure source
   unchanged only when it names nothing but `clojure.core` (measured: `(require 'clojure.string)`
   fails on both builds; `#?(:clj ...)` reads); a measured corpus of libraries is deferred.
+
+## 2026-10-10: main's image on java.base; bin/arbace-j with rlwrap
+
+- Agent, branch `baseimage` (to `4a57d5d`), merged (`7d17154`). The `arbace-for-java-26-v3`
+  changes ported to main as VENDOR-NOTES hand changes 15-17 (main's 14 is MultiFn's order):
+  15 `bean` by reflection in a new `arbace/core_bean.clj` (properties sorted by name, as
+  upstream), so main's Go variant of core_proxy drops its own `bean` and keeps only
+  `core_bean.subst.clj` (`bean-exported?` true: jrt has no modules); 16 `#inst` without
+  java.sql (`arbace/instant_timestamp.clj`, left out of the Go embed, whose `instant` variant
+  has its own); 17 `arbace.xml`, `arbace.inspector`, `arbace.java.browse-ui` fail with an error
+  naming their module. `bin/arbace-image`: `java.base,jdk.unsupported` plus
+  `ARBACE_IMAGE_MODULES`; 133 → 100 MB, start with the cache 180-190 ms. The launcher uses a
+  cache not older than the jar.
+- `bin/arbace` renamed `bin/arbace-j` (git mv; live callers, CLAUDE.md's layout mention, README,
+  ORACLE.md and the notes updated; historical records keep the old name); its interactive REPL
+  runs under rlwrap with the Go executable's convention (`ARBACE_RLWRAP`), tested on a
+  pseudo-terminal (history recall, `off`, `-e` unwrapped, 15 argument patterns).
+- Found on the way: `(reduce + (eduction (map inc) (range 10)))` throws ClassCastException on
+  every JVM release (v1-v3; upstream Clojure 1.12.6 and the Go build give 55): an agent fixes it
+  on both lines. And v3's `bean` returned its keys in hash order (fixed on `apk26`, `84da2dc`,
+  not yet released).
+- Main session on the merge: `bin/gate` passed (6m51s); the Go oracle as recorded (8);
+  Clojure's suite on Go 19,628 of 19,632, no regressions.
