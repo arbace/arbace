@@ -315,6 +315,11 @@
       ;; the class of an evaluated fn: a subclass of super (EvalFn) named name, made at run time
       (method ^:public ^:static ^:native defineFnClass ^Class [^String name ^Class super])
 
+      ;; a field of a fn's class (defineFnClass), not public, of the given type: the fn's i-th
+      ;; closed-over value (EvalFn.closed)
+      (method ^:public ^:static ^:native defineFnField ^void [^Class c ^String name ^int i
+                                                              ^Class type])
+
       (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
 
       (method ^:public ^:static ^:native getField [o ^int i])
@@ -366,6 +371,25 @@
       ;; checkcast to a class known at run time: o, or ClassCastException with the JVM's
       ;; message (jrt.ClassCast)
       (method ^:public ^:static ^:native checkCast [^Class c o])
+
+      ;; a resolved method called as compiled code calls it: its invoker directly, an
+      ;; exception propagating unwrapped (jrt's natives.clj)
+      (method ^:public ^:static ^:native invokeDirect [^java.lang.reflect.Method m target
+                                                       ^Object/1 args])
+
+      ;; a hinted call of method m (parameter types ps) on target (nil: static) with the
+      ;; evaluated arguments: what Reflector.invokeMatchingMethod does with the one method,
+      ;; without the selection, the InvocationTargetException, the copies of the parameter
+      ;; types and boxArgs' copy of the arguments (m's class is public: EVAL-NOTES.md, "The
+      ;; suite's last failures")
+      (method ^:public ^:static invokeResolved [^java.lang.reflect.Method m ^Class/1 ps target
+                                                ^Object/1 vs]
+        (Reflector/prepRet (.getReturnType m) (Evaluator/invokeDirect m target (Evaluator/typedArgs ps vs))))
+
+      ;; whether the hinted calls of m may take invokeResolved's path (Reflector otherwise
+      ;; looks for an accessible base's method)
+      (method ^:public ^:static directOk ^boolean [^java.lang.reflect.Method m]
+        (java.lang.reflect.Modifier/isPublic (.getModifiers (.getDeclaringClass m))))
 
       (method ^:public ^:static ^:native monitorExit ^void [o])
 
@@ -427,6 +451,15 @@
         (let [^:mutable c (.-evalClass fe)]
           (when (nil? c)
             (set! c (Dyn/defineFnClass (.-name fe) EvalFn))
+            ;; the closed-over locals as the compiled class's fields (reflection reads them:
+            ;; Clojure's clearing tests), named and typed as ObjExpr.compile declares them
+            (let [bs (Evaluator/closes fe)]
+              (loop [^int i 0]
+                (when (< i (alength bs))
+                  (let [lb (aget bs i)
+                        p (.getPrimitiveType lb)]
+                    (Dyn/defineFnField c (.-name lb) i (if (some? p) p Object)))
+                  (recur (unchecked-inc-int i)))))
             (set! (.-evalClass fe) c))
           c))
 
@@ -486,8 +519,27 @@
                     (aset vs i (if (> k 0)
                                    (aget (.-slots f) (unchecked-dec-int k))
                                    (.closed f (unchecked-subtract-int -1 k)))))
-                  (recur (unchecked-inc-int i))))))
+                  (recur (unchecked-inc-int i))))
+              ;; locals clearing (ObjExpr.emit loads the closed-over locals through
+              ;; closesExprs): the creating frame's local cleared where the analyzer says so
+              (let [ces (.-closesExprs objx)]
+                (loop [^int i 0]
+                  (when (< i n)
+                    (Evaluator/clear (cast LocalBindingExpr (.nth ces i)) f (aget ws i))
+                    (recur (unchecked-inc-int i)))))))
           vs))
+
+      ;; locals clearing (ObjExpr.emitLocal): after a use of lbe's local in frame f (at k,
+      ;; where's encoding) that the analyzer marks as its last on the path, the slot is
+      ;; cleared, and a closed-over value too in a ^:once fn, so that a lazy seq's head is not
+      ;; held (Clojure's clearing tests, CLJ-2145). Primitive locals are not cleared
+      (method ^:public ^:static clear ^void [^LocalBindingExpr lbe ^Frame f ^int k]
+        (let [b (.-b lbe)]
+          (when (and (.-shouldClear lbe) (.-canBeCleared b) (nil? (.getPrimitiveType b)))
+            (cond
+              (> k 0) (aset (.-slots f) (unchecked-dec-int k) nil)
+              (and (some? (.-fn f)) (.-onceOnly (.-objx f)))
+                (aset (.-closed (.-fn f)) (unchecked-subtract-int -1 k) nil)))))
 
       (method ^:public ^:static arg [^IPersistentVector es ^int i ^Frame f]
         (.evalIn (cast Expr (.nth es i)) f))
@@ -519,9 +571,9 @@
       ;; the arguments of a resolved method or constructor as the compiled call passes them
       ;; (MethodExpr.emitTypedArgs, HostExpr.emitUnboxArg): a primitive parameter's argument
       ;; cast to Number (Boolean, Character) and converted by RT's checked casts, a reference
-      ;; parameter's cast to its class (a fn passed for a functional interface is left to
-      ;; Reflector's adapter): ClassCastException and NullPointerException as compiled code
-      ;; throws them. (*unchecked-math*'s unchecked casts are not distinguished: EVAL-NOTES.md.)
+      ;; parameter's cast to its class (a fn passed for a functional interface adapted by
+      ;; Reflector.boxArg, as the compiled call adapts it): ClassCastException and
+      ;; NullPointerException as compiled code throws them; ready for the method's invoker. (*unchecked-math*'s unchecked casts are not distinguished: EVAL-NOTES.md.)
       (method ^:public ^:static typedArgs ^Object/1 [^Class/1 ps ^Object/1 vs]
         (loop [^int i 0]
           (when (and (< i (alength ps)) (< i (alength vs)))
@@ -551,7 +603,7 @@
                 ;; adapts it); another interface is a checkcast
                 (and (instance? IFn v) (.isInterface p) (not (.isInstance p v))
                      (some? (Compiler$FISupport/maybeFIMethod p)))
-                  nil
+                  (aset vs i (Reflector/boxArg p v))
                 :else (Evaluator/checkCast p v)))
             (recur (unchecked-inc-int i))))
         vs)
@@ -961,6 +1013,14 @@
     ;; the source file the fn or type is analyzed in (a compiled class's SourceFile): its
     ;; frames' file in stack traces
     (set! evalSource (cast String (.deref SOURCE)))
+    ;; the closed-over locals as the constructor call loads them (ObjExpr.emit), made here as
+    ;; the JVM's compile makes them: their LocalBindingExprs take part in locals clearing (a
+    ;; site that is the last use of a local in the creating method clears it, and a later
+    ;; site un-clears the earlier ones), which Evaluator.capture follows
+    (loop [s (RT/keys closes)]
+      (when (some? s)
+        (set! closesExprs (.cons closesExprs (LocalBindingExpr. (cast LocalBinding (.first s)) nil)))
+        (recur (.next s))))
     (when (instance? NewInstanceExpr this)
       (Compiler$Image/event (new Object/1 ["type" name this interfaceNames]))
       (set! compiledClass (Compiler$Evaluator/defineType (cast NewInstanceExpr this) interfaceNames))))
@@ -1028,13 +1088,26 @@
     ;; the local's primitive type (0: not known yet, 1: none, 2: long, 3: double)
     (field ^int evalPrim))
   (c2g/add
+    ;; locals clearing (ObjExpr.emitLocal): whether this use clears the local after reading
+    ;; it (the analyzer's shouldClear, a slot or a ^:once fn's closed-over value; decided
+    ;; with evalWhere, once the analysis is done)
+    (field ^boolean evalClear))
+  (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (let [k evalWhere]
         (cond
-          (> k 0) (.evalBox this (aget (.-slots f) (unchecked-dec-int k)))
-          (< k 0) (.evalBox this (.closed f (unchecked-subtract-int -1 k)))
-          :else (do
-                  (set! evalWhere (Compiler$Evaluator/where b f))
+          (> k 0) (let [slots (.-slots f)
+                        i (unchecked-dec-int k)
+                        v (aget slots i)]
+                    (when evalClear (aset slots i nil))
+                    (.evalBox this v))
+          (< k 0) (let [v (.closed f (unchecked-subtract-int -1 k))]
+                    (when evalClear (aset (.-closed (.-fn f)) (unchecked-subtract-int -1 k) nil))
+                    (.evalBox this v))
+          :else (let [w (Compiler$Evaluator/where b f)]
+                  (set! evalClear (and shouldClear (.-canBeCleared b) (nil? (.getPrimitiveType b))
+                                       (or (> w 0) (and (some? (.-fn f)) (.-onceOnly (.-objx f))))))
+                  (set! evalWhere w)
                   (.evalIn this f))))))
   (c2g/add
     ;; a primitive local's value boxed anew at each use, as the bytecode boxes it where an
@@ -1066,9 +1139,14 @@
     (method ^:public evalIn [this ^Compiler$Frame f]
       (let [es exprs
             n (.count es)]
+        ;; a local as a statement is neither read nor cleared (LocalBindingExpr.emit in a
+        ;; statement context emits nothing)
         (loop [^int i 0 ret nil]
           (if (< i n)
-              (recur (unchecked-inc-int i) (.evalIn (cast Expr (.nth es i)) f))
+              (let [e (cast Expr (.nth es i))]
+                (if (and (instance? LocalBindingExpr e) (< i (unchecked-dec-int n)))
+                    (recur (unchecked-inc-int i) nil)
+                    (recur (unchecked-inc-int i) (.evalIn e f))))
               ret))))))
 
 (c2g/variant Compiler$IfExpr
@@ -1266,22 +1344,37 @@
             (when (or (.equals argType Object) (.equals argType Number)) (return true)))))
       false))
   (c2g/add
+    ;; the method's parameter types, and whether its calls take Evaluator.invokeResolved
+    (field ^Class/1 evalPtypes))
+  (c2g/add (field ^boolean evalDirect))
+  (c2g/add
     (field ^List evalMethods))
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (let [vs (Compiler$Evaluator/args args f)]
         (Compiler$Evaluator/at f line source)
         (if (some? method)
-            (let [^:mutable ms evalMethods]
-              (when (nil? ms)
-                (set! ms (LinkedList.))
-                (.add ms method)
-                (set! evalMethods ms))
-              (Reflector/invokeMatchingMethod methodName ms nil
-                                              (Compiler$Evaluator/typedArgs (.getParameterTypes method) vs)))
+            (let [^:mutable ps evalPtypes]
+              (when (nil? ps)
+                (set! ps (.getParameterTypes method))
+                (set! evalDirect (Compiler$Evaluator/directOk method))
+                (set! evalPtypes ps))
+              (if evalDirect
+                  (Compiler$Evaluator/invokeResolved method ps nil vs)
+                  (let [^:mutable ms evalMethods]
+                    (when (nil? ms)
+                      (set! ms (LinkedList.))
+                      (.add ms method)
+                      (set! evalMethods ms))
+                    (Reflector/invokeMatchingMethod methodName ms nil
+                                                    (Compiler$Evaluator/typedArgs ps vs)))))
             (Reflector/invokeStaticMethod c methodName vs))))))
 
 (c2g/variant Compiler$InstanceMethodExpr
+  (c2g/add
+    ;; the method's parameter types, and whether its calls take Evaluator.invokeResolved
+    (field ^Class/1 evalPtypes))
+  (c2g/add (field ^boolean evalDirect))
   (c2g/add
     (field ^List evalMethods))
   (c2g/add
@@ -1295,12 +1388,18 @@
               ;; the compiled call's checkcast to the method's class (ClassCastException, not
               ;; Method.invoke's IllegalArgumentException)
               (Compiler$Evaluator/checkCast (.getDeclaringClass method) t)
-              (when (nil? ms)
-                (set! ms (LinkedList.))
-                (.add ms method)
-                (set! evalMethods ms))
-              (Reflector/invokeMatchingMethod methodName ms t
-                                              (Compiler$Evaluator/typedArgs (.getParameterTypes method) vs)))
+              (when (nil? evalPtypes)
+                (set! evalDirect (Compiler$Evaluator/directOk method))
+                (set! evalPtypes (.getParameterTypes method)))
+              (if evalDirect
+                  (Compiler$Evaluator/invokeResolved method evalPtypes t vs)
+                  (do
+                    (when (nil? ms)
+                      (set! ms (LinkedList.))
+                      (.add ms method)
+                      (set! evalMethods ms))
+                    (Reflector/invokeMatchingMethod methodName ms t
+                                                    (Compiler$Evaluator/typedArgs evalPtypes vs)))))
           (some? qualifyingClass)
             (Reflector/invokeInstanceMethodOfClass t qualifyingClass methodName vs)
           :else (Reflector/invokeInstanceMethod t methodName vs))))))

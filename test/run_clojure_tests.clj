@@ -5,10 +5,11 @@
 ;;       Print the test namespaces under DIR, one per line, in the order in which upstream's
 ;;       src/script/run_test.clj finds and requires them (clojure.tools.namespace.find), minus
 ;;       the :skipped ones of the EXPECTED results file.
-;;   run NS OUT NSLIST
+;;   run NS OUT NSLIST [EXPECTED]
 ;;       Require every namespace listed in the file NSLIST, in order, as run_test.clj does before
 ;;       running anything (so that helpers such as clojure.test-helper's assert-expr methods are
-;;       loaded), then run NS's clojure.test tests and write a result map to OUT:
+;;       loaded), then run NS's clojure.test tests, less those the EXPECTED results file lists
+;;       under :skipped-tests {NS {test reason}}, and write a result map to OUT:
 ;;         {:ns NS :test n :pass n :fail n :error n
 ;;          :failing {test-name {:fail n :error n}}  ; per top-level deftest
 ;;          :load-error "message"}                   ; only if NS itself failed to load
@@ -57,7 +58,17 @@
     (let [{:keys [ns name]} (meta v)]
       (symbol (str (ns-name ns)) (str name)))))
 
-(defn- run-ns [ns-sym out nslist]
+(defn- skip-tests!
+  "The tests of ns-sym that the reference EXPECTED skips (:skipped-tests {ns {test reason}}:
+  the Go build's, a test it cannot run in the time a namespace may take) no longer run: their
+  vars lose their :test."
+  [ns-sym expected]
+  (when expected
+    (doseq [t (keys (get-in (read-string (slurp-file expected)) [:skipped-tests ns-sym]))]
+      (when-let [v (ns-resolve ns-sym t)]
+        (alter-meta! v dissoc :test)))))
+
+(defn- run-ns [ns-sym out nslist expected]
   (let [nss       (map symbol (re-seq #"\S+" (slurp-file nslist)))
         load-errs (into {} (for [n (distinct (concat nss [ns-sym]))
                                  :let [err (try-require n)]
@@ -67,6 +78,7 @@
         result    (if-let [err (load-errs ns-sym)]
                     {:test 0 :pass 0 :fail 0 :error 0 :load-error err}
                     (let [report t/report]
+                      (skip-tests! ns-sym expected)
                       (binding [t/report (fn [m]
                                            (when (#{:fail :error} (:type m))
                                              (swap! failing update
@@ -177,7 +189,8 @@
              (cond-> {:revision (:revision expected)
                       :skipped (:skipped expected)
                       :namespaces results}
-               gen (assoc :generative gen)))))
+               gen (assoc :generative gen)
+               (:skipped-tests expected) (assoc :skipped-tests (:skipped-tests expected))))))
     (println "results written to" results-file)
     (shutdown-agents)
     (if (seq @bad)
@@ -193,6 +206,6 @@
                    (doseq [n (find-namespaces a) :when (not (skipped n))]
                      (println n))
                    (shutdown-agents))
-    "run"        (run-ns (symbol a) b c)
+    "run"        (run-ns (symbol a) b c d)
     "generative" (run-generative a b c)
     "report"     (report a b c d)))
