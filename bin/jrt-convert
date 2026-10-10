@@ -15,7 +15,8 @@
 #             own Java (overlay/jdk/java.base, replacing or adding to jdk26u's files), into
 #             $JRT_WORK/src/java.base (the tree j2c and javac read); sources.txt lists them
 #   generate  the files the JDK build generates (CharacterData*, CaseFolding,
-#             IndicConjunctBreak; java.nio's heap buffers, ScopedMemoryAccess) made as
+#             IndicConjunctBreak; java.nio's heap buffers, ScopedMemoryAccess; the CLDR
+#             locale data of java.base, GensrcCLDR in make/modules/java.base/Gensrc.gmk) made as
 #             make/modules/java.base/gensrc/GensrcCharacterData.gmk, GensrcRegex.gmk,
 #             GensrcBuffer.gmk and GensrcScopedMemoryAccess.gmk make them: the build tools of
 #             make/jdk/src/classes/build/tools/{generatecharacter,generateextraproperties,spp} compiled with $GEN_JDK's javac and run
@@ -24,7 +25,8 @@
 #             unicodedata, into src/java.base; compared byte for byte with the JDK build's
 #             support/gensrc when $JDK/build has one (generated.edn); and the resource data
 #             the program embeds (uniName.dat as Gendata.gmk makes it, ICU's nfc.nrm and
-#             nfkc.nrm) into $JRT_WORK/data, compared with the build's jdk/modules
+#             nfkc.nrm; the time-zone database lib/tzdb.dat as GendataTZDB.gmk makes it)
+#             into $JRT_WORK/data, compared with the build's jdk/modules (jdk/lib for lib/)
 #   convert   bin/j2c ... jdk --check: the tree into class forms, $JRT_WORK/conv (java.base,
 #             attributed with --patch-module against the running JDK, built from the same sources)
 #   javac     the tree compiled twice by javac (ref1, ref2) with java.base's build options
@@ -205,6 +207,24 @@ generate() {
   done
   { cat "$m/X-ScopedMemoryAccess.java.template"; cat "${smasnips[@]}"; echo "}"; } > "$sma"
   rm -f "${smasnips[@]}"
+  # the CLDR locale data of java.base (JRT-NOTES.md, "Time"): the root and English bundles,
+  # ZoneName and CLDRBaseLocaleDataMetaInfo, as make/modules/java.base/Gensrc.gmk makes them
+  # (TOOL_CLDRCONVERTER, build.tools.cldrconverter.CLDRConverter with its properties, on
+  # make/data/cldr/common); into a directory of their own, from which the closure's files are
+  # taken (the tool writes more: other bundles, Windows' tzmappings)
+  local cl=$tools/cldr-out
+  "$GEN_JDK/bin/javac" -nowarn -d "$tools" "$t"/build/tools/cldrconverter/*.java &&
+  cp "$t"/build/tools/cldrconverter/*.properties "$tools/build/tools/cldrconverter/" &&
+  "${java[@]}" build.tools.cldrconverter.CLDRConverter -base "$jdk/make/data/cldr/common" \
+    -baselocales "en-US" -o "$cl" -basemodule -year "$(sed -n 's/^COPYRIGHT_YEAR := *//p' "$conf" 2>/dev/null || echo 2026)" \
+    -zntempfile "$c/java/time/format/ZoneName.java.template" \
+    -tzdatadir "$jdk/src/java.base/share/data/tzdata" -utf8 || return 1
+  while read -r _ kind rel; do
+    if [ "$kind" = gensrc ] && [ -f "$cl/$rel" ]; then
+      mkdir -p "$out/$(dirname "$rel")"
+      cp "$cl/$rel" "$out/$rel"
+    fi
+  done < "$work/sources.txt"
   # the resource data the closure reads (JRT-NOTES.md, "The JDK's resource data"), into
   # $tree/../data, which bin/c2g --program embeds: uniName.dat as make/modules/java.base/
   # Gendata.gmk makes it (TOOL_CHARACTERNAME on UnicodeData.txt), ICU's normalization data as
@@ -216,6 +236,20 @@ generate() {
   "${java[@]}" build.tools.generatecharacter.CharacterName "$u/UnicodeData.txt" "$data/java/lang/uniName.dat" &&
   cp "$c/jdk/internal/icu/impl/data/icudata/nfc.nrm" "$c/jdk/internal/icu/impl/data/icudata/nfkc.nrm" \
     "$data/jdk/internal/icu/impl/data/icudata/" || return 1
+  # the time-zone database (JRT-NOTES.md, "Time"), the image's lib/tzdb.dat, as
+  # make/modules/java.base/gendata/GendataTZDB.gmk makes it: TOOL_TZDB
+  # (build.tools.tzdb.TzdbZoneRulesCompiler) with java.time.zone's ZoneRules,
+  # ZoneOffsetTransition, ZoneOffsetTransitionRule and Ser copied into its package as
+  # make/CopyInterimTZDB.gmk copies them, on src/java.base/share/data/tzdata's files
+  local tz=$tools/interim_tzdb/build/tools/tzdb f
+  mkdir -p "$tz" "$data/lib"
+  for f in ZoneRules ZoneOffsetTransition ZoneOffsetTransitionRule Ser; do
+    sed -e "s/package java.time.zone/package build.tools.tzdb/" < "$c/java/time/zone/$f.java" > "$tz/$f.java"
+  done
+  "$GEN_JDK/bin/javac" -nowarn -d "$tools" "$t"/build/tools/tzdb/*.java "$tz"/*.java &&
+  "${java[@]}" build.tools.tzdb.TzdbZoneRulesCompiler -srcdir "$jdk/src/java.base/share/data/tzdata" \
+    -dstfile "$data/lib/tzdb.dat" africa antarctica asia australasia europe northamerica \
+    southamerica backward etcetera gmt jdk11_backward || return 1
   # every gensrc file of the closure is made
   while read -r _ kind rel; do
     [ "$kind" = gensrc ] && [ ! -f "$out/$rel" ] && { echo "not generated: $rel" >&2; return 1; }
@@ -259,8 +293,10 @@ if has generate; then
     modules_ref=${conf:+$(dirname "$conf")/jdk/modules/java.base}
     echo " :data {"
     (cd "$work/data" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
-      if [ -z "$modules_ref" ] || [ ! -f "$modules_ref/$rel" ]; then v=:no-reference
-      elif cmp -s "$work/data/$rel" "$modules_ref/$rel"; then v=:same
+      # lib/: the image's own files (tzdb.dat), against the build's jdk/lib
+      case $rel in lib/*) ref=${conf:+$(dirname "$conf")/jdk/$rel} ;; *) ref=${modules_ref:+$modules_ref/$rel} ;; esac
+      if [ -z "$ref" ] || [ ! -f "$ref" ]; then v=:no-reference
+      elif cmp -s "$work/data/$rel" "$ref"; then v=:same
       else v=:different; fi
       echo "  \"$rel\" $v"
     done

@@ -7,14 +7,16 @@
  */
 package java.util;
 
+import sun.util.calendar.ZoneInfo;
+
 /**
  * java.util.GregorianCalendar for the Go build, behaving as the JDK's (checked against it
  * differentially): the Julian calendar before the cutover (by default 1582-10-15, settable), the
  * Gregorian from it, as the JDK's (and jrt's Date) count; the fields computed in the calendar's
- * zone (a fixed offset, TimeZone); the time from the fields as the JDK resolves them, leniently
- * or not; add, roll and the week year as the JDK's. Not here: setWeekDate,
- * getWeeksInWeekYear, toZonedDateTime and from(ZonedDateTime) (java.time's zones are outside
- * the closed world), serialization.
+ * zone (TimeZone, jdk26u's: a ZoneInfo's offsets as the JDK takes them, by the instant and by
+ * the wall time); the time from the fields as the JDK resolves them, leniently or not; add,
+ * roll and the week year as the JDK's; toZonedDateTime and from(ZonedDateTime). Not here:
+ * setWeekDate, getWeeksInWeekYear, serialization.
  */
 public class GregorianCalendar extends Calendar {
     public static final int BC = 0;
@@ -264,8 +266,18 @@ public class GregorianCalendar extends Calendar {
     @Override
     protected void computeFields() {
         TimeZone tz = getTimeZone();
-        int zoneOffset = tz.getRawOffset();
-        int dstOffset = tz.getOffset(time) - zoneOffset;
+        int zoneOffset;
+        int dstOffset;
+        if (tz instanceof ZoneInfo zi) {
+            // the zone's raw offset at the time and its daylight saving (jdk26u's computeFields)
+            int[] offsets = new int[2];
+            zi.getOffsets(time, offsets);
+            zoneOffset = offsets[0];
+            dstOffset = offsets[1];
+        } else {
+            zoneOffset = tz.getRawOffset();
+            dstOffset = tz.getOffset(time) - zoneOffset;
+        }
         long local = time + zoneOffset + dstOffset;
         long days = Math.floorDiv(local, ONE_DAY);
         int tod = (int) Math.floorMod(local, ONE_DAY);
@@ -408,12 +420,27 @@ public class GregorianCalendar extends Calendar {
         long local = days * ONE_DAY + timeOfDay;
         TimeZone tz = getTimeZone();
         long t;
-        if (isFieldSet(fieldMask, ZONE_OFFSET)) {
-            t = local - internalGet(ZONE_OFFSET) - (isFieldSet(fieldMask, DST_OFFSET) ? internalGet(DST_OFFSET) : 0);
-        } else {
-            t = local - tz.getRawOffset();
-            t -= tz.getOffset(t) - tz.getRawOffset();
+        // the zone's offsets at the local time (jdk26u's computeTime): a ZoneInfo's by the
+        // wall time, else the zone's at the local time less the raw offset; fields set by the
+        // caller take precedence
+        int[] offsets = new int[2];
+        boolean zoneSet = isFieldSet(fieldMask, ZONE_OFFSET);
+        boolean dstSet = isFieldSet(fieldMask, DST_OFFSET);
+        if (!(zoneSet && dstSet)) {
+            if (tz instanceof ZoneInfo zi) {
+                zi.getOffsetsByWall(local, offsets);
+            } else {
+                int gmtOffset = zoneSet ? internalGet(ZONE_OFFSET) : tz.getRawOffset();
+                tz.getOffsets(local - gmtOffset, offsets);
+            }
         }
+        if (zoneSet) {
+            offsets[0] = internalGet(ZONE_OFFSET);
+        }
+        if (dstSet) {
+            offsets[1] = internalGet(DST_OFFSET);
+        }
+        t = local - (offsets[0] + offsets[1]);
         time = t;
         computeFields();
         if (originalFields != null) {
@@ -1128,5 +1155,26 @@ public class GregorianCalendar extends Calendar {
     @Override
     public void setTimeZone(TimeZone zone) {
         super.setTimeZone(zone);
+    }
+
+    /** jdk26u's toZonedDateTime: the instant in the calendar's zone. */
+    public final java.time.ZonedDateTime toZonedDateTime() {
+        return java.time.ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(getTimeInMillis()),
+                                                 getTimeZone().toZoneId());
+    }
+
+    /** jdk26u's from(ZonedDateTime): a proleptic ISO calendar of the date-time's instant and zone. */
+    public static GregorianCalendar from(java.time.ZonedDateTime zdt) {
+        GregorianCalendar cal = new GregorianCalendar(TimeZone.getTimeZone(zdt.getZone()));
+        cal.setGregorianChange(new Date(Long.MIN_VALUE));
+        cal.setFirstDayOfWeek(MONDAY);
+        cal.setMinimalDaysInFirstWeek(4);
+        try {
+            cal.setTimeInMillis(Math.addExact(Math.multiplyExact(zdt.toEpochSecond(), 1000),
+                                              zdt.get(java.time.temporal.ChronoField.MILLI_OF_SECOND)));
+        } catch (ArithmeticException ex) {
+            throw new IllegalArgumentException(ex);
+        }
+        return cal;
     }
 }

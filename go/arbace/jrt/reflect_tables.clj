@@ -1436,8 +1436,12 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLanguage__String (assert (* Locale) this))))
         (lit MethodInfo :Name "getScript" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetScript__String (assert (* Locale) this))))
+        (lit MethodInfo :Name "getUnicodeLocaleType" :Params (lit (slice (* Class)) String_class) :Return String_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetUnicodeLocaleType_String__String (assert (* Locale) this) ((inst As (* String)) (aget args 0)))))
         (lit MethodInfo :Name "getVariant" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetVariant__String (assert (* Locale) this))))
+        (lit MethodInfo :Name "hasExtensions" :Params nil :Return Prim_boolean :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HasExtensions__Z (assert (* Locale) this))))
         (lit MethodInfo :Name "hashCode" :Params nil :Return Prim_int :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.HashCode__I (assert (* Locale) this))))
         (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class String_class) :Return Locale_class :Modifiers 0x9
@@ -1446,6 +1450,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String_String_String__Locale ((inst As (* String)) (aget args 0)) ((inst As (* String)) (aget args 1)) ((inst As (* String)) (aget args 2)))))
         (lit MethodInfo :Name "of" :Params (lit (slice (* Class)) String_class) :Return Locale_class :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Locale_Of_String__Locale ((inst As (* String)) (aget args 0)))))
+        (lit MethodInfo :Name "stripExtensions" :Params nil :Return Locale_class :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.StripExtensions__Locale (assert (* Locale) this))))
         (lit MethodInfo :Name "toLanguageTag" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.ToLanguageTag__String (assert (* Locale) this))))
         (lit MethodInfo :Name "toString" :Params nil :Return String_class :Modifiers 0x11
@@ -1530,21 +1536,6 @@
          :New (fn ^any [^{:tag (slice any)} args] (DecimalFormatSymbols_New)))
         (lit CtorInfo :Params (lit (slice (* Class)) Locale_class) :Modifiers 0x1
          :New (fn ^any [^{:tag (slice any)} args] (DecimalFormatSymbols_New_Locale ((inst As (* Locale)) (aget args 0)))))))
-  ;; sun.util.locale.provider.LocaleProviderAdapter
-  (set! (.-Methods (.Info LocaleProviderAdapter_class))
-    (lit (slice MethodInfo)
-        (lit MethodInfo :Name "getAdapter" :Params (lit (slice (* Class)) Class_class Locale_class) :Return LocaleProviderAdapter_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (LocaleProviderAdapter_GetAdapter_Class_Locale__LocaleProviderAdapter ((inst As (* Class)) (aget args 0)) ((inst As (* Locale)) (aget args 1)))))
-        (lit MethodInfo :Name "getLocaleResources" :Params (lit (slice (* Class)) Locale_class) :Return LocaleResources_class :Modifiers 0x401
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLocaleResources_Locale__LocaleResources (assert (* LocaleProviderAdapter) this) ((inst As (* Locale)) (aget args 0)))))
-        (lit MethodInfo :Name "getResourceBundleBased" :Params nil :Return LocaleProviderAdapter_class :Modifiers 0x9
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (LocaleProviderAdapter_GetResourceBundleBased__LocaleProviderAdapter)))))
-  ;; sun.util.locale.provider.LocaleResources
-  (set! (.-Methods (.Info LocaleResources_class))
-    (lit (slice MethodInfo)
-        (lit MethodInfo :Name "getNumberPatterns" :Params nil :Return (.ArrayClass String_class) :Modifiers 0x1
-         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetNumberPatterns__String1 (assert (* LocaleResources) this))))))
-  ;; sun.util.locale.provider.ResourceBundleBasedAdapter
   ;; java.util.Date
   (set! (.-Methods (.Info Date_class))
     (lit (slice MethodInfo)

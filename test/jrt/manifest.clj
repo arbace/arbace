@@ -139,9 +139,6 @@
    ["java.util.Locale" ["java.lang.Cloneable" "java.io.Serializable"] false]
    ["java.util.Locale$Category" [] false]
    ["java.text.DecimalFormatSymbols" ["java.lang.Cloneable" "java.io.Serializable"] false]
-   ["sun.util.locale.provider.LocaleProviderAdapter" [] false]
-   ["sun.util.locale.provider.LocaleResources" [] false]
-   ["sun.util.locale.provider.ResourceBundleBasedAdapter" [] false]
    ["java.util.Date" ["java.io.Serializable" "java.lang.Cloneable" "java.lang.Comparable"] true]
    ["jdk.internal.foreign.Utils" [] false]
    ;; phase 2a: threads, concurrency, Unsafe, the VM's services
