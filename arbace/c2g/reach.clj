@@ -164,11 +164,6 @@
         :when (and (not (m/static? mm)) (not (m/private? mm)) (not= "<init>" (:name mm)))]
     [(:name mm) (:desc mm)]))
 
-(def ^:private scan-reach?
-  "C2G_REACH=scan: virtual calls matched to instantiated classes by scanning (the algorithm
-  before the indexes, kept to check that both reach the same)."
-  (= "scan" (System/getenv "C2G_REACH")))
-
 (defn- supertypes-of
   "The types class d is a subtype of (env/subclass?): d, its supertypes and Object."
   [d]
@@ -176,12 +171,11 @@
     (if (some #(= "java/lang/Object" %) s) s (conj (vec s) "java/lang/Object"))))
 
 (defn- vcalls-on
-  "The virtual calls [name desc] whose receiver's static type is a supertype of d."
+  "The virtual calls [name desc] whose receiver's static type is a supertype of d (indexed by
+  receiver type: the roots of --program are each a virtual call, about 20,000)."
   [d]
-  (if scan-reach?
-    (for [[o name desc] @(:vcalls *st*) :when (env/subclass? d o)] [name desc])
-    (let [by @(:vcalls-by *st*)]
-      (for [s (supertypes-of d) nd (get by s)] nd))))
+  (let [by @(:vcalls-by *st*)]
+    (for [s (supertypes-of d) nd (get by s)] nd)))
 
 (defn instantiate!
   [d]
@@ -201,9 +195,7 @@
     (when-not (contains? @(:vcalls *st*) k)
       (swap! (:vcalls *st*) conj k)
       (swap! (:vcalls-by *st*) update o (fnil conj []) [name desc])
-      (doseq [d (concat (if scan-reach?
-                          (filter #(env/subclass? % o) @(:inst *st*))
-                          (get @(:inst-by *st*) o))
+      (doseq [d (concat (get @(:inst-by *st*) o)
                         (filter #(env/subclass? % o) @(:lambda-fis *st*)))]
         (when-let [impl (java-impl-of d [name desc])] (reach! impl))))))
 
