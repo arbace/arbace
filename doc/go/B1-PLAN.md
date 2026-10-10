@@ -116,8 +116,13 @@ pinned by commit, or vendored) is decided then.
   over the evaluator's `Dyn` (the user's decision; for `Object`, interfaces and a fixed list of
   non-leaf classes: C2G-SPEC §5.12, §10.4, amendments X1, X2), and the fork-join pool is real,
   goroutine workers in jrt, so reducers' `fold` and parallel streams run in parallel (C2G-SPEC
-  §8.4, amendment S5). `gen-class`, `defclass` at the REPL and JVM interop beyond the closed
-  world stay out.
+  §8.4, amendment S5). **Reversed for sockets (2026-10-10, the user's decision of 2026-10-09;
+  amendments NT1-NT5):** `java.net`'s sockets and addresses are translated over jrt's
+  `HostSocketImpl` and the host's optional `NetHost`, and `arbace.core.server` (the socket REPL,
+  `prepl`, `io-prepl`, `remote-prepl`) is in the executable, its servers started from the
+  `arbace.server.*` properties (from `JAVA_TOOL_OPTIONS`) as on the JVM (C2G-SPEC §4.1, §9.4,
+  §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class`, `defclass` at the REPL and JVM interop
+  beyond the closed world stay out.
 
 (D3, how Arbace depends on go-whim, moves to B1b.)
 

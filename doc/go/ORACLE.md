@@ -12,7 +12,7 @@ Under `test/oracle/`:
 
 | part | sources | what | size |
 |---|---|---|---|
-| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 7,222 forms, 15 files |
+| forms | `forms/*.clj` (hand-written, by topic) | Clojure forms, evaluated in order | 7,305 forms, 16 files |
 | forms | `forms/harvest/*.clj` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,189 forms, 29 files |
 | classes | `classes/*.clj` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.clj` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
@@ -37,7 +37,11 @@ fields, `IFn` and collection implementations, `proxy`, `bean`; EVAL-NOTES.md pha
 vars and `binding`, atoms, refs, delays, exceptions and their messages, metadata, namespaces,
 keywords and symbols, the regex functions, `eval`), `files` (`java.io.File`, `arbace.java.io` on
 files and `file:` URLs, `java.net.URL`, `java.nio.file`'s `Path` and `Files`, `load-file`, in a
-temporary directory made for the run whose path never shows; JRT-NOTES.md, "Files").
+temporary directory made for the run whose path never shows; JRT-NOTES.md, "Files"), `net`
+(`InetAddress` from literals and bytes, its printing, equality and kinds, `InetSocketAddress`, a
+`ServerSocket` and `Socket` over the loopback address on ports the host chooses, their states,
+the values they carry and the exceptions of misuse, `arbace.java.io` on sockets; no host names,
+ports, buffer sizes or timings in the results; JRT-NOTES.md, "Sockets (go-net)").
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),

@@ -235,14 +235,29 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   (step 5)"): JDK 21's sequenced collections, `java.lang.constant`'s `Constable` and
   `ConstantDesc`, `java.util.stream` whole with `java.util.function`, `Optional` and the rest
   streams need, `CountedCompleter`, `EnumSet`/`EnumMap`, `RandomGenerator`, `URI`,
-  `CyclicBarrier`, `java.time.Instant` and `DateTimeException`.
+  `CyclicBarrier`, `java.time.Instant` and `DateTimeException`; and sockets (branch `go-net`,
+  2026-10-09; JRT-NOTES.md, "Sockets"): 22 files of `java/net` (`ServerSocket`, `Socket`,
+  `SocketImpl`, `SocketImplFactory`, `SocketAddress`, `InetSocketAddress`, `InetAddress`,
+  `Inet4Address`, `Inet6Address`, `InetAddressImpl`, `Inet4AddressImpl`, `Inet6AddressImpl`,
+  `SocketOptions`, `SocketOption`, `StandardSocketOptions`, the exceptions `SocketException`,
+  `BindException`, `ConnectException`, `NoRouteToHostException`, `UnknownHostException`,
+  `SocketTimeoutException`, and `spi/InetAddressResolver`), `java/io/InterruptedIOException`
+  and `sun/net/PlatformSocketImpl`, of jdk26u at `baf63fb` (`IPAddressUtil`,
+  `jdk.internal.util.Exceptions` and `Hashtable`, which `System.getProperties()`'s `Properties`
+  extends, came with the files' `file-sources`, below). With both, `bin/jrt-convert` translates
+  415 Java files, all compiled to javac's shapes (411 identical, the 4 known differences).
 - **Other modules' files** (amendment S2, accepted 2026-10-09; C2G-SPEC §16):
   `added-module-sources` lists files of `src/MODULE/share/classes` (paths relative to jdk26u),
   `java.sql.Timestamp` and `java.sql.Date`, which `bin/jrt-convert` copies into java.base's
   tree and javac's `--patch-module java.base` compiles with it; `sources.txt` gives them KIND
   `share:MODULE`.
 - **jrt's own Java**, `overlay/jdk/MODULE/...` (KIND `overlay`, `overlay-sources`), replacing or
-  adding to jdk26u's files (C2G-SPEC §4.1, K1).
+  adding to jdk26u's files (C2G-SPEC §4.1, K1). Since `go-net`: `jdk.internal.jrt.HostSocketImpl` (the platform
+  `SocketImpl`, after jdk26u's `sun.nio.ch.NioSocketImpl`, whose code it transcribes where it
+  keeps it: LICENSE.md) and `jdk.internal.jrt.HostNet` (the socket table's and the name
+  service's natives). The Go-build variants of `Socket`, `ServerSocket`, `SocketImpl`,
+  `InetAddress`, `Inet4Address`, `Inet6Address`, `Inet4AddressImpl`, `Inet6AddressImpl` and
+  `jdk.internal.util.Exceptions` are in `overlay/jdk/variants/` (JRT-NOTES.md, "Sockets").
 - **Files** (`file-sources`; the user's decision of 2026-10-09, JRT-NOTES.md, "Files"): 46 files
   for `java.io.File` and the file system, `java.nio.file`'s options and exceptions, and
   `java.net.URL` with its handlers and the file: connection (`URL`, `URLStreamHandler`,
