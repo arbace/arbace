@@ -1401,3 +1401,11 @@ decision (2026-10-08).
   `serialization` namespaces stay skipped, the oracle's serialization case stays a known
   mismatch). After the freeze, the `.ae` rename comes first, then the focus is TamaGo: B1b, the
   box. AOT of namespaces to Go (the throughput gap) is not scheduled.
+- The user's decision, the same day: after the `.ae` rename, a Clojure → Arbace translator,
+  c2a: first the mechanical renames (`clojure.*` namespaces, the `clojure.lang`, `clojure.asm`
+  and `clojure.java.api` packages, the `:clojure.error` keyword, the `clojure.*` system
+  properties; what `arbace.j2c.rename` does for the test tools today), later more as the Clojure
+  and Arbace dialects diverge. With it the tools are renamed to name Arbace as their target:
+  j2c → j2a, g2c → g2a, and c2g → a2g if it is still needed then. Arbace runs Clojure source
+  unchanged only when it names nothing but `clojure.core` (measured: `(require 'clojure.string)`
+  fails on both builds; `#?(:clj ...)` reads); a measured corpus of libraries is deferred.
