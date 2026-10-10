@@ -16,7 +16,7 @@
             (let [w (unsigned-bit-shift-right-int j 3)]
               (aset words w (bit-or (aget words w)
                                     (bit-shift-left (bit-and (long (aget bytes j)) 0xff)
-                                                    (unchecked-multiply-int 8 (bit-and j 7))))))
+                                                    (unchecked-multiply-int 8 (bit-and-int j 7))))))
             (recur (unchecked-inc-int j))))
         (BitSet. words))))
 
@@ -34,6 +34,6 @@
                 (when (< j len)
                   (aset bytes j (unchecked-byte (unsigned-bit-shift-right
                                                   (aget words (unsigned-bit-shift-right-int j 3))
-                                                  (unchecked-multiply-int 8 (bit-and j 7)))))
+                                                  (unchecked-multiply-int 8 (bit-and-int j 7)))))
                   (recur (unchecked-inc-int j))))
               bytes))))))
