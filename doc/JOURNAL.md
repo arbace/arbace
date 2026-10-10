@@ -1361,3 +1361,20 @@ decision (2026-10-08).
 - The user's choice: 1-6 before the freeze; 7-10 after. Four agents: `gofix` (1-3 without the
   locales), `gotext` (6 with the locales), `goproc` (4, reversing D6 for processes), `gosec`
   (5).
+
+## 2026-10-10: the Go executable's REPL under rlwrap
+
+- Agent, branch `gorl` (`6608250`), merged; the user accepted RL1-RL3 (EXEC-NOTES.md, "Line
+  editing: rlwrap"), folded by the main session into C2G-SPEC §10.6 and §16 and B1-PLAN's
+  "Checks". `main` first calls `execRlwrap` (before jrt's host and the image; about 11 ms of
+  Go's package initialization in the first process): when the arguments start the REPL, fds 0
+  and 1 are terminals with a width, `TERM` is set and not `dumb`, the parent is not rlwrap,
+  `rlwrap` is on `PATH` and `ARBACE_RLWRAP` is neither `off` nor `wrapped`, it execs `rlwrap`
+  with `clj`'s flags around itself (`ARBACE_RLWRAP=wrapped` for the child; history in
+  `~/.arbace_history`); otherwise silently on. The smoke test gains 24 checks on a
+  pseudo-terminal (`test/arbace-go-rlwrap.py`). Considered: a message when rlwrap is missing, as
+  `clj` (not taken: the executable is the only way to its REPL and works without rlwrap).
+- Also folded by the main session: SZ1-SZ4 into C2G-SPEC §16 ("Size").
+- Main session on the merge (over the size trimming): `bin/jrt-convert`, the amd64 build (61.9
+  MB), the smoke test 36 of 36 with the terminal checks, the Go oracle 21,792 of 21,800 as
+  recorded.

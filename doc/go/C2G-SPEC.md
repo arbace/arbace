@@ -2531,6 +2531,17 @@ supertypes (amendment TM8, accepted 2026-10-10; `arbace.c2g.reach`).
 static initializer requires `arbace.edn` at first use) exists in the Go build as on the JVM. It is
 a class of the program, not an embedded namespace's source.
 
+**The interactive REPL under rlwrap** (amendments RL1, RL2, accepted 2026-10-10; EXEC-NOTES.md,
+"Line editing: rlwrap"). The main package's `main` first calls `execRlwrap`
+(`rlwrap_linux.go`; an empty `rlwrap_other.go` for other systems), before jrt's host and the
+image: when the arguments start the REPL (none, or `arbace.main`'s init options then
+`-r`/`--repl`), fds 0 and 1 are terminals and fd 0 reports a width, `TERM` is set and not
+`dumb`, the parent is not rlwrap, `rlwrap` is an executable on `PATH`, and `ARBACE_RLWRAP` is
+neither `off` (the user's switch) nor `wrapped` (the marker for the child), it replaces itself
+(`syscall.Exec`) with `rlwrap` with `clj`'s flags around the executable's own path and
+arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
+silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
+
 ### 10.7 Stack traces
 
 The evaluated Clojure code's frames are not Go frames: the Go stack shows only the
@@ -3865,6 +3876,19 @@ clock: §9.4. TM7 the rename table's `Calendar_Era` and the first package-privat
 by a variant: §4.4. TM8 root instance methods as virtual calls, reachability indexed: §10.6. TM9
 `bin/jrt-convert`'s shape check takes jrt's own replacing classes from source: JRT-SOURCES.md.
 TM4 replaces the hand-written locale shims of R17 with Java (§12); TM8 refines P2 and RD2.
+
+**Size** (JRT-NOTES.md, "Size"; accepted by the user 2026-10-10): SZ1 the executables linked
+with `-ldflags=-s -w` (`ARBACE_GO_SYMBOLS=1` keeps the symbols; Go's function table stays, so
+panics and Java stack traces are unchanged): `bin/arbace-go`. SZ2 embedded resources
+zlib-compressed (`P.z`) when a quarter smaller: §10.3. SZ3 a class's reflective members as a
+data table (`MemberTable`) decoded at first use (`EnsureMembers`): §5.8's member tables. SZ4
+`Dyn` and the `DynSub_C` types embed one `dynCore` with the world's interface methods: §5.12.
+Together 107.1 → 61.9 MB on amd64.
+
+**rlwrap** (EXEC-NOTES.md, "Line editing: rlwrap"; accepted by the user 2026-10-10): RL1 the
+interactive REPL under rlwrap, `ARBACE_RLWRAP`: §10.6. RL2 the main package's
+`rlwrap_linux.go` and `rlwrap_other.go`: §10.6 (U3's files). RL3 the smoke test's
+pseudo-terminal check: B1-PLAN.md, "Checks".
 
 Each with a recommendation, which the text above follows, for the user's review.
 

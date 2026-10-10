@@ -386,8 +386,8 @@ into their home documents, as noted under each.
 
 ### The REPL under rlwrap (RL)
 
-Numbered RL (a prefix not used in `doc/`); proposed on branch `gorl` (2026-10-10), for the
-user's acceptance.
+Numbered RL (a prefix not used in `doc/`); proposed on branch `gorl` (2026-10-10). **All three
+accepted by the user 2026-10-10**, folded into C2G-SPEC §10.6 and §16 and B1-PLAN's "Checks".
 
 - **RL1 (C2G-SPEC §10.6; the executable's environment) The interactive REPL under rlwrap.**
   The program's `main` first calls `execRlwrap`, which replaces the process (execve) with

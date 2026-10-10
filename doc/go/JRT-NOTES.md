@@ -2999,7 +2999,7 @@ slightly lower (158 MB, 162 before), the member tables no longer built at the st
 - **jrt's hand-written classes' tables** (`reflect_tables.clj`, 0.4 MB): could use the
   `MemberTable` too (`test/jrt/tables.clj`); small.
 
-## Proposed amendments (for the user's review)
+## Amendments (SZ): accepted by the user 2026-10-10, folded into C2G-SPEC §16 ("Size")
 
 Numbered SZ (size); no SZ appears elsewhere in doc/.
 

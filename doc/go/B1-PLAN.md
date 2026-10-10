@@ -87,7 +87,8 @@ Rough total: 25-43 days.
 jrt's tests and the differential tests; step 6 adds the executable's smoke test to `bin/gate`
 and its suite run to `--full`. The essential gate's smoke test (amendment U5, accepted
 2026-10-09) runs on an executable cached by a hash of its inputs (`bin/arbace-go --gate`,
-`.tmp/arbace-go-gate`), built again, beside the suite, only when they changed.
+`.tmp/arbace-go-gate`), built again, beside the suite, only when they changed. The smoke test also runs the REPL on a
+pseudo-terminal under rlwrap on amd64 (amendment RL3, accepted 2026-10-10; about 5 s).
 **D7** (performance, deferred to step 7; C2G-SPEC §13.4): the start's collector setting is step
 6's (amendment U4: `GOGC=400` while the program starts); the running program's is step 7a's.
 *Closed by amendment O1 (accepted 2026-10-10, SPEED-NOTES.md):* `GOGC=200` and a 64 MiB
