@@ -1196,7 +1196,8 @@ first use: `java.version` 26, `java.class.version` 70.0, `os.name` Linux, `os.ar
 (`Properties`, a `Map`) and come with them.
 
 **`Runtime`**: `getRuntime`, `availableProcessors` (the host's), `freeMemory`, `totalMemory`,
-`maxMemory` (Go's memory limit), `gc`, `exit`, `halt`, `addShutdownHook`. `Runtime.version()`
+`maxMemory` (Go's memory limit), `gc`, `exit`, `halt`, `addShutdownHook` (the hooks run at
+`System.exit` and, since amendment FS5, when `RunMain`'s main and the non-daemon threads end). `Runtime.version()`
 waits for `Runtime$Version`.
 
 ## Coverage of the edge
@@ -1798,6 +1799,165 @@ same name. jrt's locks are hand-written for these reasons (JAVA-SURFACE.md decis
 
 With it and Dyn's hand-written interfaces (EVAL-NOTES.md, "Phase 2B follow-up"), the suite's
 `pprint` namespace loads and passes 470 of its 474 assertions.
+
+# Files: java.io.File and the file system in the Go build
+
+The user's decision of 2026-10-09, reversing part of D6 (B1-PLAN.md): `java.io.File` and the file
+system, `arbace.java.io` on files and `file:` URLs, `slurp`/`spit` on paths, `load-file`
+(branch `go-file`). Sources and their origins: JRT-SOURCES.md, "The closure as grown", `Files`.
+
+## What was done
+
+**`java.io.File` translated from jdk26u, its file system jrt's.** `File`, the abstract
+`FileSystem`, `FileFilter`, `FilenameFilter`, `DeleteOnExitHook`, `FileReader`, `FileWriter`
+(`src/java.base/share/classes/java/io`) and the Unix `UnixFileSystem` and `DefaultFileSystem`
+(`src/java.base/unix/classes/java/io`, KIND `unix`, amendment FS1) are translated as they are.
+UnixFileSystem's 15 natives read the `File`'s path field through JNI, which a jrt native cannot
+(jrt builds without the translated classes, C2G-SPEC §9.1): the variant
+`overlay/jdk/variants/UnixFileSystem.clj` replaces each by a method passing the path string to a
+static native added to the class (`hostCanonicalize`, `hostBooleanAttributes` ...), and those
+natives are jrt's Go (`filesystem.clj`), with the results of jdk26u's C
+(`UnixFileSystem_md.c`: stat-based attributes, `access(2)`, `chmod`, `utimes` keeping the access
+time, `O_CREAT|O_EXCL` creation, `remove`, `mkdir 0777`, `rename`, `statvfs`, `pathconf`;
+`canonicalize_md.c`'s `JDK_Canonicalize` and `path_util.c`'s `collapse`, transcribed: LICENSE.md).
+Other variants: the constructor reads the separators and `user.dir` through
+`System.getProperty` (`StaticProperty` and `System.getProperties`' `Hashtable`-based
+`Properties` were outside the world); `File$TempDirectory` reads `java.io.tmpdir` the same way and
+draws its names from `java.util.Random` (`SecureRandom` is outside the world; the file is created
+`O_EXCL`, so the names need not be unpredictable); `File.toPath` makes jrt's `HostPath`;
+`DeleteOnExitHook` registers with `Runtime.addShutdownHook`.
+
+**The host: an optional `HostFS`** (`hostfs.clj`). `Host` (host.clj) is unchanged: what `File`
+needs beyond its `Open`, `Stat`, `ReadDir`, `Remove`, `Mkdir`, `Rename` is a second interface,
+`HostFS` (`Access`, `Chmod`, `Chtimes`, `Realpath`, `Statfs`), which a host implements when it
+can; `CurrentHostFS()` is the current host as one, or nil. B1a's `OSHost` implements it on Linux
+(`hostfs_linux.clj`, `//go:build linux`: `syscall.Access`, `syscall.Chmod`, `os.Chtimes` with a
+zero access time, `filepath.EvalSymlinks`, `syscall.Statfs`). Without it (B1b's host until it has
+one) the natives answer as the JDK does when the system call fails (no permission changes or
+times, canonical paths only collapsed, no space). Kept in files of their own, apart from the
+socket work's host additions.
+
+**Shutdown hooks at the end of main.** `RunMain` now runs the shutdown hooks after main and the
+non-daemon threads end, as the JVM's `DestroyJavaVM` does; before, they ran only at
+`System.exit`, so `deleteOnExit` would not have deleted when a script ended normally.
+
+**`java.nio.file`, as far as Arbace and the suite use it** (decision FS2 below). jrt's own
+`Path` (the documented interface without `getFileSystem` and `register`), `Files` (streams,
+readers and writers, whole-file reads and writes, `lines`, the tests, `size`, creating and
+deleting files and directories, temporary files and directories, `copy`, `move`) and
+`jdk.internal.jrt.HostPath` (UnixPath's path operations transcribed over the path's chars, with
+UnixPath's `compareTo` and `hashCode` over the UTF-8 bytes); jdk26u's `Paths`, the option enums
+and interfaces, `FileAttribute`, and the exceptions (`NoSuchFileException`,
+`FileAlreadyExistsException`, `DirectoryNotEmptyException`, `AccessDeniedException`,
+`InvalidPathException`, `ProviderMismatchException`, `FileSystemException`). `Files`' errors are
+the documented ones; its readers replace malformed input as `InputStreamReader` does where the
+JDK's report it (`MalformedInputException`).
+
+**`java.net.URL` translated, with the `file:` connection.** `slurp` of a path string tries
+`(URL. s)` first, so `URL` is needed for the plainest file read. Translated from jdk26u: `URL`,
+`URLStreamHandler`, `URLStreamHandlerFactory`, `URLConnection`, `MalformedURLException`,
+`UnknownServiceException`, `URLDecoder`, `ContentHandler`, `FileNameMap`;
+`sun.net.www.ParseUtil`, `URLConnection`, `MessageHeader`, the `file:` connection
+`FileURLConnection` and the handlers of `file:` (Unix), `http:`, `https:` and `jar:` (their
+syntax and default ports; their connections stay outside the world); what they use,
+`sun.net.util.IPAddressUtil` (the URL checks), `jdk.internal.util.Exceptions`, `HexFormat`,
+`HexDigits`, `Hashtable` and `Dictionary`. Variants: `URL` without the static initializer that
+hands its handler to `SharedSecrets`, without the `ScopedValue` and `ObjectStreamField` fields,
+the providers' lookup finding none, and a default factory of the four handlers; `URLStreamHandler`'s
+`hashCode` and `hostsEqual` by host name (the address lookup, `InetAddress`, is outside the world:
+they answer as the JDK for a host that does not resolve, exactly as the JDK for `file:` URLs);
+the `file:` handler's `openConnection(URL)` without the `Proxy` overload; `ParseUtil.decode`
+over `String`'s UTF-8 with the decoder's REPORT (valid UTF-8 is what encodes back to the same
+bytes); `URLConnection.getFileNameMap` knowing no MIME type (the JDK's table is a resource of
+the image); `Exceptions.setup` with the JDK's default `jdk.includeInExceptions`
+(`hostInfoExclSocket`); `HexFormat.parseHex(char[] ...)` over a `String`. c2g's rename table
+gains `Www_URLConnection`, `File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler` and
+`Net_Proxy` (jrt's `Proxy` is `java.lang.reflect`'s).
+
+**The namespaces.** `arbace/lang/go/ns/java/io.subst.clj`: `copy` between two files through
+their streams (Clojure's goes through their channels, outside the world), and the escape of `+`
+written out (`"%2B"`; Clojure computes it with `URLEncoder`, whose encoders are outside the
+world). `main.subst.clj` no longer replaces the error report's `Files/createTempFile`: the
+report goes to a temporary file as on the JVM. `Compiler.loadFile`'s Go-build variant is gone:
+`load-file` is the JVM's, with `File`'s absolute path and name.
+
+**Not done.** `RandomAccessFile` (nothing in Arbace or the suite uses it); `java.nio`'s
+channels, buffers and coders (`FileChannel`, `URLEncoder`); `Files`' attribute views, directory
+streams, walks and links; `jar:`, `http:` and `https:` connections; `URLClassLoader`
+(`java.io` suite's two resource tests); `java.net.ServerSocket` and `Socket` (the sockets
+branch).
+
+## Decisions
+
+- **`java.nio.file`: jrt's own subset, not jdk26u's file system providers.** jdk26u's `Path`
+  and `Files` go through `FileSystemProvider` and `sun.nio.fs` (`UnixPath`,
+  `UnixFileSystemProvider`, `UnixNativeDispatcher`'s some hundred natives, channels, attribute
+  views, watch services): thousands of lines and a second native layer for what `java.io.File`'s
+  15 natives already reach. What Arbace and the suite use is small: `arbace.main`'s error report
+  (`Files/createTempFile`, `Path.toFile`), the suite's `test-iteration`
+  (`Files/newBufferedReader`, `File.toPath`); Clojure's `java.io` namespace uses `java.nio` only
+  for `copy`'s channels. So `Path`, `Files` and `HostPath` are jrt's own Java over `File` and the
+  file streams, with the documented behaviour of the common operations and UnixPath's path
+  arithmetic, and jdk26u's small plain files (`Paths`, the options, the exceptions) translated.
+  Alternative considered: translating `sun.nio.fs` with its natives in jrt, kept for when
+  channels or attribute views are needed.
+- **`RandomAccessFile`: not now.** Nothing in Arbace, its namespaces or Clojure's suite uses it;
+  jdk26u's needs `FileChannel` and its own natives over the file table. It would join `HostFiles`
+  (a seek and a read/write mode) when wanted.
+- **`java.net.URL` translated, not written.** `slurp` of a path string goes through `URL` first,
+  and the suite's `java.io` tests build `URL`s of every shape; jdk26u's parser
+  (`URLStreamHandler.parseURL`, `IPAddressUtil`'s checks) is plain Java, so the URLs behave as
+  the JDK's. The cost: 23 more files (the handlers, the connection classes, `Hashtable`,
+  `HexFormat`) and seven variants. Connections other than `file:` stay outside the world.
+
+## Results
+
+| check | result |
+|---|---|
+| `bin/jrt-convert` | 389 files (340 before), all compiled to javac's class shapes |
+| `bin/c2g --program` | 2,021 classes (1,961 with `File` alone), no errors |
+| `bin/jrt test -run 'TestCollapsePath\|TestFileSystemNatives'` (`filesystem_test.clj`: the natives on a temporary directory, `collapse`) | pass on amd64 and on arm64 under `qemu-aarch64` |
+| the oracle's new `forms/files.clj`, 324 cases | the JVM 324 of 324; Go 323 of 324 (the hash of a `localhost` URL, in `known-go-amd64.edn`) |
+| `bin/oracle check jvm` | 20,587 of 20,587 |
+| `bin/oracle check 'target/arbace-go/amd64/arbace -' --expected test/oracle/known-go-amd64.edn` | 20,553 of 20,587; the mismatches exactly the 34 known |
+| Clojure's suite on Go (amd64) | 19,398 assertions, 19,375 pass, 19 fail, 4 errors (was 19,280, 19,251, 19, 10): `method-thunks` (20 of 20), `reader` (7,796 of 7,796, `load-file` of temporary files) and `sequences` (1,148 of 1,148) now pass as on the JVM; `java.io` still fails to load on `java.net.ServerSocket` (the sockets branch); without its socket test and imports, 14 tests and 107 of 111 assertions pass, the 4 errors `URLClassLoader` and the class loader's `getResource` |
+| size, amd64 | 60.70 MB, against 58.60 MB: +2.1 MB |
+
+## Amendments (FS)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "Files"):
+
+- **FS1 (JRT-SOURCES.md, the tool) Files of `src/java.base/unix/classes`.** `bin/jrt-convert`
+  copies them like the shared ones; `sources.txt` gives them KIND `unix`
+  (`g2c.jrt-sources/print-sources`). For `UnixFileSystem`, `DefaultFileSystem` and the `file:`
+  handler, whose shared counterparts are abstract or absent. *Accepted 2026-10-10, folded into
+  JRT-SOURCES.md ("The closure as grown", Files).*
+- **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
+  Decisions), and no `RandomAccessFile`. *Accepted 2026-10-10; it stays here, in Decisions, and
+  C2G-SPEC §4.1 refers to it.*
+- **FS3 (C2G-SPEC §9.4, the host interface) An optional `HostFS` beside `Host`.** A host's
+  file system calls beyond `Host`'s are a second interface a host may implement
+  (`CurrentHostFS`); jrt's natives fall back to the JDK's failure results without it. Keeps
+  `Host` unchanged for B1b's monitor and for the other host additions (sockets). *Accepted
+  2026-10-10, folded into C2G-SPEC §9.4.*
+- **FS4 (C2G-SPEC §4.4, Collisions) Rename table entries**: `sun/net/www/URLConnection`
+  `Www_URLConnection`, the handlers `File_Handler`, `Http_Handler`, `Https_Handler`,
+  `Jar_Handler`, and `java/net/Proxy` `Net_Proxy` (jrt's `Proxy` is `java.lang.reflect`'s).
+  *Accepted 2026-10-10, folded into C2G-SPEC §4.4.*
+- **FS5 (C2G-SPEC §8.4, threads) Shutdown hooks at the end of main.** `RunMain` runs them once
+  main and the non-daemon threads have ended, as the JVM does; before, only `System.exit` ran
+  them. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (and `Runtime.addShutdownHook`'s
+  description in "`System`, `Runtime` and the host" below holds as amended).*
+- **FS6 (C2G-SPEC §4.1 and §10.3, the world and the namespace variants) `java.io.File`,
+  `java.net.URL` with the `file:` connection, and the `java.nio.file` subset in the closed
+  world**, with the variants listed above; `java/io.subst.clj` (copy between files by streams,
+  `"%2B"`) and `main.subst.clj` (the error report's temporary file as on the JVM) changed, and
+  `Compiler.loadFile`'s variant removed. *Accepted 2026-10-10, folded into C2G-SPEC §4.1 and
+  §10.3.*
+- **FS7 (LICENSE.md) Transcribed code**: `HostPath.java` (UnixPath's path operations) and
+  `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
+  the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
+  from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).*
 
 # The JDK's resource data (regex `\N{name}` and `CANON_EQ`)
 

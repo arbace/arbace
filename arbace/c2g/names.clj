@@ -71,6 +71,15 @@
    "java/sql/Date" "Sql_Date"
    ;; java.util.Tripwire's twin in java.util.stream (step 5 phase 2B, streams)
    "java/util/stream/Tripwire" "Stream_Tripwire"
+   ;; java.net.URLConnection's subclass in sun.net.www, and the URL handlers, all named Handler
+   ;; (JRT-NOTES.md, "Files")
+   "sun/net/www/URLConnection" "Www_URLConnection"
+   "sun/net/www/protocol/file/Handler" "File_Handler"
+   "sun/net/www/protocol/http/Handler" "Http_Handler"
+   "sun/net/www/protocol/https/Handler" "Https_Handler"
+   "sun/net/www/protocol/jar/Handler" "Jar_Handler"
+   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members name
+   "java/net/Proxy" "Net_Proxy"
    ;; java.text.Normalizer's internal twin, which Pattern calls for combining classes
    ;; (JRT-NOTES.md, "The JDK's resource data")
    "sun/text/Normalizer" "Sun_Normalizer"})
