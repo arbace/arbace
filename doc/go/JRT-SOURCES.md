@@ -439,6 +439,6 @@ jdk26u at `baf63fb`, `test/g2c/jrt_sources.clj`'s `process-sources`:
   `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
   `waitForProcessExit0`, `destroy0`, `parent0`, `getProcessPids0`, and `ProcessHandleImpl.Info.hostInfo`
   (the variant's).
-- **Result** (`bin/jrt-convert`): 644 files (638 before: 581 of `share`, 5 `unix`, 26 generated,
+- **Result** (`bin/jrt-convert`): 644 files (637 on main: 6 sources and RuntimeExec added; 581 of `share`, 5 `unix`, 26 generated,
   30 of jrt's own), all converted and compiled to javac's class shapes, 640 identical and the 4
   known differences, 1,880 classes.

@@ -3128,3 +3128,41 @@ meaning in the Go build. No `/bin/sh` fallback for ENOEXEC (this machine's JVM h
   `ProcessImpl` always starts): the Java reaper thread waits on the host's record instead of
   `waitpid`, so the child is reaped even when the Java side is slow, and its pid cannot be
   reused under a later `destroy`.
+
+## Proposed amendments (for the user's review)
+
+Numbered PR (processes); no PR appears elsewhere in doc/.
+
+- **PR1 (B1-PLAN.md D6; C2G-SPEC §4.1, the closed world; §10.3, the embedded namespaces)**
+  D6 is reversed for processes: `Process`, `ProcessBuilder` (with `Redirect`), `ProcessHandle`,
+  `ProcessHandleImpl`, `ProcessImpl` and `ProcessEnvironment` are translated from jdk26u with
+  the variants above, and `arbace.java.shell` and `arbace.java.process` are embedded (embed.clj
+  no longer leaves them out); Clojure's suite on Go runs `java.shell` and `java.process`.
+- **PR2 (C2G-SPEC §9.4, the host interface)** An optional `HostProc` beside `Host` (`Start`,
+  `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`, children as `HostChild`), as `HostFS`,
+  `NetHost` and `HostLinks`; without it no program starts (the JVM's IOException with ENOSYS).
+  B1a's `OSHost` implements it on Linux over `os.StartProcess`, `os.Pipe` and `/proc`, reaping
+  each child in a goroutine at its end.
+- **PR3 (C2G-SPEC §9.1, the natives)** jrt defines the natives of `ProcessEnvironment.environ`,
+  `ProcessHandleImpl`'s (`getCurrentPid0`, `isAlive0`, `waitForProcessExit0`, `destroy0`,
+  `parent0`, `getProcessPids0`) and those the variants add (`ProcessImpl.hostForkAndExec`,
+  `ProcessHandleImpl.Info.hostInfo`); the children's pipes are entries of jrt's file table
+  (`HostFiles`), whose `available` asks a file that can tell (a pipe: `FIONREAD`), and jrt's
+  `FileDescriptor` gives `HostFiles` the setting of its number (`HostFiles.DescriptorAccess`,
+  `setHandle`) for `ProcessImpl`'s descriptors.
+- **PR4 (C2G-SPEC §11, c2g's support code)** `Runtime.exec`'s six overloads are in `Runtime`'s
+  member table, written by c2g when jrt's own `jdk.internal.jrt.RuntimeExec` is translated (its
+  methods rooted), as `System.getenv` and `getProperties` are.
+- **PR5 (C2G-SPEC §9.4, the JVM's texts; with NT5)** A failed start's message is
+  `ProcessImpl_md.c`'s `IOE_FORMAT` with musl's `strerror` (`Exec failed, error: 2 (No such file
+  or directory) `, trailing space included), the program is looked for as this machine's JVM
+  looks for it (musl's `execvp` with the environment inherited, `JDK_execvpe` with it given; no
+  `/bin/sh` fallback), and the exit status is the JDK's encoding (0x80 plus the signal).
+- **PR6 (LICENSE.md, B7)** The variants keep jdk26u's code of the methods they replace,
+  `RuntimeExec.java` transcribes `Runtime.exec`, and `process.clj` and `hostproc_linux.clj`
+  follow `ProcessImpl_md.c`, `childproc.c`, `ProcessHandleImpl_unix.c` and
+  `ProcessHandleImpl_linux.c`: recorded as jdk26u-derived (GPL 2 with the Classpath Exception),
+  as the B7 files are.
+- **PR7 (C2G-SPEC §7, method references)** A bound method reference to a private method of a
+  non-leaf class is a call of its `Impl_` with the receiver's struct and the receiver, as an
+  invocation of it is.
