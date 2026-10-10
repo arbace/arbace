@@ -234,11 +234,29 @@ and `http:`, `https:`, `jar:` for their syntax only) and the `file:` connection,
 variants: `UnixFileSystem` (its natives replaced by static natives on path strings, §9.1, over
 §9.4's `HostFS`), `File` (`toPath`; `TempDirectory` without `StaticProperty` and
 `SecureRandom`), `DeleteOnExitHook` (a `Runtime` shutdown hook), `URL`, `URL$DefaultFactory`,
-`URLStreamHandler` (`hashCode` and `hostsEqual` by host name: no `InetAddress`),
+`URLStreamHandler` (`hashCode` and `hostsEqual` compared host names while `InetAddress` was
+outside the world; with sockets, below, the variant is gone and they are the JDK's),
 `URLConnection` (no MIME table), `sun.net.www.ParseUtil` and `URI` (`decode` without
 `CharsetDecoder`), the `file:` handler (no `Proxy`), `HexFormat`, `jdk.internal.util.Exceptions`
 (the JDK's default `jdk.includeInExceptions`). Connections other than `file:`,
 `RandomAccessFile`, channels and `java.nio`'s coders stay outside the world.
+
+**Sockets in the closed world** (amendments NT1-NT5, accepted 2026-10-10; JRT-NOTES.md, "Sockets
+(go-net)"). D6's cut of sockets is reversed: jdk26u's `ServerSocket`, `Socket`, `SocketImpl`,
+`InetAddress`, `Inet4Address`, `Inet6Address`, their `InetAddressImpl`s, `InetSocketAddress`, the
+socket options and exceptions, the resolver interface, `InterruptedIOException` and
+`sun.net.PlatformSocketImpl` are in the world (JRT-SOURCES.md), over jrt's own Java
+`jdk.internal.jrt.HostSocketImpl` (the platform `SocketImpl`, in place of `NioSocketImpl`) and
+`jdk.internal.jrt.HostNet` (static natives, §9.1, over §9.4's `NetHost`). Their Go-build
+variants: `SocketImpl` (`createPlatformSocketImpl`), `Socket` (its `VarHandle`s as `Unsafe`
+compare-and-set, no SOCKS wrapper, no JFR events), `ServerSocket` (no `DelegatingSocketImpl`),
+`InetAddress` (no native library or `SharedSecrets`, the built-in resolver only, a cache of
+`CachedLookup`s expiring when used: NT4), `Inet4Address`, `Inet6Address` (no `NetworkInterface`),
+`Inet4AddressImpl`, `Inet6AddressImpl` (natives over `HostNet`, no `isReachable`),
+`IPAddressUtil` (no `CharBuffer`) and `jdk.internal.util.Exceptions`
+(`jdk.includeInExceptions` from the system property, JDK 26's default otherwise). Code kept from
+jdk26u in `HostSocketImpl` and these variants is recorded in LICENSE.md (NT3).
+`NetworkInterface`, `Proxy`, the SOCKS and HTTP-tunnel impls and the resolver providers stay out.
 
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
@@ -496,7 +514,7 @@ since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 (`java.net.URLConnection`'s subclass), the URL handlers, all named `Handler`, →
 `File_Handler`, `Http_Handler`, `Https_Handler`, `Jar_Handler`, and `java/net/Proxy` →
 `Net_Proxy`, since jrt's `Proxy` is `java.lang.reflect`'s (amendment FS4, accepted
-2026-10-10).
+2026-10-10; `Socket(Proxy)` names it too, JRT-NOTES.md "Sockets (go-net)").
 The check runs after translation (`arbace.c2g.checks`) over every Go package's package-level
 names and every type's method names, across c2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -1848,7 +1866,12 @@ the translated code may use, as the analyzer needs it:
   (which returns null: §7.9.5, V11). jrt's own Java (§4.1, amendment K1, accepted 2026-10-09)
   adds `jdk.internal.jrt.HostFiles`' natives (`open0`, `read0`, `write0`, `available0`,
   `skip0`, `close0`: the file table over the host, in `go/arbace/jrt/files.clj`), static and
-  with primitive and array parameters only, so that jrt builds without the translated types.
+  with primitive and array parameters only, so that jrt builds without the translated types;
+  and, with sockets (NT1-NT5, accepted 2026-10-10), `jdk.internal.jrt.HostNet`'s (`listen0`,
+  `accept0`, `connect0`, `read0`, `write0`, `available0`, `close0`, `shutdown0`, `address0`,
+  `port0`, `setOption0`, `getOption0`, `lookup0`, `reverse0`, `hostName0`, `hasFamily0`: the
+  socket table and the name service over §9.4's `NetHost`, in `go/arbace/jrt/net.clj`), the same
+  way (`String` parameters too).
 - **Natives of `arbace.lang`** (amendments P1 and E6, accepted 2026-10-09). A `^:native` method
   a variant declares (§4.6) is translated the same way, a call of `C_M..._native` with the
   receiver first for an instance method. The function is **jrt's when jrt defines it**: the
@@ -1962,6 +1985,22 @@ can; `jrt.CurrentHostFS()` is the current host as one, or nil. `OSHost` implemen
 the natives of `UnixFileSystem`'s variant (`filesystem.clj`) answer as the JDK does when the
 system call fails (no permission or time changes, canonical paths only collapsed, no space).
 `Host` itself is unchanged, so B1b's host and other additions (sockets) are not touched by it.
+
+**An optional `NetHost`** (JRT-NOTES.md, "Sockets (go-net)"; accepted with NT1-NT5,
+2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.clj`): `Listen`, `Dial`
+(with a local address and a timeout), `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`,
+`SetOption`/`GetOption` (by `java.net.SocketOptions`' numbers) and `Available`. jrt asks the
+current host for it at each use; a host without it has no network (every `HostNet` native fails,
+`Network not available`). `OSHost` implements it over Go's `net` (the pure Go resolver) and
+`syscall` (options, `TIOCINQ`), undoing Go's defaults that differ from the JVM's (keep-alive,
+`TCP_NODELAY`). Errors are kinds that `HostNet.exception` turns into the JVM's exceptions, with
+the C library's texts as this machine's (musl) JVM gives them (amendment NT5).
+
+**`JAVA_TOOL_OPTIONS`** (amendment NT2, accepted 2026-10-10). The system properties are made
+from the host (above) and then from the `-Dname=value` options of the environment variable
+`JAVA_TOOL_OPTIONS`, split as HotSpot splits it (`tooloptions.clj`), as the JVM reads it at its
+start; no "Picked up" line is printed. Leading `-D` arguments of the executable are the
+launcher's (step 6). `System.getProperties()` is c2g's (§11): a `Properties` holding a copy.
 
 **`RT`'s streams, for now** (amendment P4, accepted 2026-10-09). Until jrt has `System`'s
 streams with `OutputStreamWriter` and `InputStreamReader` (whose `StreamEncoder` and
@@ -2180,7 +2219,10 @@ JVM prints it, with class forms lines (§7.9.6), and the status is 1. Measured: 
 22-24 MB; 7 ms from start to that exception on amd64. Since step 5, `--program` also embeds the
 namespaces' sources (§10.3, amendment M5) and registers the classes they name outside the world
 (§4.1, M3), and the program loads `arbace.core` and runs `arbace.main` (`bin/arbace-go`;
-EVAL-NOTES.md).
+EVAL-NOTES.md). `RT.doInit` then loads `arbace.core.server` and starts the socket servers of
+the `arbace.server.*` properties as the JVM's does (amendment NT1, accepted 2026-10-10;
+`System.getProperties()` through the reflection tables; about 20 ms with the image of prepared
+namespaces).
 
 **The main package's files** (amendment U3, accepted 2026-10-09). Besides `main.go` and the
 embedded sources (`res/`), `--program` writes `image.go` (the image's encoding, hand-written Go
@@ -2293,8 +2335,9 @@ each written when its classes are translated: `String.join(CharSequence, Iterabl
 and `describeConstable`, as Go functions and methods in `c2g_support.go` with their entries in
 the member tables (`reflect_tables_c2g.go`, whose `init` runs after jrt's `reflect_tables.go`);
 `Throwable.printStackTrace(PrintStream)` and `(PrintWriter)` (the trace's text printed) and
-`System.getenv()` (the host's environment, unmodifiable), as functions `C2g_*` with table
-entries; `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
+`System.getenv()` (the host's environment, unmodifiable) and `System.getProperties()` (a
+`Properties` copy of the properties, when `Properties` is translated; NT2), as functions `C2g_*`
+with table entries; `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
 as table entries only, for reflection. Translated code calling a member that exists only as a
 table entry is an operation-level stub (§4.1; none does). And the forwarders of hand-written
 leaf classes to translated default methods (§5.4).
@@ -3436,6 +3479,14 @@ and `java.net.Proxy`: §4.4. FS5 shutdown hooks at the end of `RunMain`: §8.4. 
 and the `java.nio.file` subset in the closed world, with their variants and the namespace
 variants' changes: §4.1, §10.3. FS7 the code transcribed from jdk26u in `HostPath.java` and
 `filesystem.clj`: LICENSE.md.
+
+**Sockets** (JRT-NOTES.md, "Sockets (go-net)"; accepted by the user 2026-10-10): NT1
+`RT.doInit` loads `arbace.core.server` and starts the servers of the `arbace.server.*`
+properties, as the JVM's: §10.6. NT2 `JAVA_TOOL_OPTIONS`' `-D` options as system properties, and
+`System.getProperties()`: §9.4, §11. NT3 the code kept from jdk26u in `HostSocketImpl.java` and
+the java.net variants: LICENSE.md. NT4 `InetAddress`'s simpler cache: §4.1. NT5 the musl texts of
+errors: §9.4. With them the sockets in the closed world, `jrt.NetHost` and `HostNet`'s natives:
+§4.1, §9.1, §9.4; B1-PLAN.md D6.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

@@ -1933,26 +1933,29 @@ the image of prepared namespaces: amd64 66,931,956 to 68,856,988 bytes (+1.93 MB
 `net.clj` are about 176 KB of symbols (`go tool nm -size`), the rest their type and member
 tables. Start (`-e nil`, amd64, 5 runs): 0.38-0.41 s against 0.34-0.44 s.
 
-## Proposed amendments (for the user's review)
+## Amendments (accepted by the user 2026-10-10)
 
 - **NT1** (RT.doInit, C2G-SPEC §10): the Go build's `RT.doInit` loads `arbace.core.server`
   and starts the servers of the `arbace.server.*` properties as the JVM's does (the comment of
-  the Go variant said it had no socket server). *Recommended: accept.*
+  the Go variant said it had no socket server). *Accepted 2026-10-10: C2G-SPEC §10.6 (and §16, "Sockets").*
 - **NT2** (system properties): `JAVA_TOOL_OPTIONS`' `-D` options are the Go executable's system
   properties (the JVM's mechanism, the same text for both builds); no "Picked up" line is
   printed. Leading `-Dname=value` arguments of the executable, as the `java` launcher takes
   them, were not added: they belong to step 6's command line (`bin/arbace-go`, the program's
-  `main`). *Recommended: as is; step 6 decides the launcher's `-D`.*
+  `main`). *Accepted 2026-10-10: C2G-SPEC §9.4, §11.*
 - **NT3** (licensing): `HostSocketImpl.java` transcribes `NioSocketImpl`'s code and the variants
   keep jdk26u's code of the methods they replace, so they are recorded in LICENSE.md as
-  jdk26u-derived (GPL 2 with the Classpath Exception), as the B7 files are. *Recommended:
-  accept, as B7.*
+  jdk26u-derived (GPL 2 with the Classpath Exception), as the B7 files are. *Accepted 2026-10-10: LICENSE.md; C2G-SPEC §4.1.*
 - **NT4** (`InetAddress`'s cache): the variant's cache expires entries when they are used, and
   concurrent first lookups of one host each ask the name service (the JVM: one lookup per host
-  at a time, expiries kept in a `ConcurrentSkipListSet`). *Recommended: as is.*
+  at a time, expiries kept in a `ConcurrentSkipListSet`). *Accepted 2026-10-10: C2G-SPEC §4.1.*
 - **NT5** (the musl texts): the `errno` and `gai_strerror` texts are musl's, as this machine's
   JVM gives them; a glibc JVM's differ (`Address already in use`, `Name or service not known`).
-  *Recommended: as is (the oracle's reference is this machine's JVM).*
+  *Accepted 2026-10-10: C2G-SPEC §9.4.*
+
+With them the sockets in the closed world and `NetHost` are in C2G-SPEC §4.1, §9.1 and §9.4, D6's
+reversal for sockets in B1-PLAN.md, and the oracle's `net.clj` in ORACLE.md.
+
 # Files: java.io.File and the file system in the Go build
 
 The user's decision of 2026-10-09, reversing part of D6 (B1-PLAN.md): `java.io.File` and the file
