@@ -2327,3 +2327,39 @@ JRT-SOURCES.md) and `jdk/internal/icu/impl/data/icudata/nfc.nrm`, `nfkc.nrm`;
 `src/java.base/share/data/unicodedata/UnicodeData.txt`; `src/java.base/share/legal/icu.md`,
 `unicode.md`. The JDK build's outputs compared against:
 `build/linux-x86_64-server-release/support/gensrc/java.base/` and `jdk/modules/java.base/`.
+
+# Monitors: the late deflation (bug fix, branch `monfix`, 2026-10-10)
+
+**Symptom.** Clojure's suite on Go, at main `3b24e09` (step 7b's closure compilation), died in
+its test.generative phase with Go's "all goroutines are asleep - deadlock!": some 65 goroutines
+blocked on `monMu` in `lookupMonitor`, from the `locking` in `Compiler$ObjExpr.getCompiledClass`
+(a reify's `ObjExpr`, entered by test.generative's parallel runners), and no goroutine held
+`monMu`. Step 7b made that `locking` hot from many threads at once; before it, the monitor never
+saw that much contention.
+
+**Cause** (`monitor.clj`). `monitorExit` frees an inflated monitor `m` (owner 0, no refs), drops
+`m.mu`, then calls `tryDeflate(o, m)`, which takes `monMu`. In between another thread could
+enter `m`, exit and deflate it itself, and `o` be locked again: thin by a third thread, or
+inflated anew, possibly at `m`'s recycled index. The late `tryDeflate` found `m` free (it was
+dead) and deflated anyway: it reset `o`'s lock word to unlocked whatever it held (dropping a
+thin lock or the new monitor: mutual exclusion lost) and freed `m.idx` a second time
+(`delete monitors` removed whatever live monitor held that index; `monFree` held it twice, so two
+monitors later shared one index). A header then named an index the table no longer had, and
+`lookupMonitor` dereferenced the nil monitor while holding `monMu`. The Go nil dereference
+became a `NullPointerException` (`jrt.Catch`, §7.9.5) that Java code caught, and `monMu` stayed
+locked for good.
+
+**Fix.** `tryDeflate` deflates only the live monitor: under `monMu` it returns unless
+`monitors[m.idx]` is still `m`. An inflated lock word changes only under `monMu` (inflation and
+deflation both CAS it there), so a live `m` is the one `o`'s header names; the CAS loop now
+checks that and panics on a broken invariant instead of overwriting another lock state. Every
+`monMu` section unlocks it by `defer` (`inflate`, `lookupMonitor`, `tryDeflate`, the table
+reads through the new `monitorAt`), so a panic there can no longer wedge every monitor; a
+missing monitor in `lookupMonitor` is a Go string panic (a bug, which `Catch` re-panics), not a
+nil dereference a Java `catch` would swallow.
+
+**Tests** (`monitor_test.clj`): `TestMonitorStaleDeflate` replays the interleaving
+deterministically (a late `tryDeflate` over a thin lock, then over a new monitor at the
+recycled index, and no index freed twice); `TestMonitorContention` has 24 goroutines contend
+for 3 monitors with yields, so that inflation and deflation churn. On the old code the first
+fails every time and the second crashes in `lookupMonitor` as the suite did.
