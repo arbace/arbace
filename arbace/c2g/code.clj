@@ -1124,7 +1124,7 @@
 
 (def ^:private const-array-min
   "The least number of string leaves for which an initializer is written as data."
-  16)
+  4)
 
 (defn- utf8-safe?
   "Can the Java string travel as Go UTF-8 text (no unpaired surrogates)?"
