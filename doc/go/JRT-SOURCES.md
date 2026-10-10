@@ -422,3 +422,18 @@ here and in C2G-SPEC §4.1, §10.3:
   of `java.sql`; all converted and compiled to javac's class shapes, 576 identical and the 4
   known differences, 1,640 classes; deterministic (`--twice`); 26 of 26 generated sources and 4
   of 4 data files equal to the JDK build's.
+
+## Security (2026-10-10)
+
+java.security's basics in the Go build (JRT-NOTES.md, "Security"; proposed amendments SC4,
+SC5), from jdk26u at `baf63fb`: `test/g2c/jrt_sources.clj`'s `security-sources`, 75 files (74 of
+`src/java.base/share/classes`, `NativePRNG` of `src/java.base/unix/classes`), and jrt's own
+`javax/crypto/JceSecurity.java`, `sun/security/provider/SeedGenerator.java`,
+`sun/security/provider/JrtServices.java`, `com/sun/crypto/provider/JceServices.java` and
+`jdk/internal/jrt/HostRandom.java` (KIND `overlay`). **Data** (`generate`): `conf/security/java.security`
+as `make/modules/java.base/Gendata.gmk` makes it (`build.tools.makejavasecurity.MakeJavaSecurity`
+on `src/java.base/share/conf/security/java.security` with `linux x86 unlimited`), byte-identical
+to the image's `jdk/conf/security/java.security` (a data file under `conf/` is compared with the
+image's `jdk/conf`, as one under `lib/` with `jdk/lib`). **Result**: 717 files (637 before), all
+converted and compiled to javac's class shapes, 713 identical and the 4 known differences,
+1,979 classes; 26 of 26 generated sources and 5 of 5 data files equal to the JDK build's.
