@@ -72,7 +72,7 @@ waitForProcessExit0): the exit status, or 0x80 plus the terminating signal.\n"
   (when (!= dir "")
     (let [e (checkDir dir)]
       (when (!= e 0)
-        (return nil nil (addr (lit HostProcError :Chdir true :Errno e))))))
+        (return nil nil (addr (lit HostProcError :Chdir true :Errno (conv int e)))))))
   (let [files (make (slice (* os/File)) 3)
         own (lit (slice (* os/File)) os/Stdin os/Stdout os/Stderr)
         pipes (make (slice HostFile) 3)
@@ -81,7 +81,7 @@ waitForProcessExit0): the exit status, or 0x80 plus the terminating signal.\n"
         fail (fn [^{:tag syscall/Errno} e] :results [HostChild (slice HostFile) error]
                (range [_ f childEnds] (.Close f))
                (range [_ f parentEnds] (.Close f))
-               (return nil nil (addr (lit HostProcError :Errno e))))]
+               (return nil nil (addr (lit HostProcError :Errno (conv int e)))))]
     (range [i s stdio]
       (when (and (== i 2) errToOut)
         ;; the child's error output is its standard output; a pipe is still made, its end in
@@ -121,7 +121,7 @@ waitForProcessExit0): the exit status, or 0x80 plus the terminating signal.\n"
       (range [_ f childEnds] (.Close f))
       (when (!= err nil)
         (range [_ f parentEnds] (.Close f))
-        (return nil nil (addr (lit HostProcError :Errno (errnoOf err)))))
+        (return nil nil (addr (lit HostProcError :Errno (conv int (errnoOf err))))))
       (let [c (addr (lit osChild :p p :done (make (chan (struct)))))]
         (go ((fn []
                (let [(values st werr) (.Wait p)]
@@ -156,7 +156,7 @@ read on an end another thread closed ends the stream; Available is FIONREAD's co
     (when (and (!= err nil) (errors/Is err os/ErrClosed))
       (return n io/EOF))
     (when (and (!= err nil) (not (errors/Is err io/EOF)))
-      (return n (errors/New (ErrnoText (errnoOf err)))))
+      (return n (errors/New (ErrnoText (conv int (errnoOf err))))))
     (return n err)))
 
 (go/method Write [^{:tag (* procPipe)} p ^{:tag (slice byte)} b] :results [int error]
@@ -164,13 +164,13 @@ read on an end another thread closed ends the stream; Available is FIONREAD's co
     (when (!= err nil)
       (when (errors/Is err os/ErrClosed)
         (return n (errors/New "Stream Closed")))
-      (return n (errors/New (ErrnoText (errnoOf err)))))
+      (return n (errors/New (ErrnoText (conv int (errnoOf err))))))
     (return n nil)))
 
 (go/method Close ^error [^{:tag (* procPipe)} p] (.Close (.-f p)))
 
 (go/method Seek [^{:tag (* procPipe)} p ^int64 offset ^int whence] :results [int64 error]
-  (return 0 (errors/New (ErrnoText syscall/ESPIPE))))
+  (return 0 (errors/New (ErrnoText (conv int syscall/ESPIPE)))))
 
 (go/method Available [^{:tag (* procPipe)} p] :results [int error]
   (let [(values rc err) (.SyscallConn (.-f p))]

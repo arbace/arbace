@@ -3085,6 +3085,10 @@ nine natives and `ProcessEnvironment.environ`.
   the pipes are entries of jrt's file table (`files.clj`), so the process streams are the JDK's
   `FileInputStream` and `FileOutputStream` subclasses over `FileDescriptor`s naming them.
   `ProcessEnvironment.environ` is the host's environment as name and value bytes.
+- **The OS stays in `_linux` files.** `hostproc.clj` and `process.clj` name no `syscall` or
+  `os`: errors carry Linux's error numbers as `int`s (`process.clj`'s constants), and only
+  `hostproc_linux.clj` (`//go:build linux`, as `hostfs_linux.clj`) and the test file use
+  `os` and `syscall`, so jrt compiles for `GOOS=tamago` without processes (BOX-SURVEY.md).
 
 **Variants** (`overlay/jdk/variants/`):
 

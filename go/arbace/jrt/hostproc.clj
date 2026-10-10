@@ -6,8 +6,7 @@
 ;; current process alone.
 (in-ns 'go.arbace.jrt)
 
-(go/file "hostproc.go"
-  :imports [[syscall "syscall"]])
+(go/file "hostproc.go")
 
 (go/const
   [^{:tag int :val 0 :doc "StdioPipe: a pipe between the program and the child (ProcessBuilder.Redirect.PIPE).\n"}
@@ -74,11 +73,11 @@ exactly) and user name; empty strings when unknown.\n"
   (struct ^string Command ^{:tag (slice string)} Args ^bool HasArgs ^string CommandLine ^string User))
 
 (go/type HostProcError
-  "HostProcError is why Start failed: Errno, at the change of directory (Chdir) or at exec.\n"
-  (struct ^bool Chdir ^{:tag syscall/Errno} Errno))
+  "HostProcError is why Start failed: Errno (Linux's number), at the change of directory (Chdir) or\nat exec.\n"
+  (struct ^bool Chdir ^int Errno))
 
 (go/method Error ^string [^{:tag (* HostProcError)} e]
-  (.Error (.-Errno e)))
+  (ErrnoText (.-Errno e)))
 
 (go/func CurrentHostProc
   "CurrentHostProc is the current host as a HostProc, or nil when it is not one.\n"

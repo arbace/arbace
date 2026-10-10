@@ -11,62 +11,98 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "process.go"
-  :imports [[errors "errors"] [fs "io/fs"] [strconv "strconv"] [strings "strings"] [sync "sync"]
-            [syscall "syscall"]])
+  :imports [[errors "errors"] [fs "io/fs"] [strconv "strconv"] [strings "strings"] [sync "sync"]])
+
+;; Linux's error numbers, which the host's errors carry (jrt's generic files name no syscall
+;; package: GOOS=tamago's differs; hostproc_linux.clj converts syscall.Errno to these)
+(go/const
+  [^{:tag int :val 1} errEPERM 1]
+  [^{:tag int :val 2} errENOENT 2]
+  [^{:tag int :val 3} errESRCH 3]
+  [^{:tag int :val 4} errEINTR 4]
+  [^{:tag int :val 5} errEIO 5]
+  [^{:tag int :val 6} errENXIO 6]
+  [^{:tag int :val 7} errE2BIG 7]
+  [^{:tag int :val 8} errENOEXEC 8]
+  [^{:tag int :val 9} errEBADF 9]
+  [^{:tag int :val 10} errECHILD 10]
+  [^{:tag int :val 11} errEAGAIN 11]
+  [^{:tag int :val 12} errENOMEM 12]
+  [^{:tag int :val 13} errEACCES 13]
+  [^{:tag int :val 14} errEFAULT 14]
+  [^{:tag int :val 16} errEBUSY 16]
+  [^{:tag int :val 17} errEEXIST 17]
+  [^{:tag int :val 19} errENODEV 19]
+  [^{:tag int :val 20} errENOTDIR 20]
+  [^{:tag int :val 21} errEISDIR 21]
+  [^{:tag int :val 22} errEINVAL 22]
+  [^{:tag int :val 23} errENFILE 23]
+  [^{:tag int :val 24} errEMFILE 24]
+  [^{:tag int :val 26} errETXTBSY 26]
+  [^{:tag int :val 27} errEFBIG 27]
+  [^{:tag int :val 28} errENOSPC 28]
+  [^{:tag int :val 29} errESPIPE 29]
+  [^{:tag int :val 30} errEROFS 30]
+  [^{:tag int :val 32} errEPIPE 32]
+  [^{:tag int :val 36} errENAMETOOLONG 36]
+  [^{:tag int :val 38} errENOSYS 38]
+  [^{:tag int :val 40} errELOOP 40]
+  [^{:tag int :val 116} errESTALE 116]
+  [^{:tag int :val 110} errETIMEDOUT 110])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The C library's texts (strerror): this machine's JVM is built on musl
 
-(go/var ^{:tag (map syscall/Errno string)} muslErrnoText
-  (lit (map syscall/Errno string)
-       [syscall/EPERM "Operation not permitted"]
-       [syscall/ENOENT "No such file or directory"]
-       [syscall/ESRCH "No such process"]
-       [syscall/EINTR "Interrupted system call"]
-       [syscall/EIO "I/O error"]
-       [syscall/ENXIO "No such device or address"]
-       [syscall/E2BIG "Argument list too long"]
-       [syscall/ENOEXEC "Exec format error"]
-       [syscall/EBADF "Bad file descriptor"]
-       [syscall/ECHILD "No child process"]
-       [syscall/EAGAIN "Resource temporarily unavailable"]
-       [syscall/ENOMEM "Out of memory"]
-       [syscall/EACCES "Permission denied"]
-       [syscall/EFAULT "Bad address"]
-       [syscall/EBUSY "Resource busy"]
-       [syscall/EEXIST "File exists"]
-       [syscall/ENODEV "No such device"]
-       [syscall/ENOTDIR "Not a directory"]
-       [syscall/EISDIR "Is a directory"]
-       [syscall/EINVAL "Invalid argument"]
-       [syscall/ENFILE "Too many open files in system"]
-       [syscall/EMFILE "No file descriptors available"]
-       [syscall/ETXTBSY "Text file busy"]
-       [syscall/EFBIG "File too large"]
-       [syscall/ENOSPC "No space left on device"]
-       [syscall/ESPIPE "Invalid seek"]
-       [syscall/EROFS "Read-only file system"]
-       [syscall/EPIPE "Broken pipe"]
-       [syscall/ENAMETOOLONG "Filename too long"]
-       [syscall/ENOSYS "Function not implemented"]
-       [syscall/ELOOP "Symbolic link loop"]
-       [syscall/ESTALE "Stale file handle"]
-       [syscall/ETIMEDOUT "Operation timed out"]))
+(go/var ^{:tag (map int string)} muslErrnoText
+  (lit (map int string)
+       [errEPERM "Operation not permitted"]
+       [errENOENT "No such file or directory"]
+       [errESRCH "No such process"]
+       [errEINTR "Interrupted system call"]
+       [errEIO "I/O error"]
+       [errENXIO "No such device or address"]
+       [errE2BIG "Argument list too long"]
+       [errENOEXEC "Exec format error"]
+       [errEBADF "Bad file descriptor"]
+       [errECHILD "No child process"]
+       [errEAGAIN "Resource temporarily unavailable"]
+       [errENOMEM "Out of memory"]
+       [errEACCES "Permission denied"]
+       [errEFAULT "Bad address"]
+       [errEBUSY "Resource busy"]
+       [errEEXIST "File exists"]
+       [errENODEV "No such device"]
+       [errENOTDIR "Not a directory"]
+       [errEISDIR "Is a directory"]
+       [errEINVAL "Invalid argument"]
+       [errENFILE "Too many open files in system"]
+       [errEMFILE "No file descriptors available"]
+       [errETXTBSY "Text file busy"]
+       [errEFBIG "File too large"]
+       [errENOSPC "No space left on device"]
+       [errESPIPE "Invalid seek"]
+       [errEROFS "Read-only file system"]
+       [errEPIPE "Broken pipe"]
+       [errENAMETOOLONG "Filename too long"]
+       [errENOSYS "Function not implemented"]
+       [errELOOP "Symbolic link loop"]
+       [errESTALE "Stale file handle"]
+       [errETIMEDOUT "Operation timed out"]))
 
 (go/func ErrnoText
   "ErrnoText is strerror(e) as this machine's C library (musl) gives it.\n"
-  ^string [^{:tag syscall/Errno} e]
+  ^string [^int e]
   (let [(values t ok) (aget muslErrnoText e)]
     (when ok
       (return t)))
-  (capitalized (.Error e)))
+  (+ "Unknown error " (strconv/Itoa e)))
 
 (go/func processIOException
   "processIOException is ProcessImpl_md.c's throwIOException: IOE_FORMAT, \"%s, error: %d (%s) %s\"
 with an empty internal detail.\n"
-  ^Throwable_I [^string detail ^{:tag syscall/Errno} e]
+  ^Throwable_I [^string detail ^int e]
   (IOException_New_String
-    (Str (+ detail ", error: " (strconv/Itoa (conv int e)) " (" (ErrnoText e) ") "))))
+    (Str (+ detail ", error: " (strconv/Itoa e) " (" (ErrnoText e) ") "))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; The children the program started
@@ -151,10 +187,10 @@ JDK_execvpe's parentPathv (the program's PATH when ProcessImpl was first used, e
   "skippable tells whether an exec error lets the search go on to the next directory: musl's
 execvp goes on after ENOENT, ENOTDIR and EACCES; JDK_execvpe also after ELOOP, ESTALE, ENODEV
 and ETIMEDOUT.\n"
-  ^bool [^{:tag syscall/Errno} e ^bool envGiven]
+  ^bool [^int e ^bool envGiven]
   (switch e
-    (case [syscall/ENOENT syscall/ENOTDIR syscall/EACCES] (return true))
-    (case [syscall/ELOOP syscall/ESTALE syscall/ENODEV syscall/ETIMEDOUT] (return envGiven)))
+    (case [errENOENT errENOTDIR errEACCES] (return true))
+    (case [errELOOP errESTALE errENODEV errETIMEDOUT] (return envGiven)))
   false)
 
 (go/func startProgram
@@ -172,7 +208,7 @@ as the child does it before the exec.\n"
       (when (!= file "")
         (range [_ d (searchDirs (CurrentHost) envGiven)]
           (set! cands (append cands (candidate d file))))))
-    (let [^{:tag syscall/Errno} last syscall/ENOENT
+    (let [^int last errENOENT
           sticky false
           tried false]
       (range [_ c cands]
@@ -181,10 +217,10 @@ as the child does it before the exec.\n"
             (set! p (+ dir "/" c)))
           (let [(values _ serr) (.Stat (CurrentHost) p)]
             (when (!= serr nil)
-              (let [^{:tag syscall/Errno} e 0]
-                (when (and (not (errors/As serr (addr e))) (errors/Is serr fs/ErrNotExist))
-                  (set! e syscall/ENOENT))
-                (when (or (== e syscall/ENOENT) (== e syscall/ENOTDIR))
+              (let [e 0]
+                (when (errors/Is serr fs/ErrNotExist)
+                  (set! e errENOENT))
+                (when (== e errENOENT)
                   (set! last e)
                   (continue))))))
         (set! tried true)
@@ -194,7 +230,7 @@ as the child does it before the exec.\n"
           (let [pe (assert (* HostProcError) err)]
             (when (or (.-Chdir pe) (not (execSkippable (.-Errno pe) envGiven)))
               (return nil nil err))
-            (when (== (.-Errno pe) syscall/EACCES)
+            (when (== (.-Errno pe) errEACCES)
               (set! sticky true))
             (set! last (.-Errno pe)))))
       (when (and (not tried) (!= dir ""))
@@ -205,7 +241,7 @@ as the child does it before the exec.\n"
           (when (.-Chdir (assert (* HostProcError) err))
             (return nil nil err))))
       (when sticky
-        (set! last syscall/EACCES))
+        (set! last errEACCES))
       (return nil nil (addr (lit HostProcError :Errno last))))))
 
 (go/func ProcessImpl_HostForkAndExec_B1_B1_I_B1_I_B1_I1_Z__I_native
@@ -220,7 +256,7 @@ IOException.\n"
           ^int32 envc ^{:tag (* ByteArray)} dir ^{:tag (* IntArray)} fds ^bool redirectErrorStream]
   (let [hp (CurrentHostProc)]
     (when (== hp nil)
-      (panic (processIOException "Exec failed" syscall/ENOSYS)))
+      (panic (processIOException "Exec failed" errENOSYS)))
     (let [file (cString prog)
           argv (append (lit (slice string) file) (spread (cStrings argBlock argc)))
           ^{:tag (slice string)} env nil
@@ -236,7 +272,7 @@ IOException.\n"
                       (let [f (aget openFiles h)]
                         (.Unlock filesMu)
                         (when (== f nil)
-                          (panic (processIOException "Exec failed" syscall/EBADF)))
+                          (panic (processIOException "Exec failed" errEBADF)))
                         (aset stdio i (lit HostStdio :Kind StdioFile :File f)))))))
       (let [(values ch pipes err) (startProgram hp file argv env (!= envBlock nil) (cString dir) stdio
                                                 redirectErrorStream)]

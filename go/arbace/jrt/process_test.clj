@@ -4,6 +4,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "process_test.go"
+  :build ["//go:build linux"]
   :imports [[os "os"] [strconv "strconv"] [strings "strings"] [testing "testing"] [time "time"]])
 
 (go/func cBytes "cBytes is s as ProcessImpl.toCString makes it: its bytes and a NUL.\n"
