@@ -1242,3 +1242,19 @@ decision (2026-10-08).
   `jdk.unsupported` (for `sun.misc.Signal`, the REPL's break handler, which stays as it is);
   java.sql, java.xml and java.desktop are optional. `bin/arbace-image`'s default modules:
   `java.base,jdk.unsupported`, plus `ARBACE_IMAGE_MODULES`.
+
+## 2026-10-10: the evaluator resolves hints in the defining namespace
+
+- Agent, branch `evaltags` (`6e64164`), merged. The Go evaluator asked an expression's type
+  (`getJavaClass`, `maybePrimitiveType`, which resolve a hint's short name in the current
+  namespace and cache it) at run time in four places the JVM asks at analysis:
+  `Evaluator.caseKey` (`case` with keyword or string tests), `CaseExpr.evalIn`,
+  `Evaluator.result` (a deftype method returning a primitive), and step 7b's closure compiler
+  (a method compiled at its first call). A fn whose hints use imported short names then failed
+  when first called from another namespace. Fixed: each fn or type records its defining
+  namespace (`ObjExpr.evalNs`), methods compile with `*ns*` bound to it; `CaseExpr` keeps its
+  test's primitive type from analysis (`evalPc`); `Evaluator.result` takes `CMethod.bodyPrim`.
+  New oracle forms `hint_namespaces.clj` (35 cases; 5 failed before).
+- Checks (the agent's, on exactly this tree plus the journal): smoke; the Go oracle 21,215 of
+  21,223, the 8 recorded mismatches; Clojure's suite on Go 19,628 of 19,632, no regressions;
+  benchmarks unchanged.
