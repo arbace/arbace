@@ -180,7 +180,7 @@
   are proxy superclasses too)."
   ["java/lang/Throwable" "java/lang/Exception" "java/lang/RuntimeException" "java/lang/Error"
    "java/lang/IllegalArgumentException" "java/lang/IllegalStateException"
-   "java/lang/UnsupportedOperationException" "java/lang/Enum" "java/lang/Record" "arbace/lang/AFn"])
+   "java/lang/Enum" "java/lang/Record" "arbace/lang/AFn"])
 
 (def sub-supers
   "The classes that get a DynSub_C: proxy-supers and class-supers."
