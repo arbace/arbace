@@ -327,10 +327,16 @@ optional (`bean` without `java.beans`, `#inst` without `java.sql`, clear errors 
 `resultset-seq` and the fns of `arbace/instant_timestamp.clj`, `java.xml` only in `arbace.xml`
 and `arbace.lang.XMLHandler`. The AOT class-linking problem above does not occur with this set (the
 cache keeps class linking, no extra module); it does with `java.base,java.sql,jdk.unsupported`,
-where adding `jdk.attach` avoids it and the script's fallback still applies. Measured with the
-development JDK, two rounds of 20 launches of `-e nil`: the image 133 → 100 MB (`lib/modules`
-54 → 25 MB, `.tar.gz` 43 → 32 MB), with the cache 186-188 → 180-186 ms, without 613-626 →
-607-622 ms. The same change is in `arbace-for-java-26` v3, whose Alpine package ships such an image
+where adding `jdk.attach` avoids it and the script's fallback still applies. Measured on main
+(2026-10-10) with the development JDK against an image of the old ten modules from the same jar
+(`ARBACE_IMAGE_MODULES=java.desktop,java.sql,jdk.unsupported.desktop`), two rounds of 20
+launches of `-e nil`: the image 133 → 100 MB (`lib/modules` 54 → 25 MB, `.tar.gz` 43 → 32 MB),
+with the cache 189-191 → 180-190 ms, without 598-609 → 605-610 ms: the same start time. On the
+image: `-e`, a REPL, `#inst` read, printed and round-tripped (also through `arbace.edn`),
+`bean`, `arbace.repl`'s `doc`, `arbace.pprint`, a script requiring the common namespaces
+(`arbace.spec.alpha`, `core.reducers`, `java.shell`, `reflect`, ...), `resultset-seq` loaded
+(failing only when called), and the clear errors of `arbace.xml`, `arbace.inspector` and
+`arbace.java.browse-ui`. The same change is in `arbace-for-java-26` v3, whose Alpine package ships such an image
 (that branch's `doc/ALPINE.md`).
 
 ## Clojure's test suite on stages 1 and 2
