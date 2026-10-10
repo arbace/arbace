@@ -199,9 +199,22 @@
   [^String s]
   (let [[c n d] (str/split s #" " 3)] [c n (or d "")]))
 
+(defn- overlay-tops
+  "The top-level classes (internal names) bin/jrt-convert takes from jrt's own Java (KIND overlay
+  in its sources.txt), when that file exists."
+  [sources-txt]
+  (let [f (io/file sources-txt)]
+    (if (.isFile f)
+      (set (for [l (str/split-lines (slurp f))
+                 :let [[_ kind rel] (str/split l #" ")]
+                 :when (= kind "overlay")]
+             (str/replace rel #"\.java$" "")))
+      #{})))
+
 (defn go-build
-  "What the Go build provides, from c2g's output directory c2g-out and jrt's forms jrt-dir."
-  [c2g-out jrt-dir]
+  "What the Go build provides, from c2g's output directory c2g-out, jrt's forms jrt-dir and
+  bin/jrt-convert's sources.txt."
+  [c2g-out jrt-dir sources-txt]
   (let [report (read-string (slurp (str c2g-out "/report.edn")))
         prog (str c2g-out "/prog/go/arbace")
         texts (merge (update-keys (slurp-dir (str prog "/jrt")) #(str "jrt/" %))
@@ -221,6 +234,7 @@
         prog-scan (jrt/scan (str prog "/jrt"))
         var->class (into {} (for [[jn v] (:classes prog-scan)] [(:var v) (str/replace jn "." "/")]))]
     {:translated (set (:translated report))
+     :overlay (overlay-tops sources-txt)
      :declared declared
      ;; as c2g's main/jrt-classes: those jrt's forms register (Define) and those its manifest
      ;; declares
@@ -322,6 +336,8 @@
                                              (for [^Field f (.getDeclaredFields c) :when (Modifier/isStatic (.getModifiers f))]
                                                [:field (.getName f) (.descriptorString (.getType f))])))]]
                     {:name name :kind kind :status cs
+                     :overlay (and (= cs :translated)
+                                   (contains? (:overlay b) (first (str/split internal #"\$"))))
                      :members (vec (for [[kind mname desc abstract :as m] members
                                          :let [static? (contains? statics [kind mname desc])
                                                st (member-status b internal cs m static?)]]
@@ -373,7 +389,12 @@
      :members-by-kind (into (sorted-map)
                             (for [[k xs] (group-by :kind ms)]
                               [k {:all (count xs) :provided (count (filter #(provided (:status %)) xs))}]))
-     :provided (count (filter #(provided (:status %)) ms))}))
+     :provided (count (filter #(provided (:status %)) ms))
+     ;; the classes the Go build has: how complete they are
+     :in-go (let [cs (filter #(#{:translated :declared :hand-written} (:status %)) classes)
+                  ims (mapcat :members cs)]
+              {:classes (count cs) :members (count ims)
+               :provided (count (filter #(provided (:status %)) ims))})}))
 
 (defn- top-package
   "The family a package is counted in for the headline table."
@@ -416,6 +437,9 @@
                       [(:name c) (let [s (count-by :member (:members c))]
                                    (into [(:status c) (count (:members c))]
                                          (for [k member-statuses] (get s k))))]))
+     :overlay-classes (vec (for [c all :when (:overlay c)]
+                             [(:name c) (count (:members c))
+                              (count (filter #(provided (:status %)) (:members c)))]))
      :cross-check {:mismatches (count mismatch) :examples (vec (take 40 (sort mismatch)))}}))
 
 ;; ---------------------------------------------------------------------------------------
@@ -453,6 +477,12 @@
     (p "## Overall\n")
     (p summary-head)
     (p (summary-row "**java.base**" (:total r)))
+    (let [g (:in-go (:total r))]
+      (p "\nThe " (fmt (:classes g)) " classes in Go have " (fmt (:members g)) " API members, of which "
+         (fmt (:provided g)) " (" (pct (:provided g) (:members g)) ") are provided."))
+    (p "\nOf the translated classes, " (count (:overlay-classes r)) " are jrt's own Java (overlay/, "
+       "bin/jrt-convert's KIND overlay), not jdk26u's: "
+       (str/join ", " (for [[c m pv] (:overlay-classes r)] (str "`" c "` " pv "/" m))) ".")
     (p "\n## By member kind\n")
     (p (row "kind" "members" "provided" "%"))
     (p "|---|---:|---:|---:|")
@@ -491,9 +521,9 @@
 (defn run
   "Measures and writes out-edn (the result), details-edn (every class and member) and
   summary-md. Returns the result."
-  [root c2g-out surface-file out-edn details-edn summary-md]
+  [root c2g-out sources-txt surface-file out-edn details-edn summary-md]
   (let [a (api)
-        b (go-build c2g-out (str root "/go/arbace/jrt"))
+        b (go-build c2g-out (str root "/go/arbace/jrt") sources-txt)
         cov (measure a b)
         used (used-members (read-string (slurp surface-file)))
         r (result cov used)
