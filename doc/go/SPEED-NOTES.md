@@ -12,7 +12,7 @@ not changed here. Summary:
   64 MiB minimum heap (both overridable). This alone makes the micro workloads 2-3 times faster
   and cuts the executable's CPU time by two thirds.
 - **Allocations removed** where jrt made two objects for one Java object (reference arrays,
-  strings, `StringBuilder`), or where reflection copied arrays on every call.
+  strings, `StringBuilder`), or where reflection copied the arguments on every call.
 - **Fewer type assertions and deferred calls** on hot paths: `getClass()` of boxed numbers and
   strings, the nominal check of objects made at run time, `try` blocks without live catch
   clauses.
@@ -185,15 +185,17 @@ bound var, most of it the allocation. The Go build's variant `arbace/lang/go/Var
 `valAt` (the bindings map vars to `TBox`es, never to nil, so the result is the same). `binding`
 in `w.clj`: 939 → 791 ms with items 4 and 6.
 
-### 6. Reflective calls: no copies of the parameter classes or the arguments — kept
+### 6. Reflective calls: no copy of the arguments — kept (the shared parameter classes dropped)
 
-The evaluator calls static and instance methods through `Method.invoke` (step 7b will change
-that); each call asked `getParameterTypes()` twice (the evaluator's `typedArgs`, the
-Reflector's `boxArgs`), and Java's contract is a fresh array each time; `convertArgs` copied
-the arguments into a new slice. Now `getParameterTypes()` returns one array per `Method`
-(made on first use; a deviation, amendment O3) and `convertArgs` passes the arguments' own
-slice unless a primitive parameter converts one. This removed 21% of the bytes the evaluator
-workloads allocated.
+The evaluator calls static and instance methods through `Method.invoke` (step 7b changes
+that); `convertArgs` copied the arguments into a new slice on every call. It now passes the
+arguments' own slice to the member table's invoker unless a primitive parameter converts one
+(the invokers only read it; nothing of it reaches the caller). Measured with it, and decided
+against by the user: `getParameterTypes()` returning one shared array per `Method` (O3, a
+deviation from Java's fresh copy; it removed 21% of the bytes the evaluator workloads
+allocated, the copies the evaluator's `typedArgs` and the Reflector's `boxArgs` ask for on
+every call). jrt keeps Java's contract; step 7b's direct invocation removes those calls.
+`convertArgs`' slice alone removes about 3% of those bytes.
 
 ### 7. The dynamic flag — kept
 
@@ -369,7 +371,7 @@ indexed a `new Object[0]` with a constant -5 and passed only because the array's
 known at compile time; with the arrays of item 2 it is not, so the test now computes the index.
 A Java program indexing with a negative constant would show `Index 0` in the message on arm64.
 
-## Proposed amendments to C2G-SPEC (for the user's review)
+## Amendments to C2G-SPEC (decided by the user 2026-10-10)
 
 Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1` (the Go name of an `Object[]` parameter), never for amendments.
 
@@ -377,33 +379,39 @@ Letter O: every letter appears somewhere in doc/; O only as C2G-SPEC §4.4's `O1
   unless `GOGC` is set, and a 64 MiB minimum heap (a ballast without pointers, never written)
   unless `ARBACE_MIN_HEAP_MB` sets another (0: none); the main package's start-up setting
   (U4: `GOGC=400` until `arbace.main` is loaded) then raises it and restores jrt's. D7's
-  "planned" paragraph becomes this rule, with the measurements above.
+  "planned" paragraph becomes this rule, with the measurements above. *Accepted 2026-10-10, folded into C2G-SPEC §13.4 (closing D7, B1-PLAN.md).*
+
 - **O2 (§5.9, §13.2, D7) Reference arrays and strings in one allocation.** A reference array of
   up to 32 slots and a `String` of up to 108 code units are one Go object, the slots or units
   after the header (`unsafe.Slice` over a trailing array, the length rounded to Go's size
   classes); `new StringBuilder()` holds its first 16 units in itself. The Go types stay
-  (`*jrt.RefArray`, `*jrt.String`, a slice `A`/`value`); c2g's output does not change.
+  (`*jrt.RefArray`, `*jrt.String`, a slice `A`/`value`); c2g's output does not change. *Accepted 2026-10-10, folded into C2G-SPEC §5.9 and §7.5.*
+
 - **O3 (§3.2, §5.11) Shared parameter classes (new deviation V14).**
   `Method.getParameterTypes()` and `Constructor.getParameterTypes()` return the same array on
   every call (Java: a fresh copy). Nothing in the closed world writes to it; a program that
   does would change the method's reported parameters. Alternative: keep Java's contract and let
-  step 7b's evaluator stop asking for the array on every call (then this deviation can go).
+  step 7b's evaluator stop asking for the array on every call (then this deviation can go). *Not taken (the user, 2026-10-10): `getParameterTypes()` keeps Java's contract, a fresh copy; reverted.*
+
 - **O4 (§5.5, §5.7, §5.8, §5.12) The dynamic flag.** Bit 31 of the header's low word marks
   objects of classes made at run time (set by `MarkDynamic` when c2g's `Dyn` and `DynSub_C`
   objects are made; the identity hash keeps its 31 bits); interface `instanceof` and checkcast
   ask `jrt.Dynamic` only for flagged objects (`jrt.IsDynamic`, which reads the header through
   the interface's data word: every Java object is a pointer to a struct whose first field is
-  the header, §5.2).
+  the header, §5.2). *Accepted 2026-10-10, folded into C2G-SPEC §5.7 and §5.8.*
+
 - **O5 (§13.4, §13.6, BUILD.md) Profile-guided builds.** `bin/g2c build --pgo FILE` and
   `bin/arbace-go --build --pgo` (a training run of `test/arbace-go-pgo.clj` with
   `ARBACE_CPUPROFILE`, then `go build -pgo`). Proposed: the freeze's executables are built so;
-  the default build stays without, for build time.
+  the default build stays without, for build time. *Accepted 2026-10-10 (the freeze's executables are built with `--pgo`; ordinary builds stay without), folded into C2G-SPEC §13.4.*
+
 - **O6 (§7.9.2, §7.9.4) A `try` with nothing to catch** (no catch clause naming a class of the
   world, no normal-completion code) has no function literal of its own: its body is in place,
-  inside the `finally`'s literal when there is one.
+  inside the `finally`'s literal when there is one. *Accepted 2026-10-10, folded into C2G-SPEC §7.9.2.*
+
 - **O7 (§9.4) Profiles.** `ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU
   and heap profiles of any program run under `jrt.RunMain`; allocation sampling is off
-  otherwise.
+  otherwise. *Accepted 2026-10-10, folded into C2G-SPEC §13.4.*
 
 ## For step 7b (the evaluator)
 
@@ -415,10 +423,14 @@ call of `(+ acc i)`; an `EvalFn` invocation allocates its `Frame` and an argumen
 resolved method (the member tables' `Invoke` functions called with the evaluated arguments,
 without `Method.invoke`) and frames sized at analysis would remove most of it.
 
-Also found: a script that sends to an agent and does not call `(shutdown-agents)` ends, after
-the pool's 60 s keep-alive, with Go's `fatal error: all goroutines are asleep - deadlock!`
-(the JVM exits once its pool threads time out): `jrt.WaitNonDaemon` waits for the pool's
-non-daemon workers, which block on their queue forever (step 6's executable).
+## Open problems
+
+- A script that sends to an agent and does not call `(shutdown-agents)` ends, after the
+  pool's 60 s keep-alive, with Go's `fatal error: all goroutines are asleep - deadlock!` (the
+  JVM exits once its pool threads time out): `jrt.WaitNonDaemon` waits for the pool's
+  non-daemon workers, which block on their queue forever (step 6's executable).
+- gc for linux/arm64 reports a constant negative index into a slice of unknown length as index
+  0 (above).
 
 ## Sources
 

@@ -5,7 +5,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "reflect.go"
-  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"]])
+  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The value convention of the member tables (JRT-NOTES.md, "The member tables")
@@ -221,8 +221,7 @@ declaring class, the parameter classes and the modifiers of a member table entry
   (struct AccessibleObject
           ^{:tag (* Class)} clazz
           ^{:tag (slice (* Class))} params
-          ^int32 mods
-          ^{:tag (atomic/Pointer RefArray)} paramArray))
+          ^int32 mods))
 
 (go/var Executable_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Executable" :Kind KindClass
@@ -238,18 +237,8 @@ declaring class, the parameter classes and the modifiers of a member table entry
 bridge, varargs and synthetic bits among them (toString masks them out).\n"
   ^int32 [^{:tag (* Executable)} e]
   (bit-and (.-mods e) 0x1DFF))
-(go/method GetParameterTypes__Class1
-  "GetParameterTypes__Class1 is getParameterTypes: one array per Method or Constructor, made
-on first use and shared by later calls (proposed deviation V14, SPEED-NOTES.md: Java returns a
-fresh copy each time; the runtime and the evaluator only read it, and asked for it on every
-reflective call it cost two copies per call).\n"
-  ^{:tag (* RefArray)} [^{:tag (* Executable)} e]
-  (let [a (.Load (.-paramArray e))]
-    (when (!= a nil)
-      (return a)))
-  (let [a (classArray (.-params e))]
-    (.Store (.-paramArray e) a)
-    a))
+(go/method GetParameterTypes__Class1 ^{:tag (* RefArray)} [^{:tag (* Executable)} e]
+  (classArray (.-params e)))
 (go/method GetParameterCount__I ^int32 [^{:tag (* Executable)} e] (conv int32 (len (.-params e))))
 (go/method GetExceptionTypes__Class1
   "GetExceptionTypes__Class1: empty, the tables keep no throws clauses (JRT-NOTES.md).\n"

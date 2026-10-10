@@ -766,6 +766,12 @@ inlines most of them. §13.6 measures the code size.
 - Assertions are always comma-ok forms inside these functions: a failing `x.(T)` panics in Go
   with a `*runtime.TypeAssertionError`, and on a nil interface, where Java's checkcast succeeds.
 - `instance?` and `cast` of array types compare the array's component class (§5.9).
+- **The dynamic flag** (amendment O4, accepted 2026-10-10): bit 31 of the header's low word
+  marks the objects of classes made at run time (set by `MarkDynamic` when c2g's `Dyn` and
+  `DynSub_C` objects are made, before they are published; the identity hash keeps 31 bits,
+  §5.8); the nominal check of an interface's `instance?` and `cast` asserts `jrt.Dynamic` only
+  for flagged objects (`jrt.IsDynamic`, inlined: a load of the header through the interface's
+  data word, every Java object being a pointer to a struct whose first field is the header).
 - `instance?` of a cut class (§4.1, a class outside the world registered by name) is `false`,
   its operand still evaluated (`jrt.C2g_Discard`); `instance?` of a reflected marker interface
   is the ordinary assertion to its marker (amendment C4, accepted 2026-10-09).
@@ -795,6 +801,8 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   (Correction, 2026-10-08, to follow jrt: the hash comes from one global atomic sequence
   mixed by a 32-bit finalizer, 31 bits and never 0, not from a per-thread xorshift sequence
   as HotSpot's; V3 permits it, the values differing from the JVM's anyway.)
+  The header's low word holds the hash in bits 0-30 and the dynamic flag in bit 31 (§5.7,
+  amendment O4, accepted 2026-10-10); its high word is the lock word (§8.1).
   **A class's identity hash** (amendment U2, accepted 2026-10-09) is its name's
   `String.hashCode`, 31 bits and never 0, set when the `Class` is made (`jrt.presetClassHash`:
   `Define`, `DefineDynamic`, the primitive and array classes), so that classes hash alike in
@@ -819,6 +827,10 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   *jrt.Class` the component class, `A []any`), because Java's arrays are covariant (`String[]`
   is an `Object[]`) and Go's slices are not. Multi-dimensional arrays are reference arrays of
   arrays.
+- **One allocation** (amendment O2, accepted 2026-10-10): a reference array of up to 32 slots is
+  one Go object, the `RefArray` followed by its slots (`unsafe.Slice` over a trailing `[N]any`,
+  N rounded up to Go's size classes); longer arrays are a header and a slice. The Go type and
+  the slice `A` stay, so c2g's output does not change.
 - `(new T/n d)` is `jrt.NewIntArray(d)` or `jrt.NewRefArray(T_class, d)` (`NegativeArraySize
   Exception` for `d < 0`); several dimensions `jrt.NewMultiArray(cls, dims...)`, whose `cls` is
   the array class itself (`int[][]`'s, `(.ArrayClass (.ArrayClass jrt/Prim_int))`) and which
@@ -1304,7 +1316,10 @@ writes the converted value instead (`4294967288`). The prototype of §15 met thi
 - **`jrt.String`** is hand-written (D4): `(struct jrt/Object ^{:tag (slice uint16)} value ^int32
   hash)`, immutable, final (`*jrt.String`), with Java's `String` API as the manifest declares it
   (`length`, `charAt`, `hashCode` as `s[0]*31^(n-1) + ...`, `compareTo` by UTF-16 code units,
-  `equals`, `substring`, case mapping through the translated `Character` ...).
+  `equals`, `substring`, case mapping through the translated `Character` ...). A string of up
+  to 108 code units is one Go object, its units after the header (`unsafe.Slice` over a
+  trailing array, the length rounded up to Go's size classes); `new StringBuilder()` holds its
+  first 16 units in itself (amendment O2, accepted 2026-10-10).
 - **Literals** are interned: every string literal (and folded constant string) of a package is
   a variable of the package's pool `c2g_strings.go`, `Lit_<n>`, initialized at Go package
   initialization by `jrt.Intern` from a Go string literal (or, when the Java string has unpaired
@@ -1453,6 +1468,10 @@ stay where they are), and runs the handlers **after** it returns, in the enclosi
   tests both; with no matching handler, `(panic exc)` rethrows the same object.
 - Handlers run in the enclosing function, so a `return`, `break` or `continue` in a handler is
   an ordinary Go statement.
+- A `try` with nothing to catch (no clause naming a class of the closed world, no
+  normal-completion code) has no literal of its own: its body is translated in place, inside
+  the `finally`'s literal when there is one (§7.9.4), else into the enclosing block (amendment
+  O6, accepted 2026-10-10; an entered literal costs about 7.5 ns, §13.3).
 
 #### 7.9.3 Control transfers out of a `try` body
 
@@ -2414,27 +2433,27 @@ kept gc from inlining small static methods (`Integer.rotateLeft` into `Murmur3`)
 `Murmur3.hashLong` took 9.4 ns with it and 3.7 without, `hashUnencodedChars` 36.5 and 26.3.
 §6.2's benign initialization removes it where that cannot be observed.
 
-**Planned for step 7, not normative** (C2G-NOTES, phase 2D's D7, deferred by the user to plan
-step 7 on 2026-10-09). `bin/c2g-perf` runs the workloads of `test/c2g/bench/BnWork.clj` on the
-JVM Arbace and translated to Go, with the same checksums: Go took 3.8 (`hashing`) to 53
-(`numbers`, boxed arithmetic) times the JVM's time per element, 6 to 20 for the collections.
-The profiles put most of the factor outside c2g's code: allocation and the collector (the mark
-workers at 37% of the CPU with `GOGC=100`; the JVM allocates from a TLAB and removes the boxes
-by escape analysis), arrays of references (`jrt.NewRefArray` is two allocations, a struct and a
-slice of 16-byte `any` slots: an `Object[32]` is 512 bytes against the JVM's 144 with compressed
-oops), assertions from `any` to `Object_I` behind `getClass`, `hashCode` and `equals`, and no
-inlining across interface calls. The work planned, in jrt:
+**The collector, decided by step 7a** (amendment O1, accepted 2026-10-10, closing D7;
+SPEED-NOTES.md, "Step 7a"). With Go's defaults the mark workers took about 60% of all CPU (64
+processors), and a program with a small live heap collected hundreds of times a second (Go's 4
+MiB minimum heap). jrt's package initialization sets `GOGC=200` unless `GOGC` is set, and a
+64 MiB minimum heap unless `ARBACE_MIN_HEAP_MB` sets another (0: none): a ballast, a byte slice
+never written and without pointers, so neither scanned nor resident, raising the collector's
+goal as a JVM's initial heap does (Go has no minimum-heap setting; `GOMEMLIMIT` only lowers the
+goal). **The start's collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the
+program starts, until `Main.main` has loaded `arbace.main`, the main package runs the collector
+at `GOGC=400` unless `GOGC` is set, then restores jrt's setting. Arrays of references and
+strings are one allocation (O2, §5.9, §7.5); the 16-byte slots stay (§13.2's thin pointers not
+taken). `bin/c2g-perf`'s workloads went from 3.7-49 times the JVM's time to 2.3-32 times.
 
-- **`GOGC` set by jrt at start**: 400 measured (`GOGC=400` alone gains 20-40%:
-  `hashMapAssoc` from 3,975 to 2,899 ns per element), with `GOMEMLIMIT` as above;
-- **arrays of references as one allocation** (the slots in the array's own object), or with
-  8-byte slots (§13.2's thin pointers).
-
-Neither changes what c2g writes; step 7 decides them with its own measurements. **The start's
-collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the program starts, until
-`Main.main` has loaded `arbace.main`, the main package runs the collector at `GOGC=400` unless
-`GOGC` is set (0.32 s against 0.41 s to `-e nil` on amd64), then sets it back; the running
-program's setting stays step 7's.
+**Profiles and profile-guided builds** (amendments O7 and O5, accepted 2026-10-10).
+`ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU and heap profiles of any
+program run under `jrt.RunMain`; allocation sampling is off otherwise (its stack walks cost
+about 2% on the evaluator's deep stacks). `bin/arbace-go --build --pgo` runs the host's
+executable on `test/arbace-go-pgo.clj` with a CPU profile and builds every executable again
+with `go build -pgo` (`bin/g2c build --pgo FILE` for other programs): gc devirtualizes and
+inlines the hot interface calls, 5-15% on the executable. Opt-in for ordinary builds; the
+freeze's executables are built with it.
 
 ### 13.5 Floating point
 
@@ -3391,6 +3410,14 @@ executable cached by a hash of its inputs: B1-PLAN.md, "Checks". U1 refines M5's
 2026-10-10): Z1 a translated, non-final class of `proxy-supers` is not a leaf, and the list moves
 to `arbace.c2g.model` and gains `java.io.BufferedWriter`: §5.3, §5.12. Z1 refines X1 (leafness
 is a property of the closed world and of the proxy types c2g adds to it).
+
+**Step 7a** (SPEED-NOTES.md, "Step 7a"; decided by the user 2026-10-10): O1 the collector's
+settings, closing D7: §13.4. O2 reference arrays and strings in one allocation: §5.9, §7.5. O4
+the dynamic flag: §5.7. O5 profile-guided builds, opt-in, the freeze's executables built with
+them: §13.4. O6 a `try` with nothing to catch has no literal: §7.9.2. O7 the profiles: §13.4.
+O3 (one shared array from `getParameterTypes`, a deviation) was not taken: jrt keeps Java's
+contract, a fresh copy per call. O4 refines §5.8's header (the identity hash is 31 bits beside
+the flag).
 
 Each with a recommendation, which the text above follows, for the user's review.
 
