@@ -10,7 +10,7 @@
           "natives.go" "net.go" "numconv.go" "object.go" "reference.go" "reflect.go" "reflect_array.go"
           "reflect_tables.go" "standin_character.go" "standin_lang.go" "standin_reflect.go"
           "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "thread.go" "threadid.go"
-          "threadlocal.go" "throwable.go" "timezone.go" "tooloptions.go" "unsafe.go" "volatile.go" "vm.go"]
+          "threadlocal.go" "throwable.go" "timezone.go" "tooloptions.go" "tuning.go" "unsafe.go" "volatile.go" "vm.go"]
   :test-files ["bench_test.go" "concurrent_test.go" "enum_test.go" "filesystem_test.go" "manifest_test.go" "math_test.go"
                "monitor_test.go" "net_test.go" "object_test.go" "reflect_test.go" "shims_test.go" "string_test.go"
                "system_test.go" "testutil_test.go" "thread_test.go" "throwable_test.go" "timezone_test.go"])
@@ -59,6 +59,7 @@
 (load "jrt/throwable")
 (load "jrt/timezone")
 (load "jrt/tooloptions")
+(load "jrt/tuning")
 (load "jrt/unsafe")
 (load "jrt/volatile")
 (load "jrt/vm")

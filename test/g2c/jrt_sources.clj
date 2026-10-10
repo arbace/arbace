@@ -219,6 +219,35 @@
                 "sun/util/resources/cldr/CalendarData.java" "sun/util/cldr/CLDRBaseLocaleDataMetaInfo.java"
                 "java/time/format/ZoneName.java"])))
 
+(def util-sources
+  "Files of src/java.base/share/classes added for java.util's plain Java (doc/go/JAVA-BASE.md,
+  amendment JB1; the user's decision of 2026-10-10): first the files whose absence made
+  translated members throw (operation-level stubs), then the plain Java of java.util that
+  Clojure users reach for. java.time and java.util.concurrent are other branches'."
+  (vec (sort
+         (concat
+           ;; Arrays.sort of the primitive arrays (and its parallel sorts on jrt's pool),
+           ;; parallelSort of objects, parallelPrefix
+           (map #(str "java/util/" % ".java")
+                ["DualPivotQuicksort" "ArraysParallelSortHelpers" "ArrayPrefixHelpers"
+                 ;; Comparator.naturalOrder, nullsFirst, nullsLast; Collections.reverseOrder
+                 "Comparators"
+                 ;; TreeSet's and NavigableSet's SortedSet members, Collections' SortedSet
+                 ;; methods, instance? SortedSet
+                 "SortedSet"])
+           ;; RandomGenerator's bounded defaults and streams, Random's streams, SplittableRandom
+           ["jdk/internal/util/random/RandomSupport.java"]
+           ;; BigInteger.nextProbablePrime of large numbers
+           ["java/math/BitSieve.java"]
+           ;; plain Java of java.util
+           (map #(str "java/util/" % ".java")
+                ["BitSet" "PriorityQueue" "WeakHashMap" "StringTokenizer" "Base64"
+                 "SplittableRandom" "EventObject" "EventListener" "EventListenerProxy"
+                 "Observable" "Observer" "TooManyListenersException" "InputMismatchException"
+                 "MissingResourceException" "IllformedLocaleException"
+                 "InvalidPropertiesFormatException" "FormattableFlags"
+                 "ServiceConfigurationError"])))))
+
 (def added-module-sources
   "Files of other modules' src/MODULE/share/classes added to the closure (paths relative to
   jdk26u), translated as if they were java.base's (javac's --patch-module java.base takes them):
@@ -287,6 +316,7 @@
   [f]
   (vec (sort (distinct (concat (keys (get-in (read-data f) [:closure :repl :sources]))
                                (map #(str "src/java.base/share/classes/" %) added-sources)
+                               (map #(str "src/java.base/share/classes/" %) util-sources)
                                added-module-sources
                                file-sources)))))
 

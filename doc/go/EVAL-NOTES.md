@@ -621,6 +621,17 @@ for the JVM: 0 when nothing differs from the reference (the counts of tests are 
 exactly, so an improvement is reported too, and the reference is then rewritten from
 `.tmp/clojure-tests/go/results.edn`).
 
+**Skipped tests and timeouts** (amendment SL3, accepted 2026-10-10). Besides `:skipped`
+namespaces, the reference may hold `:skipped-tests {ns {test reason}}` (the run mode removes those
+tests' `:test` before running the namespace; `bin/clojure-tests` passes it the reference) and
+`:timeouts {ns seconds}` (the list mode writes them to the run's `timeouts.txt`, and each
+namespace's process gets its own timeout instead of `CLOJURE_TESTS_TIMEOUT`'s, default 900 s).
+Both are written back into `results.edn`. Checked with a timeout of 2 s on `clearing` and 600 s
+on `string`: `clearing` is killed (exit 124, "no result (crashed or timed out)"), `string` passes,
+on the JVM's stage 2 and on the Go build alike. The Go reference has no `:timeouts` yet:
+`transducers`' `seq-and-transducer` stays skipped until step 7's speed (closure compilation)
+lands, then gets a timeout instead.
+
 `test/run_clojure_tests.clj` reads and writes its files through `FileInputStream` and
 `FileOutputStream` (the Go build has no `java.io.File`; `slurp` of a path string goes through
 `io/as-url`, cut); its `generative` mode takes the namespaces from a file when given one
@@ -1193,9 +1204,10 @@ assertions for `transducers` there).
 
 ### Proposed amendments (for the user's review)
 
-Prefix SL (this branch). SL1, SL2, SL6 and SL7 are done on the branch and need the user's
-acceptance; SL3 is done in part (the skip) and proposes the rest; SL4 and SL5 are proposals,
-not done.
+Prefix SL (this branch). **Decided by the user 2026-10-10:** SL1, SL2, SL3 (the per-test skip
+and the per-namespace timeouts, both done), SL6 and SL7 accepted and folded (each marked below
+with where it went, and in C2G-SPEC §16); SL4 and SL5 not taken for now (nor `ProcessBuilder`
+for `java.shell`/`java.process`).
 
 - **SL1 (EVAL-PLAN §2.1; C2G-SPEC §10.2) Locals clearing.** The evaluator clears locals as
   compiled code does: `ObjExpr.compile`'s variant makes `closesExprs` (the analysis's clear
@@ -1204,7 +1216,7 @@ not done.
   a statement position is not evaluated. An evaluated fn's class declares its closed-over locals
   as (non-public) fields read by reflection from the `EvalFn` (the native
   `Compiler$Dyn.defineFnField`). EVAL-PLAN §2.1 said nothing of clearing; "A split for phase 2"
-  listed it for part 4.
+  listed it for part 4. *Accepted 2026-10-10, folded into EVAL-PLAN §2.1 and C2G-SPEC §10.2.*
 - **SL2 (EVAL-PLAN §2.6) Hinted calls through the invoker.** A resolved method of a public class
   is called through jrt's member-table invoker (`Evaluator.invokeResolved`, jrt's native
   `Compiler_Evaluator_InvokeDirect_..._native`), not `Reflector.invokeMatchingMethod`: no
@@ -1212,35 +1224,35 @@ not done.
   arguments as `typedArgs` makes them (which now adapts a fn passed for a functional interface,
   as `Reflector.boxArg` does). Methods of non-public classes keep Reflector's path (its
   accessible-base search). EVAL-PLAN §2.6 left "the invoker directly" to step 7; this is its
-  first part (boxed values, not Go values).
+  first part (boxed values, not Go values). *Accepted 2026-10-10, folded into EVAL-PLAN §2.6.*
 - **SL3 (EVAL-NOTES "Phase 2C", the runner) Skipped tests.** The Go reference may list single
   tests to skip, `:skipped-tests {ns {test reason}}` (`test/run_clojure_tests.clj` run mode
   removes their `:test`; `bin/clojure-tests` passes the reference); used for `transducers`'
   `seq-and-transducer` (about 1,700 s on the evaluator). Proposed, for when step 7's speed
   lands: per-namespace timeouts in the reference (`:timeouts {ns seconds}`) so that the test
-  runs again, then the skip removed.
+  runs again, then the skip removed. *Accepted 2026-10-10 (the skip and the timeouts), folded into "Phase 2C", "The runner", above; the timeouts done (`:timeouts {ns seconds}`).*
 - **SL4 (proposal; B1-PLAN D6, the gate) A test build with the suite's Java fixtures.** j2c
   converts `test/java` (12 files, done in 1 s, no error); `bin/arbace-go --build-tests` would
   translate them with the program (`bin/c2g --program --input`) into a second executable
   `arbace-tests` that `suite-go` uses: `generated-*` (297 assertions), `param-tags` (136),
   `reflect` (7), `try-catch` (5) and most of `compilation` could run. Cost: half a day, and
   about 3 minutes more in the gate's Go chain (a second link with the fixtures, or the fixtures
-  in every executable: smaller cost, but test classes in the product).
+  in every executable: smaller cost, but test classes in the product). *Not taken (the user, 2026-10-10).*
 - **SL5 (proposal; B1-PLAN D6) Embed D6's namespaces with their classes cut.** `arbace.inspector`,
   `arbace.xml`, `arbace.java.browse`, `javadoc`, `shell` embedded, Swing, SAX, `Desktop` and
   `ProcessBuilder` cut (their members throw): `metadata` (53) and `java.javadoc` (5) would pass,
   `java-interop` gets past its `require`; a REPL user gets "not in the Go build" errors when
-  calling them instead of a missing namespace. Half a day; it reverses part of D6.
+  calling them instead of a missing namespace. Half a day; it reverses part of D6. *Not taken (the user, 2026-10-10).*
 - **SL6 (C2G-SPEC §10.6) The Java API in the program.** `bin/c2g --program` translates
   `arbace/java/api/Clojure.clj` with `arbace/lang`: `arbace.java.api.Clojure` exists in the Go
-  build as on the JVM (it is not among the embedded namespaces' sources).
+  build as on the JVM (it is not among the embedded namespaces' sources). *Accepted 2026-10-10, folded into C2G-SPEC §10.6.*
 - **SL7 (C2G-SPEC §4.1, M3; the runner) Library cuts and test.generative on Go.** Besides the
   classes the embedded namespaces name, c2g cuts a fixed list of JDK classes that libraries
   loaded from `ARBACE_PATH` import (`arbace.c2g.embed/library-cuts`: `java.util.jar.JarFile`,
   `JarEntry`, `java.net.URLClassLoader`, `java.io.FileReader`, `java.text.SimpleDateFormat`, for
   test.generative's runner, tools.namespace, java.classpath and tools.reader), so test.generative
   runs on the Go build; `bin/clojure-tests` runs its phase there by default, and the reference
-  holds its result.
+  holds its result. *Accepted 2026-10-10, folded into C2G-SPEC §4.1.*
 
 ## Sources
 

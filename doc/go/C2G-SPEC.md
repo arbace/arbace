@@ -9,7 +9,8 @@ the evaluator's decisions Q1-Q7 ([EVAL-PLAN.md](EVAL-PLAN.md)) that touch §10, 
 W1-W6, [C2G-NOTES.md](C2G-NOTES.md)), accepted 2026-10-09 and folded in (§16), with part D's
 performance work deferred to step 7 (§13.4), and the amendments of the evaluator, B1a step 5
 (M1-M8, X1-X3, S1, S3-S6, [EVAL-NOTES.md](EVAL-NOTES.md)), accepted 2026-10-09 and folded in
-(§16). The
+(§16), and the amendments of java.util's completion (JB1-JB5,
+[JAVA-BASE.md](JAVA-BASE.md)), accepted 2026-10-10 and folded in (§16). The
 decisions it builds on: D1 (c2g + jrt), D2 (an evaluator first), D4 (Java's UTF-16 strings), D5
 (a port of `java.util.regex`), D6 (the first REPL without class forms, `gen-class`, `proxy`,
 interop beyond jrt's classes; `proxy` came back with amendment X2, and the fork-join pool with
@@ -343,6 +344,18 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   methods and constructors that do not exist in Go (`RT.toUrl`, `FileInputStream(File)`),
   throwing. Code naming them analyzes, as on the JVM, and fails when it runs (D6's "names exist
   and throw"; `arbace.c2g.embed`, `out/*absent-members*`).
+- **A cut class's constants are readable** (amendment CF1, accepted 2026-10-10). In a cut
+  class's member table, a static final field of a primitive type or `String` with a constant
+  value answers that value (read by reflection when c2g runs) instead of throwing; its other
+  members still throw. The class forms' analysis reads ASM's `Opcodes` this way
+  (CLASSFORMS-REPL.md; `arbace.c2g.out/cut-constant`).
+- **Library cuts** (amendment SL7, accepted 2026-10-10). Besides the classes the embedded
+  namespaces name, `--program` cuts a fixed list of JDK classes that libraries loaded from
+  `ARBACE_PATH` import, when the world lacks them (`arbace.c2g.embed/library-cuts`:
+  `java.util.jar.JarFile`, `JarEntry`, `java.net.URLClassLoader`, `java.io.FileReader`,
+  `java.text.SimpleDateFormat`, named by test.generative's runner, tools.namespace,
+  java.classpath and tools.reader), so that those libraries load on the Go build (Clojure's suite
+  runs its test.generative phase there).
 
 ### 4.2 Go packages
 
@@ -623,7 +636,13 @@ amendment K1, accepted 2026-10-09), read by c2g only:
   String)`), `URI` and `ReferencePipeline`, `Collectors` (no `SharedSecrets`), `GathererOp` and
   `Gatherers` (`Stream.gather`'s evaluation and `mapConcurrent` throw), `Instant` (`toString`,
   `now`) and `UUID.nameUUIDFromBytes` (MD5 from the host, a native): JRT-NOTES.md, "Phase 2B
-  (step 5)".
+  (step 5)". java.util's completion added `TreeMap` (its sorted build without the
+  `ObjectInputStream` parameter, for the copy constructor, `clone`, `putAll` and
+  `addAllForTreeSet`), `BitSet` (`valueOf(byte[])` and `toByteArray` by shifts, no
+  `ByteBuffer`) and `RandomGenerator` (`isDeprecated` false: no annotations, §12) (amendment
+  JB2, accepted 2026-10-10). A replacing member's parameter tags are written as j2c writes the
+  original's, generics included (`^{:tag (SortedMap K (? extends V))}`): the variant finds the
+  member by them.
 - Variants are class forms like any other and are analyzed with the class. c2g reports the
   number of replaced, cut and added members per class, and the differential tests (§3.1) cover
   them as the rest.
@@ -822,6 +841,12 @@ inlines most of them. §13.6 measures the code size.
 - Assertions are always comma-ok forms inside these functions: a failing `x.(T)` panics in Go
   with a `*runtime.TypeAssertionError`, and on a nil interface, where Java's checkcast succeeds.
 - `instance?` and `cast` of array types compare the array's component class (§5.9).
+- **The dynamic flag** (amendment O4, accepted 2026-10-10): bit 31 of the header's low word
+  marks the objects of classes made at run time (set by `MarkDynamic` when c2g's `Dyn` and
+  `DynSub_C` objects are made, before they are published; the identity hash keeps 31 bits,
+  §5.8); the nominal check of an interface's `instance?` and `cast` asserts `jrt.Dynamic` only
+  for flagged objects (`jrt.IsDynamic`, inlined: a load of the header through the interface's
+  data word, every Java object being a pointer to a struct whose first field is the header).
 - `instance?` of a cut class (§4.1, a class outside the world registered by name) is `false`,
   its operand still evaluated (`jrt.C2g_Discard`); `instance?` of a reflected marker interface
   is the ordinary assertion to its marker (amendment C4, accepted 2026-10-09).
@@ -851,6 +876,8 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   (Correction, 2026-10-08, to follow jrt: the hash comes from one global atomic sequence
   mixed by a 32-bit finalizer, 31 bits and never 0, not from a per-thread xorshift sequence
   as HotSpot's; V3 permits it, the values differing from the JVM's anyway.)
+  The header's low word holds the hash in bits 0-30 and the dynamic flag in bit 31 (§5.7,
+  amendment O4, accepted 2026-10-10); its high word is the lock word (§8.1).
   **A class's identity hash** (amendment U2, accepted 2026-10-09) is its name's
   `String.hashCode`, 31 bits and never 0, set when the `Class` is made (`jrt.presetClassHash`:
   `Define`, `DefineDynamic`, the primitive and array classes), so that classes hash alike in
@@ -875,6 +902,10 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   *jrt.Class` the component class, `A []any`), because Java's arrays are covariant (`String[]`
   is an `Object[]`) and Go's slices are not. Multi-dimensional arrays are reference arrays of
   arrays.
+- **One allocation** (amendment O2, accepted 2026-10-10): a reference array of up to 32 slots is
+  one Go object, the `RefArray` followed by its slots (`unsafe.Slice` over a trailing `[N]any`,
+  N rounded up to Go's size classes); longer arrays are a header and a slice. The Go type and
+  the slice `A` stay, so c2g's output does not change.
 - `(new T/n d)` is `jrt.NewIntArray(d)` or `jrt.NewRefArray(T_class, d)` (`NegativeArraySize
   Exception` for `d < 0`); several dimensions `jrt.NewMultiArray(cls, dims...)`, whose `cls` is
   the array class itself (`int[][]`'s, `(.ArrayClass (.ArrayClass jrt/Prim_int))`) and which
@@ -1154,6 +1185,21 @@ name "size" with signature "()I" in class file ...") from `Evaluator.defineType`
 made, which the analyzer wraps in `CompilerException` as on the JVM. `ClassFormatError` is a jrt
 stand-in (§4.3).
 
+**Interpreted classes and the superclasses of the world** (amendment CF4, accepted 2026-10-10;
+CLASSFORMS-REPL.md §2.3). `DynClass` gains a field `CF`, the `Compiler$CF$Klass` of a class of
+class forms made at the REPL (nil for `deftype`, `reify`, `proxy`). The DynSub types are made for
+`arbace.c2g.dyn/class-supers` too (`Throwable`, `Exception`, `RuntimeException`, `Error`,
+`IllegalArgumentException`, `IllegalStateException`, `Enum`, `Record`, `AFn`; a leaf, such as
+`UnsupportedOperationException`, cannot have one), so these classes can be proxied as well. An
+interpreted class extending one of `sub-supers` (or an interpreted class that does) has DynSub_C
+objects: c2g writes for each C, in `c2g_cf.go`, its allocation without a constructor
+(`dynCfNew_C`: C's initialization, then the object), C's constructors on an allocated object
+(`dynCfCtors_C`, by descriptor: the interpreted constructor's super call) and C's implementations
+of its virtual methods (`dynCfSupers_C`, by name and descriptor: `super.m()`). The natives of
+`Compiler$CFGo` (`defineClass`, `alloc`, `klassOf`, `setMethod` with the members' modifiers and a
+virtual member table entry, `addCtor`, `addField`, `addStatic`, `canExtend`, `superCtor`,
+`superCall`, `setEnum`, `setOuter`) are `arbace.c2g.dyncf`'s.
+
 Functions (`fn*`) need no dynamic type: they are instances of ordinary evaluator classes (§10.2).
 
 ## 6. Statics and initialization
@@ -1360,7 +1406,10 @@ writes the converted value instead (`4294967288`). The prototype of §15 met thi
 - **`jrt.String`** is hand-written (D4): `(struct jrt/Object ^{:tag (slice uint16)} value ^int32
   hash)`, immutable, final (`*jrt.String`), with Java's `String` API as the manifest declares it
   (`length`, `charAt`, `hashCode` as `s[0]*31^(n-1) + ...`, `compareTo` by UTF-16 code units,
-  `equals`, `substring`, case mapping through the translated `Character` ...).
+  `equals`, `substring`, case mapping through the translated `Character` ...). A string of up
+  to 108 code units is one Go object, its units after the header (`unsafe.Slice` over a
+  trailing array, the length rounded up to Go's size classes); `new StringBuilder()` holds its
+  first 16 units in itself (amendment O2, accepted 2026-10-10).
 - **Literals** are interned: every string literal (and folded constant string) of a package is
   a variable of the package's pool `c2g_strings.go`, `Lit_<n>`, initialized at Go package
   initialization by `jrt.Intern` from a Go string literal (or, when the Java string has unpaired
@@ -1509,6 +1558,10 @@ stay where they are), and runs the handlers **after** it returns, in the enclosi
   tests both; with no matching handler, `(panic exc)` rethrows the same object.
 - Handlers run in the enclosing function, so a `return`, `break` or `continue` in a handler is
   an ordinary Go statement.
+- A `try` with nothing to catch (no clause naming a class of the closed world, no
+  normal-completion code) has no literal of its own: its body is translated in place, inside
+  the `finally`'s literal when there is one (§7.9.4), else into the enclosing block (amendment
+  O6, accepted 2026-10-10; an entered literal costs about 7.5 ns, §13.3).
 
 #### 7.9.3 Control transfers out of a `try` body
 
@@ -1622,8 +1675,14 @@ each check; c2g may generate them later.
   receiver (`expr::m`) is evaluated once and null-checked (`Objects.requireNonNull`, as javac)
   before the literal captures it; an unbound one takes the receiver from the first argument;
   `C/new` allocates; the analyzer's lambda form of array constructor references is a lambda.
-- Marker interfaces of intersection targets (`(& Runnable Serializable)`) give the adapter their
-  markers; serializability itself is cut (§12).
+- Marker interfaces of intersection targets (`(& Comparator Serializable)`, javac's
+  `(Comparator<T> & Serializable)`) give the lambda an adapter of its own, `F_Fn_M1_..._Mn`,
+  registered as `F$$Lambda$M1...`, that also implements the markers in the world which `F` does
+  not already extend (Serializable when the target is serializable, then the others, sorted), as
+  `altMetafactory` makes the lambda's class implement them; javac's cast to `Serializable`
+  after such a lambda then succeeds (`Comparator.comparing`, `thenComparing`,
+  `Map.Entry.comparingByKey`) (amendment JB5, accepted 2026-10-10). Serializability itself is
+  cut (§12).
 - `FromFn` in the functional interface's class (§5.11) wraps an `IFn` into the adapter, `Fn`
   calling `invoke`: that is how jrt's `Reflector` support adapts a Clojure function passed where
   a functional interface is expected, without `java.lang.reflect.Proxy` (cut).
@@ -1638,7 +1697,9 @@ each check; c2g may generate them later.
   sets `FromFn` of every `@FunctionalInterface` interface translated, jrt's included (the
   annotation of a class with class forms is read from its declaration, §4.1). The adapter
   behaves as the JVM's `Reflector` proxy does: the arguments boxed, the fn called with
-  `applyTo`, the result converted as `Reflector.coerceAdapterReturn` converts it. Reachability
+  `applyTo`, the result converted as `Reflector.coerceAdapterReturn` converts it; an array
+  result is checked against the return type's array class, as `Dyn`'s results are (amendment
+  JB3, accepted 2026-10-10). Reachability
   treats these interfaces as lambda targets (their adapters and default methods are reached).
 - **`:fi-adapter`** (the analyzer's conversion of a Clojure `fn` to a functional interface
   inside class bodies) is the interface's adapter whose `Fn` calls the `FnInvokers` invoker the
@@ -1833,7 +1894,10 @@ this only matters for racy publication, which the race detector also finds.
   threads (goroutines) that know their pool (`inForkJoinPool`, `getPool`), not
   `ForkJoinWorkerThread`s. A task runs once: whoever claims it first (the forked worker,
   `join`, `invoke`) runs it, the others wait for its completion; a task whose `exec` returns
-  false (a `CountedCompleter`) is done when completed explicitly. `commonPool` has the
+  false (a `CountedCompleter`) is done when completed explicitly, and runs `exec` again when it
+  is forked again before then, as the JDK's `doExec` runs any task not done
+  (`ArrayPrefixHelpers` reforks a parent to continue its cumulation; amendment JB4, accepted
+  2026-10-10). `commonPool` has the
   processors less one. So reducers' `fold` and parallel streams run in parallel.
 - **References** are jrt's: a `WeakReference` holds a `weak.Pointer` to the referent's header
   and its type word, and a `runtime.AddCleanup` on the referent enqueues it on its
@@ -2073,6 +2137,21 @@ hinted interop. A Clojure function passed where a functional interface is expect
 `Reflector` variant's `boxArg` through `jrt.AdaptFn`, not `Proxy` (§7.11, amendment R13, accepted
 2026-10-08).
 
+**Closure compilation** (amendments EC1, EC2, EC5, accepted 2026-10-10; SPEED-NOTES.md, "The
+evaluator: closure compilation"). The evaluator compiles each method of an evaluated fn,
+deftype, defrecord or reify, at its first call, into a tree of `Code` nodes (the variant file
+`arbace/lang/go/CompilerCode.clj`): locals as slot indexes, `long` and `double` locals unboxed
+in the frame's `prims`, constants made once, a node of a primitive analyzed type answering
+`runLong`, `runDouble` or `runBool` (the bytecode's `emitUnboxed`), `recur` by a frame flag;
+`evalIn` remains the evaluation of top-level forms and of node kinds the compiler does not know
+(compat mode). The public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at
+most three parameters of the kinds long, int, double, boolean or a reference are called
+directly, as Go calls: `arbace/lang/go/CompilerOps.clj` (`CodeOp0` .. `CodeOp3`), generated by
+`test/c2g/eval_ops.clj` from the JVM's classes and checked in, regenerated when those methods
+change. Other resolved methods go through `Evaluator.invokeResolved` (their invoker directly,
+when the declaring class is public), resolved constructors through jrt's
+`Compiler_CodeRun_Construct_Constructor_O1__O`, exceptions unwrapped.
+
 ### 10.2 Functions
 
 `fn*` evaluates to an instance of an **evaluator class**, written in class forms in a variant of
@@ -2098,6 +2177,13 @@ made at run time (`Compiler$Dyn.defineFnClass`), a subclass of `EvalFn` named as
 the fn's class (`arbace.core$map`, `user$eval12$fn__13`), held in `EvalFn`'s field `c2g$class`,
 which `getClass` answers (§5.11): messages, `class`, printing and stack traces show the JVM's
 names.
+
+**A fn's class declares its closed-over locals** (amendment SL1, accepted 2026-10-10): one field
+per closed-over local, named and typed as `ObjExpr.compile` declares them (not public; a primitive
+local's field of its primitive type), whose reflective `get` reads the `EvalFn`'s captured value
+(and `set`, for a reference type, writes it): `Compiler$Dyn.defineFnField`, a native c2g writes
+(`arbace/c2g/dyn.clj`). The evaluator clears locals as compiled code does (EVAL-PLAN §2.1), so
+such a field of a `^:once` fn reads null once the fn has run (Clojure's `clearing` tests).
 
 **Primitive fns are evaluated boxed** (EVAL-PLAN Q1, decided 2026-10-09). An `EvalFn` cannot
 answer `invokePrim`: one Go type cannot implement, per fn, whichever of `IFn`'s 322 primitive
@@ -2177,6 +2263,22 @@ Since files are in the world (amendment FS6, accepted 2026-10-10), the error rep
 temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
 variant: `load-file` is the JVM's, with `File`'s absolute path and name.
 
+**The class forms' analysis** (amendment CF2, accepted 2026-10-10; CLASSFORMS-REPL.md). The
+embedded tree holds the class forms compiler's analysis (`arbace/classes/types`, `env`, `parse`,
+`lower`, `analyze`; not `emit`, `compiler`, `shape`, `verify`, `build`, `boot`), with namespace
+variants in `arbace/lang/go/ns/classes/`: `types.subst.clj` (the runtime's package name),
+`env.subst.clj` (a `HashMap` for reflection's cache; the constructors jrt's reflection does not
+list), `analyze.subst.clj` (ASM's `TypeReference` and the world's generic signatures from
+`arbace.classes.go`; no source path lookup), `native.subst.clj` (the classes interpreted:
+`arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.clj` and
+`interp.clj`. `Compiler.classForms`' variant loads them on the first class form without
+checking the macros' specs, as the JVM loads them compiled.
+
+**The world's generic signatures** (amendment CF5, accepted 2026-10-10). `--program` also
+embeds `arbace/classes/generics.edn`: the generic view (`class-generics`) of the world's interfaces
+and of the classes an interpreted class can extend, and the constructors of abstract ones, which
+jrt's reflection does not have and javac's bridges need (`arbace.c2g.dyncf/generics-text`).
+
 ### 10.4 Types made at run time
 
 `deftype`, `defrecord` and `reify` create a `jrt.Class` at run time (name, `Object` as
@@ -2211,6 +2313,16 @@ found by reflection as `java.beans.Introspector` finds them (`java.beans` is not
 build). Not provided: proxies of leaf classes and of classes outside §5.12's list,
 serialization of proxies, and methods of more than 18 parameters (the JVM calls super for them;
 here the fn is called).
+
+**Class forms at the REPL** (amendment CF3, accepted 2026-10-10; it reverses D6 for `defclass`
+and the code forms, B1-PLAN.md; `gen-class` stays out). `defclass` and the code forms (SPEC
+§9.5) are analyzed by the embedded analysis (§10.3) and interpreted (CLASSFORMS-REPL.md):
+`arbace.classes.native`'s boundary is kept, `compile-and-load!` is `arbace.classes.interp`'s,
+which builds from the analyzed nodes trees of the interpreter's nodes (`Compiler$CF`, class forms
+in the `Compiler` variant `arbace/lang/go/ClassForms.clj`, translated), one per method, and
+makes the classes through the host `Compiler$CFGo` (§5.12, amendment CF4): classes made at run
+time whose objects are `Dyn` (DynSub_C for a superclass of the world, `Compiler$CF$FnObj` for a
+Clojure fn's class), their members in the member tables and `Dyn`'s slots.
 
 ### 10.5 Recursion depth
 
@@ -2274,6 +2386,11 @@ Clojure code access to them (`IllegalAccessError`), so rooting them only grew th
 classes of no JDK module (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted (amendment RD2,
 accepted 2026-10-10; `arbace.c2g.main/repl-visible?`).
 
+**The Java API** (amendment SL6, accepted 2026-10-10): `--program` also translates
+`arbace/java/api/Clojure.clj`, so `arbace.java.api.Clojure` (`Clojure/var`, `Clojure/read`; its
+static initializer requires `arbace.edn` at first use) exists in the Go build as on the JVM. It is
+a class of the program, not an embedded namespace's source.
+
 ### 10.7 Stack traces
 
 The evaluated Clojure code's frames are not Go frames: the Go stack shows only the
@@ -2295,6 +2412,13 @@ literal) and leaves out the evaluator's own frames, the `Dyn` and `DynSub_C` dis
 tables' invokers, and the reflective call frames under an evaluated host call, which compiled
 code calls directly. So `arbace.main`'s error report names the Clojure frame (`Execution error
 (ArithmeticException) at user/f (REPL:1)`).
+
+With the closure compiler (amendment EC5, accepted 2026-10-10) the call body is still
+`Evaluator.invokeFn`'s and `invokeMethod`'s `try` literal; the compiled nodes' frames
+(`arbace/lang.(*Compiler_Code...`, `Compiler_Code...`, jrt's `Compiler_CodeRun_` natives) are
+the evaluator's own, and a `CodeHost*` node (a host call) hides the reflective frames above it,
+as the host nodes' `evalIn` did. A compiled node sets the frame's line before each call, so the
+line is the call's.
 
 ## 11. jrt's API as c2g uses it
 
@@ -2527,27 +2651,27 @@ kept gc from inlining small static methods (`Integer.rotateLeft` into `Murmur3`)
 `Murmur3.hashLong` took 9.4 ns with it and 3.7 without, `hashUnencodedChars` 36.5 and 26.3.
 §6.2's benign initialization removes it where that cannot be observed.
 
-**Planned for step 7, not normative** (C2G-NOTES, phase 2D's D7, deferred by the user to plan
-step 7 on 2026-10-09). `bin/c2g-perf` runs the workloads of `test/c2g/bench/BnWork.clj` on the
-JVM Arbace and translated to Go, with the same checksums: Go took 3.8 (`hashing`) to 53
-(`numbers`, boxed arithmetic) times the JVM's time per element, 6 to 20 for the collections.
-The profiles put most of the factor outside c2g's code: allocation and the collector (the mark
-workers at 37% of the CPU with `GOGC=100`; the JVM allocates from a TLAB and removes the boxes
-by escape analysis), arrays of references (`jrt.NewRefArray` is two allocations, a struct and a
-slice of 16-byte `any` slots: an `Object[32]` is 512 bytes against the JVM's 144 with compressed
-oops), assertions from `any` to `Object_I` behind `getClass`, `hashCode` and `equals`, and no
-inlining across interface calls. The work planned, in jrt:
+**The collector, decided by step 7a** (amendment O1, accepted 2026-10-10, closing D7;
+SPEED-NOTES.md, "Step 7a"). With Go's defaults the mark workers took about 60% of all CPU (64
+processors), and a program with a small live heap collected hundreds of times a second (Go's 4
+MiB minimum heap). jrt's package initialization sets `GOGC=200` unless `GOGC` is set, and a
+64 MiB minimum heap unless `ARBACE_MIN_HEAP_MB` sets another (0: none): a ballast, a byte slice
+never written and without pointers, so neither scanned nor resident, raising the collector's
+goal as a JVM's initial heap does (Go has no minimum-heap setting; `GOMEMLIMIT` only lowers the
+goal). **The start's collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the
+program starts, until `Main.main` has loaded `arbace.main`, the main package runs the collector
+at `GOGC=400` unless `GOGC` is set, then restores jrt's setting. Arrays of references and
+strings are one allocation (O2, §5.9, §7.5); the 16-byte slots stay (§13.2's thin pointers not
+taken). `bin/c2g-perf`'s workloads went from 3.7-49 times the JVM's time to 2.3-32 times.
 
-- **`GOGC` set by jrt at start**: 400 measured (`GOGC=400` alone gains 20-40%:
-  `hashMapAssoc` from 3,975 to 2,899 ns per element), with `GOMEMLIMIT` as above;
-- **arrays of references as one allocation** (the slots in the array's own object), or with
-  8-byte slots (§13.2's thin pointers).
-
-Neither changes what c2g writes; step 7 decides them with its own measurements. **The start's
-collector** (amendment U4, accepted 2026-10-09, EXEC-NOTES.md): while the program starts, until
-`Main.main` has loaded `arbace.main`, the main package runs the collector at `GOGC=400` unless
-`GOGC` is set (0.32 s against 0.41 s to `-e nil` on amd64), then sets it back; the running
-program's setting stays step 7's.
+**Profiles and profile-guided builds** (amendments O7 and O5, accepted 2026-10-10).
+`ARBACE_CPUPROFILE=FILE` and `ARBACE_MEMPROFILE=FILE` write Go's CPU and heap profiles of any
+program run under `jrt.RunMain`; allocation sampling is off otherwise (its stack walks cost
+about 2% on the evaluator's deep stacks). `bin/arbace-go --build --pgo` runs the host's
+executable on `test/arbace-go-pgo.clj` with a CPU profile and builds every executable again
+with `go build -pgo` (`bin/g2c build --pgo FILE` for other programs): gc devirtualizes and
+inlines the hot interface calls, 5-15% on the executable. Opt-in for ordinary builds; the
+freeze's executables are built with it.
 
 ### 13.5 Floating point
 
@@ -3529,6 +3653,51 @@ RD3 jrt's own `InflaterInputStream` over Go's zlib: §4.1. RD4 generated sources
 measured closure's and the resource data, made as the JDK build makes them and compared with its
 output: §4.1, JRT-SOURCES.md. RD5 the rename table's `Sun_Normalizer`: §4.4. With them, fixed
 (not amended): §6.2's benign initialization counts a static read in a `switch` arm.
+
+**Class forms at the REPL** (CLASSFORMS-REPL.md; accepted by the user 2026-10-10): CF1 a cut
+class's constants readable: §4.1. CF2 the class forms' analysis embedded, with its namespace
+variants, loaded without spec checks: §10.3. CF3 class forms at the REPL interpreted: §10.4,
+B1-PLAN.md D6. CF4 `DynClass.CF`, the DynSub types of `class-supers`, the natives of
+`Compiler$CFGo`: §5.12. CF5 `generics.edn` embedded: §10.3. CF6 the oracle's `defclass` forms:
+ORACLE.md. CF3 reverses D6 for `defclass`; CF4 extends X1 (the classes a proxy may extend gain
+`class-supers`).
+
+**The suite's last failures** (EVAL-NOTES.md, "The suite's last failures"; accepted by the user
+2026-10-10): SL1 locals clearing in the evaluator and a fn class's fields for its closed-over
+locals: EVAL-PLAN §2.1, §10.2. SL2 hinted calls through the member table's invoker:
+EVAL-PLAN §2.6. SL3 single tests skipped and per-namespace timeouts in the Go build's suite
+reference: EVAL-NOTES.md, "Phase 2C" (the runner). SL6 `arbace.java.api.Clojure` in the program:
+§10.6. SL7 library cuts: §4.1. SL1 settles phase 2's "locals clearing" (EVAL-NOTES.md, "A split
+for phase 2"); SL2 does part of EVAL-PLAN §2.6's "the invoker directly" ahead of step 7; SL7
+extends M3. SL4 (the suite's Java fixtures in a test build) and SL5 (D6's namespaces embedded
+with their classes cut) were not taken.
+
+**Step 7b** (SPEED-NOTES.md, "The evaluator: closure compilation"; accepted by the user
+2026-10-10): EC1 each method of an evaluated fn or deftype compiled at its first call into
+`Code` nodes, `long` and `double` locals unboxed in the frame, `recur` by a frame flag:
+§10.1, EVAL-PLAN §2, §6. EC2 the direct static calls of `Numbers`, `RT`, `Util` and `Math`
+generated into `arbace/lang/go/CompilerOps.clj`: §10.1. EC3 calls of fixed arity without a
+seq: EVAL-PLAN §2.2. EC4 frames reused per thread by depth: EVAL-PLAN §2.1. EC5 resolved
+members through their invoker (`Evaluator.invokeResolved`, `Compiler_CodeRun_Construct`) and
+the `Compiler_Code*` frames in jrt's stack-trace mapping: §10.1, §10.7. EC6 the image stores
+the analyzed trees, methods compiled lazily: EXEC-NOTES.md, "The image of prepared
+namespaces". EC7 (un-skipping `transducers`' `seq-and-transducer`) not taken. EC1 refines §10.1's
+"the evaluator may call one with Go values directly" and EVAL-PLAN Q3's per-arity `invoke`.
+
+**java.util completed** (JAVA-BASE.md, "java.util completed"; accepted by the user 2026-10-10):
+JB1 the java.util files of the closure, `util-sources`: JRT-SOURCES.md. JB2 the variants of
+`TreeMap`, `BitSet` and `RandomGenerator`, and a replacing member's tags as j2c writes them:
+§4.6. JB3 FromFn's array results: §7.11. JB4 a forked task not yet done runs again: §8.4.
+JB5 lambdas with marker interfaces get adapters implementing them: §7.11. JB4 refines S5's "a
+task runs once".
+
+**Step 7a** (SPEED-NOTES.md, "Step 7a"; decided by the user 2026-10-10): O1 the collector's
+settings, closing D7: §13.4. O2 reference arrays and strings in one allocation: §5.9, §7.5. O4
+the dynamic flag: §5.7. O5 profile-guided builds, opt-in, the freeze's executables built with
+them: §13.4. O6 a `try` with nothing to catch has no literal: §7.9.2. O7 the profiles: §13.4.
+O3 (one shared array from `getParameterTypes`, a deviation) was not taken: jrt keeps Java's
+contract, a fresh copy per call. O4 refines §5.8's header (the identity hash is 31 bits beside
+the flag).
 
 Each with a recommendation, which the text above follows, for the user's review.
 

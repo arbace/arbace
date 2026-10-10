@@ -14,7 +14,8 @@ accordingly:
   B1a is a milestone that ends with a freeze, as the JVM state was frozen on
   `arbace-for-java-26`: a well-known branch and tag, advertised in the docs (the user's intent,
   2026-10-08). Proposed names (the user, 2026-10-08): the branch `arbace-for-golang`, the tag
-  `arbace-for-go1.27.1` after the pinned Go toolchain. It includes `linux/arm64`: Go cross-compiles the same
+  `arbace-for-go1.27.1-v1` after the pinned Go toolchain, with `-v2`... for fix releases on the
+  same toolchain, as `arbace-for-java-26-v1`/`-v2` (the user, 2026-10-10). It includes `linux/arm64`: Go cross-compiles the same
   program, and the arm64 executable is tested here under QEMU's user-mode emulation
   (`qemu-aarch64`).
 - **B1b (later): the box.** The same program built with TamaGo (`GOOS=tamago`) on go-whim's
@@ -85,7 +86,9 @@ and its suite run to `--full`. The essential gate's smoke test (amendment U5, ac
 2026-10-09) runs on an executable cached by a hash of its inputs (`bin/arbace-go --gate`,
 `.tmp/arbace-go-gate`), built again, beside the suite, only when they changed.
 **D7** (performance, deferred to step 7; C2G-SPEC §13.4): the start's collector setting is step
-6's (amendment U4: `GOGC=400` while the program starts); the running program's stays step 7's.
+6's (amendment U4: `GOGC=400` while the program starts); the running program's is step 7a's.
+*Closed by amendment O1 (accepted 2026-10-10, SPEED-NOTES.md):* `GOGC=200` and a 64 MiB
+minimum heap set by jrt's initialization, reference arrays and strings in one allocation (O2).
 
 ## B1b, later: the box
 
@@ -121,8 +124,11 @@ pinned by commit, or vendored) is decided then.
   `HostSocketImpl` and the host's optional `NetHost`, and `arbace.core.server` (the socket REPL,
   `prepl`, `io-prepl`, `remote-prepl`) is in the executable, its servers started from the
   `arbace.server.*` properties (from `JAVA_TOOL_OPTIONS`) as on the JVM (C2G-SPEC §4.1, §9.4,
-  §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class`, `defclass` at the REPL and JVM interop
-  beyond the closed world stay out.
+  §10.6; JRT-NOTES.md, "Sockets (go-net)"). `gen-class` and JVM interop beyond the closed world
+  stay out.
+  **Reversed for `defclass` (2026-10-10, amendment CF3):** `defclass` and the code forms work at
+  the REPL, analyzed by the embedded class forms compiler and interpreted
+  ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md), C2G-SPEC §10.4).
 
 (D3, how Arbace depends on go-whim, moves to B1b.)
 

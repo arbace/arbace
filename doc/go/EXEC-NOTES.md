@@ -118,6 +118,13 @@ instance does on the JVM (`StrConcatExpr.STR_VAR` was nil otherwise).
 executable that already holds one (preparing ignores it). It does not depend on the
 architecture: the amd64 executable makes it, and the arm64 executables embed the same.
 
+**With the closure compiler** (amendment EC6, accepted 2026-10-10; SPEED-NOTES.md, "The
+evaluator: closure compilation"): the image still holds the analyzed `Expr` trees; each method is
+compiled to `Code` at its first call, not when the image is replayed (most of core's fns are not
+called at start). The compiler's caches, `ObjMethod.evalCM` and `FnExpr.evalArities`, are among
+the image's skipped fields. Start went from 0.33 s to 0.21 s, preparing the image from 32 s to
+11 s.
+
 ## Building
 
 `bin/arbace-go --build` (amd64 and arm64 by default, `ARBACE_GO_ARCHES`):

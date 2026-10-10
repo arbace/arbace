@@ -119,7 +119,8 @@ an instance check for references): IllegalArgumentException as the JVM's accesso
       (return x))))
 
 (go/func convertArgs
-  "convertArgs checks the argument count and converts each argument (convertArg).\n"
+  "convertArgs checks the argument count and converts each argument (convertArg); the result
+is the arguments' slice itself when no argument is primitive.\n"
   ^{:tag (slice any)} [^{:tag (slice (* Class))} params ^{:tag (* RefArray)} args]
   (let [n 0]
     (when (!= args nil)
@@ -127,10 +128,21 @@ an instance check for references): IllegalArgumentException as the JVM's accesso
     (when (!= n (len params))
       (panic (IllegalArgumentException_New_String
                (Str (+ "wrong number of arguments: " (strconv/Itoa n) " expected: " (strconv/Itoa (len params)))))))
-    (let [out (make (slice any) n)]
+    ;; references are passed as they are: the arguments' own slice serves unless a primitive
+    ;; parameter converts one (the invokers only read it)
+    (let [^{:tag (slice any)} out nil]
       (range [i p params]
-        (aset out i (convertArg p (aget (.-A args) i))))
-      out)))
+        (let [c (convertArg p (aget (.-A args) i))]
+          (when (and (== out nil) (.IsPrimitive__Z p))
+            (set! out (make (slice any) n))
+            (copy out (.-A args)))
+          (when (!= out nil)
+            (aset out i c))))
+      (when (!= out nil)
+        (return out))
+      (when (== args nil)
+        (return nil))
+      (.-A args))))
 
 (go/func callWrapping
   "callWrapping runs f and wraps a Java exception it throws (a Go run-time error mapped first,
