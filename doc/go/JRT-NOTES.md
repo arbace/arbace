@@ -2610,25 +2610,26 @@ largest single part; kept as the JDK's sources (fidelity) rather than turned int
 - `Date` follows the default zone (hooks) rather than staying GMT: with the host's zone the JVM
   and the Go build would otherwise print different `toString`s.
 
-## Proposed amendments (for the user's review)
+## Amendments (accepted by the user 2026-10-10)
 
-Numbered TM (time); no TM appears elsewhere in doc/.
+Numbered TM (time). All nine were accepted on 2026-10-10 and folded into C2G-SPEC (§16, "Time")
+and JRT-SOURCES.md; each says where below.
 
 - **TM1 (C2G-SPEC §4.1, the closed world; JRT-SOURCES.md)** `java.time` is in the world:
   `java.time`, `.temporal`, `.format`, `.zone` whole but the serialization proxies, `.chrono`
   with the ISO chronology alone (Hijrah, Japanese, Minguo, Thai Buddhist cut: `Chronology.of`
   of them is the JDK's unknown-chronology exception); `DateTimeFormatter.toFormat` throws
   (`java.text.Format` is outside); variants for `ZoneRulesProvider`, `TzdbZoneRulesProvider`,
-  `AbstractChronology`, `ZoneOffset` (above). `Instant`'s variant and jrt's `TimeText` are gone.
+  `AbstractChronology`, `ZoneOffset` (above). `Instant`'s variant and jrt's `TimeText` are gone. *Accepted 2026-10-10: C2G-SPEC §4.1.*
 - **TM2 (C2G-SPEC §10.3, RD1; JRT-SOURCES.md, RD4)** The resource data include an image file,
   `lib/tzdb.dat`, made as `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib`
   (a data file under `lib/` is the image's, the others the module's); `TzdbZoneRulesProvider`
-  and `ZoneInfoFile` read it as the resource `/lib/tzdb.dat`.
+  and `ZoneInfoFile` read it as the resource `/lib/tzdb.dat`. *Accepted 2026-10-10: C2G-SPEC §10.3.*
 - **TM3 (JRT-SOURCES.md, RD4)** The generated sources include java.base's CLDR data, made by
   the JDK build's `CLDRConverter` with the build's arguments and compared byte for byte:
   `FormatData`, `FormatData_en`, `TimeZoneNames`, `TimeZoneNames_en`, `CalendarData`,
   `CLDRBaseLocaleDataMetaInfo` (its static initializer cut: parent locales and language
-  aliases need `Locale.forLanguageTag`), `ZoneName`.
+  aliases need `Locale.forLanguageTag`), `ZoneName`. *Accepted 2026-10-10: C2G-SPEC §4.1, JRT-SOURCES.md "Time".*
 - **TM4 (C2G-SPEC §4.1, jrt's own Java, K1; §9.1, the manifest)** The locale providers are
   jrt's own Java over those bundles (`LocaleProviderAdapter`, `LocaleResources`,
   `CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`,
@@ -2639,30 +2640,30 @@ Numbered TM (time); no TM appears elsewhere in doc/.
   another English region `en`'s, where the JVM has `jdk.localedata`'s (a deviation; 3 oracle
   cases). The week parameters are by region for every locale. jrt's `Locale` answers
   `getUnicodeLocaleType` (null), `hasExtensions` (false), `stripExtensions`, and has the JDK's
-  locale constants.
+  locale constants. *Accepted 2026-10-10: C2G-SPEC §4.1, §12 (R17).*
 - **TM5 (C2G-SPEC §4.1)** `java.util.TimeZone` is jdk26u's (with `SimpleTimeZone`, `ZoneInfo`,
   `ZoneInfoFile`, `sun.util.calendar`, `CRC32`), replacing jrt's own fixed-offset `TimeZone` and
   `ZoneInfo`; jrt's `GregorianCalendar` takes a `ZoneInfo`'s offsets as the JDK's, and has
   `toZonedDateTime` and `from`; jrt's `Date` computes its local fields, `toString` and its local
-  constructors in the default zone through hooks c2g sets to jrt's `jdk.internal.jrt.DefaultZone`.
+  constructors in the default zone through hooks c2g sets to jrt's `jdk.internal.jrt.DefaultZone`. *Accepted 2026-10-10: C2G-SPEC §4.1.*
 - **TM6 (C2G-SPEC §9.4, the host interface)** The default zone is the host's, as the JDK finds
   it on Linux (`TZ`, `/etc/localtime`; jrt's natives of `TimeZone`, after `TimeZone_md.c`),
   with a second optional interface of the host, `HostLinks` (`Readlink`), as `HostFS` is; the
   clock of `java.time.Clock` is the host's with its nanoseconds (`VM.getNanoTimeAdjustment`), so
-  `Instant.now()` is no longer in milliseconds.
+  `Instant.now()` is no longer in milliseconds. *Accepted 2026-10-10: C2G-SPEC §9.4.*
 - **TM7 (C2G-SPEC §4.4, the rename table; W4)** `sun.util.calendar.Era` is `Calendar_Era` in
   Go; the first package-private pair across packages c2g found, `TimeZone.getOffsets(long,
   int[])` and `ZoneInfo`'s public one, is resolved by a variant that cuts `TimeZone`'s (nothing
   in the world calls it on a `TimeZone`) instead of a member entry in the rename table, which
   W4 foresaw and c2g has no mechanism for (a renamed method would need its callers' and
-  overrides' names to follow).
+  overrides' names to follow). *Accepted 2026-10-10: C2G-SPEC §4.4.*
 - **TM8 (C2G-SPEC §10.6, the REPL's world; P2, RD2)** A root instance method is a virtual call
   too: its overrides in every instantiated class are translated, those of classes the REPL
   cannot name (RD2's) included, so that reflection on their instances does not reach a stub.
   Reachability indexes virtual calls by receiver type (167 s to 3.6 s with the roots as virtual
-  calls; 68 s on main before).
+  calls; 68 s on main before). *Accepted 2026-10-10: C2G-SPEC §10.6.*
 - **TM9 (`bin/jrt-convert`'s shape check)** In the overlay chunk the checker takes jrt's own
-  classes from their sources (`FROM_SOURCE`), not the running JDK's of the same names.
+  classes from their sources (`FROM_SOURCE`), not the running JDK's of the same names. *Accepted 2026-10-10: JRT-SOURCES.md "Time".*
 
 ## Sources
 

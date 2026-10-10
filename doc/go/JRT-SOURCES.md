@@ -346,7 +346,10 @@ Two options of the conversion (amendment S2):
 ## Time (2026-10-10)
 
 java.time in the Go build (JRT-NOTES.md, "Time"; the user's decision of 2026-10-10), from jdk26u
-at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`:
+at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`. Amendments TM2,
+TM3 and TM9 (the time-zone database as an image file of the resource data, java.base's CLDR data
+as generated sources, the shape check's `FROM_SOURCE`) were accepted on 2026-10-10 and are folded
+here and in C2G-SPEC §4.1, §10.3:
 
 - **Sources added** (`time-sources`, 94 files of `src/java.base/share/classes`; `MissingResourceException` is also `util-sources`'): `java/time/`
   but `Ser.java` (`Clock`, `DayOfWeek`, `Duration`, `InstantSource`, `LocalDate`,
