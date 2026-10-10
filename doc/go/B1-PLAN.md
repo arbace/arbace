@@ -136,6 +136,12 @@ pinned by commit, or vendored) is decided then.
   **Reversed for `defclass` (2026-10-10, amendment CF3):** `defclass` and the code forms work at
   the REPL, analyzed by the embedded class forms compiler and interpreted
   ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md), C2G-SPEC §10.4).
+  **Reversed for processes (2026-10-10, the user's decision of that day; amendments PR1-PR7):**
+  jdk26u's `Process`, `ProcessBuilder` (with `Redirect`), `ProcessHandle`, `ProcessHandleImpl`,
+  `ProcessImpl` and `ProcessEnvironment` are translated over jrt's natives and the host's optional
+  `HostProc` (fork and exec, pipes, reaping, signals; `/proc` for the handles), `Runtime.exec`
+  is in `Runtime`'s member table, and `arbace.java.shell` and `arbace.java.process` are in the
+  executable (C2G-SPEC §4.1, §9.4; JRT-NOTES.md, "Processes").
 
 (D3, how Arbace depends on go-whim, moves to B1b.)
 

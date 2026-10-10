@@ -311,6 +311,22 @@ computes its local fields, `toString` and its local constructors in the default 
 hooks (`DateZoneOffset`, `DateZoneOffsetByWall`, `DateZoneName`) that c2g's support code sets to
 jrt's own Java `jdk.internal.jrt.DefaultZone` (TM5).
 
+**Processes in the closed world** (amendments PR1, PR3, PR6, accepted 2026-10-10; JRT-NOTES.md,
+"Processes"; JRT-SOURCES.md, "Processes"). D6's cut of processes is reversed: jdk26u's `Process`,
+`ProcessBuilder` (with `Redirect`), `ProcessHandle`, `ProcessHandleImpl` and the Unix
+`ProcessImpl` and `ProcessEnvironment` are in the world, and `arbace.java.shell` and
+`arbace.java.process` are embedded (§10.3). Variants: `ProcessImpl` (no launch mechanism, helper
+path or native `init`; `forkAndExec` calls the static native `hostForkAndExec`; descriptors through
+`HostFiles.handle` and `setHandle` in place of `SharedSecrets`' `JavaIOFileDescriptorAccess`;
+Linux's branches of `initStreams` and `destroy`), `Process` (no `Blocker`; the native charset from
+`native.encoding`), `ProcessBuilder` (no JFR event or `System.Logger`; `Redirect`'s null file
+`/dev/null`) and `ProcessHandleImpl` (no `initNative`; plain daemon reaper threads;
+`Info.info0` over the static native `hostInfo`). The natives are jrt's (§9.1, PR3) over §9.4's
+`HostProc`; the children's pipes are entries of jrt's file table, and jrt's `FileDescriptor`
+gives `HostFiles` the setting of its number. `Runtime.exec`'s six overloads are in `Runtime`'s
+member table through jrt's own Java `jdk.internal.jrt.RuntimeExec` (§11, PR4). Code kept from
+jdk26u in the variants, `RuntimeExec` and jrt's process natives is recorded in LICENSE.md (PR6).
+
 The analyzer runs as it runs for the JVM, with one difference: classes the closed world takes
 from source are never resolved by reflection on the running JDK, even when the JDK has them
 (the analyzer's environment prefers the compilation set; c2g makes that a rule and fails on a
@@ -1716,7 +1732,9 @@ each check; c2g may generate them later.
   final locals (§7.3). `(return v)` inside returns from the literal.
 - `(method-ref F ...)`: a static method reference is a literal calling the function; a bound
   receiver (`expr::m`) is evaluated once and null-checked (`Objects.requireNonNull`, as javac)
-  before the literal captures it; an unbound one takes the receiver from the first argument;
+  before the literal captures it, and a bound reference to a private method of a non-leaf class
+  calls its `Impl_` with the receiver's struct and the receiver, as an invocation of it does
+  (amendment PR7, accepted 2026-10-10); an unbound one takes the receiver from the first argument;
   `C/new` allocates; the analyzer's lambda form of array constructor references is a lambda.
 - Marker interfaces of intersection targets (`(& Comparator Serializable)`, javac's
   `(Comparator<T> & Serializable)`) give the lambda an adapter of its own, `F_Fn_M1_..._Mn`,
@@ -2076,6 +2094,13 @@ the translated code may use, as the analyzer needs it:
   `port0`, `setOption0`, `getOption0`, `lookup0`, `reverse0`, `hostName0`, `hasFamily0`: the
   socket table and the name service over §9.4's `NetHost`, in `go/arbace/jrt/net.clj`), the same
   way (`String` parameters too).
+  With processes (PR3, accepted 2026-10-10) jrt defines natives of translated classes directly:
+  `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
+  `waitForProcessExit0`, `destroy0`, `parent0` and `getProcessPids0`, and the static natives the
+  variants add, `ProcessImpl.hostForkAndExec` and `ProcessHandleImpl.Info.hostInfo` (in
+  `go/arbace/jrt/process.clj`, over §9.4's `HostProc`), all static over primitives, arrays and
+  `String`; the children's pipes are entries of `HostFiles`' table, whose `available` asks a
+  file that can tell (a pipe: `FIONREAD`).
 - **Natives of `arbace.lang`** (amendments P1 and E6, accepted 2026-10-09). A `^:native` method
   a variant declares (§4.6) is translated the same way, a call of `C_M..._native` with the
   receiver first for an instance method. The function is **jrt's when jrt defines it**: the
@@ -2199,6 +2224,21 @@ then sorted order), else the host's offset now as `GMT+hh:mm`. The symbolic link
 a fourth optional interface, `jrt.HostLinks` (`Readlink`; `OSHost` implements it over
 `os.Readlink`), the files through `Host`. `VM.getNanoTimeAdjustment` (java.time's system clock)
 is the host's clock with its nanoseconds, so `Instant.now()` has them.
+
+**An optional `HostProc`; the JVM's process texts** (amendments PR2, PR5, accepted 2026-10-10;
+JRT-NOTES.md, "Processes"). The processes are a fifth optional interface, `jrt.HostProc` (in
+`hostproc.clj`): `Start` (a path, the arguments, the environment or nil for the program's, the
+directory, each standard stream a pipe, the program's own or an open file of the host, error output
+to standard output), `Pid`, `ProcStat`, `ProcInfo`, `Pids`, `Kill`; a started child is a
+`jrt.HostChild` (`Pid`, `Wait`, `Signal`). `OSHost` implements it on Linux (`hostproc_linux.clj`,
+`//go:build linux`) over `os.StartProcess`, `os.Pipe` and `/proc`, a goroutine reaping each child
+at its end (no zombies; a reaped child's pid is never signalled). Without it no program starts.
+jrt's generic process files name no `syscall` or `os` (errors carry Linux's numbers as `int`s), so
+jrt builds for `GOOS=tamago` without them. A failed start's message is `ProcessImpl_md.c`'s
+`IOE_FORMAT` with musl's `strerror` (`Exec failed, error: 2 (No such file or directory) `), the
+program is looked for as this machine's JVM looks for it (musl's `execvp` with the environment
+inherited, `childproc.c`'s `JDK_execvpe` with it given, no `/bin/sh` fallback), and the exit
+status is the JDK's encoding (0x80 plus the signal) (PR5, with NT5).
 
 **An optional `NetHost`** (JRT-NOTES.md, "Sockets (go-net)"; accepted with NT1-NT5,
 2026-10-10). The network is a third interface, `jrt.NetHost` (in `net.clj`): `Listen`, `Dial`
@@ -2344,7 +2384,8 @@ namespaces' sources under the main package's forms directory
 `//go:embed res`; `main` sets the host's `Resources` to `fs.Sub(resources, "res")` (§9.4)
 before `Main.main`. The embedded tree is `arbace/**/*.clj` less the tools (`classes`, `j2c`,
 `g2c`, `c2g`), the runtime's class forms (`arbace/lang`), ASM, and the namespaces the Go build
-leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`)
+leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`; processes,
+`arbace.java.shell` and `arbace.java.process`, are in since amendment PR1, accepted 2026-10-10)
 (`arbace.c2g.embed/excluded`). `RT.load` (variant) finds `NAME.clj` or `.cljc` among the
 embedded sources, then in the directories of the environment variable `ARBACE_PATH`, the class
 path's counterpart; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
@@ -2646,7 +2687,9 @@ the member tables (`reflect_tables_c2g.go`, whose `init` runs after jrt's `refle
 `Throwable.printStackTrace(PrintStream)` and `(PrintWriter)` (the trace's text printed) and
 `System.getenv()` (the host's environment, unmodifiable) and `System.getProperties()` (a
 `Properties` copy of the properties, when `Properties` is translated; NT2), as functions `C2g_*`
-with table entries; `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
+with table entries; `Runtime.exec`'s six overloads, each an entry calling jrt's own Java
+`jdk.internal.jrt.RuntimeExec`'s method of the same parameters (rooted; when `RuntimeExec` is
+translated; PR4, accepted 2026-10-10); `Date.toInstant` and `Date.from(Instant)` and `ClassLoader.getResourceAsStream` (§10.3)
 as table entries only, for reflection. Translated code calling a member that exists only as a
 table entry is an operation-level stub (§4.1; none does). And the forwarders of hand-written
 leaf classes to translated default methods (§5.4).
@@ -3889,6 +3932,14 @@ Together 107.1 → 61.9 MB on amd64.
 interactive REPL under rlwrap, `ARBACE_RLWRAP`: §10.6. RL2 the main package's
 `rlwrap_linux.go` and `rlwrap_other.go`: §10.6 (U3's files). RL3 the smoke test's
 pseudo-terminal check: B1-PLAN.md, "Checks".
+
+**Processes** (JRT-NOTES.md, "Processes"; accepted by the user 2026-10-10): PR1 processes in the
+closed world, D6 reversed for them, `arbace.java.shell` and `arbace.java.process` embedded: §4.1,
+§10.3, B1-PLAN.md D6. PR2 the optional `HostProc`: §9.4. PR3 jrt's process natives, the pipes in
+jrt's file table, `FileDescriptor`'s access for `HostFiles`: §4.1, §9.1. PR4 `Runtime.exec` in
+`Runtime`'s member table through `RuntimeExec`: §4.1, §11. PR5 the JVM's texts, search and
+status: §9.4. PR6 the jdk26u-derived code: LICENSE.md, §4.1. PR7 bound references to private
+methods of non-leaf classes: §7.11.
 
 Each with a recommendation, which the text above follows, for the user's review.
 

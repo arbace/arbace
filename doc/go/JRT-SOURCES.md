@@ -426,7 +426,8 @@ here and in C2G-SPEC §4.1, §10.3:
 ## Processes (2026-10-10)
 
 Processes in the Go build (JRT-NOTES.md, "Processes"; the user's decision of 2026-10-10), from
-jdk26u at `baf63fb`, `test/g2c/jrt_sources.clj`'s `process-sources`:
+jdk26u at `baf63fb`, `test/g2c/jrt_sources.clj`'s `process-sources`. Amendments PR1-PR7 were
+accepted on 2026-10-10 (C2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Processes"):
 
 - **Sources added**: `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
   `ProcessHandle.java`, `ProcessHandleImpl.java`; `src/java.base/unix/classes/java/lang/ProcessImpl.java`
