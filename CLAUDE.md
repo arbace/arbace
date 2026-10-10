@@ -67,7 +67,8 @@ Prior art:
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite`, the
   g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`) and
   the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
-  Clojure's suite on it (`test/arbace-go-results.edn`) and the oracle on it, against its known
+  Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
+  suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2c and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest; it also trims Go's build cache of entries unused for a day): run it when

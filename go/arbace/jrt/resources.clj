@@ -4,8 +4,7 @@
 ;; their handler.
 (in-ns 'go.arbace.jrt)
 
-(go/file "resources.go"
-  :imports [[os "os"] [filepath "path/filepath"]])
+(go/file "resources.go")
 
 (go/func ClassPathResources_Embedded0_String__Z_native
   "ClassPathResources_Embedded0_String__Z_native tells whether name is a resource embedded in the
@@ -24,17 +23,24 @@ executable (Host.Resource).\n"
       (range [i x b] (aset (.-A a) i (conv int8 x)))
       a)))
 
+(go/type HostExecutable
+  "HostExecutable is a host that can tell the executable's path (the embedded resources' jar:
+URLs name it): a Host may implement it (B1a's OSHost does on Linux, resources_linux.clj).\n"
+  (interface
+    (^{:doc "Executable is the executable's absolute path, symbolic links resolved.\n"}
+      Executable [] :results [string error])))
+
 (go/func ClassPathResources_Executable0__String_native
-  "ClassPathResources_Executable0__String_native is the executable's absolute path, symbolic links
-resolved, or \"\" when the host cannot tell (B1b's box).\n"
+  "ClassPathResources_Executable0__String_native is the executable's absolute path, or \"\" when
+the host cannot tell (a host without HostExecutable: B1b's box).\n"
   ^{:tag (* String)} []
-  (let [(values p err) (os/Executable)]
-    (when (!= err nil)
+  (let [(values he ok) (assert HostExecutable (CurrentHost))]
+    (when (not ok)
       (return (Str "")))
-    (let [(values r rerr) (filepath/EvalSymlinks p)]
-      (when (== rerr nil)
-        (set! p r)))
-    (Str p)))
+    (let [(values p err) (.Executable he)]
+      (when (!= err nil)
+        (return (Str "")))
+      (Str p))))
 
 (go/func VM_IsSystemDomainLoader_ClassLoader__Z
   "VM_IsSystemDomainLoader_ClassLoader__Z is jdk.internal.misc.VM.isSystemDomainLoader, as the

@@ -1254,6 +1254,160 @@ for `java.shell`/`java.process`).
   runs on the Go build; `bin/clojure-tests` runs its phase there by default, and the reference
   holds its result. *Accepted 2026-10-10, folded into C2G-SPEC §4.1.*
 
+## The suite's Java fixtures (branch `gofix`)
+
+The user's decision of 2026-10-10, before the `arbace-for-golang` freeze: SL4 after all (the
+suite's Java fixtures in a test build of the Go executable), `java.io`'s 4 errors (resources
+through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle differences.
+
+### The test build
+
+- `bin/clojure-tests --java-fixtures OUT` fetches and renames the suite as rename mode does (its
+  own run, `java-fixtures`) and converts `test/java` (12 files: `compilation.TestDispatch`,
+  `JDK8InterfaceMethods`, `ClassWithFailingStaticInitialiser`, `reflector.IBar`, and
+  `arbace.test`'s `AdapterExerciser`, `FIConstructor`, `FIStatic`, `FunctionalTester`,
+  `SwissArmy`, `ConcreteClass`, `GenericInterface`, `ReflectorTryCatchFixture`) into class forms
+  with j2c (javac's class path: stage 2, for `IFn` and the Java API): 12 of 12, no error.
+- `bin/arbace-go --build-tests [DIR]` translates them with the program (`bin/c2g --program --input
+  DIR`, every public member a root as for the rest of the REPL's world) into
+  `target/arbace-go/<arch>/arbace-tests`, with its own c2g output, work modules and image
+  (`c2g-tests`, `work-tests-<arch>`); the shipped executable does not carry them. The test build
+  is 63.7 MB against the shipped 62.1 MB (amd64): the fixtures, their 100-odd functional
+  interfaces' adapters and `Dyn` slots.
+- `bin/clojure-tests` with `CLOJURE_TESTS_GO` checks that the executable holds the fixtures
+  (`arbace.test.SwissArmy`) and otherwise stops, naming the test build; `test/arbace-go-results.edn`
+  is the test build's reference. `bin/gate --full`'s Go chain builds the test build after the
+  shipped one and runs the suite on it (`go-build-tests`, then `suite-go`), beside the smoke
+  test and the oracle on the shipped executable.
+- Found on the way, in c2g: a derived method's body (a bridge's casts) named the classes as
+  jrt's own package does, unqualified, which is right only in jrt: `ConcreteClass`' bridge in
+  `arbace/lang` did not build. `derived-body` now qualifies them as its package sees them.
+
+### What the namespaces needed besides the fixtures
+
+- **Skipped tests are not compiled.** A test that names a class outside the Go build's world
+  (`java.awt.Point`) or a class only AOT compilation makes (`compilation.load_ns.x`) fails when
+  its namespace loads, before any test runs: removing its `:test` was not enough. The runner
+  now also wraps `deftest` while the namespaces load, so that a test listed under
+  `:skipped-tests` defines its var without a body (in run and generative modes; the generative
+  mode is given the reference too).
+- **A stand-in `arbace.inspector`** (`test/suite-go/arbace/inspector.clj`, on `ARBACE_PATH` for
+  the suite's Go runs only): `java-interop` requires it in its `ns` form; its one user,
+  `test-proxy-non-serializable`, is skipped. The Go build itself still leaves `arbace.inspector`
+  out (D6).
+- **Functional interfaces for let and loop locals** (`generated-all-fi-adapters-in-let`: 99
+  errors before). Compiled code adapts the init of an object local whose tag names a functional
+  interface (`LetExpr.doEmit`, `FISupport.maybeEmitFIAdapter`: a fn not already an instance is
+  adapted, anything else cast). The evaluator now does the same in both its paths
+  (`Evaluator.fiTarget` and `fiAdapt`, the `LetExpr` variant's `evalIn`, `CodeFI` in the closure
+  compiler).
+- **`arbace.reflect` without ASM** (`param-tags`: `arbace.asm.Type.getType is not in the Go
+  build`): a Go-build variant of `arbace/reflect/java.clj` (`arbace/lang/go/ns/reflect/
+  java.subst.clj`) computes the names ASM's `Type` gives classes, descriptors and internal
+  names; `type-reflect` and `reflect` (the `JavaReflector`) work on Go now.
+- **`Files.newDirectoryStream`** (java-interop's `get-dir-stream`, a reflective call whose
+  analysis needs the method): jrt's `Files` gains it (JRT-NOTES.md, "Resources by URL").
+
+### The two oracle differences
+
+- `(try (Base.) (catch Throwable e (class e)))` of an abstract class made by `defclass`: the
+  evaluator's resolved `new` (`NewExpr.evalIn`, and `CodeHostNew` in the closure compiler) now
+  throws `InstantiationError` naming the class, before evaluating the arguments, as the JVM's
+  `new` instruction does; the reflective path keeps `Constructor.newInstance`'s
+  `InstantiationException`, as the JVM's `Reflector.invokeConstructor` gives it. This needed
+  `java.lang.InstantiationError` in the closure (`test/g2c/jrt_sources.clj`).
+- `(eval (quote (deftype Foo/2 [a])))`: the JVM's error comes from `deftype*`'s analysis, the
+  stub's `defineClass`, whose `ClassLoader.preDefineClass` refuses a binary name with `/` (or a
+  leading `[`): `NoClassDefFoundError: IllegalName: compile__stub.user.Foo/2`. The Go build's
+  `compileStub` now refuses it the same way, so the error is the JVM's, from the same place.
+
+Both cases match now; `test/oracle/known-go-amd64.edn` holds 6 cases in 4 groups (was 8 in 6).
+
+### Results
+
+amd64, `CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 12`
+(test.generative included; 3.5 minutes):
+
+| | main (the reference before) | this branch (test build) |
+|---|---:|---:|
+| namespaces run / loading | 66 / 66 | 74 / 74 |
+| skipped namespaces | 19 | 11 |
+| tests | 681 | 771 |
+| assertions passing | 19,628 of 19,632 | 20,487 of 20,501 |
+| failures, errors | 0, 4 | 11, 3 |
+| test.generative | 26 specs | 27 specs (as the JVM) |
+
+Per namespace (JVM in parentheses): `generated-*` 3 × 99 of 99 (99), `param-tags` 136 of 136
+(136), `try-catch` 5 of 5 (5), `java.io` 115 of 115 (115), `reflect` 5 of 5 (7: one test
+skipped, `javax.xml.stream`), `compilation` 114 of 124 (125: `clj-1208` skipped), `java-interop`
+296 of 300 (337: four tests skipped). The skipped tests, each with its reason in the
+reference: `compilation/clj-1208` (a class AOT compilation makes), `java-interop`'s `test-dot`
+and `test-bean` (`java.awt`), `test-proxy-method-order` (reads a class file with ASM),
+`test-proxy-non-serializable` (`arbace.inspector`, serialization), `reflect`'s
+`invoke-checks-accessibility` (`javax.xml.stream`). The known failures, recorded in the
+reference:
+
+- `compilation`: `primitive-return-decl` (2) and `incorrect-primitive-type-hint-throws` (1), the
+  evaluator's primitive fns being boxed (EVAL-PLAN.md Q1: no recur-mismatch warning, no "Cannot
+  coerce long to int"); `test-compiler-line-numbers` (7 of 16), the evaluator's stack traces giving
+  a field access, a field assignment and an invoke's `IFn` cast the line of the enclosing call.
+- `java-interop`: `test-invoke-fiprim-rets` (2) and `test-match-prim-args-only-to-2` (1), a fn for
+  an interface `definterface` makes at run time with `FunctionalInterface` (run-time interfaces
+  carry no annotation, and jrt's `AdaptFn` adapts fns to the world's interfaces only);
+  `test-proxy-super` (1), a proxy of `java.util.BitSet`, not one of the Go build's proxy
+  superclasses.
+
+Other checks: `bin/arbace-go --smoke` passes; the whole oracle on the shipped executable,
+`--expected test/oracle/known-go-amd64.edn`: 21,794 of 21,800, the 6 recorded, none new; the
+JVM's suite on stage 2 is unchanged by the runner's change (`java.io`, `reflect`, `try-catch`
+checked, and the reference has no `:skipped-tests`). No source the bootstrap compiles changed
+(the Go variants, c2g, the overlay and jrt are the Go build's).
+
+### The gate's cost
+
+The test build is a second c2g run and Go build: 154 s (c2g 84 s, the Go build 47 s with go's
+cache warm from the shipped build, the image 15 s, the fixtures' conversion about 10 s), 195 s
+when the shipped build changed the cache's packages too. In `bin/gate --full` it runs between
+the shipped build and the suite on Go, beside the smoke test and the oracle, so the Go chain's
+critical path, the suite, grows by about 2.5 to 3.5 minutes; the suite itself runs 8 more
+namespaces (each in its own process beside the others: a few seconds more). The essential gate
+is unchanged (its Go check is the shipped executable's smoke test).
+
+### Proposed amendments (for the user's review)
+
+Prefix FX (this branch; no FX appears elsewhere in doc/).
+
+- **FX1 (B1-PLAN D6; C2G-SPEC §10.6; the gate) The test build.** `bin/arbace-go --build-tests`
+  makes `arbace-tests`, the program with the suite's Java fixtures (`bin/clojure-tests
+  --java-fixtures`: j2c on the renamed `test/java`), which `bin/clojure-tests` requires of
+  `CLOJURE_TESTS_GO` and `bin/gate --full`'s `suite-go` uses; `test/arbace-go-results.edn` is
+  its reference, with `compilation`, `generated-*` ×3, `java-interop`, `param-tags`, `reflect`
+  and `try-catch` no longer skipped. Supersedes SL4.
+- **FX2 (EVAL-NOTES "Phase 2C", the runner; SL3) Skipped tests are not compiled**, and a
+  stand-in `arbace.inspector` on the suite's `ARBACE_PATH` for the Go runs (`test/suite-go`).
+- **FX3 (EVAL-PLAN §2; C2G-SPEC §10.2) Functional interfaces of let and loop locals.** The
+  evaluator adapts or casts the init of an object local tagged with a functional interface, as
+  `LetExpr.doEmit` compiles it.
+- **FX4 (EVAL-PLAN §2.5, C2G-SPEC §10.2) The JVM's errors of `new` and of a stub's name.** The
+  resolved `new` of an abstract class throws `InstantiationError` before its arguments; a
+  `deftype*` stub whose name has `/` or a leading `[` is `NoClassDefFoundError: IllegalName:
+  NAME`, as `ClassLoader.preDefineClass` refuses it; `java.lang.InstantiationError` joins the
+  closure.
+- **FX5 (C2G-SPEC §10.3, namespace variants) `arbace.reflect` without ASM**: the variant
+  `arbace/lang/go/ns/reflect/java.subst.clj`.
+- **FX6 (C2G-SPEC §10.3, M5, RD1; §4.1, SL7) Resources by URL**: JRT-NOTES.md "Resources by URL"
+  (`ClassPathResources`, the class loaders' `getResource` and `getResources`, `URLClassLoader`
+  in the world and out of the library cuts, `VM.isSystemDomainLoader`, the optional host
+  interface `HostExecutable`).
+- **FX7 (JRT-NOTES "Files", FS2) `Files.newDirectoryStream`** in jrt's `Files`, with jdk26u's
+  `DirectoryStream`, `NotDirectoryException` and `Globs`; the entries listed when the stream is
+  opened.
+
+Not done, proposed for after the freeze or for the user to choose: annotations on interfaces
+made at run time and `AdaptFn` for them (2 java-interop tests); `java.util.BitSet` among the
+proxy superclasses (one test, about 0.5 MB); the evaluator's lines for field accesses and
+casts (7 assertions); primitive fns (EVAL-PLAN Q1, 3 assertions).
+
 ## Sources
 
 Nothing vendored. Studied: upstream Clojure's `Compiler.java` as Arbace's `arbace/lang/Compiler.clj`
