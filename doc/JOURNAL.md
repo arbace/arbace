@@ -1552,3 +1552,28 @@ decision (2026-10-08).
   oracle as recorded (6); Clojure's suite on the test build: 76 namespaces, 777 tests, 20,506 of
   20,520 assertions (11 failures and 3 errors recorded), 9 skipped, test.generative 27 of 27, no
   regressions. (Before: 66 namespaces, 19,628 of 19,632.)
+
+## 2026-10-10: java.security basics on Go
+
+- Agent, branch `gosec` (to `440bd56`), merged; the user accepted SC1-SC6, and asked for SC7
+  (JRT-NOTES.md, "Security"; folded into C2G-SPEC §4.1, §4.2, §4.4, §4.6, §8.5, §9.4, §10.3,
+  §16 "Security"). Translated from jdk26u: sun.security.provider's digests and generators,
+  com.sun.crypto.provider's HMACs, the java.security and javax.crypto API classes, sun.security.jca,
+  with variants simplifying the provider machinery; providers SUN and SunJCE only (signatures,
+  ciphers and key stores throw the JDK's NoSuchAlgorithmException); the JDK's `java.security`
+  file generated and embedded (byte-identical); entropy through `Host.RandomBytes` in a
+  linux-tagged file; `UUID` on jdk26u's own code. SC1: c2g compiles
+  `byteArrayViewVarHandle`'s int/long views. SC7 (the user's request): a `DigestBase` variant
+  hands whole blocks to natives over Go's crypto block functions on the Java object's own state
+  (as the JVM's intrinsics): SHA-256 116 → 1,326 MB/s (JVM 1,332), HmacSHA256 94 → 1,491 MB/s.
+  New oracle forms `security.clj` (181; the provider list is a known mismatch). java.base
+  coverage 52.0% of members (9,124 of 17,546), Arbace's use 827 of 896.
+- Main session on the merge (over the fixtures): conflicts in JRT-NOTES and the known
+  mismatches (the security case kept, gofix's two fixed cases dropped); the checks as for
+  gofix: the Go oracle 22,111 of 22,118, the 7 recorded mismatches; Clojure's suite on the test
+  build 20,506 of 20,520, no regressions; the executable 65.1 MB.
+- A read-through of the documents before the freeze (the user's request): five reviewers, about
+  330 findings in `.tmp/docreview/` (stale status and numbers, accepted amendments shown as
+  proposed or unfolded, FX1-FX7 folded nowhere, wrong cross-references, `bin/arbace` as current,
+  LICENSE.md silent on the Go executable's translated jdk26u code and Go's runtime). To be fixed
+  after gotext's merge.
