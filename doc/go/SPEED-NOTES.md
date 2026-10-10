@@ -565,8 +565,8 @@ read and analyzed) against this branch merged with it; same method:
 ### After merging step 7b (closure compilation)
 
 Main at `48ba45c` (step 7b's compiled evaluator, cf-repl, jbase, go-net, regex-res) against this
-branch merged with it (`bfedb18`); same method, ms unless noted. With the evaluator 7-12 times
-faster, the runtime's share grew; this branch's part is now 1.25 times on the whole script
+branch merged with it (`bfedb18`); same method, ms unless noted. With the evaluator 6.8 times
+faster on this script (58.1 s to 8.6 s on main), the runtime's share grew; this branch's part is now 1.25 times on the whole script
 (up to 1.7 on maps and vectors) and half the CPU:
 
 | | main | this branch | speedup |
