@@ -3655,6 +3655,13 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   50.1% before), 617 classes in Go (568); **`java.text` 575 of 580 (99.1%; was 50, 8.6%)**, the
   5 others protected serialization and `Attribute.getName`; `java.util` 2,203 of 2,695 (81.7%;
   2,089, 77.5%) with `Locale`, `Currency` and the SPIs.
+- **After merging main** (`6cbed45`: processes, resources by URL, java.security; the test
+  build): `bin/jrt-convert` 961 files (956 identical, the 5 known differences), the executable
+  74,051,744 bytes; the whole oracle on Go 22,274 of 22,278, its 4 known mismatches; `text.clj`
+  160 of 160 on Go and on the JVM; Clojure's suite on the test build (`arbace-tests`) 20,506 of
+  20,520 assertions, 76 namespaces, no regressions against `test/arbace-go-results.edn`,
+  test.generative 27 of 27; the smoke test and `bin/jrt test` pass; coverage 9,807 of 17,546
+  (55.9%).
 - **Start** (amd64, `-e nil`): 0.22-0.26 s (main 0.21-0.23 s). First uses: a French
   `NumberFormat` 1.7 ms, a German `SimpleDateFormat` 2.5 ms, a French `Collator` 1.5 ms.
 
