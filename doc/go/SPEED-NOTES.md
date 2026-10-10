@@ -85,6 +85,18 @@ neither read nor cleared. Hinted calls of methods not listed for `CodeOpN` take
 `Compiler_CodeRun_Construct`). Clojure's `clearing` namespace passes 31 of 31; the benchmarks
 move within the noise.
 
+**Types in the defining namespace** (2026-10-10, branch `evaltags`). The analyzer's types
+(`getJavaClass`, `maybePrimitiveType`) resolve a tag's short class name lazily, against `*ns*`'s
+imports, and cache it; the JVM asks for them when it emits the code, during analysis. The
+evaluator asked some of them only when the code ran: `Evaluator.caseKey` (a `case` on keywords or
+strings), `Evaluator.result` (a primitive return of a deftype's method), `CaseExpr.evalIn`, and
+the closure compiler at a method's first call; a fn of a namespace that imports a class and
+hints with its short name then failed ("Unable to resolve classname") when first called while
+`*ns*` was another. Now `ObjExpr.compile` (at analysis) records the namespace (`evalNs`), a
+method is compiled with `*ns*` bound to it, `CaseExpr` keeps its tested expression's primitive
+type from analysis (`evalPc`), and `Evaluator.result` takes the body's type found at
+compilation (`CMethod.bodyPrim`). Oracle forms: `test/oracle/forms/hint_namespaces.clj`.
+
 **The image (step 6)** keeps storing the analyzed `Expr` trees; methods are compiled lazily, at
 their first call, not when the image is replayed: most of core's 1,262 fns are not called at
 start, and code that runs once (the `ns` forms' `refer`, top-level defs) is compiled once

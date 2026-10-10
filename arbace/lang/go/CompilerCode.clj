@@ -79,7 +79,9 @@
       ;; the result: 0 the body's value, 1 a long return of a long or int body, 2 a double
       ;; return of a double body, 3 converted by Evaluator.result
       (field ^:public ^int rkind)
-      (field ^:public ^Class retClass)))
+      (field ^:public ^Class retClass)
+      ;; the body's primitive type (Compiler.maybePrimitiveType), or nil
+      (field ^:public ^Class bodyPrim)))
 
   ;; ---------------------------------------------------------------------------------------
   ;; The run-time side: entry points of EvalFn, EvalMethod and the evaluator, conversions
@@ -123,11 +125,20 @@
       ;; method m of objx compiled (cached on the method); in compat mode when it holds a node
       ;; kind the compiler does not know
       (method ^:public ^:static cmethod ^CMethod [^ObjMethod m ^ObjExpr objx ^boolean isFn]
-        (let [^:mutable ^CMethod cm nil]
+        ;; in the namespace the fn or type was analyzed in (ObjExpr.evalNs): the analyzer's types
+        ;; (getJavaClass, maybePrimitiveType) resolve tags lazily, against *ns*'s imports, and
+        ;; the method may first be called from another namespace
+        (let [^:mutable ^CMethod cm nil
+              ns (.-evalNs objx)]
+          (when (some? ns)
+            (Var/pushThreadBindings (^[Object/1] RT/map RT/CURRENT_NS ns)))
           (try
-            (set! cm (.compileMethod (CodeCompiler. objx m isFn false)))
-            (catch CodeFallback e
-              (set! cm (.compileMethod (CodeCompiler. objx m isFn true)))))
+            (try
+              (set! cm (.compileMethod (CodeCompiler. objx m isFn false)))
+              (catch CodeFallback e
+                (set! cm (.compileMethod (CodeCompiler. objx m isFn true)))))
+            (finally
+              (when (some? ns) (Var/popThreadBindings))))
           (set! (.-evalCM m) cm)
           cm))
 
@@ -149,7 +160,7 @@
             (== k 1) (Long/valueOf (CodeRun/runLong cm f))
             (== k 2) (Double/valueOf (CodeRun/runDouble cm f))
             (== k 0) (CodeRun/runObject cm f)
-            :else (Evaluator/result (.-retClass cm) (.-bodyExpr cm) (CodeRun/runObject cm f)))))
+            :else (Evaluator/result (.-retClass cm) (.-bodyPrim cm) (CodeRun/runObject cm f)))))
 
       (method ^:static runObject [^CMethod cm ^Frame f]
         (let [body (.-body cm)]
@@ -330,6 +341,7 @@
           (let [rc (if isFn (.-retClass (cast FnMethod m)) (.-retClass (cast NewInstanceMethod m)))
                 bc (arbace.lang.Compiler/maybePrimitiveType (.-body m))]
             (set! (.-retClass cm) rc)
+            (set! (.-bodyPrim cm) bc)
             (set! (.-rkind cm)
                   (cond
                     (or (nil? rc) (not (.isPrimitive rc))) 0

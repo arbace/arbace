@@ -768,13 +768,15 @@
 
       ;; a method's result converted to its return class as the bytecode does
       ;; (ObjMethod.emitBody): a primitive body by RT's checked casts, any other unboxed
-      ;; (Number.intValue ...), boxed again for the caller
-      (method ^:public ^:static result [^Class rc ^Expr body r]
+      ;; (Number.intValue ...), boxed again for the caller. bc: the body's primitive type
+      ;; (Compiler.maybePrimitiveType), found when the method is compiled, in the namespace it
+      ;; was analyzed in (its tags name that namespace's imports)
+      (method ^:public ^:static result [^Class rc ^Class bc r]
         (cond
           (or (nil? rc) (not (.isPrimitive rc))) r
           (identical? rc Void/TYPE) nil
           :else
-            (let [bc (arbace.lang.Compiler/maybePrimitiveType body)]
+            (do
               (cond
                 (some? bc) (Evaluator/prim rc r)
                 (identical? rc Boolean/TYPE) (if (.booleanValue (cast Boolean r)) Boolean/TRUE Boolean/FALSE)
@@ -980,9 +982,10 @@
                   (if (.isInstance (.-c c) t) c (recur (unchecked-inc-int i))))
                 nil))))
 
-      ;; case*: the key of the switch (CaseExpr.doEmit), Integer, or nil for the default
+      ;; case*: the key of the switch (CaseExpr.doEmit), Integer, or nil for the default (the
+      ;; tested expression's primitive type found at analysis: CaseExpr.evalPc)
       (method ^:public ^:static caseKey ^Integer [^CaseExpr ce v]
-        (let [pc (arbace.lang.Compiler/maybePrimitiveType (.-expr ce))
+        (let [pc (.-evalPc ce)
               ^:mutable ^int k 0]
           (if (identical? (.-testType ce) CaseExpr/intKey)
               (cond
@@ -1013,6 +1016,9 @@
     ;; the source file the fn or type is analyzed in (a compiled class's SourceFile): its
     ;; frames' file in stack traces
     (set! evalSource (cast String (.deref SOURCE)))
+    ;; the namespace the fn or type is analyzed in: its methods are compiled to closures in it
+    ;; (CodeRun.cmethod), so that their tags name its imports, as the JVM emits them at analysis
+    (set! evalNs (cast Namespace (.deref RT/CURRENT_NS)))
     ;; the closed-over locals as the constructor call loads them (ObjExpr.emit), made here as
     ;; the JVM's compile makes them: their LocalBindingExprs take part in locals clearing (a
     ;; site that is the last use of a local in the creating method clears it, and a later
@@ -1040,6 +1046,7 @@
   (c2g/add (field ^:public ^int/1 evalWhere))
   (c2g/add (field ^:public ^Class evalClass))
   (c2g/add (field ^:public ^String evalSource))
+  (c2g/add (field ^:public ^Namespace evalNs))
   (c2g/add (field ^:public ^int evalMaxFixed))
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
@@ -1614,16 +1621,20 @@
           (RT/errPrintWriter)
           "Performance warning, %s:%d:%d - hash collision of some case test constants; if selected, those entries will be tested sequentially.\n"
           (new Object/1 [(.deref SOURCE_PATH) line column]))))
+    ;; the tested expression's primitive type, found at analysis, in the namespace whose
+    ;; imports its tags name (the evaluator's switch: Evaluator.caseKey)
+    (set! (.-evalPc this) (arbace.lang.Compiler/maybePrimitiveType expr))
     ;; emitExprForInts' warning, which the JVM prints when it emits the case (the Go build
     ;; emits nothing): at analysis, after the constructor's own
     (when (and (identical? testType intKey)
-               (nil? (arbace.lang.Compiler/maybePrimitiveType expr))
+               (nil? (.-evalPc this))
                (RT/booleanCast (.deref RT/WARN_ON_REFLECTION)))
       (.format
         (RT/errPrintWriter)
         "Performance warning, %s:%d:%d - case has int tests, but tested expression is not primitive.\n"
         (new Object/1 [(.deref SOURCE_PATH) line column]))))
 
+  (c2g/add (field ^:public ^Class evalPc))
   (c2g/add
     ;; CaseExpr.doEmit's switch: the key's then when its test holds, else the default
     (method ^:public evalIn [this ^Compiler$Frame f]
@@ -1635,7 +1646,7 @@
                   then (cast Expr (.get thens k))]
               (cond
                 (identical? testType intKey)
-                  (let [pc (arbace.lang.Compiler/maybePrimitiveType expr)]
+                  (let [pc evalPc]
                     (cond
                       (nil? pc)
                         (if (Util/equiv v (.eval test)) (.evalIn then f) (.evalIn defaultExpr f))
