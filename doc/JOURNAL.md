@@ -1530,3 +1530,25 @@ decision (2026-10-08).
   time at most hourly when it uses it, so builds in progress keep theirs); `bin/gate` runs it at
   every run (it was `--full` only, with a day), `bin/arbace-go --build` before each build.
   CLAUDE.md's gate paragraph says so.
+
+## 2026-10-10: the suite's Java fixtures, resources by URL
+
+- Agent, branch `gofix` (`c1115bc`, `a106dca`), merged; the user accepted FX1-FX7 (EVAL-NOTES.md,
+  "The suite's Java fixtures"; JRT-NOTES.md, "Resources by URL"). FX1: `bin/arbace-go
+  --build-tests` builds `arbace-tests`, the program with the suite's 12 Java fixtures converted
+  by j2c and translated in (the shipped executable does not carry them); `bin/clojure-tests`
+  runs the Go suite on it; `bin/gate --full` builds it beside the shipped one (about 3 more
+  minutes). FX2 skipped tests are not compiled; a stand-in `arbace.inspector` for Go suite runs.
+  FX3 let/loop locals tagged with a functional interface adapted as the JVM's
+  `LetExpr.doEmit`. FX4 `InstantiationError` for `new` of an abstract class; a stub's illegal
+  name refused as `ClassLoader.preDefineClass`. FX5 `arbace.reflect` without ASM. FX6
+  resources found embedded then in `ARBACE_PATH`, with URLs (`jar:file:<executable>!/name`,
+  `file:`), `URLClassLoader` over directories, an optional `HostExecutable`. FX7
+  `Files.newDirectoryStream`. A c2g fix (a bridge method's casts). Both oracle differences
+  fixed (8 → 6 recorded).
+- Main session on the merge (over processes): conflicts in `bin/arbace-go` (the cache trim and
+  the test build's variant), JRT-NOTES and the suite reference; `bin/jrt-convert`, `bin/jrt
+  manifest` (no change), `bin/jrt test`, the shipped build and smoke, the test build; the Go
+  oracle as recorded (6); Clojure's suite on the test build: 76 namespaces, 777 tests, 20,506 of
+  20,520 assertions (11 failures and 3 errors recorded), 9 skipped, test.generative 27 of 27, no
+  regressions. (Before: 66 namespaces, 19,628 of 19,632.)
