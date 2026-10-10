@@ -2897,3 +2897,113 @@ What is left of the family: the field updaters, `StructuredTaskScope` and its ki
   agents without and with `shutdown-agents`).
 - **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2c/jrt_sources.clj`, which says
   what the executable is built from (it changes the conversion, but the key did not see it).
+
+# Size: trimming the executable
+
+Branch `gosize` (2026-10-10, the user's request before the freeze): where the Go executable's
+107 MB went (amd64, main at `d97e0f9`, go-juc merged), and what was cut without changing
+behaviour. Measured with `go tool nm -size` (the symbols by package, class and kind), `readelf
+-S` (the sections) and the build's own outputs.
+
+## Where it went (main at `d97e0f9`, 107,070,549 bytes)
+
+| section | MB | what |
+|---|---:|---|
+| `.text` | 34.2 | code: the translated classes 10.8, the 18 `DynSub_C` types' methods 9.1, the member tables' construction at initialization 5.0 and their per-member closures 4.5, jrt's own and Go's std |
+| `.gopclntab` | 29.0 | Go's function table (names, line and stack tables): about 200 bytes and a name per function, 127,000 functions |
+| `.debug_*` | 16.6 | DWARF |
+| `.symtab`, `.strtab` | 10.5 | the ELF symbol table |
+| `.rodata` | 10.1 | the image of prepared namespaces 6.0, the embedded sources and data 1.7, constants |
+| `.go.type`, `.go.func`, data | 6.7 | type descriptors, function data |
+
+(`.noptrbss`, 33.6 MB of zeros in std's crypto tables, takes no space in the file.)
+
+## What was cut
+
+| item | amendment | bytes saved |
+|---|---|---:|
+| the `DynSub_C` types take the interfaces' methods from an embedded `dynCore` | SZ4 | 11.3 MB (measured alone on main at `a5ace08`: 99,635,531 to 88,353,780) |
+| member tables as data, decoded at their first use, one dispatch function per class and kind | SZ3 | about 9.2 MB (the rest of the 21.7 MB with symbols, below) |
+| embedded resources zlib-compressed when a quarter smaller | SZ2 | 1.15 MB (1,744,745 to 593,404 bytes of resources) |
+| the executables linked without the symbol table and DWARF (`-ldflags=-s -w`) | SZ1 | 23.5 MB (85,398,138 with them, 61,898,912 without) |
+| **all** | | **107,070,549 to 61,898,912 bytes (-45.2 MB, -42%)** |
+
+With the symbols kept (`ARBACE_GO_SYMBOLS=1`) the program is 85,398,138 bytes, 21.7 MB less than
+main: `.text` 34.2 to 20.7 MB (the `DynSub_C` methods 9.1 to 0.6, the tables' initialization 5.0
+to 1.6 and closures 4.5 to 0.3, against 2.8 of dispatch functions), `.gopclntab` 29.0 to 25.9,
+DWARF 16.6 to 13.6, `.rodata` 10.1 to 8.8.
+
+**SZ4: `Dyn` and `dynCore`.** Every interface method of the world was a Go method of `Dyn` and,
+again, of each of the 18 `DynSub_C` (the proxies' and the class forms' superclasses): about
+1,300 methods each, 21,600 in all. They are now methods of one struct, `dynCore` (`D`, `F`, and
+`Self`, the object around it), which `Dyn` and every `DynSub_C` embed; Go's promotion gives them
+the methods. A core method passes `Self` (the `Dyn` or `DynSub_C`) to the slot's fn, to an
+interface's default method (asserted to the interface) and to `AbstractMethodError`'s text, as
+the methods on `Dyn` passed the object. A `DynSub_C` defines itself Object's methods, its class's
+virtual methods and the core's methods whose names its class's struct has too (its interfaces'
+markers, its ancestors' methods: Go would find them ambiguous); its slots are `Dyn`'s, then its
+class's own methods, so that the core's slot indexes hold for it. Go generates a small wrapper
+per promoted method (23,400, 0.6 MB).
+
+**SZ3: member tables as data.** c2g wrote each class's public members as a `MethodInfo`,
+`CtorInfo` and `FieldInfo` literal with a closure, built by the class's `init` at the program's
+start: 22,600 closures and 5 MB of initialization code. Now each class has a `MemberTable`
+(`jrt/members.clj`): its members as lines of text ("M1 getHours ()I", the descriptors with
+binary names), and per kind one dispatch function, a switch over the member's index
+(`C_invoke`, `C_new`, `C_get`, `C_set`); jrt decodes the table into the `ClassInfo`'s `Methods`,
+`Ctors` and `Fields` the first time reflection reads them (`EnsureMembers`, once), resolving the
+descriptors' classes by name (jrt's registry) and making each member's function a closure over
+the dispatch function and its index. Members that do not exist in Go (`m`, `c`) and the cut
+classes' (`MemberTable.Cut`; `f`, a field that is not a constant) throw the same
+`UnsupportedOperationException`s as before, made by jrt. The tables' order, names, modifiers
+and behaviour are unchanged; only their construction moved from the start to the first use.
+
+**SZ2: compressed resources.** c2g writes an embedded resource as `P.z` (zlib) when that is at
+least a quarter smaller (the namespaces' sources, `generics.edn`, `tzdb.dat`, ICU's data; not
+`uniName.dat`, already deflated), and jrt's `OSHost.Resource` inflates `P.z` when asked for `P`.
+The image step takes the embedded namespaces from a list c2g writes (`prog/namespaces.txt`)
+instead of reading the sources.
+
+**SZ1: no symbol table or DWARF.** `bin/arbace-go` links the executables with `-ldflags=-s -w`.
+Go's own function table (`.gopclntab`) stays: panics' traces, jrt's Java stack traces
+(`runtime.CallersFrames`) and profiles read it, and they are unchanged (checked: the same traces
+of an uncaught `ArithmeticException` and of `printStackTrace`). What goes is for debuggers and
+`go tool nm`; `ARBACE_GO_SYMBOLS=1 bin/arbace-go --build` keeps them.
+
+## Checks
+
+RESULTS
+
+## Not done, and why
+
+- **The image of prepared namespaces** (6.0 MB): zlib makes it 1.7 MB, but Go inflates it in
+  about 40 ms, a fifth of the start (0.21 s), and a load needs most of it (core). Not taken; a
+  per-namespace compression loaded on demand would cost less, core still the most.
+- **The REPL's roots** (every public member of every class the REPL can name): fewer roots would
+  cut translated code, but members Clojure code can call would become stubs. Kept.
+- **Go's function table** (25.9 MB with 104,000 functions): it shrinks only with fewer
+  functions; the largest remaining groups are the translated code itself and the `DynSub_C`
+  wrappers that Go needs for the types' method sets.
+- **CLDR's bundles as code** (`FormatData`, `TimeZoneNames`, `ZoneName`: 1.0 MB of code): arrays
+  of string literals compile to one store per element; a c2g helper building such arrays from
+  one string would save perhaps half, at the cost of a special case in c2g. Not done.
+- **jrt's hand-written classes' tables** (`reflect_tables.clj`, 0.4 MB): could use the
+  `MemberTable` too (`test/jrt/tables.clj`); small.
+
+## Proposed amendments (for the user's review)
+
+Numbered SZ (size); no SZ appears elsewhere in doc/.
+
+- **SZ1 (BUILD.md, `bin/arbace-go`; C2G-SPEC §10.6)** The executables are linked without the
+  symbol table and DWARF (`-ldflags=-s -w`); Go's function table stays, so traces and profiles
+  are unchanged; `ARBACE_GO_SYMBOLS=1` keeps them.
+- **SZ2 (C2G-SPEC §10.3, RD1)** An embedded resource is stored zlib-compressed as `P.z` when that
+  saves a quarter, and the host's `Resource` inflates it; `bin/arbace-go`'s image step takes the
+  namespaces from c2g's `namespaces.txt`.
+- **SZ3 (C2G-SPEC §5.11, the member tables; R12)** A translated or cut class's member table is a
+  `MemberTable`: its members as text and one dispatch function per kind, decoded into the
+  `ClassInfo`'s slices at reflection's first use (`jrt.EnsureMembers`); absent and cut members
+  throw as before, their functions made by jrt.
+- **SZ4 (C2G-SPEC §5.12, `Dyn`; E4, X1)** `Dyn` and the `DynSub_C` types embed a `dynCore` (`D`,
+  `F`, `Self`) that has the interfaces' methods; a `DynSub_C` defines only Object's methods, its
+  class's and those whose names its class's struct shares, and its slots begin with `Dyn`'s.
