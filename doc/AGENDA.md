@@ -140,10 +140,19 @@ fallbacks of `arbace/core_classes.clj` are gone.
     4.2 s → 0.35 s, [go/EXEC-NOTES.md](go/EXEC-NOTES.md)); amendments U1-U5 accepted and folded;
     the essential `bin/gate` smoke-tests the Go executable, cached by a hash of its inputs
     (seconds on a hit, about 5 minutes beside the suite on a miss).
+  - Done (2026-10-10): `java.io.File`, the file system, `java.net.URL` for `file:` and a small
+    `java.nio.file` (JRT-NOTES.md "Files", amendments FS1-FS7 accepted and folded); Clojure's suite on Go
+    19,379 of 19,398 assertions, 0 errors.
+  - Done (2026-10-10): the suite's last failures (EVAL-NOTES.md, SL1-SL7): Clojure's suite on Go
+    19,506 of 19,506 assertions (65 namespaces, `java.io` waits for sockets; 20 skipped, by D6,
+    the Java fixtures and `seq-and-transducer`'s time); test.generative runs on Go.
   - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
-    compilation), and feature completion: class forms in the REPL, `java.io.File`, sockets and
+    compilation), and feature completion: class forms in the REPL, sockets and
     the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
     (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
+  - Before the freeze: an assessment of how much of `java.base` jrt implements (the user's
+    request, an agent; `doc/go/JAVA-BASE.md`); SL3's per-namespace timeouts once step 7 lands;
+    the agents-without-`shutdown-agents` deadlock found by step 7a.
   - Then: step 8 (the `.ae` rename), step 9 (the freeze, with `bin/gate --full`).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure

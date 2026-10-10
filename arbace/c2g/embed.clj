@@ -3,7 +3,8 @@
   doc/go/EVAL-NOTES.md, \"Loading\"), and the classes they name that are outside the closed
   world (registered as cut classes, so that imports and hints resolve).
 
-  The embedded tree is arbace/**/*.clj less the tools (the class forms compiler, j2c, g2c, c2g),
+  The embedded tree is arbace/**/*.clj less the tools (the class forms compiler's back end, j2c,
+  g2c, c2g),
   the runtime's class forms (arbace/lang, compiled into the program), ASM, and the namespaces the
   Go build leaves out (JAVA-SURFACE.md decision 6, B1-PLAN.md D6). The Go build's namespace
   variants, arbace/lang/go/ns/P.clj, replace arbace/P.clj; arbace/lang/go/ns/P.after.clj is
@@ -16,7 +17,10 @@
 
 (def excluded
   "Resource paths (prefixes) not embedded."
-  ["arbace/classes/" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
+  [;; of the class forms compiler, the analysis is embedded (doc/go/CLASSFORMS-REPL.md): not the
+   ;; bytecode back end and the tools around it
+   "arbace/classes/emit.clj" "arbace/classes/compiler.clj" "arbace/classes/shape.clj"
+   "arbace/classes/verify.clj" "arbace/classes/build.clj" "arbace/classes/boot.clj" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
    "arbace/asm.clj" "arbace/lang.clj" "arbace/java/api"
    ;; decision 6: processes, URLs, sockets, browsers
    "arbace/core/server.clj" "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
@@ -116,12 +120,22 @@
     (doseq [f (read-all text)] (walk f))
     (persistent! acc)))
 
+(def library-cuts
+  "Classes outside the world that libraries loaded from ARBACE_PATH import, cut as those the
+  embedded sources name are: Clojure's suite's test.generative runner requires
+  clojure.tools.namespace.find and clojure.java.classpath, which import java.util.jar's JarFile
+  and JarEntry, java.io.FileReader, and extend java.net.URLClassLoader (the runner then lists no
+  jars, and reads no files through them); clojure.tools.reader names java.text.SimpleDateFormat
+  (its #inst reader's formatter)."
+  ["java.util.jar.JarFile" "java.util.jar.JarEntry" "java.net.URLClassLoader" "java.io.FileReader"
+   "java.text.SimpleDateFormat"])
+
 (defn cut-candidates
   "The classes the sources name that exist on this JVM, from the JDK or arbace.lang/arbace.asm
   (not the classes the namespaces define themselves: deftype, defrecord, definterface), as
-  internal names."
+  internal names; and library-cuts."
   [srcs]
-  (set (for [n (for [[_ text] srcs n (names text)] n)
+  (set (for [n (concat (for [[_ text] srcs n (names text)] n) library-cuts)
              :when (and (or (re-find #"^(java|javax|jdk|sun)\." n)
                             (re-find #"^arbace\.(lang|asm)\." n))
                         (try (Class/forName n false (ClassLoader/getSystemClassLoader)) true

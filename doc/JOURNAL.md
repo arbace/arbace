@@ -1068,3 +1068,69 @@ decision (2026-10-08).
   §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
   considered: keeping leafness a condition on the list (a listed class must already be
   non-leaf), which excluded BufferedWriter.
+
+## 2026-10-10: java.io.File and the file system on Go
+
+- Agent, branch `go-file` (`6bb5b0a`, `6172f24`), merged: jdk26u's `File`, `FileSystem`,
+  `UnixFileSystem` (`src/java.base/unix/classes`, a new source kind `unix` in `bin/jrt-convert`),
+  `FileReader`, `FileWriter`, `DeleteOnExitHook` translated; `overlay/jdk/variants/UnixFileSystem.clj`
+  routes its 15 natives to `go/arbace/jrt/filesystem.clj` (canonicalize from jdk26u's C, in
+  LICENSE.md) over an optional host interface `HostFS` (`hostfs.clj`, `hostfs_linux.clj`; `Host`
+  unchanged). Shutdown hooks run when main returns. A small `java.nio.file` of jrt's own (`Path`,
+  `Files`, `HostPath`, path arithmetic from jdk26u's `UnixPath`) instead of jdk26u's provider
+  layer (about a hundred more natives for what Arbace and the suite use: temp files, a buffered
+  reader). `java.net.URL` translated with the `file:` connection (`slurp` tries `URL.` first);
+  `http:`, `https:`, `jar:` parse only. `RandomAccessFile` not done (unused). Amendments FS1-FS7
+  in JRT-NOTES.md "Files" (to review). JDK closure 340 → 389 files; executable +2.1 MB.
+- Merge conflicts (main session): jrt's file list and load order (union with step 6's
+  `image`), the suite reference's header.
+- Main session on the merge: `bin/jrt-convert`, the amd64 build, `--smoke`; the Go oracle 20,566
+  of 20,600, its 34 mismatches as recorded (a new one: a `localhost` URL's hash, which the JDK
+  takes from the resolved address); Clojure's suite on Go 19,379 of 19,398 assertions, 19
+  failures, 0 errors (`method-thunks`, `reader`, `sequences` and `pprint` pass), no regressions.
+  `java.io` still fails to load on `ServerSocket` (the sockets agent).
+
+## 2026-10-10: amendments FS1-FS7 accepted and folded
+
+- The user accepted FS1-FS7 (JRT-NOTES.md, "Files"). The agent folded them (`ef9e0c6`): FS1
+  JRT-SOURCES.md (the `unix` source kind); FS2 stays a decision in JRT-NOTES.md, referred to
+  from C2G-SPEC §4.1; FS3 C2G-SPEC §9.4 (an optional `HostFS`); FS4 §4.4's rename table; FS5
+  §8.4 (`RunMain` runs the shutdown hooks); FS6 §4.1 (files in the closed world) and §10.3
+  (namespace variants); FS7 LICENSE.md, kept. C2G-SPEC §16 has a "Files" entry.
+
+## 2026-10-10: the suite's last failures on Go
+
+- Agent, branch `suite-last` (9 commits to `5072bae`), merged (`6a33be8`). Amendments SL1-SL7 in
+  EVAL-NOTES.md, "The suite's last failures".
+- SL1 locals clearing in the evaluator, as compiled code does (`arbace/lang/go/Compiler.clj`:
+  `closesExprs` as the JVM's `compile` builds it, a slot cleared after a `shouldClear` use,
+  closed-overs cleared in a `^:once` fn, statement-position locals skipped, a fn's class declares
+  its closed-overs as fields through `Dyn.defineFnField`): `clearing` 12 → 31 of 31; a lazy
+  seq's head is no longer retained (5e6 elements: 619 → 121 MB resident).
+- SL2 a hinted call of a resolved public method goes through jrt's invoker
+  (`Evaluator.invokeResolved`), skipping `Reflector`'s selection and wrapping: transducers' trial
+  11.5 → 8.6 ms (JVM 0.11). SL3 the Go reference skips single tests (`:skipped-tests`; only
+  `seq-and-transducer`). SL6 `arbace.java.api.Clojure` is in the program (`api` loads). SL7 c2g
+  cuts a fixed list of JDK classes the test libraries import (`embed/library-cuts`), so
+  test.generative runs on Go (26 specs pass; about 3 more minutes in the suite on Go).
+- arm64 under qemu (before the merges): the oracle's forms 10,079 of 10,082, the same 3
+  mismatches as amd64; 14 suite namespaces (14,904 assertions) as on amd64.
+- Not done, with costs (EVAL-NOTES.md): SL4 the suite's Java fixtures as a test build (about 450
+  assertions), SL5 embedding D6's `metadata`/`javadoc` namespaces, `ProcessBuilder`, SAX,
+  serialization.
+- The user's decisions: SL1, SL2, SL3's skip, SL6, SL7 accepted (to fold); of the proposals,
+  only SL3's per-namespace timeouts, for after step 7; SL4, SL5 and `ProcessBuilder` not now.
+- Main session on the merge: `bin/gate` (the runner changed) passed in 6m39s, the JVM suite
+  20,750 of 20,750, the Go check built afresh (308 s); the Go oracle 20,566 of 20,600 as
+  recorded; Clojure's suite on Go 19,506 of 19,506 assertions, 0 failures, 0 errors (65
+  namespaces, `java.io` fails to load on `ServerSocket`), no regressions.
+
+## 2026-10-10: the user's decisions on step 7a, 7b and class forms; java.base's assessment
+
+- Class forms at the Go REPL (branch `cf-repl`): CF1-CF6 accepted, merge as is (executable
+  63.1 → 74.0 MB; size tuning later, with step 7); CF3 reverses D6 for `defclass`.
+- Step 7a: O1 (collector settings, closing D7), O2, O4, O6, O7 accepted; O3 (a shared
+  `getParameterTypes` array, a deviation from Java's contract) dropped; O5 accepted: the
+  freeze's executables are built with `--pgo`.
+- Before the freeze, an assessment of how much of `java.base` jrt implements (the user's
+  request): an agent measures it reproducibly (branch `jbase`, `doc/go/JAVA-BASE.md`).

@@ -95,3 +95,19 @@ passes), with the JVM's ClassCastException message.\n"
   (when (and (!= o nil) (not (.IsInstance_O__Z c o)))
     (panic (ClassCast o c)))
   o)
+
+(go/func Compiler_Evaluator_InvokeDirect_Method_O_O1__O_native
+  "Compiler_Evaluator_InvokeDirect_Method_O_O1__O_native is the evaluator's call of a resolved
+method (a hinted interop call; EVAL-NOTES.md, \"The suite's last failures\"), as compiled code calls it: the
+arguments converted (convertArgs), the method called through its invoker, an exception it throws
+propagating as it is (Method.invoke wraps it in InvocationTargetException, which Reflector then
+unwraps), a primitive result boxed. A null receiver of an instance method is
+NullPointerException.\n"
+  ^any [^{:tag (* Method)} m ^any obj ^{:tag (* RefArray)} args]
+  (let [info (.-info m)]
+    (when (and (== (bit-and (.-mods m) AccStatic) 0) (== obj nil))
+      (panic (NPE)))
+    (let [cargs (convertArgs (.-params m) args)]
+      (when (== (.-Invoke info) nil)
+        (panic (AbstractMethodError_New_String (Str (+ (.GoName (.-clazz m)) "." (.-Name info))))))
+      (Box ((.-Invoke info) obj cargs)))))

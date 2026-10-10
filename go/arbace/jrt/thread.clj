@@ -556,7 +556,8 @@ before it exits after main.\n"
   "RunMain runs a program's main as the JVM runs it: on the calling goroutine, made the
 thread main (#1 when called first, non-daemon); an uncaught exception goes to the handlers
 (Exception in thread \"main\" ...) and makes the status 1; then it waits for the non-daemon
-threads and returns the exit status (System.exit ends the process before).\n"
+threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns the exit status
+(System.exit ends the process before).\n"
   ^int [^{:tag (func [])} run]
   (StartRuntime)
   (let [^{:tag (* Thread)} t nil]
@@ -572,6 +573,7 @@ threads and returns the exit status (System.exit ends the process before).\n"
         (.dispatchUncaught t exc)
         (set! status 1))
       (WaitNonDaemon)
+      (runShutdownHooks)
       (StopProfile)
       status)))
 
