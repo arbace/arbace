@@ -138,7 +138,7 @@ public final class TimeZoneNameUtility {
     // the adapter supports that has one
     private static String getLocalizedName(Locale locale, String requestID, int style, String tzid) {
         for (Locale current : LocaleResources.candidateLocales(locale)) {
-            if (isSupportedLocale(current)) {
+            if (LocaleResources.isSupportedLocale(current)) {
                 String value = getObject(current, requestID, style, tzid);
                 if (value != null) {
                     return value;
@@ -146,20 +146,6 @@ public final class TimeZoneNameUtility {
             }
         }
         return null;
-    }
-
-    // java.base's CLDR adapter's locales: " en en-Latn-US en-US en-US-POSIX" and the root locale
-    private static boolean isSupportedLocale(Locale locale) {
-        if (Locale.ROOT.equals(locale)) {
-            return true;
-        }
-        if (!"en".equals(locale.getLanguage())) {
-            return false;
-        }
-        String country = locale.getCountry();
-        String variant = locale.getVariant();
-        return (country.isEmpty() && variant.isEmpty())
-            || ("US".equals(country) && (variant.isEmpty() || "POSIX".equals(variant)));
     }
 
     // TimeZoneNameGetter.getObject

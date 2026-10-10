@@ -16,9 +16,9 @@
         (return))
       (if (.hasArray buffer)
           (set! crc (CRC32/updateBytes crc (.array buffer) (unchecked-add-int pos (.arrayOffset buffer)) rem))
-          (let [b (new byte/1 (Math/min (.remaining buffer) 4096))]
+          (let [b (new byte/1 (^[int int] Math/min (.remaining buffer) 4096))]
             (while (.hasRemaining buffer)
-              (let [length (Math/min (.remaining buffer) (alength b))]
+              (let [length (^[int int] Math/min (.remaining buffer) (alength b))]
                 (.get buffer b 0 length)
                 (.update this b 0 length)))))
       (.position buffer limit))))

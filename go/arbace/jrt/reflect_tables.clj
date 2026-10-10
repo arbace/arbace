@@ -1494,6 +1494,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Clone__O (assert (* DecimalFormatSymbols) this))))
         (lit MethodInfo :Name "equals" :Params (lit (slice (* Class)) Object_class) :Return Prim_boolean :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.Equals_O__Z (assert (* DecimalFormatSymbols) this) (aget args 0))))
+        (lit MethodInfo :Name "getAvailableLocales" :Params nil :Return (.ArrayClass Locale_class) :Modifiers 0x9
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (DecimalFormatSymbols_GetAvailableLocales__Locale1)))
         (lit MethodInfo :Name "getCurrencySymbol" :Params nil :Return String_class :Modifiers 0x1
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCurrencySymbol__String (assert (* DecimalFormatSymbols) this))))
         (lit MethodInfo :Name "getDecimalSeparator" :Params nil :Return Prim_char :Modifiers 0x1

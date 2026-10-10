@@ -83,40 +83,65 @@ public class CalendarDataUtility {
         return Optional.empty();
     }
 
+    // LocaleServiceProviderPool.getLocalizedObject over the CLDR adapter's calendar name
+    // provider: the first non-null answer of the locale's supported candidate locales
+
     public static String retrieveFieldValueName(String id, int field, int value, int style, Locale locale) {
-        return getDisplayNameImpl(normalizeCalendarType(id), field, value, style, locale, false);
+        String type = normalizeCalendarType(id);
+        for (Locale current : LocaleResources.supportedCandidateLocales(locale)) {
+            String name = getDisplayNameImpl(type, field, value, style, current, false);
+            if (name != null) {
+                return name;
+            }
+        }
+        return null;
     }
 
     public static String retrieveJavaTimeFieldValueName(String id, int field, int value, int style, Locale locale) {
         String type = normalizeCalendarType(id);
-        String name = getDisplayNameImpl(type, field, value, style, locale, true);
-        if (name == null) {
-            name = getDisplayNameImpl(type, field, value, style, locale, false);
+        for (Locale current : LocaleResources.supportedCandidateLocales(locale)) {
+            String name = getDisplayNameImpl(type, field, value, style, current, true);
+            if (name != null) {
+                return name;
+            }
         }
-        return name;
+        return retrieveFieldValueName(id, field, value, style, locale);
     }
 
     public static Map<String, Integer> retrieveFieldValueNames(String id, int field, int style, Locale locale) {
         String type = normalizeCalendarType(id);
-        Map<String, Integer> names;
-        if (style == ALL_STYLES) {
-            names = getDisplayNamesImpl(type, field, SHORT_FORMAT, locale, false);
-            for (int st : REST_OF_STYLES) {
-                names.putAll(getDisplayNamesImpl(type, field, st, locale, false));
+        for (Locale current : LocaleResources.supportedCandidateLocales(locale)) {
+            Map<String, Integer> names = getDisplayNames(type, field, style, current);
+            if (names != null) {
+                return names;
             }
-        } else {
-            names = getDisplayNamesImpl(type, field, style, locale, false);
         }
-        return names.isEmpty() ? null : names;
+        return null;
     }
 
     public static Map<String, Integer> retrieveJavaTimeFieldValueNames(String id, int field, int style, Locale locale) {
         String type = normalizeCalendarType(id);
-        Map<String, Integer> map = getDisplayNamesImpl(type, field, style, locale, true);
-        if (map.isEmpty()) {
-            map = retrieveFieldValueNames(id, field, style, locale);
+        for (Locale current : LocaleResources.supportedCandidateLocales(locale)) {
+            Map<String, Integer> names = getDisplayNamesImpl(type, field, style, current, true);
+            if (!names.isEmpty()) {
+                return names;
+            }
         }
-        return map == null || map.isEmpty() ? null : map;
+        return retrieveFieldValueNames(id, field, style, locale);
+    }
+
+    // CalendarNameProviderImpl.getDisplayNames
+    private static Map<String, Integer> getDisplayNames(String calendarType, int field, int style, Locale locale) {
+        Map<String, Integer> names;
+        if (style == ALL_STYLES) {
+            names = getDisplayNamesImpl(calendarType, field, SHORT_FORMAT, locale, false);
+            for (int st : REST_OF_STYLES) {
+                names.putAll(getDisplayNamesImpl(calendarType, field, st, locale, false));
+            }
+        } else {
+            names = getDisplayNamesImpl(calendarType, field, style, locale, false);
+        }
+        return names.isEmpty() ? null : names;
     }
 
     /** The locale itself: jrt's locales have no Unicode extensions, so no region override (rg). */

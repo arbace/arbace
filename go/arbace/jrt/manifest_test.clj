@@ -689,6 +689,7 @@
 (go/var _ DecimalFormatSymbols_New_Locale)
 (go/var _ (method-expr (* DecimalFormatSymbols) Clone__O))
 (go/var _ (method-expr (* DecimalFormatSymbols) Equals_O__Z))
+(go/var _ DecimalFormatSymbols_GetAvailableLocales__Locale1)
 (go/var _ (method-expr (* DecimalFormatSymbols) GetCurrencySymbol__String))
 (go/var _ (method-expr (* DecimalFormatSymbols) GetDecimalSeparator__C))
 (go/var _ (method-expr (* DecimalFormatSymbols) GetDigit__C))

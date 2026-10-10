@@ -380,6 +380,27 @@ public class LocaleResources {
         return list;
     }
 
+    /** The candidate locales java.base's CLDR adapter supports (supportedLocale). */
+    static List<Locale> supportedCandidateLocales(Locale locale) {
+        List<Locale> list = candidateLocales(locale);
+        list.removeIf(l -> !isSupportedLocale(l));
+        return list;
+    }
+
+    /** java.base's CLDR adapter's locales: " en en-Latn-US en-US en-US-POSIX" and the root locale. */
+    static boolean isSupportedLocale(Locale locale) {
+        if (Locale.ROOT.equals(locale)) {
+            return true;
+        }
+        if (!"en".equals(locale.getLanguage())) {
+            return false;
+        }
+        String country = locale.getCountry();
+        String variant = locale.getVariant();
+        return (country.isEmpty() && variant.isEmpty())
+            || ("US".equals(country) && (variant.isEmpty() || "POSIX".equals(variant)));
+    }
+
     public ResourceBundle getJavaTimeFormatData() {
         return formatData;
     }

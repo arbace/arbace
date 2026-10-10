@@ -227,6 +227,12 @@ DecimalFormatSymbols.getInstance(Locale): a new instance (they are mutable in Ja
   ^{:tag (* DecimalFormatSymbols)} [^{:tag (* Locale)} l]
   (DecimalFormatSymbols_New_Locale l))
 
+(go/func DecimalFormatSymbols_GetAvailableLocales__Locale1
+  "DecimalFormatSymbols_GetAvailableLocales__Locale1 is DecimalFormatSymbols.getAvailableLocales:
+the locales of java.base's CLDR data, the root locale, en and en_US (JRT-NOTES.md, \"Time\").\n"
+  ^{:tag (* RefArray)} []
+  (RefArrayOf Locale_class Locale_ROOT Locale_ENGLISH Locale_US))
+
 (go/method GetLocale__Locale ^{:tag (* Locale)} [^{:tag (* DecimalFormatSymbols)} t] (.-locale t))
 (go/method GetZeroDigit__C ^uint16 [^{:tag (* DecimalFormatSymbols)} t] \0)
 (go/method GetGroupingSeparator__C ^uint16 [^{:tag (* DecimalFormatSymbols)} t] \,)
