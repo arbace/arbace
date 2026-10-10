@@ -224,10 +224,11 @@ taken.
 
 ## The closure as grown (B1a step 4 phase 2C, step 5 phase 2B)
 
-The 184 files above are the measured closure. `bin/jrt-convert` now translates **375 files**
-(`sources.txt` lines as `MODULE KIND REL`): 340 of `src/java.base/share/classes` (KIND
-`share`), 19 generated (`gensrc`), 2 of another module (`share:java.sql`) and 14 of jrt's own
-Java (`overlay`); it was 340 files (317, 8, 2, 13) before the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.clj`):
+The 184 files above are the measured closure. `bin/jrt-convert` now translates **424 files**
+(`sources.txt` lines as `MODULE KIND REL`): 383 of `src/java.base/share/classes` (KIND
+`share`), 3 of `src/java.base/unix/classes` (`unix`), 19 generated (`gensrc`), 2 of another
+module (`share:java.sql`) and 17 of jrt's own Java (`overlay`); 389 with the files (below), 35
+more with the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.clj`):
 
 - `added-sources`: java.base files added, each with its reason there: phase 2C's 31 (the
   stand-ins jrt had without sources, the standard streams' `PrintStream` and interfaces,
@@ -298,8 +299,9 @@ jdk26u at `baf63fb`:
   `DeflaterOutputStream` on the generator JDK). `--twice` compares the data of both runs too.
   Not embedded: `uprops.icu` and `ubidi.icu` (`UCharacterProperty`'s and `UBiDiProps`'s data,
   which the normalizer does not load).
-- **Result**: 375 files convert and compile to javac's shapes (371 identical, the 4 known
-  differences), 1,249 classes; deterministic (`--twice`).
+- **Result**: 375 files (340 before) convert and compile to javac's shapes (371 identical, the
+  4 known differences), 1,249 classes; deterministic (`--twice`). With the files merged: 424
+  files, 420 identical and the 4 known differences, 1,321 classes.
 
 Two options of the conversion (amendment S2):
 
