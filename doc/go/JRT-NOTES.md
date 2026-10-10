@@ -2410,9 +2410,14 @@ and the interfaces they implement (`BlockingDeque`, `TransferQueue`, `Concurrent
 **jrt's hand-written executors and `FutureTask` are gone** (JC5): `Executors`,
 `ThreadPoolExecutor`, `ScheduledThreadPoolExecutor` and `FutureTask` are the JDK's, so
 `shutdownNow`, `invokeAll`, `invokeAny`, the pool's sizes and counters, rejection policies and
-scheduled tasks behave as on the JVM, and Arbace's agents run on the JDK's pools. jrt keeps the
-interfaces (`Executor`, `ExecutorService`, `Future`, `ThreadFactory`), which its `ForkJoinPool`
-implements, with `ExecutorService`'s default `close()` (`ExecutorService_Close__V`). jrt's own
+scheduled tasks behave as on the JVM, and Arbace's agents run on the JDK's pools.
+`ExecutorService` is translated too, all its methods with it: jrt keeps a stand-in of it
+(`standin_executor.clj`) for its own build, and its `ForkJoinPool` implements the translated
+interface, the methods jrt cannot name (`shutdownNow`, `invokeAll`, `invokeAny`: their types are
+`List` and `Collection`) given by c2g as Go methods calling jrt's own Java
+`jdk.internal.jrt.ForkJoinPools` (`c2g_support`, `out/fjp-support-forms`). jrt keeps the other
+interfaces (`Executor`, `Future` with JDK 19's `resultNow`, `exceptionNow`, `state` and the enum
+`Future.State`, `ThreadFactory`). jrt's own
 Java for what jdk26u's code reaches beyond the world: `jdk.internal.vm.SharedThreadContainer`
 (`ThreadPoolExecutor`'s container: starts threads, keeps nothing),
 `jdk.internal.jrt.ThreadPerTaskExecutor` (`newThreadPerTaskExecutor`,
@@ -2423,8 +2428,10 @@ probe). Variants (`overlay/jdk/variants/`): `Executors` (the thread-per-task exe
 `ThreadGroup`, `AutoShutdownDelegatedExecutorService` without its `Cleaner`), `CompletableFuture`
 (`orTimeout`, `completeOnTimeout`, `delayedExecutor` through `Delays`),
 `AbstractQueuedSynchronizer$Node` and `AbstractOwnableSynchronizer` (the waiter and the owner
-volatile, JC6), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` (no
-offsets of the thread-local maps).
+volatile, JC6), `Striped64` (the probe without `SharedSecrets`), `ThreadLocalRandom` and
+`ForkJoinWorkerThread` (no offsets of the thread-local maps, which are jrt's Go maps: without it
+`ForkJoinWorkerThread` failed to initialize, and with it every wait of `LinkedTransferQueue` and
+`SynchronousQueue`, which ask its static `hasKnownQueuedWork`).
 
 **`ThreadLocalRandom` translated** (JC4): jrt's `Thread` has the JDK's fields
 `F_threadLocalRandomSeed`, `F_threadLocalRandomProbe` and `F_threadLocalRandomSecondarySeed`
@@ -2435,11 +2442,15 @@ bounded and stream methods (`RandomSupport`) work.
 **jrt's additions**: `ForkJoinPool` is an `ExecutorService` (`execute(Runnable)`, the three
 `submit`s, `isTerminated`, `awaitTermination`, `close`, `isQuiescent`), with
 `ForkJoinPool.ManagedBlocker`, `managedBlock` and the package-private `asyncCommonPool`
-(`CompletableFuture`'s default executor) (JC7); `LockSupport` keeps the blocker
-(`getBlocker`, `setCurrentBlocker`, `parkUntil(Object, long)`); `Unsafe` has
-`weakCompareAndSetReference`, `getAndBitwiseAndInt`, `putIntOpaque`, `getLongOpaque`,
-`storeStoreFence`, `park` and `unpark` (`AbstractQueuedSynchronizer`, `StampedLock`);
-`Reference.reachabilityFence`.
+(`CompletableFuture`'s default executor), and `ForkJoinTask`'s tags (`getForkJoinTaskTag`,
+`setForkJoinTaskTag`, `compareAndSetForkJoinTaskTag`: `CompletableFuture`'s claims) (JC7);
+`LockSupport` keeps the blocker (`getBlocker`, `setCurrentBlocker`, `parkUntil(Object, long)`) and
+has a class object (the REPL knew it as a name only); `Thread.getState` with `Thread.State`
+(`ThreadPoolExecutor.addWorker` checks it; jrt tells `NEW`, `RUNNABLE` and `TERMINATED` only) and
+`Thread.Builder` (`Executors.newVirtualThreadPerTaskExecutor` calls `factory()` on it) (JC8);
+`Unsafe` has `weakCompareAndSetReference`, `getAndBitwiseAndInt`, `putIntOpaque`,
+`getLongOpaque`, `storeStoreFence`, `park` and `unpark` (`AbstractQueuedSynchronizer`,
+`StampedLock`).
 
 **A program that never shuts its agents down** (JC9). Agents' `send` runs on a fixed pool whose
 workers, non-daemon threads, wait forever for tasks; without `shutdown-agents` the JVM waits
