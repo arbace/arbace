@@ -192,7 +192,7 @@
 (.getParameters (SecureRandom/getInstance "SHA1PRNG"))
 (.toString (.getParameters (SecureRandom/getInstance "DRBG")))
 (let [r (SecureRandom/getInstance "DRBG" (DrbgParameters/instantiation 256 DrbgParameters$Capability/PR_AND_RESEED (utf8 "ps")))] [(.getAlgorithm r) (.toString (.getParameters r))])
-(let [r (SecureRandom.) b (byte-array 33)] (.nextBytes r b) [(alength b) (count (distinct (seq b))) (< 10 (count (distinct (seq b))))])
+(let [r (SecureRandom.) b (byte-array 33)] (.nextBytes r b) [(alength b) (< 10 (count (distinct (seq b))))])
 (let [r (SecureRandom.)] (vec (for [_ (range 50)] (let [x (.nextInt r 10)] (and (<= 0 x) (< x 10))))))
 (let [r (SecureRandom.)] (not= (.nextLong r) (.nextLong r)))
 (mapv #(alength (.generateSeed (SecureRandom/getInstance %) 24)) ["NativePRNG" "NativePRNGBlocking" "NativePRNGNonBlocking" "DRBG" "SHA1PRNG"])
