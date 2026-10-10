@@ -1196,7 +1196,8 @@ first use: `java.version` 26, `java.class.version` 70.0, `os.name` Linux, `os.ar
 (`Properties`, a `Map`) and come with them.
 
 **`Runtime`**: `getRuntime`, `availableProcessors` (the host's), `freeMemory`, `totalMemory`,
-`maxMemory` (Go's memory limit), `gc`, `exit`, `halt`, `addShutdownHook`. `Runtime.version()`
+`maxMemory` (Go's memory limit), `gc`, `exit`, `halt`, `addShutdownHook` (the hooks run at
+`System.exit` and, since amendment FS5, when `RunMain`'s main and the non-daemon threads end). `Runtime.version()`
 waits for `Runtime$Version`.
 
 ## Coverage of the edge
@@ -1922,30 +1923,38 @@ branch).
 | Clojure's suite on Go (amd64) | 19,398 assertions, 19,375 pass, 19 fail, 4 errors (was 19,280, 19,251, 19, 10): `method-thunks` (20 of 20), `reader` (7,796 of 7,796, `load-file` of temporary files) and `sequences` (1,148 of 1,148) now pass as on the JVM; `java.io` still fails to load on `java.net.ServerSocket` (the sockets branch); without its socket test and imports, 14 tests and 107 of 111 assertions pass, the 4 errors `URLClassLoader` and the class loader's `getResource` |
 | size, amd64 | 60.70 MB, against 58.60 MB: +2.1 MB |
 
-## Amendments (FS; proposed, for the user)
+## Amendments (FS)
+
+All accepted by the user 2026-10-10 and folded where they belong (C2G-SPEC §16, "Files"):
 
 - **FS1 (JRT-SOURCES.md, the tool) Files of `src/java.base/unix/classes`.** `bin/jrt-convert`
   copies them like the shared ones; `sources.txt` gives them KIND `unix`
   (`g2c.jrt-sources/print-sources`). For `UnixFileSystem`, `DefaultFileSystem` and the `file:`
-  handler, whose shared counterparts are abstract or absent.
+  handler, whose shared counterparts are abstract or absent. *Accepted 2026-10-10, folded into
+  JRT-SOURCES.md ("The closure as grown", Files).*
 - **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
-  Decisions), and no `RandomAccessFile`.
+  Decisions), and no `RandomAccessFile`. *Accepted 2026-10-10; it stays here, in Decisions, and
+  C2G-SPEC §4.1 refers to it.*
 - **FS3 (C2G-SPEC §9.4, the host interface) An optional `HostFS` beside `Host`.** A host's
   file system calls beyond `Host`'s are a second interface a host may implement
   (`CurrentHostFS`); jrt's natives fall back to the JDK's failure results without it. Keeps
-  `Host` unchanged for B1b's monitor and for the other host additions (sockets).
+  `Host` unchanged for B1b's monitor and for the other host additions (sockets). *Accepted
+  2026-10-10, folded into C2G-SPEC §9.4.*
 - **FS4 (C2G-SPEC §4.4, Collisions) Rename table entries**: `sun/net/www/URLConnection`
   `Www_URLConnection`, the handlers `File_Handler`, `Http_Handler`, `Https_Handler`,
   `Jar_Handler`, and `java/net/Proxy` `Net_Proxy` (jrt's `Proxy` is `java.lang.reflect`'s).
-- **FS5 (C2G-SPEC §8, threads; JRT-NOTES "System, Runtime and the host") Shutdown hooks at the
-  end of main.** `RunMain` runs them once main and the non-daemon threads have ended, as the
-  JVM does; before, only `System.exit` ran them.
+  *Accepted 2026-10-10, folded into C2G-SPEC §4.4.*
+- **FS5 (C2G-SPEC §8.4, threads) Shutdown hooks at the end of main.** `RunMain` runs them once
+  main and the non-daemon threads have ended, as the JVM does; before, only `System.exit` ran
+  them. *Accepted 2026-10-10, folded into C2G-SPEC §8.4 (and `Runtime.addShutdownHook`'s
+  description in "`System`, `Runtime` and the host" below holds as amended).*
 - **FS6 (C2G-SPEC §4.1 and §10.3, the world and the namespace variants) `java.io.File`,
   `java.net.URL` with the `file:` connection, and the `java.nio.file` subset in the closed
   world**, with the variants listed above; `java/io.subst.clj` (copy between files by streams,
   `"%2B"`) and `main.subst.clj` (the error report's temporary file as on the JVM) changed, and
-  `Compiler.loadFile`'s variant removed.
+  `Compiler.loadFile`'s variant removed. *Accepted 2026-10-10, folded into C2G-SPEC §4.1 and
+  §10.3.*
 - **FS7 (LICENSE.md) Transcribed code**: `HostPath.java` (UnixPath's path operations) and
   `filesystem.clj` (`JDK_Canonicalize`, `collapse`) hold jdk26u code under the GPL version 2 with
   the Classpath Exception, recorded by the rule of B7; the alternative is rewriting those parts
-  from the documented behaviour.
+  from the documented behaviour. *Accepted 2026-10-10 (kept, as LICENSE.md records it).*

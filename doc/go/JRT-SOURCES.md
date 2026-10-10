@@ -249,7 +249,7 @@ Java (`overlay`). Besides the measured closure (`test/g2c/jrt_sources.clj`):
   `URLConnection`, `URLDecoder`, `sun.net.www.ParseUtil`, `MessageHeader`, `IPAddressUtil`,
   `Hashtable`, `HexFormat`, `jdk.internal.util.Exceptions` ...), each group's reason there; with
   them jrt's own `java.nio.file.Path`, `Files` and `jdk.internal.jrt.HostPath` (KIND
-  `overlay`). Three are files of **`src/java.base/unix/classes`** (amendment FS1): KIND `unix`
+  `overlay`). Three are files of **`src/java.base/unix/classes`** (amendment FS1, accepted 2026-10-10): KIND `unix`
   in `sources.txt`, copied into java.base's tree like the others: `java/io/UnixFileSystem.java`,
   `java/io/DefaultFileSystem.java`, `sun/net/www/protocol/file/Handler.java`. With them
   `bin/jrt-convert` translates **389 files** (all 389 compiled to javac's class shapes; 385
