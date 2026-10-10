@@ -103,13 +103,15 @@
     :else (list (m/class-sym :lang (t/desc->internal d) "_Cast") r)))
 
 (defn- call-impl
-  "The call of slot fn f with the object and the boxed arguments."
-  [args]
-  (let [n (inc (count args))]
-    (if (<= n 20)
-      (apply list (symbol (str "." (nm/method-base "invoke" (t/method-desc (repeat n "Ljava/lang/Object;") "Ljava/lang/Object;"))))
-             'f 't args)
-      (list '.ApplyTo_ISeq__O 'f (list 'RT_Seq_O__ISeq (apply list 'jrt/RefArrayOf 'jrt/Object_class 't args))))))
+  "The call of slot fn f with the object this (t, or the object around a dynCore) and the boxed
+  arguments."
+  ([args] (call-impl 't args))
+  ([this args]
+   (let [n (inc (count args))]
+     (if (<= n 20)
+       (apply list (symbol (str "." (nm/method-base "invoke" (t/method-desc (repeat n "Ljava/lang/Object;") "Ljava/lang/Object;"))))
+              'f this args)
+       (list '.ApplyTo_ISeq__O 'f (list 'RT_Seq_O__ISeq (apply list 'jrt/RefArrayOf 'jrt/Object_class this args)))))))
 
 (defn- java-type-name
   "The Java name of descriptor d (int, java.lang.Object, byte[])."
@@ -132,26 +134,30 @@
 
 (defn- iface-fallback
   "What a method of the interfaces does when its slot is unset (or its fn answers SUPER): the
-  interface's default method, else AbstractMethodError."
-  [ifaces [name desc :as k] pn r]
-  (concat
-    (for [[j fsym] (defaults-for ifaces k)]
-      (list 'when (list '.DynImplements 't (m/class-sym :lang j "_class"))
-            (if (= "V" r) (list 'do (apply list fsym 't pn) '(return)) (list 'return (apply list fsym 't pn)))))
-    [(list 'panic (list 'dynAbstract 't (abstract-text ifaces k)))]))
+  interface's default method, else AbstractMethodError. On a dynCore (core?) the default method
+  takes the object around it (Self) as the interface."
+  ([ifaces k pn r] (iface-fallback ifaces k pn r false))
+  ([ifaces [name desc :as k] pn r core?]
+   (concat
+     (for [[j fsym] (defaults-for ifaces k)
+           :let [this (if core? (list 'assert (m/class-sym :lang j) '(.-Self t)) 't)]]
+       (list 'when (list '.DynImplements 't (m/class-sym :lang j "_class"))
+             (if (= "V" r) (list 'do (apply list fsym this pn) '(return)) (list 'return (apply list fsym this pn)))))
+     [(list 'panic (list 'dynAbstract 't (abstract-text ifaces k)))])))
 
 (defn- method-form
   "The Go method of slot i (method k) on receiver type recv (Dyn or a DynSub_C): the slot's fn
   when it is set and does not answer SUPER (a proxy's method without a mapping), else the
   statements of fallback."
-  ([ifaces i k] (method-form '(* Dyn) i k (fn [pn r] (iface-fallback ifaces k pn r))))
-  ([recv i [name desc :as k] fallback]
+  ([ifaces i k] (method-form '(* dynCore) i k (fn [pn r] (iface-fallback ifaces k pn r true)) '(.-Self t)))
+  ([recv i k fallback] (method-form recv i k fallback 't))
+  ([recv i [name desc :as k] fallback this]
    (let [[ps r] (t/parse-method-desc desc)
          pn (vec (for [j (range (count ps))] (symbol (str "p" j))))
          base (nm/method-base name desc)
          params (vec (cons (tag 't recv) (map #(tag %1 (m/go-type :lang %2)) pn ps)))
          params (if (= "V" r) params (with-meta params {:tag (m/go-type :lang r)}))
-         call (call-impl (map box-arg pn ps))]
+         call (call-impl this (map box-arg pn ps))]
      (apply list 'go/method (symbol base) params
             (list 'let ['f (list 'aget (list '.-Slots (list '.-D 't)) i)]
                   (list 'when (list '!= 'f nil)
@@ -264,36 +270,57 @@
                                  :New (list* 'fn (with-meta [(tag 'args '(slice any))] {:tag 'any})
                                             (concat
                                               (when-not (or (m/hand-written? n) (m/trivial-init? n)) [(list (m/class-sym :lang n "_Init"))])
-                                              [(list 'let ['t (list 'addr (list 'lit (symbol g) :D 'dc :F '(make (slice any) 1)))]
+                                              [(list 'let ['t (list 'addr (list 'lit (symbol g) :dynCore '(lit dynCore :D dc :F (make (slice any) 1))))]
+                                                     '(set! (.-Self t) t)
                                                      '(.MarkDynamic t)
                                                      (apply list (symbol (str "." (nm/ctor-base real)))
                                                             (list (symbol (str ".-" (m/go-name n))) 't) 't
                                                             (map-indexed (fn [i p] (arg-conv p (list 'aget 'args i))) ps))
                                                      't)]))))))))))
 
+(defn- go-method-names
+  "The Go method names of class n's struct (its own and its ancestors' methods, translated or
+  jrt's, its interfaces' markers): those a DynSub_C must define itself, as the ones promoted
+  from its embedded dynCore would be ambiguous."
+  [n]
+  (into #{}
+        (concat
+          (for [c (m/superclass-chain n)
+                :when (and c (not= c "java/lang/Object"))
+                nme (if (m/hand-written? c)
+                      (jrt/struct-methods (:jrt m/*w*) (m/go-name c))
+                      (for [mm (:methods (a/decl c))
+                            :when (and (not (m/static? mm)) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm)))]
+                        (nm/method-base (:name mm) (:desc mm))))]
+            nme)
+          (for [j (m/all-supertypes n) :when (and (not= j n) (m/interface? j))]
+            (str "Is_" (m/go-name j))))))
+
 (defn- sub-forms
-  "The Go type DynSub_C of the proxies of class n, its methods and its slot table."
+  "The Go type DynSub_C of the proxies of class n, its methods and its slot table. It embeds C's
+  struct and a dynCore, whose methods (the interfaces' methods and markers, Dyn's) it takes by
+  Go's promotion; it defines itself Object's and C's virtual methods, and those of the core whose
+  names C's struct has too (they would be ambiguous). Its slots are Dyn's (the core's methods
+  index them), then C's own methods the interfaces lack."
   [n ifaces dyn-keys]
   (let [g (sub-name n)
         recv (list '* (symbol g))
         own (into {} (for [[k mm] (m/vmethods n) :when (not (m/object-keys k))] [k mm]))
-        ks (vec (concat object-slots (sort (distinct (concat (drop (count object-slots) dyn-keys) (keys own))))))
+        dyn-set (set dyn-keys)
+        ks (vec (concat dyn-keys (sort (remove dyn-set (keys own)))))
+        clash (go-method-names n)
         slots (symbol (str "dynSlots_" g))]
     (concat
       [(list 'c2g/comment (str "---- DynSub_" (m/go-name n) ": proxies of " (str/replace n "/" ".") ", "
                                (count ks) " methods"))
        (list 'go/type (symbol g)
              (str g " is an object of a proxy class extending " (str/replace n "/" ".")
-                  ": its struct, the class's dispatch table D and its fields F (the fn map).\n")
-             (list 'struct (m/class-sym :lang n) (tag 'D '(* DynClass)) (tag 'F '(slice any))))
+                  ": its struct, and a dynCore (the class's dispatch table D, its fields F, Self this object).\n")
+             (list 'struct (m/class-sym :lang n) 'dynCore))
        (list 'go/var (tag slots '(map string int32))
              (apply list 'lit '(map string int32) (map-indexed (fn [i [nme desc]] [(str nme desc) i]) ks)))
        (list 'go/var (tag (symbol (str "dynOwn_" g)) '(map string string))
              (apply list 'lit '(map string string) (for [[nme desc] (sort (keys own))] [(str nme desc) nme])))
-       (list 'go/method 'DynImplements (with-meta [(tag 't recv) (tag 'c '(* jrt/Class))] {:tag 'bool})
-             '(aget (.-Ifaces (.-D t)) c))
-       (list 'go/method 'DynClassOf (with-meta [(tag 't recv)] {:tag '(* DynClass)}) '(.-D t))
-       (list 'go/method 'DynFields (with-meta [(tag 't recv)] {:tag '(* (slice any))}) '(addr (.-F t)))
        (list 'go/method 'Ref (with-meta [(tag 't recv)] {:tag 'any}) '(when (== t nil) (return nil)) 't)
        (list 'go/method 'GetClass__Class (with-meta [(tag 't recv)] {:tag '(* jrt/Class)}) '(.-Cls (.-D t)))
        (list 'go/method 'Clone__O (with-meta [(tag 't recv)] {:tag 'any}) '(panic (jrt/CloneNotSupported t)))
@@ -301,9 +328,11 @@
       (for [i (range (count object-slots))
             :let [k (nth object-slots i)]]
         (method-form recv i k (fn [pn r] (object-fallback n k pn))))
-      (for [j ifaces] (list 'go/method (symbol (str "Is_" (m/go-name j))) [(tag 't recv)]))
-      (keep-indexed (fn [i k]
-                      (when (>= i (count object-slots))
+      (for [j ifaces :let [mk (str "Is_" (m/go-name j))] :when (clash mk)]
+        (list 'go/method (symbol mk) [(tag 't recv)]))
+      (keep-indexed (fn [i [nme desc :as k]]
+                      (when (and (>= i (count object-slots))
+                                 (or (own k) (clash (nm/method-base nme desc))))
                         (method-form recv i k (if (own k)
                                                 (fn [pn r] (class-fallback n k pn r))
                                                 (fn [pn r] (iface-fallback ifaces k pn r))))))
@@ -347,10 +376,16 @@ boxed, through its invoke of that arity.\n"
         n (count ks)]
     (concat
       [(list 'c2g/comment (str "---- Dyn (C2G-SPEC §5.12): " (count ifaces) " interfaces, " n " methods"))
+       '(go/type dynCore
+          "dynCore is what an object of a class made at run time has besides its superclass's
+struct: its class's dispatch table D, its fields F, and Self, the object (a Dyn or a DynSub_C)
+around it, which its methods (every interface's, by slot) pass to the slots' fns and the
+interfaces' default methods.\n"
+          (struct ^{:tag (* DynClass)} D ^{:tag (slice any)} F ^any Self))
        '(go/type Dyn
-          "Dyn is an object of a class made at run time (deftype, defrecord, reify): its class's
-dispatch table D and its fields F.\n"
-          (struct jrt/Object ^{:tag (* DynClass)} D ^{:tag (slice any)} F))
+          "Dyn is an object of a class made at run time (deftype, defrecord, reify): Object's
+struct and a dynCore.\n"
+          (struct jrt/Object dynCore))
        '(go/type DynClass
           "DynClass is a class made at run time: its Class, the fns of its methods by slot (nil:
 the interface's default, else AbstractMethodError), the interfaces it implements (with their
@@ -398,13 +433,14 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
        '(go/func newDyn
           "newDyn is a new object of a class made at run time, with the header's dynamic flag.\n"
           ^{:tag (* Dyn)} [^{:tag (* DynClass)} dc ^{:tag (slice any)} f]
-          (let [d (addr (lit Dyn :D dc :F f))]
+          (let [d (addr (lit Dyn :dynCore (lit dynCore :D dc :F f)))]
+            (set! (.-Self d) d)
             (.MarkDynamic d)
             d))
-       '(go/method DynImplements ^bool [^{:tag (* Dyn)} t ^{:tag (* jrt/Class)} c]
+       '(go/method DynImplements ^bool [^{:tag (* dynCore)} t ^{:tag (* jrt/Class)} c]
           (aget (.-Ifaces (.-D t)) c))
-       '(go/method DynClassOf ^{:tag (* DynClass)} [^{:tag (* Dyn)} t] (.-D t))
-       '(go/method DynFields ^{:tag (* (slice any))} [^{:tag (* Dyn)} t] (addr (.-F t)))
+       '(go/method DynClassOf ^{:tag (* DynClass)} [^{:tag (* dynCore)} t] (.-D t))
+       '(go/method DynFields ^{:tag (* (slice any))} [^{:tag (* dynCore)} t] (addr (.-F t)))
        '(go/method Ref ^any [^{:tag (* Dyn)} t] (when (== t nil) (return nil)) t)
        '(go/method GetClass__Class ^{:tag (* jrt/Class)} [^{:tag (* Dyn)} t] (.-Cls (.-D t)))
        '(go/method Clone__O ^any [^{:tag (* Dyn)} t] (panic (jrt/CloneNotSupported t)))
@@ -426,7 +462,7 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
               (let [r (.Invoke_O_O__O f t o)]
                 (when (!= r dynSuper) (return (assert bool (dynUnbox jrt/Prim_boolean r))))))
             (.Equals_O__Z (addr (.-Object t)) o)))]
-      (for [j ifaces] (list 'go/method (symbol (str "Is_" (m/go-name j))) [(tag 't '(* Dyn))]))
+      (for [j ifaces] (list 'go/method (symbol (str "Is_" (m/go-name j))) [(tag 't '(* dynCore))]))
       (keep-indexed (fn [i k] (when (>= i (count object-slots)) (method-form ifaces i k))) ks)
       ;; the natives of Compiler$Dyn
       [(list 'go/func (symbol (native-name "defineClass" "(Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Class;"))

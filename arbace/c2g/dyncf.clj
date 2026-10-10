@@ -57,7 +57,8 @@
              (if (or (m/hand-written? n) (m/trivial-init? n))
                '(do)
                (list (m/class-sym :lang n "_Init")))
-             (list 'let ['t (list 'addr (list 'lit (symbol g) :D 'dc :F 'f))]
+             (list 'let ['t (list 'addr (list 'lit (symbol g) :dynCore '(lit dynCore :D dc :F f)))]
+                   '(set! (.-Self t) t)
                    ;; the header's dynamic flag (jrt.MarkDynamic: the nominal checks)
                    '(.MarkDynamic t)
                    't))
