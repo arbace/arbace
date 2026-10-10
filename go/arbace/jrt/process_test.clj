@@ -124,8 +124,8 @@ it so).\n"
     (HostFiles_Close0_I__V_native (aget (.-A fds) 2))
     (ProcessHandleImpl_WaitForProcessExit0_J_Z__I_native (conv int64 pid) true))
   (let [(values pid fds) (spawn t "echo a; echo b >&2" nil 0 "" true)]
-    (when (!= (aget (.-A fds) 2) -1)
-      (.Error t "an error pipe though redirected"))
+    (when (!= (readAll (aget (.-A fds) 2)) "")
+      (.Error t "the error pipe of a redirected error output is not empty"))
     (HostFiles_Close0_I__V_native (aget (.-A fds) 0))
     (when (!= (readAll (aget (.-A fds) 1)) "a\nb\n")
       (.Error t "error output to standard output"))

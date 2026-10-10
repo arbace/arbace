@@ -29,7 +29,8 @@ let the program start programs and see processes.\n"
     (^{:doc "Start starts the program at path (a path, not searched) with the arguments argv
 (argv[0] first), the environment env (\"NAME=value\"; nil: the program's own), in the directory
 dir (\"\": the program's), and its standard input, output and error as stdio says; error output
-goes where standard output goes when errToOut. It returns the child and, for each StdioPipe of
+goes where standard output goes when errToOut (a pipe of stdio[2] is still made, as the JDK
+makes it: its child's end closed). It returns the child and, for each StdioPipe of
 stdio, the program's end of the pipe (writing for the input, reading for the outputs; nil
 otherwise). An error is a *HostProcError.\n"}
       Start [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^string dir

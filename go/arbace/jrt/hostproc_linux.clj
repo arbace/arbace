@@ -84,7 +84,17 @@ waitForProcessExit0): the exit status, or 0x80 plus the terminating signal.\n"
                (return nil nil (addr (lit HostProcError :Errno e))))]
     (range [i s stdio]
       (when (and (== i 2) errToOut)
+        ;; the child's error output is its standard output; a pipe is still made, its end in
+        ;; the child closed (ProcessImpl_md.c makes the err pipe whether or not
+        ;; redirectErrorStream; the stream reads its end at once)
         (aset files 2 (aget files 1))
+        (when (== (.-Kind s) StdioPipe)
+          (let [(values r w err) (os/Pipe)]
+            (when (!= err nil)
+              (return (fail (errnoOf err))))
+            (set! childEnds (append childEnds w))
+            (set! parentEnds (append parentEnds r))
+            (aset pipes 2 (addr (lit procPipe :f r)))))
         (continue))
       (switch (.-Kind s)
         (case [StdioPipe]
