@@ -492,14 +492,6 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (!= v nil)
                       (.SetProperty_String_String__O p (Str k) v))))
                 p)))
-     (when (m/c2g-method? "java/lang/String" "Chars__IntStream")
-       '(go/method Chars__IntStream "Chars__IntStream is String.chars(), CharSequence's default.\n"
-          ^IntStream [^{:tag (* String)} t]
-          (CharSequence_Chars__IntStream t)))
-     (when (m/c2g-method? "java/lang/String" "CodePoints__IntStream")
-       '(go/method CodePoints__IntStream "CodePoints__IntStream is String.codePoints(), CharSequence's default.\n"
-          ^IntStream [^{:tag (* String)} t]
-          (CharSequence_CodePoints__IntStream t)))
      (when (m/translated? "java/util/Properties")
        (list 'go/func 'System_GetProperties__Properties
              "System_GetProperties__Properties is System.getProperties() as translated code calls it

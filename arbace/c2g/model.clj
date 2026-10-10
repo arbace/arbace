@@ -269,10 +269,11 @@
                   (c2g-method? n base))))))
 
 (defn c2g-method?
-  "An instance method of jrt's hand-written class n (Go base name base) that c2g writes in the
-  program's support code (out.clj), because it returns a translated class jrt cannot name:
-  String's chars() and codePoints(), CharSequence's default methods (JRT-NOTES.md, \"Text and
-  locales\": CompactNumberFormat and java.time's text use them)."
+  "An instance method of jrt's hand-written class n (Go base name base) that the program's
+  support code has, though jrt does not: String's chars() and codePoints(), the default methods
+  of CharSequence (translated), which c2g forwards to on the classes jrt writes that implement
+  it (JRT-NOTES.md, \"Text and locales\": CompactNumberFormat and java.time's text call them on
+  a String)."
   [n base]
   (and (= n "java/lang/String") (#{"Chars__IntStream" "CodePoints__IntStream"} base)
        (translated? "java/lang/CharSequence") (translated? "java/util/stream/IntStream")))
