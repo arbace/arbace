@@ -2,7 +2,7 @@
 ;; (test/classes/*_test.clj): every vector of class forms they compile (same-shapes?, forms-classes,
 ;; load-forms) becomes one defclasses form at the REPL, in a namespace of its own, so that the
 ;; oracle checks that the Go build defines what the JVM compiles (and fails where it fails, with
-;; the analysis's messages). Run: bin/arbace test/classforms/gen_corpus.clj (then bin/oracle record
+;; the analysis's messages). Run: bin/arbace-j test/classforms/gen_corpus.clj (then bin/oracle record
 ;; forms/defclass_corpus).
 (ns classforms.gen-corpus
   (:require [arbace.string :as str]

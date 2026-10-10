@@ -27,7 +27,9 @@
    "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
    "arbace/java/process.clj" "arbace/java/shell.clj" "arbace/java/browse" "arbace/java/javadoc.clj"
    ;; D6: Swing, SAX
-   "arbace/inspector.clj" "arbace/xml.clj"])
+   "arbace/inspector.clj" "arbace/xml.clj"
+   ;; loaded by arbace/instant.clj, whose Go variant holds java.sql.Timestamp's part itself
+   "arbace/instant_timestamp.clj"])
 
 (def variants-dir "arbace/lang/go/ns")
 

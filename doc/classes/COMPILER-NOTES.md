@@ -37,7 +37,7 @@ visitors) and `arbace.lang.DynamicClassLoader`/`RT` for the REPL loaders.
 ## Use
 
 ```
-$ bin/arbace
+$ bin/arbace-j
 user=> (defclass ^:public Counter
          (field ^:private ^int n)
          (method ^:public inc ^int [this] (set! n (unchecked-inc-int n))))
@@ -246,7 +246,7 @@ from stage 1 on: `java -cp target/stage1:. arbace.lang.Main` and `(defclass ...)
   already): before, compiling from source took nearly all of it, `analyze` 470 ms and `emit`
   290 ms; ASM and the class environment cost nothing measurable.
   With all namespaces AOT-compiled (2026-10-07) the first class form costs about 200 ms from
-  `-cp target/stage2:.` and about 55 ms from `bin/arbace` (the jar with the JDK AOT cache, which
+  `-cp target/stage2:.` and about 55 ms from `bin/arbace-j` (the jar with the JDK AOT cache, which
   has `arbace.classes` loaded and linked by its training run); the whole `defclass` script runs
   in 0.78 s and 0.26 s, against 2.3 s before.
 - **The special forms.** `class*`, `label*`, `break*`, `continue*`, `return*`, `switch*`,

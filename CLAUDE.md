@@ -53,7 +53,7 @@ Prior art:
     (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
     reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
     `test/aot-training.clj`). With `--suite` it also runs Clojure's test suite on stages 1
-    and 2. Run Arbace with `bin/arbace` (the jar, with the cache when it applies), or a stage
+    and 2. Run Arbace with `bin/arbace-j` (the jar, with the cache when it applies), or a stage
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).

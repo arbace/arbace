@@ -5,9 +5,9 @@
 ;; the JVM), and the script's steps call them in place of arbace.lang.C; the results, with
 ;; cf.lang. read as arbace.lang., are compared with the script's expected file.
 ;;
-;; Usage: bin/arbace test/classforms/class_scripts.clj IMPL [SCRIPT...]
+;; Usage: bin/arbace-j test/classforms/class_scripts.clj IMPL [SCRIPT...]
 ;;   IMPL    a command reading forms on its standard input, as for bin/oracle check (jvm:
-;;           bin/arbace -)
+;;           bin/arbace-j -)
 ;;   SCRIPT  scripts by name (Murmur3); default: all of `scripts`
 (ns classforms.class-scripts
   (:require [arbace.string :as str]
@@ -73,7 +73,7 @@
                                 (str "(oracle.driver/step "
                                      (renamed cs (oracle.driver/emit (select-keys c step-keys))) ")\n")))
                    "(oracle.driver/done " (count cases) ")\n")
-        cmd (if (= impl "jvm") "bin/arbace -" impl)
+        cmd (if (= impl "jvm") "bin/arbace-j -" impl)
         t0 (System/nanoTime)
         {:keys [records noise err exit]} (oracle.runner/run-impl cmd input (Long/parseLong (or (System/getenv "CF_TIMEOUT") "900")))
         done (some :done records)
@@ -98,7 +98,7 @@
 
 (let [[impl & sel] *command-line-args*]
   (when-not impl
-    (println "Usage: bin/arbace test/classforms/class_scripts.clj IMPL [SCRIPT...]")
+    (println "Usage: bin/arbace-j test/classforms/class_scripts.clj IMPL [SCRIPT...]")
     (System/exit 2))
   (let [rs (doall (for [s (or (seq sel) (sort (keys scripts)))]
                     (run-script impl s (get scripts s))))]

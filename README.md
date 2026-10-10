@@ -32,7 +32,7 @@ known limits.
 
 ```sh
 bin/build-arbace         # bootstrap into target/: the stages, target/arbace.jar and its AOT cache
-bin/arbace               # a REPL; also bin/arbace -e '(+ 1 2)', bin/arbace script.clj
+bin/arbace-j             # a REPL; also bin/arbace-j -e '(+ 1 2)', bin/arbace-j script.clj
 ```
 
 ## Documentation

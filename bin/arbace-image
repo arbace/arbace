@@ -1,26 +1,29 @@
 #!/bin/bash
 # Make target/arbace-image, a self-contained Arbace: a JDK runtime image trimmed by jlink (JEP 282)
 # to the modules Arbace needs, with Arbace's jar, a JDK AOT cache trained by the image's own java,
-# and the launcher bin/arbace inside it:
+# and the launcher bin/arbace-j inside it:
 #   target/arbace-image/bin/java, lib/modules, ...   the trimmed JDK (jlink)
 #   target/arbace-image/lib/arbace/arbace.jar        target/arbace.jar (from bin/build-arbace)
 #   target/arbace-image/lib/arbace/arbace.aot        its AOT cache (JEP 483, 514; no profiles)
-#   target/arbace-image/bin/arbace                   this repository's bin/arbace, which runs
+#   target/arbace-image/bin/arbace-j                 this repository's bin/arbace-j, which runs
 #                                                    the image's java and jar when it sits there
-# The modules are those jdeps finds in the jar's classes (java.base, java.desktop for `bean`,
-# the inspector and browse, java.sql for resultset-seq and instants, jdk.unsupported for the
-# REPL's interrupt handler, and what they require), jdk.unsupported.desktop (see below), and any
-# in ARBACE_IMAGE_MODULES. The JDK's own classes are stripped of debug information, and headers
-# and man pages are left out. The image needs no JDK at run time: copy the directory anywhere and
-# run its bin/arbace. The cache is tied to the image's JVM; it still applies after a move (the
-# JVM matches the class path by its common prefix), and bin/arbace --aot-train in the image
-# makes it anew.
+# The modules are java.base and jdk.unsupported (the REPL's interrupt handler, sun.misc.Signal),
+# the baseline of every Arbace image (the user's decision, 2026-10-10: Arbace targets the server
+# side), and any in ARBACE_IMAGE_MODULES. Arbace loads and works on them; what needs more is
+# optional and works when the runtime has it (VENDOR-NOTES, hand changes 15 to 17): java.sql
+# (java.sql.Timestamp's #inst, resultset-seq), java.xml (arbace.xml), java.desktop
+# (arbace.inspector, arbace.java.browse's Swing window). The JDK's own classes are stripped of
+# debug information, and headers and man pages are left out. The image needs no JDK at run
+# time: copy the directory anywhere and run its bin/arbace-j. The cache is tied to the image's
+# JVM; it still applies after a move (the JVM matches the class path by its common prefix), and
+# bin/arbace-j --aot-train in the image makes it anew.
 #
 # Usage: bin/arbace-image [OUTPUT-DIR]   default target/arbace-image; needs target/arbace.jar
 # Environment:
-#   ARBACE_IMAGE_MODULES  further modules, comma-separated (e.g. java.net.http,jdk.httpserver)
-#   JAVA_HOME             the JDK whose jlink, jdeps and jmods are used (default: the one of
-#                         the jlink on the PATH)
+#   ARBACE_IMAGE_MODULES  further modules, comma-separated (e.g. java.sql,java.xml for #inst as
+#                         java.sql.Timestamp and arbace.xml, or java.net.http,jdk.httpserver)
+#   JAVA_HOME             the JDK whose jlink (and jmods, or run-time image) is used
+#                         (default: the one of the jlink on the PATH)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -28,35 +31,32 @@ out=${1:-target/arbace-image}
 jar=target/arbace.jar
 if [ ! -f "$jar" ]; then echo "bin/arbace-image: no $jar; build it with bin/build-arbace" >&2; exit 1; fi
 bin=${JAVA_HOME:+$JAVA_HOME/bin/}
-feature=$("${bin}java" -XshowSettings:properties -version 2>&1 |
-            sed -n 's/^ *java.specification.version = //p')
-mods=$("${bin}jdeps" --multi-release "$feature" --ignore-missing-deps --print-module-deps "$jar")
-# jdk.unsupported.desktop (a few classes) only so that the cache keeps AOT class linking on JDK
-# 26.0.2; see train below
-mods=$mods,jdk.unsupported.desktop${ARBACE_IMAGE_MODULES:+,$ARBACE_IMAGE_MODULES}
+mods=java.base,jdk.unsupported${ARBACE_IMAGE_MODULES:+,$ARBACE_IMAGE_MODULES}
 echo "== jlink: $mods"
 rm -rf "$out"
 "${bin}jlink" --add-modules "$mods" --output "$out" \
   --strip-debug --no-header-files --no-man-pages
 mkdir -p "$out/lib/arbace"
 cp "$jar" "$out/lib/arbace/arbace.jar"
-cp bin/arbace "$out/bin/arbace"
-# train ARGS...: make the cache with the image's java (bin/arbace --aot-train), then launch with
+cp bin/arbace-j "$out/bin/arbace-j"
+# train ARGS...: make the cache with the image's java (bin/arbace-j --aot-train), then launch with
 # it; the launch fails when the JVM cannot initialize from the cache
 train() {
   rm -f "$out/lib/arbace/aot-train-options"
   [ $# -gt 0 ] && echo "$*" > "$out/lib/arbace/aot-train-options"
-  "$out/bin/arbace" --aot-train < test/aot-training.clj > "$out/lib/arbace/arbace.aot.log" 2>&1 &&
+  "$out/bin/arbace-j" --aot-train < test/aot-training.clj > "$out/lib/arbace/arbace.aot.log" 2>&1 &&
     [ -s "$out/lib/arbace/arbace.aot" ] &&
-    env -u ARBACE_JAR "$out/bin/arbace" -e '(println "image:" (clojure-version))' > /dev/null 2>&1
+    env -u ARBACE_JAR "$out/bin/arbace-j" -e '(println "image:" (clojure-version))' > /dev/null 2>&1
 }
 echo "== AOT cache, trained by the image's java"
 # JDK 26.0.2 (jdk26u): with AOT class linking, the cache of an image of some module sets (such
-# as java.base with java.sql, or with java.compiler; Arbace's set too, unless a module such as
-# jdk.unsupported.desktop or jdk.attach is added) stops the JVM at startup: the cache records ClassLoaders$AppClassLoader for initialization at
-# run time, and its <clinit> fails in ClassLoader.registerAsParallelCapable (InternalError). The
-# full JDK is not affected. Then the cache is made without class linking, which still loads the
-# classes from the cache (JEP 483's linking is lost).
+# as java.base with java.sql, or with java.compiler) stops the JVM at startup: the cache records
+# ClassLoaders$AppClassLoader for initialization at run time, and its <clinit> fails in
+# ClassLoader.registerAsParallelCapable (InternalError). The default set, java.base and
+# jdk.unsupported, is not affected, nor is the full JDK; adding a module such as jdk.attach or
+# jdk.unsupported.desktop to an affected set avoids it. When it happens, the cache is made
+# without class linking, which still loads the classes from the cache (JEP 483's linking is
+# lost).
 if ! train; then
   echo "   the cache with AOT class linking stops the JVM; training with -XX:-AOTClassLinking"
   if ! train -XX:-AOTClassLinking; then
@@ -66,5 +66,5 @@ fi
 rm "$out/lib/arbace/arbace.aot.log"
 echo "   $out: $(du -sm "$out" | cut -f1) MB" \
      "(cache $(( $(stat -c %s "$out/lib/arbace/arbace.aot") / 1048576 )) MB)"
-echo "   $(env -u ARBACE_JAR "$out/bin/arbace" -e \
+echo "   $(env -u ARBACE_JAR "$out/bin/arbace-j" -e \
              '(println "image:" (clojure-version) (System/getProperty "java.home"))' 2>&1 | tail -1)"

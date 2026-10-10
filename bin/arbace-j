@@ -4,25 +4,49 @@
 # With the JDK AOT cache target/arbace.aot (JEP 483, 514) the classes come from the cache,
 # already loaded and linked; it holds no method profiles (JEP 515, see --aot-train). The cache
 # applies only when it was made by this JDK build from this jar with these JVM options: the
-# launcher uses it only when it is newer than the jar, and the JVM checks the rest; if the check
-# fails, the JVM runs without it, silently (its AOT logging is off). Without the cache (or with
-# ARBACE_AOT=off) the launch takes the jar alone.
+# launcher uses it only when it is not older than the jar, and the JVM checks the rest; if the
+# check fails, the JVM runs without it, silently (its AOT logging is off). Without the cache (or
+# with ARBACE_AOT=off) the launch takes the jar alone.
 #
-# Usage: bin/arbace [ARG...]
-#        bin/arbace --aot-train < WORKLOAD   make the cache: a training run of the jar
-#                                            (-XX:AOTCacheOutput, classes only, no method
-#                                            profiles), the REPL reading WORKLOAD
+# Usage: bin/arbace-j [ARG...]
+#        bin/arbace-j --aot-train < WORKLOAD   make the cache: a training run of the jar
+#                                              (-XX:AOTCacheOutput, classes only, no method
+#                                              profiles), the REPL reading WORKLOAD
 # Inside a runtime image (bin/arbace-image) it runs the image's java and lib/arbace/arbace.jar.
+# The interactive REPL runs under rlwrap (line editing, history), as clj does, when it is on
+# the PATH, standard input and output are terminals and TERM is not dumb; the REPL is
+# interactive when there are no arguments, or when the first main option (after -i, -e and
+# --report with their values) is -r or --repl. The Go executable follows the same convention.
 # Environment:
 #   ARBACE_JAR        the jar (default target/arbace.jar, or the image's lib/arbace/arbace.jar);
 #                     its cache is the same path with .aot
 #   ARBACE_CLASSPATH  appended to the class path (the cache allows appending)
 #   ARBACE_JAVA_OPTS  further JVM options (a cache made without them may then not apply)
 #   ARBACE_AOT        off: do not use the cache
+#   ARBACE_RLWRAP     off: no rlwrap (wrapped: set by the launcher for the wrapped child)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-# In a runtime image made by bin/arbace-image this script is the image's bin/arbace: it runs the
-# image's own java with the image's lib/arbace/arbace.jar (and its cache, trained by that java)
+# starts_repl ARGS...: whether ARGS start the interactive REPL (arbace.main's option grammar)
+starts_repl() {
+  [ $# -eq 0 ] && return 0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -i|--init|-e|--eval|--report) [ $# -ge 2 ] || return 1; shift 2 ;;
+      -r|--repl) return 0 ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1   # init options only: arbace.main runs them and no REPL
+}
+if [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] &&
+   [ "${ARBACE_RLWRAP:-}" != off ] && [ "${ARBACE_RLWRAP:-}" != wrapped ] &&
+   command -v rlwrap > /dev/null && starts_repl "$@"; then
+  self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+  exec env ARBACE_RLWRAP=wrapped rlwrap -m -r -q '\"' -b "(){}[],^%#@\";:'" "$self" "$@"
+fi
+# In a runtime image made by bin/arbace-image this script is the image's bin/arbace-j: it runs
+# the image's own java with the image's lib/arbace/arbace.jar (and its cache, trained by that
+# java)
 if [ -x "$root/bin/java" ] && [ -f "$root/lib/arbace/arbace.jar" ]; then
   java=$root/bin/java
   jar=${ARBACE_JAR:-$root/lib/arbace/arbace.jar}
@@ -32,7 +56,7 @@ else
 fi
 cache=${jar%.jar}.aot
 if [ ! -f "$jar" ]; then
-  echo "bin/arbace: no $jar; build it with bin/build-arbace," \
+  echo "bin/arbace-j: no $jar; build it with bin/build-arbace," \
        "or run a stage with java -cp target/stageN:. arbace.lang.Main" >&2
   exit 1
 fi
@@ -54,7 +78,9 @@ if [ "${1:-}" = "--aot-train" ]; then
   exec "$java" "${opts[@]}" -XX:+UnlockDiagnosticVMOptions -XX:-AOTRecordTraining \
     -XX:AOTCacheOutput="$cache" -cp "$jar" arbace.lang.Main "$@"
 fi
-if [ "${ARBACE_AOT:-}" != off ] && [ "$cache" -nt "$jar" ]; then
+# The cache is used when it is not older than the jar: apk (dist/alpine/) installs every file
+# with the same mtime, and the package trains the cache against the jar so dated
+if [ "${ARBACE_AOT:-}" != off ] && [ -f "$cache" ] && [ ! "$jar" -nt "$cache" ]; then
   opts+=(-XX:AOTCache="$cache" '-Xlog:aot*=off' '-Xlog:cds*=off')
 fi
 exec "$java" "${opts[@]}" -cp "$cp" arbace.lang.Main "$@"

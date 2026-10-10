@@ -1,7 +1,7 @@
 (ns oracle.runner
   "The oracle's runner (doc/go/ORACLE.md), run by bin/oracle on the JVM Arbace. Each corpus
   file becomes one run of the implementation under test: a command reading forms on its
-  standard input (the JVM's: bin/arbace -), given the driver test/oracle/driver.clj and then
+  standard input (the JVM's: bin/arbace-j -), given the driver test/oracle/driver.clj and then
   one driver call per case. The records it prints are normalized (normalize) and either written
   as the expected file (record) or compared with it (check)."
   (:require [arbace.string :as str]
@@ -366,7 +366,7 @@
 
 ;; With -XX:-OmitStackTraceInFastThrow: once C2 compiles a hot path, the JVM otherwise throws
 ;; preallocated exceptions without their messages (seen under load: NPE messages turned nil)
-(def default-impl "env ARBACE_JAVA_OPTS=-XX:-OmitStackTraceInFastThrow bin/arbace -")
+(def default-impl "env ARBACE_JAVA_OPTS=-XX:-OmitStackTraceInFastThrow bin/arbace-j -")
 
 (defn record
   "Regenerates the expected files of the selected parts (or files) from the JVM Arbace."

@@ -8,7 +8,7 @@
 
   The file it makes, go/arbace/jrt/reflect_tables.clj, is generated and tracked.
 
-  bin/jrt manifest   regenerates it after the manifest (ARBACE_CLASSPATH=test bin/arbace -m
+  bin/jrt manifest   regenerates it after the manifest (ARBACE_CLASSPATH=test bin/arbace-j -m
                      jrt.tables FILE)."
   (:require [jrt.manifest :as m]
             [arbace.string :as str])
