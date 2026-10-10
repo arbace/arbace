@@ -4,7 +4,8 @@
  * src/java.base/share/classes/sun/util/locale/provider/CalendarDataUtility.java,
  * CalendarNameProviderImpl.java (the names' resource keys and lookups) and
  * src/java.base/share/classes/sun/util/cldr/CLDRCalendarDataProviderImpl.java (the week
- * parameters by region), Copyright (c) Oracle and/or its affiliates, under the GNU General
+ * parameters by region; findRegionOverride and the fw extension of retrieveFirstDayOfWeek),
+ * Copyright (c) Oracle and/or its affiliates, under the GNU General
  * Public License version 2 with the Classpath Exception (LICENSE.md); the lookup's order over
  * the locale's candidates (LocaleServiceProviderPool's) is Arbace's own.
  */
@@ -37,6 +38,29 @@ public class CalendarDataUtility {
     }
 
     public static int retrieveFirstDayOfWeek(Locale locale) {
+        // Look for the Unicode Extension in the locale parameter
+        if (locale.hasExtensions()) {
+            String fw = locale.getUnicodeLocaleType("fw");
+            if (fw != null) {
+                switch (fw.toLowerCase(Locale.ROOT)) {
+                    case "mon":
+                        return MONDAY;
+                    case "tue":
+                        return TUESDAY;
+                    case "wed":
+                        return WEDNESDAY;
+                    case "thu":
+                        return THURSDAY;
+                    case "fri":
+                        return FRIDAY;
+                    case "sat":
+                        return SATURDAY;
+                    case "sun":
+                        return SUNDAY;
+                }
+            }
+        }
+
         int value = findValue(FIRST_DAY_OF_WEEK, findRegionOverride(locale));
         if (value == 0) {
             value = MONDAY; // default for the world ("001")
@@ -144,9 +168,31 @@ public class CalendarDataUtility {
         return names.isEmpty() ? null : names;
     }
 
-    /** The locale itself: jrt's locales have no Unicode extensions, so no region override (rg). */
+    // Utility to retrieve the region override from a locale's "rg" extension
+    private static final Locale.Builder OVERRIDE_BUILDER = new Locale.Builder();
+
     public static Locale findRegionOverride(Locale l) {
-        return l;
+        String rg = l.getUnicodeLocaleType("rg");
+        Locale override = l;
+
+        if (rg != null && rg.length() == 6) {
+            // UN M.49 code should not be allowed here
+            // cannot use regex here, as it could be a recursive call
+            rg = rg.toUpperCase(Locale.ROOT);
+            if (rg.charAt(0) >= 0x0041 &&
+                rg.charAt(0) <= 0x005A &&
+                rg.charAt(1) >= 0x0041 &&
+                rg.charAt(1) <= 0x005A &&
+                rg.substring(2).equals("ZZZZ")) {
+                override = OVERRIDE_BUILDER
+                    .clear()
+                    .setLocale(l)
+                    .setRegion(rg.substring(0, 2))
+                    .build();
+            }
+        }
+
+        return override;
     }
 
     static String normalizeCalendarType(String requestID) {

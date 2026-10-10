@@ -86,7 +86,10 @@
    "sun/text/Normalizer" "Sun_Normalizer"
    ;; java.time.chrono.Era's namesake in sun.util.calendar, which ZoneInfo's calendars use
    ;; (JRT-NOTES.md, "Time")
-   "sun/util/calendar/Era" "Calendar_Era"})
+   "sun/util/calendar/Era" "Calendar_Era"
+   ;; java.lang.annotation.Annotation's namesake in java.text, an attribute value's wrapper
+   ;; (JRT-NOTES.md, "Text and locales")
+   "java/text/Annotation" "Text_Annotation"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

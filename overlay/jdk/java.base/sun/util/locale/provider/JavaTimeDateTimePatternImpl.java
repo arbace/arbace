@@ -24,10 +24,10 @@ public class JavaTimeDateTimePatternImpl extends JavaTimeDateTimePatternProvider
     private JavaTimeDateTimePatternImpl() {
     }
 
-    /** The locales of java.base's CLDR data: the root locale, en, en_US. */
+    /** The adapter's locales. */
     @Override
     public Locale[] getAvailableLocales() {
-        return new Locale[] {Locale.ROOT, Locale.ENGLISH, Locale.US};
+        return LocaleProviderAdapter.getResourceBundleBased().getAvailableLocales();
     }
 
     @Override
@@ -39,7 +39,7 @@ public class JavaTimeDateTimePatternImpl extends JavaTimeDateTimePatternProvider
     @Override
     public String getJavaTimeDateTimePattern(String requestedTemplate, String calType, Locale locale) {
         LocaleProviderAdapter lpa = LocaleProviderAdapter.getResourceBundleBased();
-        return LocaleResources.candidateLocales(locale).stream()
+        return LocaleResources.cldrCandidateLocales(locale).stream()
                 .map(lpa::getLocaleResources)
                 .map(lr -> lr.getLocalizedPattern(requestedTemplate, calType))
                 .filter(Objects::nonNull)
