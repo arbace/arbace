@@ -3163,6 +3163,6 @@ Numbered PR (processes); no PR appears elsewhere in doc/.
   follow `ProcessImpl_md.c`, `childproc.c`, `ProcessHandleImpl_unix.c` and
   `ProcessHandleImpl_linux.c`: recorded as jdk26u-derived (GPL 2 with the Classpath Exception),
   as the B7 files are.
-- **PR7 (C2G-SPEC §7, method references)** A bound method reference to a private method of a
+- **PR7 (C2G-SPEC §7.11, method references)** A bound method reference to a private method of a
   non-leaf class is a call of its `Impl_` with the receiver's struct and the receiver, as an
   invocation of it is.
