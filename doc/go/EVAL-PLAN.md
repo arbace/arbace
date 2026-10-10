@@ -66,6 +66,13 @@ the questions the user should decide (§9).
 The design follows what Clojure's `Compiler` already decides; the evaluator adds only the
 run-time side the bytecode had.
 
+**As built in step 7** (amendment EC1, accepted 2026-10-10; SPEED-NOTES.md, "The evaluator:
+closure compilation"; C2G-SPEC §10.1): the tree is not walked at each call. Each method is
+compiled at its first call into `Code` nodes, closures over the method's decisions (slot
+indexes, unboxed `long` and `double` locals, constants, direct static calls, resolved members),
+with the semantics described below; `evalIn` evaluates top-level forms and, in compat mode, node
+kinds the compiler does not know.
+
 ### 2.1 Frames and locals
 
 - The analyzer numbers locals (`LocalBinding.idx`, `NEXT_LOCAL_NUM`, `ObjMethod.maxLocal`) as
@@ -80,6 +87,14 @@ run-time side the bytecode had.
   analyzer's `closeOver` adds it to every fn in between).
 - Primitive locals (`^long`, `^double`, loop locals with primitive inits) hold boxed values;
   the analyzer has chosen the primitive overloads, and the invokers convert (§2.6).
+- **As built in step 7** (amendments EC1, EC4, accepted 2026-10-10): `long` and `double`
+  locals of a compiled method live unboxed in the frame's `prims` (a `long[]`, a `double` as its
+  raw bits), boxed anew at each use where an `Object` is wanted, as the bytecode boxes them;
+  `recur` stores its values (through temporaries in the frame when there are several) and sets
+  the frame's `recur` flag, which its loop clears. Frames are reused: each thread's `EvalState`
+  keeps its frames by depth (calls nest, and no frame outlives its call, a fn closing over
+  values copied when it is made); a call takes the frame of its depth, and clears its slots when
+  it returns.
 
 ### 2.2 Functions
 
@@ -97,6 +112,12 @@ run-time side the bytecode had.
   "Functions").
 - Step 7 replaces `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk with
   closures.
+- **As built in step 7** (amendment EC3, accepted 2026-10-10): `EvalFn` answers `invoke` of 0 to
+  5 arguments itself, calling the compiled method of that fixed arity (`FnExpr.evalArities`)
+  with the arguments bound in a frame, without a seq; variadic calls and `apply` go through
+  `RestFn` to `doInvoke` as before (the seq's arguments taken before the frame). `EvalMethod`
+  answers `invoke` of 1 to 4 arguments, and `Dyn`'s dispatch calls the `invoke` of the arity
+  (`dynCallFast`).
 
 ### 2.3 Control
 
@@ -254,6 +275,12 @@ A tree walk per form with seq-packed arguments and boxed locals: expect Joker's 
 plan stays: per-arity `invoke`, closure compilation of the tree (each `Expr` to a Go closure
 once, at `fn*` evaluation), invokers called with Go values on hinted interop, then AOT of the
 core namespaces to Go forms.
+
+**As built in step 7b** (amendments EC1-EC6, accepted 2026-10-10; SPEED-NOTES.md): the closure
+compilation is per method at its first call, not at `fn*` evaluation; the hot static methods
+are called directly (EC2, generated `CodeOpN`), other resolved members through their invoker
+(EC5). The benchmarks run 5 to 69 times faster than the tree walk (geometric mean 12.8x), about
+54 times slower than the JVM. AOT to Go forms remains.
 
 ## 7. Checks
 
