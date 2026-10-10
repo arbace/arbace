@@ -220,9 +220,10 @@ On amd64 (this machine, 2026-10-09/10), the branch `cf-repl`:
   the oracle's `Murmur3.clj` script run on it: 189 of 189 steps match, on the JVM (compiled) and on
   Go (interpreted). The other scripts' classes are recognized by identity in the runtime or the
   driver, or extend classes without a DynSub type (the tool says which).
-- **No regression**: the whole oracle on Go (`bin/oracle check ... --expected
-  test/oracle/known-go-amd64.edn`): the 33 recorded mismatches, none new besides the case above,
-  none newly passing; `bin/oracle check jvm` passes (20,476 cases before the new files).
+- **No regression**: the whole oracle on Go after merging main `b20b577` (`bin/oracle check ...
+  --expected test/oracle/known-go-amd64.edn`): 20,909 of 20,944 cases, the 35 recorded mismatches
+  (the case above among them), none new, none newly passing; `bin/oracle check jvm` passes
+  (20,944 of 20,944); `bin/arbace-go --smoke` passes.
 - **On the JVM**, `test/classforms/jvm_check.clj` runs the interpreter against the compiled classes
   (over the test host): 74 forms calling static methods match; the others need Class objects.
 
@@ -240,11 +241,12 @@ The interpreter is 14-40 times faster than the evaluator on the same work and 5-
 than HotSpot's compiled code. The first class form of a session loads the analysis: 3.2 s (2.3 s
 of it evaluating the namespaces); then a small class takes 10-60 ms to define.
 
-**Size**: the executable grows from 58.6 MB (the branch's base, `815d9d9`) to 69.7 MB: the DynSub
-types of the nine new superclasses (about 0.5 MB each: `c2g_dyn.go`'s forms grew from 5.1 to
-9.7 MB), the interpreter and the host (about 1.5 MB), the embedded analysis (360 KB of sources)
-and the world's generic signatures (`generics.edn`, 674 KB before restricting it to what an
-interpreted class can extend or implement).
+**Size**: the static amd64 executable is 74.0 MB against 63.1 MB for main at `b20b577` (built the
+same way, same day): +10.9 MB (+17%). Most of it is the DynSub types of the nine new
+superclasses (about 0.5 MB each: `c2g_dyn.go`'s forms grow from 5.1 to 9.7 MB); then the
+interpreter and the host (the `Compiler` variant's forms grow by 350 KB, `c2g_cf.go` 81 KB, and
+their member tables), the embedded analysis (360 KB of sources) and `generics.edn` (106 KB,
+restricted to what an interpreted class can extend or implement; 674 KB for the whole world).
 
 ## 7. What remains
 
