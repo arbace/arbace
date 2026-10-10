@@ -216,9 +216,11 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   `-XX:-AOTRecordTraining`. With the profiles (JEP 515) the JIT trusted those of the short
   training session, and long hot loops (`into` with a transducer, `conj!`) ran 15-30% slower;
   without them a short REPL session warms up about 40 ms slower, and startup is unchanged.
-- **`bin/arbace`** runs `arbace.lang.Main` from the jar with `-XX:+UseCompactObjectHeaders`
+- **`bin/arbace`** (since 2026-10-10 `bin/arbace-j`, which also runs the interactive REPL
+  under rlwrap) runs `arbace.lang.Main` from the jar with `-XX:+UseCompactObjectHeaders`
   (JEP 519; also used for the training run, since the cache must match), and with
-  `-XX:AOTCache=target/arbace.aot` when the cache is newer than the jar. If the JVM rejects the
+  `-XX:AOTCache=target/arbace.aot` when the cache is newer than the jar (since 2026-10-10:
+  not older than it, as an installed copy may give every file the same mtime). If the JVM rejects the
   cache (another JDK, other options) it runs without it; the launcher turns the JVM's `aot` and
   `cds` logging off, which would otherwise print the rejection on stdout. `ARBACE_CLASSPATH` is
   appended to the class path (the cache allows appending), `ARBACE_JAVA_OPTS` adds JVM options,
@@ -273,9 +275,9 @@ module): `bin/arbace-image`, also run by `bin/build-arbace --image`, makes
   and `jdk.unsupported` (`sun.misc.Signal` in `arbace.repl`); `jlink` adds what they require
   (`java.xml`, `java.logging`, `java.datatransfer`, `java.prefs`, `java.transaction.xa`).
   `ARBACE_IMAGE_MODULES` adds more. `jlink --strip-debug --no-header-files --no-man-pages`.
-- **Layout**: the image's `bin/arbace` is the repository's `bin/arbace`, which, when it finds
-  `bin/java` and `lib/arbace/arbace.jar` beside it, runs that `java` and that jar (and
-  `lib/arbace/arbace.aot`). The jar is copied unchanged.
+- **Layout**: the image's `bin/arbace` (since 2026-10-10 `bin/arbace-j`) is the repository's
+  launcher, which, when it finds `bin/java` and `lib/arbace/arbace.jar` beside it, runs that
+  `java` and that jar (and `lib/arbace/arbace.aot`). The jar is copied unchanged.
 - **The AOT cache** is trained by the image's own `java` (`bin/arbace --aot-train` inside the
   image, the same `test/aot-training.clj`), then the image is launched once with it. A JDK
   26.0.2 problem showed up here: with AOT class linking (the default of `-XX:AOTCacheOutput`),

@@ -395,7 +395,7 @@ Go tests written as Go forms (`*_test.clj`, printed as `_test.go`, in package `j
 | `TestToString`, `TestDoubles`, `TestFloats`, `TestInts`, `TestNoFusion`, `TestMathExceptions` | 60,228 + 110,312 + 65,072 + 47,754 cases of the numbers files; the FMA idiom |
 
 **Differential test data** comes from the JVM. `test/jrt/testdata.clj` (ns `jrt.testdata`) runs
-on `bin/arbace`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
+on `bin/arbace-j`, the JDK 26 Arbace runs on, and writes `strings.txt`, `chars.txt`,
 `exceptions.txt`, `tostring.txt`, `doubles.txt`, `floats.txt` and `ints.txt`.
 
 - **Format:** one case per line with tab-separated fields: the operation, its arguments, the
@@ -1897,7 +1897,7 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   quotes removed; other options ignored). So one setting starts a server on both builds:
 
       JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' target/arbace-go/amd64/arbace
-      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace
+      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace-j
 
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).

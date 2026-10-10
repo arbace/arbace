@@ -1,5 +1,5 @@
 ;; Timings of the class forms at the REPL (doc/go/CLASSFORMS-REPL.md, "Results"): the same work as
-;; a class form's methods and as Clojure fns, on whichever Arbace runs it (bin/arbace, or the Go
+;; a class form's methods and as Clojure fns, on whichever Arbace runs it (bin/arbace-j, or the Go
 ;; build: bin/arbace-go test/classforms/bench.clj).
 (defclass ^:public CFBench
   (method ^:public ^:static sumSq ^long [^int n]
