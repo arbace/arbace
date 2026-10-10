@@ -392,6 +392,39 @@ its field (nil for an array element, an any slot).\n"
   (let [(values p f) (refSlot o off)]
     (casRef p f e x)))
 
+(go/method WeakCompareAndSetReference_O_J_O_O__Z
+  "WeakCompareAndSetReference_O_J_O_O__Z: compareAndSetReference (Go's CAS does not fail
+spuriously; AbstractQueuedSynchronizer, StampedLock).\n"
+  ^bool [^{:tag (* Unsafe)} u ^any o ^int64 off ^any e ^any x]
+  (.CompareAndSetReference_O_J_O_O__Z u o off e x))
+
+(go/method GetAndBitwiseAndInt_O_J_I__I "GetAndBitwiseAndInt_O_J_I__I: the previous value (AbstractQueuedSynchronizer).\n"
+  ^int32 [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 m]
+  (atomic/AndInt32 (intSlot o off) m))
+
+(go/method PutIntOpaque_O_J_I__V "PutIntOpaque_O_J_I__V: a volatile store (Go has no weaker atomic one).\n"
+  [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 x]
+  (atomic/StoreInt32 (intSlot o off) x))
+
+(go/method GetLongOpaque_O_J__J "GetLongOpaque_O_J__J: a volatile load (StampedLock).\n"
+  ^int64 [^{:tag (* Unsafe)} u ^any o ^int64 off]
+  (atomic/LoadInt64 (longSlot o off)))
+
+(go/method Park_Z_J__V
+  "Park_Z_J__V is Unsafe.park(isAbsolute, time), LockSupport's: until the permit, an interrupt,
+the deadline in epoch milliseconds (absolute) or the nanoseconds (relative; 0: no limit).\n"
+  [^{:tag (* Unsafe)} u ^bool isAbsolute ^int64 time]
+  (cond
+    isAbsolute (LockSupport_ParkUntil_J__V time)
+    (== time 0) (LockSupport_Park__V)
+    (> time 0) (LockSupport_ParkNanos_J__V time)))
+
+(go/method Unpark_O__V "Unpark_O__V is Unsafe.unpark(thread).\n"
+  [^{:tag (* Unsafe)} u ^any thread]
+  (when (== thread nil)
+    (return))
+  (LockSupport_Unpark_Thread__V (assert Thread_I thread)))
+
 (go/method GetAndAddInt_O_J_I__I ^int32 [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 d]
   (- (atomic/AddInt32 (intSlot o off) d) d))
 
@@ -564,6 +597,7 @@ elements of elemSize (2, 4 or 8) bytes, each byte-reversed.\n"
 (go/method StoreFence__V "StoreFence__V: a sequentially consistent atomic operation (Go has no weaker fence).\n"
   [^{:tag (* Unsafe)} u] (.Add fence 0))
 (go/method LoadFence__V [^{:tag (* Unsafe)} u] (.Load fence))
+(go/method StoreStoreFence__V [^{:tag (* Unsafe)} u] (.Add fence 0))
 (go/method FullFence__V [^{:tag (* Unsafe)} u] (.Add fence 0))
 
 (go/method Ref ^any [^{:tag (* Unsafe)} t] (when (== t nil) (return nil)) t)

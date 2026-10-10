@@ -1,11 +1,11 @@
 ;; jrt: executors over goroutines (C2G-SPEC §8.4; JAVA-SURFACE.md decision 4; doc/go/
-;; JRT-NOTES.md, phase 2a): Executor, ExecutorService, ThreadFactory, Future, the pools of
-;; Executors (cached, fixed, thread per task), FutureTask, CountDownLatch, Semaphore. Every worker is a
+;; JRT-NOTES.md, phase 2a): Executor, ExecutorService, ThreadFactory, Future, CountDownLatch,
+;; Semaphore (the pools and FutureTask are translated since JC5). Every worker is a
 ;; jrt thread made by the pool's ThreadFactory, as Java's.
 (in-ns 'go.arbace.jrt)
 
 (go/file "executor.go"
-  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"] [time "time"]])
+  :imports [[strconv "strconv"] [sync "sync"] [time "time"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The interfaces
@@ -20,18 +20,6 @@
     (Is_Executor [])
     (Execute_Runnable__V [^Runnable r])))
 
-(go/type ExecutorService "ExecutorService is java.util.concurrent.ExecutorService (the members jrt has).\n"
-  (interface Executor
-    (Is_ExecutorService [])
-    (Submit_Callable__Future ^Future [^Callable task])
-    (Submit_Runnable__Future ^Future [^Runnable task])
-    (Submit_Runnable_O__Future ^Future [^Runnable task ^any result])
-    (Shutdown__V [])
-    (IsShutdown__Z ^bool [])
-    (IsTerminated__Z ^bool [])
-    (AwaitTermination_J_TimeUnit__Z ^bool [^int64 timeout ^{:tag (* TimeUnit)} unit])
-    (Close__V [])))
-
 (go/type Future "Future is java.util.concurrent.Future.\n"
   (interface Object_I
     (Is_Future [])
@@ -39,7 +27,10 @@
     (Get_J_TimeUnit__O ^any [^int64 timeout ^{:tag (* TimeUnit)} unit])
     (Cancel_Z__Z ^bool [^bool mayInterruptIfRunning])
     (IsCancelled__Z ^bool [])
-    (IsDone__Z ^bool [])))
+    (IsDone__Z ^bool [])
+    (ResultNow__O ^any [])
+    (ExceptionNow__Throwable ^Throwable_I [])
+    (State__Future_State ^{:tag (* Future_State)} [])))
 
 (go/var ThreadFactory_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.ThreadFactory" :Kind KindInterface
@@ -47,431 +38,134 @@
 (go/var Executor_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.Executor" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Executor"))))
-(go/var ExecutorService_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ExecutorService" :Kind KindInterface
-                     :Modifiers (bit-or AccPublic AccInterface AccAbstract)
-                     :Interfaces (lit (slice (* Class)) Executor_class) :Go "arbace/jrt.ExecutorService"))))
 (go/var Future_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.Future" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Future"))))
 
 (go/func ThreadFactory_InstanceOf ^bool [^any x] (let [(values _ ok) (assert ThreadFactory x)] (dynNominal x ThreadFactory_class ok)))
 (go/func Executor_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Executor x)] (dynNominal x Executor_class ok)))
-(go/func ExecutorService_InstanceOf ^bool [^any x] (let [(values _ ok) (assert ExecutorService x)] (dynNominal x ExecutorService_class ok)))
 (go/func Future_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Future x)] (dynNominal x Future_class ok)))
 (go/func Future_Cast ^Future [^any x]
   (when (== x nil) (return nil))
   (let [(values v ok) (assert Future x)]
     (when (not (dynNominal x Future_class ok)) (panic (ClassCast x Future_class)))
     v))
-(go/func ExecutorService_Cast ^ExecutorService [^any x]
+(go/func Executor_Cast ^Executor [^any x]
   (when (== x nil) (return nil))
-  (let [(values v ok) (assert ExecutorService x)]
-    (when (not (dynNominal x ExecutorService_class ok)) (panic (ClassCast x ExecutorService_class)))
+  (let [(values v ok) (assert Executor x)]
+    (when (not (dynNominal x Executor_class ok)) (panic (ClassCast x Executor_class)))
     v))
+(go/func ThreadFactory_Cast ^ThreadFactory [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert ThreadFactory x)]
+    (when (not (dynNominal x ThreadFactory_class ok)) (panic (ClassCast x ThreadFactory_class)))
+    v))
+;; ---- Future's default methods (JDK 19) and Future.State
 
-;; ---------------------------------------------------------------------------------------
-;; The default thread factory: pool-N-thread-M, non-daemon, as Java's
+(go/type Future_State "Future_State is the enum java.util.concurrent.Future.State.\n" (struct Enum))
 
-(go/var ^{:tag atomic/Int64} poolNumbers)
+(go/var Future_State_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.Future$State" :Kind KindEnum
+                     :Modifiers (bit-or AccPublic AccStatic AccFinal AccEnum) :Super Enum_class
+                     :Declaring Future_class :Simple "State" :Go "arbace/jrt.Future_State"))))
 
-(go/type defaultThreadFactory (struct Object ^string prefix ^{:tag atomic/Int64} n))
-
-(go/var defaultThreadFactory_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.Executors$DefaultThreadFactory" :Kind KindClass
-                     :Modifiers AccStatic :Super Object_class
-                     :Interfaces (lit (slice (* Class)) ThreadFactory_class)
-                     :Go "arbace/jrt.defaultThreadFactory"))))
-
-(go/func Executors_DefaultThreadFactory__ThreadFactory "Executors_DefaultThreadFactory__ThreadFactory is Executors.defaultThreadFactory().\n"
-  ^ThreadFactory []
-  (addr (lit defaultThreadFactory :prefix (+ "pool-" (strconv/FormatInt (.Add poolNumbers 1) 10) "-thread-"))))
-
-(go/method NewThread_Runnable__Thread ^Thread_I [^{:tag (* defaultThreadFactory)} f ^Runnable r]
-  (let [t (Thread_New_Runnable_String r (Str (+ (.-prefix f) (strconv/FormatInt (.Add (.-n f) 1) 10))))]
-    (.Store (.-daemon t) false)
+(go/func newFutureState ^{:tag (* Future_State)} [^string n ^int32 o]
+  (let [t (addr (lit Future_State))]
+    (.Ctor_String_I (.-Enum t) t (Intern n) o)
     t))
-(go/method Is_ThreadFactory [^{:tag (* defaultThreadFactory)} f])
-(go/method Ref ^any [^{:tag (* defaultThreadFactory)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* defaultThreadFactory)} t] defaultThreadFactory_class)
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* defaultThreadFactory)} t] (Object_toString t))
-(go/method Clone__O ^any [^{:tag (* defaultThreadFactory)} t] (panic (CloneNotSupported t)))
+
+(go/var
+  [^{:tag (* Future_State) :doc "Future_State_RUNNING is Future.State.RUNNING.\n"} Future_State_RUNNING (newFutureState "RUNNING" 0)]
+  [^{:tag (* Future_State)} Future_State_SUCCESS (newFutureState "SUCCESS" 1)]
+  [^{:tag (* Future_State)} Future_State_FAILED (newFutureState "FAILED" 2)]
+  [^{:tag (* Future_State)} Future_State_CANCELLED (newFutureState "CANCELLED" 3)])
+
+(go/func Future_State_Values__Future_State1 ^{:tag (* RefArray)} []
+  (RefArrayOf Future_State_class Future_State_RUNNING Future_State_SUCCESS Future_State_FAILED Future_State_CANCELLED))
+
+(go/func Future_State_ValueOf_String__Future_State ^{:tag (* Future_State)} [^{:tag (* String)} n]
+  (assert (* Future_State) (Enum_ValueOf_Class_String__Enum Future_State_class n)))
+
+(go/method Ref ^any [^{:tag (* Future_State)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Future_State)} t] Future_State_class)
+(go/method Clone__O ^any [^{:tag (* Future_State)} t] (.Impl_Clone__O t t))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* Future_State)} t] (.Impl_ToString__String t t))
+(go/method CompareTo_Enum__I ^int32 [^{:tag (* Future_State)} t ^Enum_I o] (.Impl_CompareTo_Enum__I t t o))
+(go/method CompareTo_O__I ^int32 [^{:tag (* Future_State)} t ^any o] (.Impl_CompareTo_O__I t t o))
+(go/method GetDeclaringClass__Class ^{:tag (* Class)} [^{:tag (* Future_State)} t] (.Impl_GetDeclaringClass__Class t t))
+(go/func Future_State_Cast ^{:tag (* Future_State)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* Future_State) x)]
+    (when (not ok) (panic (ClassCast x Future_State_class)))
+    v))
+(go/func Future_State_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Future_State) x)] ok))
+
+(go/func futureGet
+  "futureGet is f.get() for Future's defaults: its result, its exception (ExecutionException,
+CancellationException: exc), whether an interrupt was taken (Java's loops retry get then and
+set the status again at the end).\n"
+  [^Future f] :results [^any v ^Throwable_I exc ^bool interrupted]
+  (while true
+    (set! exc (runCatching (fn [] (set! v (.Get__O f)))))
+    (if (and (!= exc nil) (InterruptedException_InstanceOf exc))
+      (set! interrupted true)
+      (return))))
+
+(go/func Future_ResultNow__O
+  "Future_ResultNow__O is Future's default resultNow(): the result of a task done normally, else
+IllegalStateException.\n"
+  ^any [^Future this]
+  (when (not (.IsDone__Z this))
+    (panic (IllegalStateException_New_String (Str "Task has not completed"))))
+  (let [(values v exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (return v))
+    (when (ExecutionException_InstanceOf exc)
+      (panic (IllegalStateException_New_String (Str "Task completed with exception"))))
+    (when (CancellationException_InstanceOf exc)
+      (panic (IllegalStateException_New_String (Str "Task was cancelled"))))
+    (panic exc)))
+
+(go/func Future_ExceptionNow__Throwable
+  "Future_ExceptionNow__Throwable is Future's default exceptionNow(): the exception of a task
+that failed, else IllegalStateException.\n"
+  ^Throwable_I [^Future this]
+  (when (not (.IsDone__Z this))
+    (panic (IllegalStateException_New_String (Str "Task has not completed"))))
+  (when (.IsCancelled__Z this)
+    (panic (IllegalStateException_New_String (Str "Task was cancelled"))))
+  (let [(values _ exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (panic (IllegalStateException_New_String (Str "Task completed with a result"))))
+    (when (ExecutionException_InstanceOf exc)
+      (return (.GetCause__Throwable exc)))
+    (panic exc)))
+
+(go/func Future_State__Future_State
+  "Future_State__Future_State is Future's default state().\n"
+  ^{:tag (* Future_State)} [^Future this]
+  (when (not (.IsDone__Z this))
+    (return Future_State_RUNNING))
+  (when (.IsCancelled__Z this)
+    (return Future_State_CANCELLED))
+  (let [(values _ exc interrupted) (futureGet this)]
+    (when interrupted
+      (.Interrupt__V (Thread_CurrentThread__Thread)))
+    (when (== exc nil)
+      (return Future_State_SUCCESS))
+    (when (ExecutionException_InstanceOf exc)
+      (return Future_State_FAILED))
+    (panic exc)))
 
 ;; ---------------------------------------------------------------------------------------
-;; The pools
-
-(go/type threadPool
-  "threadPool is the ExecutorService of Executors' factories: workers made by the factory,
-at most max (0: no limit), idle ones kept keepAlive (0: forever; < 0: a worker runs one task,
-the thread-per-task executor); tasks queue when every worker is busy and the pool is full.\n"
-  (struct Object
-          ^{:tag sync/Mutex} mu
-          ^ThreadFactory factory
-          ^int max
-          ^{:tag time/Duration} keepAlive
-          ^int workers
-          ^{:tag (slice (* poolWorker))} idle
-          ^{:tag (slice Runnable)} queue
-          ^bool shutdown
-          ^bool terminated
-          ^{:tag (chan (struct))} done
-          ^string kind))
-
-(go/var threadPool_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ThreadPoolExecutor" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class
-                     :Interfaces (lit (slice (* Class)) ExecutorService_class)
-                     :Go "arbace/jrt.threadPool"))))
-
-(go/func newPool ^{:tag (* threadPool)} [^ThreadFactory f ^int max ^{:tag time/Duration} keepAlive ^string kind]
-  (when (== f nil)
-    (panic (NPE)))
-  (addr (lit threadPool :factory f :max max :keepAlive keepAlive :done (make (chan (struct))) :kind kind)))
-
-(go/func Executors_NewCachedThreadPool__ExecutorService ^ExecutorService []
-  (newPool (Executors_DefaultThreadFactory__ThreadFactory) 0 (* 60 time/Second) "cached"))
-(go/func Executors_NewCachedThreadPool_ThreadFactory__ExecutorService
-  "Executors_NewCachedThreadPool_ThreadFactory__ExecutorService is newCachedThreadPool(factory):
-no limit, idle workers kept 60 s.\n"
-  ^ExecutorService [^ThreadFactory f]
-  (newPool f 0 (* 60 time/Second) "cached"))
-(go/func Executors_NewFixedThreadPool_I__ExecutorService ^ExecutorService [^int32 n]
-  (Executors_NewFixedThreadPool_I_ThreadFactory__ExecutorService n (Executors_DefaultThreadFactory__ThreadFactory)))
-(go/func Executors_NewFixedThreadPool_I_ThreadFactory__ExecutorService
-  "Executors_NewFixedThreadPool_I_ThreadFactory__ExecutorService is newFixedThreadPool(n, factory):
-at most n workers, kept forever, an unbounded queue.\n"
-  ^ExecutorService [^int32 n ^ThreadFactory f]
-  (when (<= n 0)
-    (panic (IllegalArgumentException_New)))
-  (newPool f (conv int n) 0 "fixed"))
-(go/func Executors_NewSingleThreadExecutor__ExecutorService ^ExecutorService []
-  (newPool (Executors_DefaultThreadFactory__ThreadFactory) 1 0 "fixed"))
-(go/func Executors_NewThreadPerTaskExecutor_ThreadFactory__ExecutorService
-  "Executors_NewThreadPerTaskExecutor_ThreadFactory__ExecutorService is newThreadPerTaskExecutor:
-a new thread of the factory per task (virtual threads: goroutines, as every thread here).\n"
-  ^ExecutorService [^ThreadFactory f]
-  (newPool f 0 -1 "per-task"))
-(go/func Executors_NewVirtualThreadPerTaskExecutor__ExecutorService ^ExecutorService []
-  (newPool (.Factory__ThreadFactory (Thread_OfVirtual__Thread_Builder_OfVirtual)) 0 -1 "per-task"))
-
-(go/type poolWorker
-  "poolWorker is a worker's Runnable: its first task, then the queue's, then idle until a task
-is handed over on ch (nil: the pool shut down).\n"
-  (struct Object ^{:tag (* threadPool)} p ^Runnable first ^{:tag (chan Runnable)} ch))
-
-(go/var poolWorker_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ThreadPoolExecutor$Worker" :Kind KindClass
-                     :Modifiers (bit-or AccPrivate AccFinal) :Super Object_class
-                     :Interfaces (lit (slice (* Class)) Runnable_class)
-                     :Go "arbace/jrt.poolWorker"))))
-
-(go/method rejected [^{:tag (* threadPool)} p ^Runnable r]
-  (panic (RejectedExecutionException_New_String
-           (Concat (Str "Task ") (StrOfObj r) (Str " rejected from ") (.ToString__String p)))))
-
-(go/method Execute_Runnable__V "Execute_Runnable__V is execute: to an idle worker, a new one, or the queue.\n"
-  [^{:tag (* threadPool)} p ^Runnable r]
-  (when (== r nil)
-    (panic (NPE)))
-  (.Lock (.-mu p))
-  (when (.-shutdown p)
-    (.Unlock (.-mu p))
-    (.rejected p r))
-  (when (> (len (.-idle p)) 0)
-    (let [w (aget (.-idle p) (- (len (.-idle p)) 1))]
-      (set! (.-idle p) (subslice (.-idle p) _ (- (len (.-idle p)) 1)))
-      (>! (.-ch w) r)
-      (.Unlock (.-mu p))
-      (return)))
-  (when (or (== (.-max p) 0) (< (.-workers p) (.-max p)))
-    (inc! (.-workers p))
-    (.Unlock (.-mu p))
-    (.startWorker p r)
-    (return))
-  (set! (.-queue p) (append (.-queue p) r))
-  (.Unlock (.-mu p)))
-
-(go/method startWorker [^{:tag (* threadPool)} p ^Runnable first]
-  (let [w (addr (lit poolWorker :p p :first first :ch (make (chan Runnable) 1)))
-        ^Thread_I t nil
-        exc (runCatching (fn [] (set! t (.NewThread_Runnable__Thread (.-factory p) w))))]
-    (when (or (!= exc nil) (== t nil))
-      (.Lock (.-mu p))
-      (dec! (.-workers p))
-      (.checkTerminated p)
-      (.Unlock (.-mu p))
-      (when (!= exc nil)
-        (panic exc))
-      (.rejected p first))
-    (.Start__V t)))
-
-(go/method checkTerminated "checkTerminated ends the pool when it is shut down without workers (mu held).\n"
-  [^{:tag (* threadPool)} p]
-  (when (and (.-shutdown p) (== (.-workers p) 0) (not (.-terminated p)))
-    (set! (.-terminated p) true)
-    (close (.-done p))))
-
-(go/method Run__V "Run__V is the worker's loop.\n" [^{:tag (* poolWorker)} w]
-  (let [p (.-p w)
-        task (.-first w)
-        normal false]
-    (set! (.-first w) nil)
-    ;; a task that throws ends its worker (the exception goes to the thread's handlers);
-    ;; a replacement takes the queue
-    (defer ((fn []
-              (when (not normal)
-                (.Lock (.-mu p))
-                (dec! (.-workers p))
-                (if (and (> (len (.-queue p)) 0) (not (.-shutdown p)))
-                  (let [r (aget (.-queue p) 0)]
-                    (set! (.-queue p) (subslice (.-queue p) 1))
-                    (inc! (.-workers p))
-                    (.Unlock (.-mu p))
-                    (go (.startWorker p r)))
-                  (do
-                    (.checkTerminated p)
-                    (.Unlock (.-mu p))))))))
-    (while true
-      (when (!= task nil)
-        (.Run__V task)
-        (set! task nil))
-      (.Lock (.-mu p))
-      (when (> (len (.-queue p)) 0)
-        (set! task (aget (.-queue p) 0))
-        (set! (.-queue p) (subslice (.-queue p) 1))
-        (.Unlock (.-mu p))
-        (continue))
-      (when (or (.-shutdown p) (< (.-keepAlive p) 0))
-        (dec! (.-workers p))
-        (.checkTerminated p)
-        (.Unlock (.-mu p))
-        (set! normal true)
-        (return))
-      (set! (.-idle p) (append (.-idle p) w))
-      (.Unlock (.-mu p))
-      (if (== (.-keepAlive p) 0)
-        (set! task (<! (.-ch w)))
-        (let [tm (time/NewTimer (.-keepAlive p))]
-          (select
-            (case [r (<! (.-ch w))] (set! task r))
-            (case (<! (.-C tm))
-              (.Lock (.-mu p))
-              (let [found false]
-                (range [i x (.-idle p)]
-                  (when (== x w)
-                    (set! (.-idle p) (append (subslice (.-idle p) _ i) (spread (subslice (.-idle p) (+ i 1)))))
-                    (set! found true)
-                    (break)))
-                (if found
-                  (do
-                    (dec! (.-workers p))
-                    (.checkTerminated p)
-                    (.Unlock (.-mu p))
-                    (set! normal true)
-                    (return))
-                  (do
-                    ;; a task is being handed over
-                    (.Unlock (.-mu p))
-                    (set! task (<! (.-ch w))))))))
-          (.Stop tm)))
-      (when (== task nil)
-        ;; woken by shutdown: the loop ends at the shutdown check
-        (continue)))))
-
-(go/method Is_Runnable [^{:tag (* poolWorker)} w])
-(go/method Ref ^any [^{:tag (* poolWorker)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* poolWorker)} t] poolWorker_class)
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* poolWorker)} t] (Object_toString t))
-(go/method Clone__O ^any [^{:tag (* poolWorker)} t] (panic (CloneNotSupported t)))
-
-(go/method Submit_Callable__Future ^Future [^{:tag (* threadPool)} p ^Callable task]
-  (when (== task nil) (panic (NPE)))
-  (let [f (addr (lit FutureTask :callable task :done (make (chan (struct)))))]
-    (.Execute_Runnable__V p f)
-    f))
-(go/method Submit_Runnable__Future ^Future [^{:tag (* threadPool)} p ^Runnable task]
-  (.Submit_Runnable_O__Future p task nil))
-(go/method Submit_Runnable_O__Future ^Future [^{:tag (* threadPool)} p ^Runnable task ^any result]
-  (when (== task nil) (panic (NPE)))
-  (let [f (addr (lit FutureTask :runnable task :result result :done (make (chan (struct)))))]
-    (.Execute_Runnable__V p f)
-    f))
-
-(go/method Shutdown__V "Shutdown__V is shutdown(): no new tasks; queued ones still run.\n"
-  [^{:tag (* threadPool)} p]
-  (.Lock (.-mu p))
-  (when (not (.-shutdown p))
-    (set! (.-shutdown p) true)
-    (range [_ w (.-idle p)]
-      (>! (.-ch w) nil))
-    (set! (.-idle p) nil)
-    (.checkTerminated p))
-  (.Unlock (.-mu p)))
-
-(go/method IsShutdown__Z ^bool [^{:tag (* threadPool)} p]
-  (.Lock (.-mu p))
-  (defer (.Unlock (.-mu p)))
-  (.-shutdown p))
-
-(go/method IsTerminated__Z ^bool [^{:tag (* threadPool)} p]
-  (.Lock (.-mu p))
-  (defer (.Unlock (.-mu p)))
-  (.-terminated p))
-
-(go/method AwaitTermination_J_TimeUnit__Z ^bool [^{:tag (* threadPool)} p ^int64 timeout ^{:tag (* TimeUnit)} unit]
-  (let [me (CurrentThread)
-        dl (deadlineOf (unitNanos timeout unit))]
-    (switch (block (.-done p) me true dl)
-      (case [wokenInterrupted] (panic (InterruptedException_New)))
-      (case [wokenTimeout]
-        (select
-          (case (<! (.-done p)) (return true))
-          (default (return false)))))
-    true))
-
-(go/method Close__V "Close__V is close(): shutdown, then wait for the termination.\n" [^{:tag (* threadPool)} p]
-  (.Shutdown__V p)
-  (<! (.-done p)))
-
-(go/method Is_Executor [^{:tag (* threadPool)} p])
-(go/method Is_ExecutorService [^{:tag (* threadPool)} p])
-(go/method Ref ^any [^{:tag (* threadPool)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* threadPool)} t] threadPool_class)
-(go/method Clone__O ^any [^{:tag (* threadPool)} t] (panic (CloneNotSupported t)))
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* threadPool)} p]
-  (.Lock (.-mu p))
-  (let [state "Running"]
-    (cond
-      (.-terminated p) (set! state "Terminated")
-      (.-shutdown p) (set! state "Shutting down"))
-    (let [s (+ "[" state ", pool size = " (strconv/Itoa (.-workers p)) ", active threads = "
-               (strconv/Itoa (- (.-workers p) (len (.-idle p)))) ", queued tasks = "
-               (strconv/Itoa (len (.-queue p))) "]")]
-      (.Unlock (.-mu p))
-      (Concat (Object_toString p) (Str s)))))
-
-;; ---------------------------------------------------------------------------------------
-;; FutureTask
-
-(go/const
-  [^{:tag int32 :val 0} futureNew 0]
-  [^{:tag int32 :val 1} futureNormal 1]
-  [^{:tag int32 :val 2} futureExceptional 2]
-  [^{:tag int32 :val 3} futureCancelled 3])
-
-(go/type FutureTask
-  "FutureTask is java.util.concurrent.FutureTask: a Callable's (or a Runnable's) run, its
-result or exception, and cancellation. Java's states, simplified: running counts as new, as
-in Java (cancel succeeds on a running task).\n"
-  (struct Object
-          ^{:tag sync/Mutex} mu
-          ^Callable callable
-          ^Runnable runnable
-          ^int32 state
-          ^bool started
-          ^any result
-          ^Throwable_I exc
-          ^{:tag (* Thread)} runner
-          ^{:tag (chan (struct))} done))
-
-(go/var FutureTask_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.FutureTask" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class
-                     :Interfaces (lit (slice (* Class)) Runnable_class Future_class)
-                     :Go "arbace/jrt.FutureTask"))))
-
-(go/func FutureTask_New_Callable ^{:tag (* FutureTask)} [^Callable c]
-  (addr (lit FutureTask :callable (nnIface c) :done (make (chan (struct))))))
-(go/func FutureTask_New_Runnable_O ^{:tag (* FutureTask)} [^Runnable r ^any result]
-  (addr (lit FutureTask :runnable (nnIface r) :result result :done (make (chan (struct))))))
-
-(go/method Run__V [^{:tag (* FutureTask)} f]
-  (.Lock (.-mu f))
-  (when (or (!= (.-state f) futureNew) (.-started f))
-    (.Unlock (.-mu f))
-    (return))
-  (set! (.-started f) true)
-  (set! (.-runner f) (CurrentThread))
-  (.Unlock (.-mu f))
-  (let [^any v nil
-        exc (runCatching (fn []
-                           (if (!= (.-callable f) nil)
-                             (set! v (.Call__O (.-callable f)))
-                             (do
-                               (.Run__V (.-runnable f))
-                               (set! v (.-result f))))))]
-    (.Lock (.-mu f))
-    (set! (.-runner f) nil)
-    (when (== (.-state f) futureNew)
-      (if (!= exc nil)
-        (do
-          (set! (.-exc f) exc)
-          (set! (.-state f) futureExceptional))
-        (do
-          (set! (.-result f) v)
-          (set! (.-state f) futureNormal)))
-      (close (.-done f)))
-    (.Unlock (.-mu f))))
-
-(go/method Cancel_Z__Z ^bool [^{:tag (* FutureTask)} f ^bool mayInterrupt]
-  (.Lock (.-mu f))
-  (defer (.Unlock (.-mu f)))
-  (when (!= (.-state f) futureNew)
-    (return false))
-  (set! (.-state f) futureCancelled)
-  (when (and mayInterrupt (!= (.-runner f) nil))
-    (.Interrupt__V (.-self (.-runner f))))
-  (close (.-done f))
-  true)
-
-(go/method IsCancelled__Z ^bool [^{:tag (* FutureTask)} f]
-  (.Lock (.-mu f))
-  (defer (.Unlock (.-mu f)))
-  (== (.-state f) futureCancelled))
-
-(go/method IsDone__Z ^bool [^{:tag (* FutureTask)} f]
-  (.Lock (.-mu f))
-  (defer (.Unlock (.-mu f)))
-  (!= (.-state f) futureNew))
-
-(go/method report ^any [^{:tag (* FutureTask)} f]
-  (.Lock (.-mu f))
-  (defer (.Unlock (.-mu f)))
-  (switch (.-state f)
-    (case [futureNormal] (return (.-result f)))
-    (case [futureExceptional] (panic (ExecutionException_New_Throwable (.-exc f))))
-    (default (panic (CancellationException_New)))))
-
-(go/method Get__O "Get__O is get(): waits; ExecutionException, CancellationException, InterruptedException.\n"
-  ^any [^{:tag (* FutureTask)} f]
-  (when (== (block (.-done f) (CurrentThread) true (lit time/Time)) wokenInterrupted)
-    (panic (InterruptedException_New)))
-  (.report f))
-
-(go/method Get_J_TimeUnit__O ^any [^{:tag (* FutureTask)} f ^int64 timeout ^{:tag (* TimeUnit)} unit]
-  (switch (block (.-done f) (CurrentThread) true (deadlineOf (unitNanos timeout unit)))
-    (case [wokenInterrupted] (panic (InterruptedException_New)))
-    (case [wokenTimeout]
-      (select
-        (case (<! (.-done f)))
-        (default (panic (TimeoutException_New))))))
-  (.report f))
-
-(go/method Is_Runnable [^{:tag (* FutureTask)} f])
-(go/method Is_Future [^{:tag (* FutureTask)} f])
-(go/method Ref ^any [^{:tag (* FutureTask)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* FutureTask)} t] FutureTask_class)
-(go/method Clone__O ^any [^{:tag (* FutureTask)} t] (panic (CloneNotSupported t)))
-(go/method ToString__String "ToString__String is FutureTask.toString: [Completed normally] and the like.\n"
-  ^{:tag (* String)} [^{:tag (* FutureTask)} f]
-  (.Lock (.-mu f))
-  (let [s "[Not completed]"]
-    (switch (.-state f)
-      (case [futureNormal] (set! s "[Completed normally]"))
-      (case [futureExceptional] (set! s (+ "[Completed exceptionally: " (.String (StrOfObj (.-exc f))) "]")))
-      (case [futureCancelled] (set! s "[Cancelled]")))
-    (.Unlock (.-mu f))
-    (Concat (Object_toString f) (Str s))))
+;; Executors, ThreadPoolExecutor, ScheduledThreadPoolExecutor and FutureTask are translated
+;; from jdk26u (doc/go/JRT-NOTES.md, "Concurrency", JC5), and ExecutorService too: jrt keeps a
+;; stand-in of it (standin_executor.clj) and the other interfaces, which its ForkJoinPool
+;; implements and the translated classes implement.
 
 ;; ---------------------------------------------------------------------------------------
 ;; CountDownLatch
@@ -663,11 +357,8 @@ zero or less tries once.\n"
 (go/func init []
   (set! (.-IsInstance (.Info ThreadFactory_class)) ThreadFactory_InstanceOf)
   (set! (.-IsInstance (.Info Executor_class)) Executor_InstanceOf)
-  (set! (.-IsInstance (.Info ExecutorService_class)) ExecutorService_InstanceOf)
   (set! (.-IsInstance (.Info Future_class)) Future_InstanceOf)
+  (set! (.-IsInstance (.Info Future_State_class)) Future_State_InstanceOf)
+  (set! (.-Enum (.Info Future_State_class)) Future_State_Values__Future_State1)
   (set! (.-IsInstance (.Info CountDownLatch_class)) CountDownLatch_InstanceOf)
-  (set! (.-IsInstance (.Info Semaphore_class)) Semaphore_InstanceOf)
-  (set! (.-IsInstance (.Info FutureTask_class))
-        (fn ^bool [^any x] (let [(values _ ok) (assert (* FutureTask) x)] ok)))
-  (set! (.-IsInstance (.Info threadPool_class))
-        (fn ^bool [^any x] (let [(values _ ok) (assert (* threadPool) x)] ok))))
+  (set! (.-IsInstance (.Info Semaphore_class)) Semaphore_InstanceOf))

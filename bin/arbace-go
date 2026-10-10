@@ -150,6 +150,16 @@ run() { # run ARCH ARG...
   "${exec_cmd[@]}" "$@"
 }
 
+run_for() { # run_for SECONDS ARCH ARG...: run, killed after SECONDS (status 124)
+  local s=$1 a=$2; shift 2
+  if [ "$a" = arm64 ]; then
+    exec_cmd=(/usr/bin/qemu-aarch64 "$dir/$a/arbace")
+  else
+    exec_cmd=("$dir/$a/arbace")
+  fi
+  timeout "$s" "${exec_cmd[@]}" "$@"
+}
+
 smoke() {
   local status=0 t
   t=$(mktemp -d "$root/.tmp/arbace-go-smoke.XXXXXX")
@@ -204,6 +214,16 @@ EOF
     check "an error's exit status" "1" "$st"
     check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"
     check "stdin as a script (-)" "6" "$(echo '(println (* 2 3))' | run "$a" - 2>&1)"
+    # main's end (doc/go/JRT-NOTES.md, "Concurrency", JC9): the process waits for the
+    # non-daemon threads, as the JVM does; threads that wait forever (agents' fixed pool
+    # without shutdown-agents) keep it, as they keep the JVM, without Go's deadlock crash
+    check "non-daemon threads at main's end" "$(printf 'main ends\nthread ends')" \
+      "$(run "$a" -e '(do (.start (Thread. (fn [] (Thread/sleep 200) (println "thread ends")))) (println "main ends"))' 2>&1)"
+    run_for 5 "$a" -e '(send (agent 1) inc)' > "$t/agents.txt" 2>&1; st=$?
+    check "agents without shutdown-agents keep the process (killed after 5 s)" "124" "$st"
+    check "... without Go's deadlock crash" "" "$(grep -o 'fatal error.*' "$t/agents.txt")"
+    run_for 60 "$a" -e '(do (send (agent 1) inc) (deref (future 2)) (shutdown-agents))' > /dev/null 2>&1; st=$?
+    check "agents with shutdown-agents end the process" "0" "$st"
     [ $fails -eq 0 ] || status=1
   done
   rm -rf "$t"
@@ -217,7 +237,7 @@ EOF
 gate_key() {
   (cd "$root" && {
     find arbace go overlay bin/lib -type f | sort
-    printf '%s\n' doc/go/java-surface.edn seed/arbace-seed.jar.sha256 bin/arbace-go bin/c2g bin/g2c \
+    printf '%s\n' doc/go/java-surface.edn test/g2c/jrt_sources.clj seed/arbace-seed.jar.sha256 bin/arbace-go bin/c2g bin/g2c \
       bin/j2c bin/jrt bin/jrt-convert bin/arbace bin/build-arbace
   } | xargs sha256sum
     cat "${G2C_GOROOT:-/root/tamago-go}/VERSION"
