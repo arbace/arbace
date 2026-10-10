@@ -94,7 +94,7 @@ embedded resources.\n"
     (return nil false))
   (let [(values b err) (fs/ReadFile (.-Resources h) name)]
     (return b (== err nil))))
-(go/method Exit [^OSHost h ^int code] (os/Exit code))
+(go/method Exit [^OSHost h ^int code] (StopProfile) (os/Exit code))
 
 (go/func ResourceOrPath
   "ResourceOrPath is a resource as the Go build's class path has it (ClassLoader's
