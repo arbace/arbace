@@ -422,3 +422,69 @@ here and in C2G-SPEC §4.1, §10.3:
   of `java.sql`; all converted and compiled to javac's class shapes, 576 identical and the 4
   known differences, 1,640 classes; deterministic (`--twice`); 26 of 26 generated sources and 4
   of 4 data files equal to the JDK build's.
+
+## Text and locales (2026-10-10)
+
+java.text and jdk.localedata's locales in the Go build (JRT-NOTES.md, "Text and locales"; the
+user's decision of 2026-10-10; proposed amendments TL4, TL5), from jdk26u at `baf63fb`,
+`test/g2c/jrt_sources.clj`'s `text-sources`, `text-locales` and `added-gensrc`:
+
+- **Sources added** (`text-sources`, paths below `src/java.base/share/classes`): `java/text/` but
+  the classes already in (`CharacterIterator`, `Normalizer`, `ParsePosition`): `Annotation`,
+  `AttributedCharacterIterator`, `AttributedString`, `Bidi`, `BreakIterator`, `CalendarBuilder`,
+  `CharacterIteratorFieldDelegate`, `ChoiceFormat`, `CollationElementIterator`, `CollationKey`,
+  `Collator`, `CompactNumberFormat`, `DateFormat`, `DateFormatSymbols`, `DecimalFormat`,
+  `DecimalFormatSymbols`, `DigitList`, `DontCareFieldPosition`, `EntryPair`, `FieldPosition`,
+  `Format`, `ListFormat`, `MergeCollation`, `MessageFormat`, `NumberFormat`, `ParseException`,
+  `PatternEntry`, `RBCollationTables`, `RBTableBuilder`, `RuleBasedCollationKey`,
+  `RuleBasedCollator`, `SimpleDateFormat`, `StringBufFactory`, `StringCharacterIterator`;
+  `java/text/spi/` (six); `sun/text/`'s `CollatorUtilities`, `ComposedCharIter`, `IntHashtable`,
+  `UCompactIntArray`, `RuleBasedBreakIterator`, `SupplementaryCharacterData`, `CompactByteArray`,
+  `resources/BreakIteratorInfo`, `BreakIteratorResources`, `CollationData`;
+  `sun/util/resources/BreakIteratorResourceBundle`; `jdk/internal/icu/text/BidiBase`, `BidiLine`,
+  `BidiRun`, `impl/UBiDiProps`; `sun/util/locale/provider/`'s `AvailableLanguageTags`,
+  `BreakIteratorProviderImpl`, `CollationRules`, `CollatorProviderImpl`,
+  `CurrencyNameProviderImpl`, `DateFormatProviderImpl`, `DateFormatSymbolsProviderImpl`,
+  `DecimalFormatSymbolsProviderImpl`, `LocaleNameProviderImpl`, `NumberFormatProviderImpl`,
+  `JRELocaleConstants`, `LocaleServiceProviderPool`; `java/util/Currency`, `java/util/spi/`'s
+  `CurrencyNameProvider`, `LocaleNameProvider`, `TimeZoneNameProvider`, `CalendarDataProvider`,
+  `CalendarNameProvider`; `java/util/Locale`, `LocaleISOData`, `sun/util/locale/`'s `BaseLocale`,
+  `Extension`, `InternalLocaleBuilder`, `LanguageTag`, `LocaleExtensions`, `LocaleMatcher`,
+  `LocaleSyntaxException`, `LocaleUtils`, `StringTokenIterator`, `UnicodeLocaleExtension`;
+  `jdk/internal/util/StaticProperty`, `ReferencedKeyMap`, `ReferencedKeySet`, `ReferenceKey`,
+  `StrongReferenceKey`, `WeakReferenceKey`, `SoftReferenceKey`; `java/lang/LazyConstant`,
+  `jdk/internal/lang/LazyConstantImpl`; `jdk/internal/misc/CDS`; `java/util/regex/MatchResult`.
+- **jrt's own Java** (KIND `overlay`): `sun/util/resources/LocaleData`, `sun/util/cldr/CLDRParentLocales`
+  (new); `LocaleProviderAdapter`, `LocaleResources`, `ResourceBundleBasedAdapter`,
+  `CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`, `ResourceBundle`,
+  `Calendar` (extended). The variant of `CLDRBaseLocaleDataMetaInfo` is gone; one is added,
+  `BreakIteratorResourceBundle`.
+- **Generated sources**: java.base's `sun/util/resources/cldr/CurrencyNames`, `CurrencyNames_en`,
+  `LocaleNames`, `LocaleNames_en` (the java.base `CLDRConverter` run's), and
+  `sun/util/locale/LocaleEquivalentMaps` as `make/modules/java.base/Gensrc.gmk` makes it
+  (`build.tools.generatelsrequivmaps.EquivMapsGenerator` on
+  `src/java.base/share/data/lsrdata/language-subtag-registry.txt`, the copyright year from
+  `spec.gmk`). jdk.localedata's CLDR bundles: `CLDRConverter` run as
+  `make/modules/jdk.localedata/Gensrc.gmk` runs it (`-base make/data/cldr/common -baselocales
+  "en-US" -year YEAR -o DIR -tzdatadir src/java.base/share/data/tzdata -utf8`), the selection
+  taken into java.base's tree with KIND `gensrc:jdk.localedata` (compared with the build's
+  `support/gensrc/jdk.localedata`); the JRE collation data of the selected locales,
+  `src/jdk.localedata/share/classes/sun/text/resources/ext/CollationData_X.java` (KIND
+  `share:jdk.localedata`); and jrt's `jdk/internal/jrt/LocaleDataIndex.java` (KIND `jrtgen`,
+  written by `g2c.jrt-sources/write-locale-data`). `sources.txt`'s line `java.base locales SPEC`
+  (`JRT_LOCALES`) is expanded into these by the generate step (`expand-locales`). **All 144
+  generated sources of the default selection (1,562 with `all`) are byte-identical to the JDK
+  build's.**
+- **Data** (`$JRT_WORK/data`, embedded): `java/util/currency.data` (`make/modules/java.base/Gendata.gmk`:
+  `build.tools.generatecurrencydata.GenerateCurrencyData` on
+  `src/java.base/share/data/currency/CurrencyData.properties`); `sun/text/resources/WordBreakIteratorData`,
+  `LineBreakIteratorData`, `SentenceBreakIteratorData` (`gendata/GendataBreakIterator.gmk`:
+  `build.tools.generatebreakiteratordata.GenerateBreakIteratorData -spec UnicodeData.txt` with
+  `BreakIteratorRules` and `BreakIteratorInfo` compiled into a patch of java.base, jdk.localedata's
+  Thai ones into a patch of jdk.localedata, the tools compiled with
+  `--add-exports java.base/sun.text=ALL-UNNAMED` as `make/CompileToolsJdk.gmk` does); ICU's
+  `jdk/internal/icu/impl/data/icudata/ubidi.icu` (copied). All equal to the build's image (9 of 9
+  data files).
+- **The shape check**: `java/util/Locale.clj` is a known difference (one checkcast, TL8).
+- **Result**: 867 files by default (2,310 with `JRT_LOCALES=all`), all converted and compiled to
+  javac's class shapes, 862 identical and the 5 known differences, 2,144 classes.

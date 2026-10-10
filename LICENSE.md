@@ -152,7 +152,7 @@ covers what.
   its GNU General Public License version 2 with the Classpath Exception.
 
   Likewise jdk.localedata's CLDR locale data of the locales `bin/jrt-convert` selects
-  (doc/go/JRT-NOTES.md, "Text and locales"; `JRT_LOCALES`, by default the 26 locales of
+  (doc/go/JRT-NOTES.md, "Text and locales"; `JRT_LOCALES`, by default the 27 locales of
   `test/g2c/jrt_sources.clj`'s `text-locales` with their parent locales), generated as
   `make/modules/jdk.localedata/Gensrc.gmk` generates it (the same `CLDRConverter`, on the same
   CLDR 48 data) into the bundles `sun.text.resources.cldr.ext.FormatData_*` and
