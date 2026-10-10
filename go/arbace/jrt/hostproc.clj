@@ -1,0 +1,88 @@
+;; jrt: the host's processes (doc/go/JRT-NOTES.md, "Processes"): what java.lang's ProcessImpl and
+;; ProcessHandleImpl ask of the operating system, as an optional interface of the host beside
+;; Host (host.clj is unchanged), as HostFS, NetHost and HostLinks are. A host implements HostProc
+;; when it can start programs (B1a's OSHost does on Linux, hostproc_linux.clj); without it no
+;; program starts (ProcessBuilder.start throws the JVM's IOException) and ProcessHandle knows the
+;; current process alone.
+(in-ns 'go.arbace.jrt)
+
+(go/file "hostproc.go"
+  :imports [[syscall "syscall"]])
+
+(go/const
+  [^{:tag int :val 0 :doc "StdioPipe: a pipe between the program and the child (ProcessBuilder.Redirect.PIPE).\n"}
+   StdioPipe 0]
+  [^{:tag int :val 1 :doc "StdioInherit: the program's own stream (Redirect.INHERIT).\n"}
+   StdioInherit 1]
+  [^{:tag int :val 2 :doc "StdioFile: an open file of the host (a redirection to or from a file).\n"}
+   StdioFile 2])
+
+(go/type HostStdio
+  "HostStdio is what a child's standard stream is: Kind StdioPipe, StdioInherit, or StdioFile with
+File, an open file of the host (Host.Open's, or a pipe end Start gave).\n"
+  (struct ^int Kind ^HostFile File))
+
+(go/type HostProc
+  "HostProc is the processes of a host (java.lang.Process, ProcessHandle). A Host implements it to
+let the program start programs and see processes.\n"
+  (interface
+    (^{:doc "Start starts the program at path (a path, not searched) with the arguments argv
+(argv[0] first), the environment env (\"NAME=value\"; nil: the program's own), in the directory
+dir (\"\": the program's), and its standard input, output and error as stdio says; error output
+goes where standard output goes when errToOut. It returns the child and, for each StdioPipe of
+stdio, the program's end of the pipe (writing for the input, reading for the outputs; nil
+otherwise). An error is a *HostProcError.\n"}
+      Start [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^string dir
+             ^{:tag (slice HostStdio)} stdio ^bool errToOut]
+      :results [HostChild (slice HostFile) error])
+    (^{:doc "Pid is the program's own process ID.\n"}
+      Pid ^int [])
+    (^{:doc "ProcStat is what the host tells of process pid: its parent, its CPU time and its start
+(ProcessHandleImpl_linux.c's os_getParentPidAndTimings); false when there is no such process.\n"}
+      ProcStat [^int pid] :results [HostProcStat bool])
+    (^{:doc "ProcInfo is the command, arguments and user of process pid, as far as the host tells
+(os_getCmdlineAndUserInfo).\n"}
+      ProcInfo ^HostProcInfo [^int pid])
+    (^{:doc "Pids is the IDs of the host's processes.\n"}
+      Pids ^{:tag (slice int)} [])
+    (^{:doc "Kill sends process pid SIGTERM, or SIGKILL when force.\n"}
+      Kill ^error [^int pid ^bool force])))
+
+(go/type HostChild
+  "HostChild is a process Start started. Its end is waited for by the host, so that it leaves no
+zombie: Wait blocks until it has ended.\n"
+  (interface
+    (^{:doc "Pid is the child's process ID.\n"}
+      Pid ^int [])
+    (^{:doc "Wait waits for the child's end: its exit status, or 0x80 plus the signal that ended
+it (the JDK's encoding, WTERMSIG_RETURN).\n"}
+      Wait ^int [])
+    (^{:doc "Signal sends the child SIGTERM, or SIGKILL when force, unless it has ended (an error
+then).\n"}
+      Signal ^error [^bool force])))
+
+(go/type HostProcStat
+  "HostProcStat is a process's parent ID, CPU time (user and system, in nanoseconds) and start
+(milliseconds since the epoch; 0 when unknown).\n"
+  (struct ^int Ppid ^int64 TotalNanos ^int64 StartMillis))
+
+(go/type HostProcInfo
+  "HostProcInfo is a process's command (the executable's path), arguments (after the command;
+HasArgs false when unknown), command line (when the command or the arguments are not known
+exactly) and user name; empty strings when unknown.\n"
+  (struct ^string Command ^{:tag (slice string)} Args ^bool HasArgs ^string CommandLine ^string User))
+
+(go/type HostProcError
+  "HostProcError is why Start failed: Errno, at the change of directory (Chdir) or at exec.\n"
+  (struct ^bool Chdir ^{:tag syscall/Errno} Errno))
+
+(go/method Error ^string [^{:tag (* HostProcError)} e]
+  (.Error (.-Errno e)))
+
+(go/func CurrentHostProc
+  "CurrentHostProc is the current host as a HostProc, or nil when it is not one.\n"
+  ^HostProc []
+  (let [(values hp ok) (assert HostProc (CurrentHost))]
+    (when (not ok)
+      (return nil))
+    hp))
