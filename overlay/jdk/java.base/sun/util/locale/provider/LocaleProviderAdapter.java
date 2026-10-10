@@ -10,6 +10,7 @@ package sun.util.locale.provider;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import sun.text.spi.JavaTimeDateTimePatternProvider;
 
 /**
  * The Go build's one locale provider adapter: the CLDR adapter over java.base's own locale
@@ -86,6 +87,11 @@ public abstract class LocaleProviderAdapter {
     /** The type of the adapter: CLDR. */
     public Type getAdapterType() {
         return Type.CLDR;
+    }
+
+    /** The provider of java.time's localized patterns (JavaTimeDateTimePatternImpl). */
+    public JavaTimeDateTimePatternProvider getJavaTimeDateTimePatternProvider() {
+        return JavaTimeDateTimePatternImpl.INSTANCE;
     }
 
     /** The locale's resources, one instance per locale. */

@@ -8,14 +8,14 @@
 (c2g/variant CRC32
   (c2g/cut (static-initializer 0))
 
-  (method ^:public update ^void [this ^java.nio.ByteBuffer buffer]
+  (method ^:public update ^void [this ^ByteBuffer buffer]
     (let [pos (.position buffer)
           limit (.limit buffer)
-          rem (- limit pos)]
+          rem (unchecked-subtract-int limit pos)]
       (when (<= rem 0)
         (return))
       (if (.hasArray buffer)
-          (set! crc (CRC32/updateBytes crc (.array buffer) (+ pos (.arrayOffset buffer)) rem))
+          (set! crc (CRC32/updateBytes crc (.array buffer) (unchecked-add-int pos (.arrayOffset buffer)) rem))
           (let [b (new byte/1 (Math/min (.remaining buffer) 4096))]
             (while (.hasRemaining buffer)
               (let [length (Math/min (.remaining buffer) (alength b))]

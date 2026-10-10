@@ -10,7 +10,6 @@
  */
 package sun.util.locale.provider;
 
-import java.time.DateTimeException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
@@ -22,7 +21,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.Set;
 import java.util.TimeZone;
@@ -357,24 +355,6 @@ public class LocaleResources {
         // for DateTimePatterns. CLDR has multiple styles, while JRE has one.
         String[] styles = (String[]) value;
         return (styles.length > 1 ? styles[styleIndex] : styles[0]);
-    }
-
-    /**
-     * JavaTimeDateTimePatternImpl.getJavaTimeDateTimePattern(String, String, Locale): the
-     * pattern of a requested template in the first of the locale's candidate locales that has
-     * one, else in the generic calendar's.
-     */
-    public static String getJavaTimeDateTimePattern(String requestedTemplate, String calType, Locale locale) {
-        LocaleProviderAdapter lpa = LocaleProviderAdapter.getResourceBundleBased();
-        return candidateLocales(locale).stream()
-                .map(lpa::getLocaleResources)
-                .map(lr -> lr.getLocalizedPattern(requestedTemplate, calType))
-                .filter(Objects::nonNull)
-                .findFirst()
-                .or(() -> calType.equals("generic") ? Optional.empty():
-                        Optional.of(getJavaTimeDateTimePattern(requestedTemplate, "generic", locale)))
-                .orElseThrow(() -> new DateTimeException("Requested template \"" + requestedTemplate +
-                        "\" cannot be resolved in the locale \"" + locale + "\""));
     }
 
     /**

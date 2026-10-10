@@ -35,7 +35,8 @@
   Hijrah, Japanese, Minguo and Thai Buddhist chronologies are cut: AbstractChronology's
   variant registers IsoChronology alone). With them what they use outside the closure:
   DateTimeHelper (the toString of the local types), ParsePosition (DateTimeFormatter's
-  parse), DataInput (TzdbZoneRulesProvider and the zone rules' Ser read through it); and
+  parse), DataInput (TzdbZoneRulesProvider and the zone rules' Ser read through it) and the
+  exceptions of a corrupt time-zone database; and
   java.util.TimeZone's family (below)."
   (vec (concat
          (map #(str "java/time/" % ".java")
@@ -59,7 +60,8 @@
               ["Ser" "TzdbZoneRulesProvider" "ZoneOffsetTransition" "ZoneOffsetTransitionRule"
                "ZoneRules" "ZoneRulesException" "ZoneRulesProvider"])
          ["jdk/internal/util/DateTimeHelper.java" "java/text/ParsePosition.java"
-          "java/io/DataInput.java"]
+          "java/io/DataInput.java" "java/io/StreamCorruptedException.java"
+          "java/io/InvalidObjectException.java"]
          ;; java.util.TimeZone, jdk26u's own since the time-zone database is in the Go build
          ;; (replacing jrt's fixed-offset TimeZone and ZoneInfo): SimpleTimeZone, ZoneInfo
          ;; and ZoneInfoFile (which reads tzdb.dat too) and the sun.util.calendar classes they
@@ -70,7 +72,10 @@
          ;; jrt's own ResourceBundle and locale providers (overlay/jdk) read them
          ["java/util/ListResourceBundle.java" "java/util/MissingResourceException.java"
           "sun/util/ResourceBundleEnumeration.java" "sun/util/resources/OpenListResourceBundle.java"
-          "sun/util/resources/TimeZoneNamesBundle.java" "sun/util/locale/provider/LocaleDataMetaInfo.java"]
+          "sun/util/resources/TimeZoneNamesBundle.java" "sun/util/locale/provider/LocaleDataMetaInfo.java"
+          ;; the service provider class of java.time's localized patterns, which jrt's
+          ;; JavaTimeDateTimePatternImpl extends
+          "java/util/spi/LocaleServiceProvider.java" "sun/text/spi/JavaTimeDateTimePatternProvider.java"]
          (map #(str "sun/util/calendar/" % ".java")
               ["ZoneInfo" "ZoneInfoFile" "AbstractCalendar" "BaseCalendar" "CalendarDate"
                "CalendarSystem" "CalendarUtils" "Era" "Gregorian" "JulianCalendar"

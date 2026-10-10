@@ -430,8 +430,11 @@ public class GregorianCalendar extends Calendar {
             if (tz instanceof ZoneInfo zi) {
                 zi.getOffsetsByWall(local, offsets);
             } else {
+                // TimeZone.getOffsets(local - gmtOffset, offsets), which the Go build's TimeZone
+                // does not have (its variant): the raw offset and the rest of the offset
                 int gmtOffset = zoneSet ? internalGet(ZONE_OFFSET) : tz.getRawOffset();
-                tz.getOffsets(local - gmtOffset, offsets);
+                offsets[0] = tz.getRawOffset();
+                offsets[1] = tz.getOffset(local - gmtOffset) - offsets[0];
             }
         }
         if (zoneSet) {
