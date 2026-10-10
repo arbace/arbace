@@ -117,12 +117,22 @@
     (doseq [f (read-all text)] (walk f))
     (persistent! acc)))
 
+(def library-cuts
+  "Classes outside the world that libraries loaded from ARBACE_PATH import, cut as those the
+  embedded sources name are: Clojure's suite's test.generative runner requires
+  clojure.tools.namespace.find and clojure.java.classpath, which import java.util.jar's JarFile
+  and JarEntry, java.io.FileReader, and extend java.net.URLClassLoader (the runner then lists no
+  jars, and reads no files through them); clojure.tools.reader names java.text.SimpleDateFormat
+  (its #inst reader's formatter)."
+  ["java.util.jar.JarFile" "java.util.jar.JarEntry" "java.net.URLClassLoader" "java.io.FileReader"
+   "java.text.SimpleDateFormat"])
+
 (defn cut-candidates
   "The classes the sources name that exist on this JVM, from the JDK or arbace.lang/arbace.asm
   (not the classes the namespaces define themselves: deftype, defrecord, definterface), as
-  internal names."
+  internal names; and library-cuts."
   [srcs]
-  (set (for [n (for [[_ text] srcs n (names text)] n)
+  (set (for [n (concat (for [[_ text] srcs n (names text)] n) library-cuts)
              :when (and (or (re-find #"^(java|javax|jdk|sun)\." n)
                             (re-find #"^arbace\.(lang|asm)\." n))
                         (try (Class/forName n false (ClassLoader/getSystemClassLoader)) true
