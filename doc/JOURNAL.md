@@ -1478,3 +1478,25 @@ decision (2026-10-08).
   throw). VENDOR-NOTES gains a section "Dialect divergences", the list for c2a; the same on
   `arbace-for-java-26` (`0160052`). A comment for CLJ-2656 connecting it to `Eduction` was
   drafted for the user to post (not posted).
+
+## 2026-10-10: the box survey (B1b, after the freeze)
+
+- Agent, branch `boxsurvey` (`c3245f3`), merged: `doc/go/BOX-SURVEY.md`, a survey of go-whim's
+  joint /dev/kvm + Hypervisor.framework box (`/root/go-whim` at `80c49bf`, read only) for
+  vendoring, the user's request. Found: arbace-go already runs inside go-whim's box on /dev/kvm
+  here (a copy built `GOOS=tamago` with `jrt/net.go`'s Linux socket options stubbed and a
+  scratch main of about 80 lines: a jrt host over the board's calls, files on TamaGo's
+  in-memory file system; go-whim's monitor unmodified): the REPL over the console, `spit`/
+  `slurp`, a `future`, exit 0; start 0.38-0.42 s (native 0.20 s), 445 MB resident. Two defects
+  at once: the wall clock counts from boot (`jrt/date.clj` reads `time.Now()`), and a blocking
+  console read stops the guest (the monitor serves host calls one at a time). go-whim's KVM and
+  TamaGo guest tests pass from a clone; the arm64 images cross-compile.
+- Vendorable: about 5,000 lines (`hv/` one API in Hypervisor.framework's shape, KVM by ioctl,
+  HVF by purego, no cgo; `vmm/`; `guest/abi`, the doorbell; `guest/tamago/board`), tied to the
+  editor only by `vmm.Config.Host` and the launcher. Licence: go-whim's LICENSE is Vim's (for
+  the modified vim); the box code is not vim-derived and all of it is the user's, so it can be
+  licensed to Arbace in LICENSE.md; TamaGo's goos (BSD-3) and purego (Apache-2.0) need entries.
+- Surfaces: the doorbell has 29 calls, Arbace needs about 12-14; jrt's `Host` has 20 methods
+  plus about 40 in the optional interfaces. Proposed stages S0 (vendor) to S6, S1 a boxed REPL
+  on amd64. Decisions D3, D8-D14 and risks R1-R8 for the user, after the freeze. Before the
+  freeze: no code; new jrt work keeps OS calls in `linux`-tagged files.
