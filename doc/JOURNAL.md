@@ -1520,3 +1520,13 @@ decision (2026-10-08).
   regressions.
 - `gosec` (java.security, SC1-SC6 accepted) follows, with its digests' compression over Go's
   crypto first (the user: before the freeze).
+
+## 2026-10-10: Go's build cache trimmed by every gate and build
+
+- The disk reached 86% (the user): Go's build cache had grown to 52 GB in a few hours of
+  parallel agents' builds; trimmed to entries used in the last 3 hours (21 GB; disk 57%). The
+  user's decision: trim it automatically. `bin/lib/gocache.bash`'s `gocache_trim` deletes
+  entries unused for `ARBACE_GOCACHE_KEEP_MIN` minutes (default 360; Go refreshes an entry's
+  time at most hourly when it uses it, so builds in progress keep theirs); `bin/gate` runs it at
+  every run (it was `--full` only, with a day), `bin/arbace-go --build` before each build.
+  CLAUDE.md's gate paragraph says so.

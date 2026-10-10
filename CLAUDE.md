@@ -70,8 +70,9 @@ Prior art:
   Clojure's suite on it (`test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2c and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
-  on Go the longest; it also trims Go's build cache of entries unused for a day): run it when
-  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`.
+  on Go the longest): run it when
+  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
+  cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
   - `arbace/j2c/`: the Java → class forms converter.
 
 ## Records
