@@ -244,7 +244,7 @@ Java (`overlay`); it was 340 files (317, 8, 2, 13) before the JDK's resource dat
 - **jrt's own Java**, `overlay/jdk/MODULE/...` (KIND `overlay`, `overlay-sources`), replacing or
   adding to jdk26u's files (C2G-SPEC §4.1, K1).
 - **Generated files added** (`added-gensrc`, paths below `gensrc/java.base`; JRT-NOTES.md, "The
-  JDK's resource data", amendment Z4): java.nio's `ByteBuffer`, `CharBuffer`, `IntBuffer`, their
+  JDK's resource data", amendment RD4): java.nio's `ByteBuffer`, `CharBuffer`, `IntBuffer`, their
   heap classes `HeapByteBuffer`, `HeapCharBuffer`, `HeapIntBuffer`, the views
   `ByteBufferAsCharBufferB`/`L` and `ByteBufferAsIntBufferB`/`L`, and
   `jdk.internal.misc.ScopedMemoryAccess`: KIND `gensrc`, made by the `generate` step below.

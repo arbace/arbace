@@ -89,7 +89,7 @@
   "Can the REPL name class n's public members (internal name)? Not when n is in a JDK module's
   package that the module does not export (jdk.internal.misc, sun.nio.cs ...): the JVM refuses
   such access from Clojure code (IllegalAccessError), so the Go build's REPL world does not root
-  them (C2G-SPEC §10.6; JRT-NOTES.md, \"The JDK's resource data\", amendment Z2). Classes of no
+  them (C2G-SPEC §10.6; JRT-NOTES.md, \"The JDK's resource data\", amendment RD2). Classes of no
   JDK module (Arbace's, jrt's own jdk.internal.jrt) are visible."
   [^String n]
   (let [i (.lastIndexOf n "/")

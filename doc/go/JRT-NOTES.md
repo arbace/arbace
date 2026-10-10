@@ -1881,7 +1881,7 @@ Route 1 keeps both the loader and the buffers jdk26u's own code, and gives the R
 buffers whole (heap only: `allocateDirect`, mapped buffers, `asLongBuffer` and the other views
 whose classes are not in the world throw). It costs the most, measured below; most of the cost
 was `ScopedMemoryAccess`'s 400 public members, rooted only because the REPL's world roots every
-public member (P2), which led to amendment Z2.
+public member (P2), which led to amendment RD2.
 
 ## Found on the way
 
@@ -1907,7 +1907,7 @@ public member (P2), which led to amendment Z2.
 
 ## The closure and the executable, measured (amd64)
 
-| | main (`815d9d9`'s code) | Z2 alone | this branch |
+| | main (`815d9d9`'s code) | RD2 alone | this branch |
 |---|---:|---:|---:|
 | `bin/jrt-convert`: files (share, gensrc, overlay, java.sql) | 340 (317, 8, 13, 2) | 340 | 375 (340, 19, 14, 2) |
 | c2g: files, classes analyzed | 482, 1,950 | 482, 1,950 | 517, 2,021 |
@@ -1915,13 +1915,33 @@ public member (P2), which led to amendment Z2.
 | methods with missing parts | 511 | 484 | 561 |
 | executable (bytes) | 58,603,718 | 58,294,936 | 61,131,717 |
 
-The resource data and the classes that read it cost **+2.84 MB** over Z2 alone (+4.9%; 49
+The resource data and the classes that read it cost **+2.84 MB** over RD2 alone (+4.9%; 49
 classes and 796 methods more reached), the branch as a whole +2.53 MB over main (+4.3%): the
 Go symbols grow by 0.89 MB (the reflection tables' initialization about 0.5 MB, the buffers
 about 0.15 MB, `NormalizerBase` and the ICU loader, `compress/flate`), the embedded data by
-0.27 MB, the rest is the tables of the runtime (line tables, types). Without Z2 the branch was
+0.27 MB, the rest is the tables of the runtime (line tables, types). Without RD2 the branch was
 62,794,179 bytes (+4.19 MB): `ScopedMemoryAccess`'s 400 public members alone were 0.34 MB of
 code and most of the reflection tables' growth.
+
+## Results
+
+- **Against the JVM, directly** (`Character/getName` of 17 code points, among them the
+  algorithmic CJK and Hangul names, surrogates, unassigned; `Character/codePointOf` of 11 names,
+  lower case and errors included; `Normalizer/normalize` and `isNormalized` of 17 strings in the
+  four forms, among them Hangul, compatibility ligatures, the Ångström sign, a supplementary
+  character, reordering of combining marks): the 97 lines printed are the JVM's.
+- **The regex corpus** (`bin/c2g-regex`): 1,233 of 1,233 cases, 11,682 of 11,682 inputs (amd64).
+- **The oracle on the Go build** (amd64): 20,259 of 20,263; the 29 cases pass, none new; the
+  reference `test/oracle/known-go-amd64.edn` rewritten with `--write-expected` (the two
+  resource-data groups gone, the other 4 cases and their reasons kept; checked by hand).
+- **No regressions**: `bin/arbace-go --smoke`; `bin/jrt test` on amd64 and arm64;
+  `bin/c2g-check -- --program` 9,010 of 9,010 steps on amd64 and arm64; Clojure's suite on the
+  Go build 19,251 of 19,280 assertions, no regression against `test/arbace-go-results.edn`
+  (unchanged: the suite does not use `\N{}`, `CANON_EQ` or `Normalizer`). The essential
+  `bin/gate` was not run: the bootstrap compiles none of the changed sources (`arbace/c2g` is a
+  tool), as the gate policy of 2026-10-09 allows. arm64's executable: 58,465,447 bytes.
+- The amendments are numbered RD (resource data): the single letters are taken (Z since by
+  EVAL-NOTES.md's proxies of `BufferedWriter`).
 
 ## Decisions
 
@@ -1937,28 +1957,28 @@ code and most of the reflection tables' growth.
 
 ## Proposed amendments (for the user's review)
 
-- **Z1 (C2G-SPEC §10.3, Classes and resources by name; M5)** The program embeds, besides the
+- **RD1 (C2G-SPEC §10.3, Classes and resources by name; M5)** The program embeds, besides the
   namespaces' sources, the JDK's resource data that `bin/jrt-convert` makes (`.tmp/jrt/data`,
   under their resource paths: `uniName.dat`, `nfc.nrm`, `nfkc.nrm`), as binary files.
   `Class.getResourceAsStream` is c2g's support method on jrt's `Class` (when
   `ByteArrayInputStream` is translated): the name resolved as `Class.resolveName`, then the
   embedded resources and `ARBACE_PATH`, as `ClassLoader.getResourceAsStream`. No module
   encapsulation of resources (a deviation: the JVM hides java.base's from Clojure code).
-- **Z2 (C2G-SPEC §10.6, the REPL's world; P2)** The REPL's world roots every public member of
+- **RD2 (C2G-SPEC §10.6, the REPL's world; P2)** The REPL's world roots every public member of
   every class with class forms **except the classes of JDK packages their module does not
   export** (`jdk.internal.*`, `sun.*`): the JVM refuses Clojure code access to them
   (`IllegalAccessError`), so rooting them only grew the executable. Classes of no JDK module
   (Arbace's, jrt's own `jdk.internal.jrt`) stay rooted. Alone it saves 310 methods and 0.31 MB on
   main; Clojure's suite, the oracle and the smoke test are unchanged by it (below).
-- **Z3 (C2G-SPEC §4.1, jrt's own Java; K1)** jrt's own Java gains
+- **RD3 (C2G-SPEC §4.1, jrt's own Java; K1)** jrt's own Java gains
   `java.util.zip.InflaterInputStream`, the `InputStream` constructor only, which inflates its
   whole input at the first read through a native over Go's `compress/zlib`.
-- **Z4 (JRT-SOURCES.md; C2G-SPEC §4.1, the inputs)** The closure takes generated files beyond
+- **RD4 (JRT-SOURCES.md; C2G-SPEC §4.1, the inputs)** The closure takes generated files beyond
   the measured closure's (`added-gensrc`: java.nio's heap buffers and their views, and
   `ScopedMemoryAccess`), generated by `bin/jrt-convert` as the JDK build generates them and
   compared byte for byte with the build's; and the resource data likewise
   (`generated.edn`'s `:data`, against the build's module image).
-- **Z5 (C2G-SPEC §4.4, the rename table)** `sun.text.Normalizer` is `Sun_Normalizer` in Go
+- **RD5 (C2G-SPEC §4.4, the rename table)** `sun.text.Normalizer` is `Sun_Normalizer` in Go
   (`java.text.Normalizer` keeps `Normalizer`).
 
 Fixed, not amended: §6.2's benign-initialization rule (W3) counts a static read anywhere in the
