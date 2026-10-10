@@ -22,12 +22,15 @@
    "arbace/classes/emit.clj" "arbace/classes/compiler.clj" "arbace/classes/shape.clj"
    "arbace/classes/verify.clj" "arbace/classes/build.clj" "arbace/classes/boot.clj" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
    "arbace/asm.clj" "arbace/lang.clj" "arbace/java/api"
-   ;; decision 6: processes, URLs, browsers (sockets, arbace.core.server, are in since
-   ;; 2026-10-09: JRT-NOTES.md, "Sockets")
+   ;; decision 6: URLs, browsers (sockets, arbace.core.server, are in since 2026-10-09:
+   ;; JRT-NOTES.md, "Sockets"; processes, arbace.java.process and arbace.java.shell, since
+   ;; 2026-10-10: JRT-NOTES.md, "Processes")
    "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
-   "arbace/java/process.clj" "arbace/java/shell.clj" "arbace/java/browse" "arbace/java/javadoc.clj"
+   "arbace/java/browse" "arbace/java/javadoc.clj"
    ;; D6: Swing, SAX
-   "arbace/inspector.clj" "arbace/xml.clj"])
+   "arbace/inspector.clj" "arbace/xml.clj"
+   ;; loaded by arbace/instant.clj, whose Go variant holds java.sql.Timestamp's part itself
+   "arbace/instant_timestamp.clj"])
 
 (def variants-dir "arbace/lang/go/ns")
 
@@ -189,6 +192,11 @@
 (def image-forms
   "The image's encoding: Go forms of the main package, copied into the program."
   "go/arbace/cmd/arbace/image.clj")
+
+(def rlwrap-forms
+  "The interactive REPL under rlwrap (EXEC-NOTES.md, \"Line editing: rlwrap\"): Go forms of the
+  main package, copied into the program, Linux's and the other systems' (an empty execRlwrap)."
+  ["go/arbace/cmd/arbace/rlwrap_linux.clj" "go/arbace/cmd/arbace/rlwrap_other.clj"])
 
 (defn image-type-forms
   "The main package's table of the program's struct types (image_types.go): every exported,

@@ -6,6 +6,12 @@
 ;   the terms of this license.
 ;   You must not remove this notice, or any other, from this software.
 
+;; Arbace (hand change 17, doc/VENDOR-NOTES.md): this namespace needs the module java.desktop, which
+;; Arbace's runtime images leave out unless asked for (bin/arbace-image, ARBACE_IMAGE_MODULES)
+(when-not (.isPresent (.findModule (ModuleLayer/boot) "java.desktop"))
+  (throw (UnsupportedOperationException.
+           "arbace.inspector needs the module java.desktop, which this Java runtime does not have (an Arbace image holds java.base and jdk.unsupported; bin/arbace-image adds more with ARBACE_IMAGE_MODULES=java.desktop)")))
+
 (ns ^{:doc "Graphical object inspector for Clojure data structures."
        :author "Rich Hickey"}
     arbace.inspector

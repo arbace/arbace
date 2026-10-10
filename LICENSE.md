@@ -106,6 +106,21 @@ covers what.
   below); recorded by the rule of B7. The rest of those files is Arbace's own, and the other
   files of the change (`Path.java`, `Files.java`, the variants) are written from the documented
   APIs, as the overlay's other files.
+- Processes (doc/go/JRT-NOTES.md, "Processes"; recorded by the rule of B7): the variants
+  `overlay/jdk/variants/ProcessImpl.clj`, `Process.clj`, `ProcessBuilder.clj` and
+  `ProcessHandleImpl.clj` keep the code of the jdk26u methods they replace
+  (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/unix/classes/java/lang/ProcessImpl.java`,
+  `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
+  `ProcessHandleImpl.java`) where they keep it; `overlay/jdk/java.base/jdk/internal/jrt/RuntimeExec.java`
+  transcribes `Runtime.exec` (`src/java.base/share/classes/java/lang/Runtime.java`); and
+  `go/arbace/jrt/process.clj` and `hostproc_linux.clj`, jrt's Go forms, follow
+  `src/java.base/unix/native/libjava/ProcessImpl_md.c` (the exception texts, `IOE_FORMAT`),
+  `childproc.c` (`JDK_execvpe`'s search), `ProcessHandleImpl_unix.c` and
+  `src/java.base/linux/native/libjava/ProcessHandleImpl_linux.c` (`/proc`'s fields, the status
+  encoding, the start-time checks): Copyright (c) Oracle and/or its affiliates, under the GNU
+  General Public License version 2 with the Classpath Exception (text below); the rest of those
+  files is Arbace's own. The errno texts of `process.clj` are musl's `strerror`'s (as this
+  machine's JVM gives them), facts of its interface, not its code.
 - `overlay/jdk/java.base/jdk/internal/jrt/ThreadPerTaskExecutor.java` (doc/go/JRT-NOTES.md,
   "Concurrency": its states and their transitions, `ensureNotShutdown`, `tryTerminate`,
   `tryShutdownAndTerminate`, `shutdown`, `shutdownNow`), the methods `DefaultThreadFactory.newThread`

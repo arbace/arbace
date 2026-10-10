@@ -389,6 +389,21 @@
            ;; SeedGenerator (overlay), over the host's random source
            ["src/java.base/unix/classes/sun/security/provider/NativePRNG.java"]))))
 
+(def process-sources
+  "Processes in the Go build (the user's decision of 2026-10-10, reversing D6 for them;
+  doc/go/JRT-NOTES.md, \"Processes\"): paths relative to jdk26u. Process, ProcessBuilder (with
+  its Redirect), ProcessHandle and ProcessHandleImpl are plain Java; ProcessImpl and
+  ProcessEnvironment are src/java.base/unix/classes files (KIND unix). ProcessImpl's forkAndExec
+  and ProcessHandleImpl's natives are jrt's over the host's optional HostProc (variants
+  overlay/jdk/variants/ProcessImpl.clj, ProcessHandleImpl.clj); ProcessEnvironment's environ is
+  jrt's over Host.Environ."
+  (vec (sort
+         (concat
+           (map #(str "src/java.base/share/classes/java/lang/" % ".java")
+                ["Process" "ProcessBuilder" "ProcessHandle" "ProcessHandleImpl"])
+           (map #(str "src/java.base/unix/classes/java/lang/" % ".java")
+                ["ProcessImpl" "ProcessEnvironment"])))))
+
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
   whose JDK sources need what is cut (java.nio's encoders and channels), written for jrt.
@@ -413,6 +428,7 @@
                                (map #(str "src/java.base/share/classes/" %) util-sources)
                                added-module-sources
                                file-sources
+                               process-sources
                                security-sources)))))
 
 (defn print-sources

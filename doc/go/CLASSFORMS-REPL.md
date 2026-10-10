@@ -188,7 +188,7 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 
 ## 5. Checks
 
-- `bin/arbace test/classforms/jvm_check.clj [FILE...]`: on the JVM, every `defclass` of the file
+- `bin/arbace-j test/classforms/jvm_check.clj [FILE...]`: on the JVM, every `defclass` of the file
   compiled and interpreted (over the test host, without Class objects), every form calling only
   static methods of the classes evaluated both ways and compared.
 - `bin/oracle check '<go executable> -' forms/defclass`: the oracle's `defclass` forms (recorded on

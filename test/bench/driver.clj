@@ -45,7 +45,7 @@
 
 (defn with-opts
   "The command of impl with the JVM options opts added (through ARBACE_JAVA_OPTS for
-  bin/arbace)."
+  bin/arbace-j)."
   [{:keys [cmd env arbace]} opts]
   (if arbace
     [cmd (assoc env "ARBACE_JAVA_OPTS" (str/join " " opts))]

@@ -7,7 +7,7 @@
   go/arbace/jrt/standin_lang.clj, is generated and tracked; when c2g's output joins the
   build, it is deleted and the translated classes take the same names.
 
-  bin/jrt standins   regenerates it (ARBACE_CLASSPATH=test bin/arbace -m jrt.standins FILE)."
+  bin/jrt standins   regenerates it (ARBACE_CLASSPATH=test bin/arbace-j -m jrt.standins FILE)."
   (:require [arbace.string :as str]))
 
 ;; Java's exceptions as jrt needs them: [simple-name super kind & ctors]. kind :leaf, :nonleaf

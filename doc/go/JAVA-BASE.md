@@ -21,7 +21,8 @@ The classes the Go build has are nearly complete (94.7% of their members); the r
 packages left out: `java.lang.classfile`, `java.security` and `javax.*`, most of `java.text`,
 `java.nio`'s channels, `java.lang.invoke`, most of `java.lang.foreign`. Of the **896 members
 Arbace's runtime and REPL namespaces reference, 805 are provided (89.8%)**; the others are
-D6's cuts and reworks (processes, method handles, class loading). The first measurement (main
+D6's cuts and reworks (processes, method handles, class loading; processes are in since
+2026-10-10, JRT-NOTES.md "Processes", after this measurement). The first measurement (main
 at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
 `Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
 plain Java ("java.util completed": 5,787 members, 33.0%); sockets, java.time and
@@ -189,7 +190,8 @@ exported API:
 
 805 of 896 (89.8%) are provided (at the first measurement 793). The others are cut or reworked by decision: method
 handles and call sites (`java.lang.invoke`, 35: the evaluator replaces `invokedynamic`),
-processes (`Process`, `ProcessBuilder`, its `Redirect`, 21), class loading and resources
+processes (`Process`, `ProcessBuilder`, its `Redirect`, 21: translated since 2026-10-10,
+amendments PR1-PR7, not yet counted here), class loading and resources
 (`ClassLoader` 7, `URLClassLoader` 3, `JarURLConnection`, `JarFile`, `ZipEntry`), sockets
 (`Socket`, `ServerSocket`, `InetAddress`, 9), channels (`FileChannel`, `getChannel`,
 `Reader.read(CharBuffer)`, `Readable`, 7), `DateFormat`/`SimpleDateFormat` (3), annotations
@@ -275,7 +277,7 @@ cut classes Arbace names exist as names whose members throw; everything else is 
 |---|---|---|
 | class loading, `java.lang.invoke`, `java.lang.classfile`, `java.lang.constant` (but `Constable`, `ConstantDesc`) | absent or cut | the evaluator replaces bytecode, call sites and method handles (D2); no class files |
 | `java.lang.reflect`'s generic and annotated types, annotations at run time | absent | closed world over c2g's member tables (JAVA-SURFACE.md decision 1; amendment R16) |
-| processes (`Process`, `ProcessBuilder`), `ProcessHandle` | cut | D6: `sh`, `arbace.java.process` |
+| processes (`Process`, `ProcessBuilder`), `ProcessHandle` | translated (since 2026-10-10) | D6 reversed for them (amendments PR1-PR7; JRT-NOTES.md, "Processes"): over the host's `HostProc`; `sh` and `arbace.java.process` are in |
 | `java.net` sockets, `InetAddress`, `URLClassLoader`, other URL connections | cut or absent | D6 (sockets and the socket REPL are in progress on another branch) |
 | `java.nio` buffers, channels, charset coders, most of `java.nio.file` | absent | D6; the file system is reached through `File` and jrt's `Path`/`Files` (FS2) |
 | `java.time` (but `Instant`), `java.text` (but `DecimalFormatSymbols`) | cut or absent | D6; `#inst` over `Date`, `Calendar`, `Instant` (JAVA-SURFACE.md decision 7) |

@@ -2052,9 +2052,18 @@
                            (apply list (symbol (str (if (= (m/pkg owner) (pkg)) "" (str (nm/pkg-name (m/pkg owner)) "/"))
                                                     (nm/new-name (m/go-name owner) real)))
                                   args))
-                    :bound (let [rx (:x recv) rt (:t recv)]
-                             (if (object-like? rt)
+                    :bound (let [rx (:x recv) rt (:t recv)
+                                 mm (m/find-method owner (:name node) (:desc node))]
+                             (cond
+                               (object-like? rt)
                                (apply list (jsym (object-helpers [(:name node) (:desc node)])) rx args)
+                               ;; a private method of a non-leaf class is its Impl_, which
+                               ;; takes the receiver's struct and the receiver (as invoke-val
+                               ;; calls it): this::m in Process.onExit
+                               (and mm (m/private? mm) (m/translated? owner) (not (m/leaf? owner)))
+                               (apply list (symbol (str ".Impl_" base))
+                                      (list (symbol (str ".Self_" (m/go-name owner))) rx) rx args)
+                               :else
                                (apply list (symbol (str "." base)) rx args)))
                     :unbound (let [od (str "L" owner ";")
                                    rx (convert-ref-or-prim (first psyms) (first ps) od)]

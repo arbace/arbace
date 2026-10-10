@@ -1,8 +1,8 @@
 ;; The evaluator's benchmarks (B1a step 7b, doc/go/SPEED-NOTES.md, "The evaluator"): small
-;; workloads run unchanged by the JVM's bin/arbace and the Go executable, to compare the Go
+;; workloads run unchanged by the JVM's bin/arbace-j and the Go executable, to compare the Go
 ;; build's evaluator before and after a change, and against the JVM's compiled code.
 ;;
-;; Usage: bin/arbace test/bench/eval-bench.clj [NAME...]
+;; Usage: bin/arbace-j test/bench/eval-bench.clj [NAME...]
 ;;        target/arbace-go/amd64/arbace test/bench/eval-bench.clj [NAME...]
 ;; Each benchmark's thunk runs once (warm-up), then repeatedly until at least MIN-MS (default
 ;; 1000, the environment's EVAL_BENCH_MS) have passed and 3 runs are done; it prints one EDN map

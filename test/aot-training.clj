@@ -1,5 +1,5 @@
 ;; The training workload of Arbace's JDK AOT cache (bin/build-arbace runs it as
-;; `bin/arbace --aot-train < test/aot-training.clj`, which makes target/arbace.aot): a REPL
+;; `bin/arbace-j --aot-train < test/aot-training.clj`, which makes target/arbace.aot): a REPL
 ;; session over what a launch commonly touches, the common libraries, the class forms compiler,
 ;; deftype, defrecord, protocols, arbace.test, futures and agents, doc and source. The classes
 ;; it loads from the jar, and the method profiles it gathers, go into the cache.
