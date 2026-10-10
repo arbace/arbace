@@ -63,6 +63,15 @@ covers what.
   its affiliates, under the GNU General Public License version 2 with the Classpath Exception
   (text below); the rest of those files is Arbace's own. Kept so by the user's decision
   (2026-10-09; doc/go/EVAL-NOTES.md, B7), rather than rewritten from the documented behaviour.
+  Also except (doc/go/JRT-NOTES.md, "Sockets"; amendment NT3): `overlay/jdk/java.base/jdk/internal/jrt/HostSocketImpl.java`
+  follows `src/java.base/share/classes/sun/nio/ch/NioSocketImpl.java` of jdk26u at `baf63fb`
+  (its state checks, messages, streams and option handling transcribed, the I/O replaced by
+  jrt's socket table), and the variants `overlay/jdk/variants/Socket.clj`, `ServerSocket.clj`, `InetAddress.clj`,
+  `Inet4AddressImpl.clj`, `Inet6AddressImpl.clj`, `Inet6Address.clj`, `IPAddressUtil.clj` and `Exceptions.clj` keep
+  the code of the jdk26u methods they replace (`java/net/Socket.java`, `ServerSocket.java`, `InetAddress.java`,
+  `Inet6AddressImpl.java`, `sun/net/util/IPAddressUtil.java`, `jdk/internal/util/Exceptions.java`) where they keep it: Copyright (c)
+  Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
+  Exception (text below); the rest of those files is Arbace's own.
 - `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1

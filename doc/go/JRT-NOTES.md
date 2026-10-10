@@ -1798,3 +1798,150 @@ same name. jrt's locks are hand-written for these reasons (JAVA-SURFACE.md decis
 
 With it and Dyn's hand-written interfaces (EVAL-NOTES.md, "Phase 2B follow-up"), the suite's
 `pprint` namespace loads and passes 470 of its 474 assertions.
+
+# Sockets (go-net)
+
+Branch `go-net` (2026-10-09; the user's decision of that day, reversing D6's cut of sockets,
+JAVA-SURFACE.md decision 6 for `arbace.core.server`): `java.net`'s `ServerSocket`, `Socket`,
+`InetAddress`, `InetSocketAddress` and what they need in the Go build, over Go's `net` package
+as a host interface; then `arbace.core.server` (the socket REPL, `prepl`, `io-prepl`,
+`remote-prepl`, `start-server`, `stop-server`) and the start of servers from the
+`arbace.server.*` system properties, as on the JVM.
+
+## Translated, hand-written, and why
+
+**Decision: jdk26u's plain Java translated, the platform `SocketImpl` written for jrt, the OS in
+Go behind a host interface.** `ServerSocket`, `Socket`, `SocketImpl`, `InetAddress`,
+`Inet4Address`, `Inet6Address`, `InetSocketAddress`, the socket options and the exceptions are
+plain Java over two seams: `SocketImpl.createPlatformSocketImpl` (jdk26u: `sun.nio.ch.NioSocketImpl`,
+which needs `java.nio`'s channels, the poller and the VM's natives) and the name service
+(`Inet6AddressImpl`'s JNI natives over `getaddrinfo`). Translating the plain Java keeps the
+JVM's behaviour where it is decided (the state checks and messages of `Socket` and
+`ServerSocket`, literal parsing in `IPAddressUtil`, `InetAddress`'s printing, equality, the
+resolver's ordering policy and its cache), and the seams are small. Hand-writing `Socket` and
+`InetAddress` (the alternative) would have meant re-deciding all of that; translating
+`NioSocketImpl` would have brought `java.nio` in. The added files: JRT-SOURCES.md, "The closure
+as grown".
+
+- **`jdk.internal.jrt.HostSocketImpl`** (overlay/jdk, jrt's Java): the platform `SocketImpl`
+  (`PlatformSocketImpl`), after `NioSocketImpl`: its states (`Socket not created`, `Not
+  connected`, `Socket closed`, `Already bound` ...), the legacy read behaviour (-1 after the
+  end, `Connection reset` remembered), the read lock and write lock, the `SO_TIMEOUT` of reads
+  and accepts (`Read timed out`, `Accept timed out`, `Connect timed out`), the streams, the
+  options by `SocketOptions` number and by `StandardSocketOptions`, `shutdownInput` and
+  `shutdownOutput`. Differences: a server socket listens when it is bound (the host has no
+  unbound sockets; `ServerSocket.bind` always binds then listens, so this is not observable but
+  in the backlog, which is the host's); a client socket's `bind` is recorded and used by the
+  connect (its local port is the requested one until then); options set before the host's
+  socket exists are kept and applied when it does; urgent data is not supported
+  (`supportsUrgentData` false). It transcribes `NioSocketImpl`'s code where it keeps it
+  (LICENSE.md).
+- **`jdk.internal.jrt.HostNet`** (overlay/jdk): the natives, static and over primitives, arrays
+  and `String` only (C2G-SPEC §9.1), on a table of handles as `HostFiles`' (phase 2C): listen,
+  accept, connect, read, write, available, close, shutdown, the local and remote addresses and
+  ports, options; the name service (lookup, reverse lookup, the host's name, whether it has
+  IPv4 or IPv6). A native reports an error as a negative kind with the text, and
+  `HostNet.exception` makes the JVM's exception of it: `BindException`, `ConnectException`,
+  `NoRouteToHostException`, `SocketTimeoutException`, `UnknownHostException`, `Socket closed`,
+  `Connection reset`, else `SocketException`.
+- **`go/arbace/jrt/net.clj`**: the natives and **`NetHost`**, the network as a host gives it: an
+  interface of its own, beside `Host` (`host.clj` is unchanged), that a `Host` may implement
+  (jrt asks `CurrentHost()` at each use); a host without it has no network and every native
+  fails (`Network not available`), which is what B1b's box has until its monitor gives one.
+  `OSHost` implements it over Go's `net` (the pure Go resolver: `/etc/hosts`, then DNS) and
+  `syscall` for the options (`getsockopt`/`setsockopt` on the descriptor, `TIOCINQ` for
+  `available`). Go's defaults that differ from the JVM's are undone: no TCP keep-alive on
+  dialed and accepted connections, no `TCP_NODELAY`. A blocked accept or read ends when another
+  thread closes the socket (Go's `net.ErrClosed`), with the JVM's `Socket closed`.
+- **The JVM's texts.** An `errno`'s text is the C library's `strerror`, and this machine's JVM
+  is built on musl: `Address in use`, `Connection refused`, `Connection reset by peer`,
+  `Broken pipe`, `Host is unreachable` ... (net.clj's table; glibc's JVMs say `Address already in
+  use`). An unknown host is `host: Name does not resolve` (musl's `gai_strerror`).
+
+**Variants** (`overlay/jdk/variants/`):
+
+| class | what |
+|---|---|
+| `SocketImpl` | `createPlatformSocketImpl` makes a `HostSocketImpl` |
+| `Socket` | the state bits and the streams' installation through `Unsafe` (a compare-and-set loop for `getAndBitwiseOr`, `compareAndSetReference`) instead of `VarHandle`s; a client's impl is the platform's itself, not wrapped in a `SocksSocketImpl` (no proxies); the streams record no JFR events |
+| `ServerSocket` | `implAccept(Socket)` without the `DelegatingSocketImpl` step (no SOCKS or HTTP-tunnel impls; c2g has no cast for a pattern-matching `instanceof` of a cut class) |
+| `InetAddress` | the static initializers without the native library, `SharedSecrets` and the native `init`; IPv4 and IPv6 availability from the host; the built-in resolver only (no `ServiceLoader`); the cache a map of `CachedLookup`s expiring as the JVM's default policy without a security manager (30 s, failures 10 s), checked when used (the JVM's `ConcurrentSkipListSet` of expiries is outside the world), without the one-lookup-per-host lock; `PlatformResolver` without `Blocker` |
+| `Inet4Address`, `Inet6Address` | no native `init`; `Inet6Address(String, byte[])` without `NetworkInterface` (outside the world: null in the JDK there); `Inet6AddressHolder.getHostAddress` without the scope's interface (a dropped field) |
+| `Inet4AddressImpl`, `Inet6AddressImpl` | the natives over `HostNet`; `isReachable` throws `UnsupportedOperationException`; the loopback address without asking `NetworkInterface` whether it is bound |
+| `jdk.internal.util.Exceptions` | `jdk.includeInExceptions` from the system property, defaulting to JDK 26's `java.security` value `hostInfoExclSocket` (security properties are not in the Go build) |
+
+`java.net.Proxy` stays outside the world, a cut class named `Net_Proxy` in Go (c2g's rename
+table: jrt's `java.lang.reflect.Proxy` is `Proxy`). `NetworkInterface`, `URL`, `Proxy`, the
+SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
+
+## `System.getProperties()` and `JAVA_TOOL_OPTIONS`
+
+- **`System.getProperties()`**: a `Properties` holding a copy of the properties (jrt keeps them in
+  its own table, where `setProperty` writes; a change to the copy does not reach
+  `System.getProperty`). c2g writes it (`C2g_SystemGetProperties`, out.clj) and its member
+  table entry when `Properties` is translated; `Properties` came with `Hashtable` and
+  `Dictionary` (its superclasses, added).
+- **The servers' start.** The JVM's `RT.doInit` requires `arbace.core.server` and calls
+  `start-servers` with `System.getProperties()`. The Go build's (`arbace/lang/go/RT.clj`) does
+  the same, but requires `arbace.core.server` only when an `arbace.server.*` property exists:
+  loading it costs about 0.5 s of the executable's 4.7 s start today (amendment NT1).
+- **Where the properties come from.** The Go executable has no `java` launcher to take `-D`
+  options. jrt reads **`JAVA_TOOL_OPTIONS`**, as the JVM does at its start: its `-Dname=value`
+  options become system properties (`tooloptions.clj`, split as HotSpot's
+  `Arguments::parse_options_buffer` splits: white space outside quotes, `'` and `"` grouping,
+  quotes removed; other options ignored). So one setting starts a server on both builds:
+
+      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' target/arbace-go/amd64/arbace
+      JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' bin/arbace
+
+  The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
+  does not (NT2).
+
+## `arbace.core.server`
+
+Embedded in the executable (embed.clj no longer leaves it out), with one namespace variant,
+`arbace/lang/go/ns/core/server.subst.clj`: `prepl` sets no `DynamicClassLoader` as the thread's
+context loader (one loader in the Go build, as the REPL's `main.subst.clj`). Nothing else
+changes: `start-server`, `stop-server`, `stop-servers`, `repl`, `prepl`, `io-prepl`,
+`remote-prepl`, `parse-props` and `start-servers` are the JVM's code.
+
+## Tests
+
+| what | result |
+|---|---|
+| `bin/jrt test` (`net_test.clj`: `TestSockets`, `TestSocketErrors`, `TestSocketOptions`, `TestLookup`, `TestNoNetwork`, `TestToolOptions`) | RESULTS-JRT |
+| `bin/net-check` (new; `test/net/client.clj`, a client on the JVM Arbace): a socket REPL session (forms, output, `*err*`, errors, a reader error, namespaces, `*session*`) and an `io-prepl` session, each against a JVM server and a Go server started from `JAVA_TOOL_OPTIONS`; 8 concurrent sessions; `remote-prepl` run by the Go executable against the JVM's `io-prepl`; `start-server`/`stop-server` at the Go REPL | RESULTS-NETCHECK |
+| the oracle's new forms file `test/oracle/forms/net.clj` (83 cases: literals, bytes, printing, equality, kinds, socket addresses, a loopback connection and its exceptions; recorded twice, identical) | RESULTS-ORACLE |
+| Clojure's suite on Go: `clojure.test-clojure.server`, `clojure.test-clojure.java.io` | RESULTS-SUITE |
+
+Known differences: the buffer sizes the kernel reports (`getReceiveBufferSize`,
+`getSendBufferSize`) differ between the two processes (the JVM: 65536 and 1313280 on a loopback
+connection here, the Go executable: 131072 and 2626560; both read the kernel), and an unconnected
+socket's are a constant in the Go build (131072, 16384: there is no socket to ask yet).
+
+## Size
+
+RESULTS-SIZE
+
+## Proposed amendments (for the user's review)
+
+- **NT1** (RT.doInit): the Go build loads `arbace.core.server` at start only when an
+  `arbace.server.*` property asks for a server, where the JVM always loads it (about 0.5 s of
+  the evaluator's start today). Code that calls `arbace.core.server/...` without requiring it
+  works on the JVM only. *Recommended: keep until step 6's image of prepared namespaces makes
+  the load cheap, then load it always, as the JVM.*
+- **NT2** (system properties): `JAVA_TOOL_OPTIONS`' `-D` options are the Go executable's system
+  properties (the JVM's mechanism, the same text for both builds); no "Picked up" line is
+  printed. Leading `-Dname=value` arguments of the executable, as the `java` launcher takes
+  them, were not added: they belong to step 6's command line (`bin/arbace-go`, the program's
+  `main`). *Recommended: as is; step 6 decides the launcher's `-D`.*
+- **NT3** (licensing): `HostSocketImpl.java` transcribes `NioSocketImpl`'s code and the variants
+  keep jdk26u's code of the methods they replace, so they are recorded in LICENSE.md as
+  jdk26u-derived (GPL 2 with the Classpath Exception), as the B7 files are. *Recommended:
+  accept, as B7.*
+- **NT4** (`InetAddress`'s cache): the variant's cache expires entries when they are used, and
+  concurrent first lookups of one host each ask the name service (the JVM: one lookup per host
+  at a time, expiries kept in a `ConcurrentSkipListSet`). *Recommended: as is.*
+- **NT5** (the musl texts): the `errno` and `gai_strerror` texts are musl's, as this machine's
+  JVM gives them; a glibc JVM's differ (`Address already in use`, `Name or service not known`).
+  *Recommended: as is (the oracle's reference is this machine's JVM).*

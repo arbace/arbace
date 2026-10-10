@@ -7,12 +7,12 @@
   :path "arbace/jrt"
   :files ["access.go" "array.go" "atomic.go" "charset.go" "class.go" "classloader.go" "codec.go" "date.go" "dyn.go"
           "enum.go" "executor.go" "fdlibm.go" "files.go" "forkjoin.go" "host.go" "locale.go" "locks.go" "math.go" "monitor.go"
-          "natives.go" "numconv.go" "object.go" "reference.go" "reflect.go" "reflect_array.go"
+          "natives.go" "net.go" "numconv.go" "object.go" "reference.go" "reflect.go" "reflect_array.go"
           "reflect_tables.go" "standin_character.go" "standin_lang.go" "standin_reflect.go"
           "standin_timeunit.go" "string.go" "stringbuilder.go" "system.go" "thread.go" "threadid.go"
-          "threadlocal.go" "throwable.go" "unsafe.go" "volatile.go" "vm.go"]
+          "threadlocal.go" "throwable.go" "tooloptions.go" "unsafe.go" "volatile.go" "vm.go"]
   :test-files ["bench_test.go" "concurrent_test.go" "enum_test.go" "manifest_test.go" "math_test.go"
-               "monitor_test.go" "object_test.go" "reflect_test.go" "shims_test.go" "string_test.go"
+               "monitor_test.go" "net_test.go" "object_test.go" "reflect_test.go" "shims_test.go" "string_test.go"
                "system_test.go" "testutil_test.go" "thread_test.go" "throwable_test.go"])
 
 (load "jrt/access")
@@ -35,6 +35,7 @@
 (load "jrt/math")
 (load "jrt/monitor")
 (load "jrt/natives")
+(load "jrt/net")
 (load "jrt/numconv")
 (load "jrt/object")
 (load "jrt/reference")
@@ -52,6 +53,7 @@
 (load "jrt/threadid")
 (load "jrt/threadlocal")
 (load "jrt/throwable")
+(load "jrt/tooloptions")
 (load "jrt/unsafe")
 (load "jrt/volatile")
 (load "jrt/vm")
@@ -61,6 +63,7 @@
 (load "jrt/manifest_test")
 (load "jrt/math_test")
 (load "jrt/monitor_test")
+(load "jrt/net_test")
 (load "jrt/object_test")
 (load "jrt/reflect_test")
 (load "jrt/shims_test")

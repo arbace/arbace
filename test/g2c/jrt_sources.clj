@@ -109,7 +109,24 @@
            ;; \"Dates\"): Instant and the exception it throws; the rest of java.time stays
            ;; outside the world (its uses in Instant are operation-level stubs, toString a
            ;; variant)
-           ["java/time/Instant.java" "java/time/DateTimeException.java"]))))
+           ["java/time/Instant.java" "java/time/DateTimeException.java"]
+           ;; sockets and the socket REPL (arbace.core.server; JRT-NOTES.md, "Sockets"): the plain
+           ;; Java of java.net's sockets and addresses, over jrt's own HostSocketImpl
+           ;; (overlay/jdk) in place of sun.nio.ch.NioSocketImpl; the name service through
+           ;; Inet6AddressImpl's natives (variants over the host's). NetworkInterface, Proxy, the
+           ;; SOCKS and HTTP-tunnel impls and the resolver SPI's providers stay outside the world
+           (map #(str "java/net/" % ".java")
+                ["ServerSocket" "Socket" "SocketImpl" "SocketImplFactory" "SocketAddress"
+                 "InetSocketAddress" "InetAddress" "Inet4Address" "Inet6Address" "InetAddressImpl"
+                 "Inet4AddressImpl" "Inet6AddressImpl" "SocketOptions" "SocketOption"
+                 "StandardSocketOptions" "SocketException" "BindException" "ConnectException"
+                 "NoRouteToHostException" "UnknownHostException" "SocketTimeoutException"
+                 "spi/InetAddressResolver"])
+           ["java/io/InterruptedIOException.java" "sun/net/PlatformSocketImpl.java"
+            "sun/net/util/IPAddressUtil.java" "jdk/internal/util/Exceptions.java"]
+           ;; System.getProperties() (the socket servers' start, start-servers): Properties, in
+           ;; the closure since step 1, is a Hashtable
+           ["java/util/Hashtable.java" "java/util/Dictionary.java"]))))
 
 (def added-module-sources
   "Files of other modules' src/MODULE/share/classes added to the closure (paths relative to

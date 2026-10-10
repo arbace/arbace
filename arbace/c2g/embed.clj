@@ -18,8 +18,9 @@
   "Resource paths (prefixes) not embedded."
   ["arbace/classes/" "arbace/j2c/" "arbace/g2c/" "arbace/c2g/" "arbace/lang/" "arbace/asm/"
    "arbace/asm.clj" "arbace/lang.clj" "arbace/java/api"
-   ;; decision 6: processes, URLs, sockets, browsers
-   "arbace/core/server.clj" "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
+   ;; decision 6: processes, URLs, browsers (sockets, arbace.core.server, are in since
+   ;; 2026-10-09: JRT-NOTES.md, "Sockets")
+   "arbace/repl/deps.clj" "arbace/java/basis" "arbace/tools/deps/"
    "arbace/java/process.clj" "arbace/java/shell.clj" "arbace/java/browse" "arbace/java/javadoc.clj"
    ;; D6: Swing, SAX
    "arbace/inspector.clj" "arbace/xml.clj"])

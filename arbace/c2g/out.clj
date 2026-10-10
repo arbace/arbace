@@ -402,6 +402,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (> i 0)
                       (.Put_O_O__O m (Str (subslice kv _ i)) (Str (subslice kv (+ i 1)))))))
                 (Collections_UnmodifiableMap_Map__Map m))))
+     ;; System.getProperties() (the socket server's start, arbace.core.server/start-servers;
+     ;; JRT-NOTES.md, "Sockets"): a Properties holding a copy of the properties
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'C2g_SystemGetProperties
+             "C2g_SystemGetProperties is System.getProperties(): a Properties with the system properties
+(a copy: the Go build keeps them in jrt's table, System.setProperty's).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(let [p (Properties_New)]
+                (range [_ k (PropertyNames)]
+                  (let [v (System_GetProperty_String__String (Str k))]
+                    (when (!= v nil)
+                      (.SetProperty_String_String__O p (Str k) v))))
+                p)))
      ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -715,6 +728,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         pst-w? (m/translated? "java/io/PrintWriter")
         pst-s? (m/translated? "java/io/PrintStream")
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
+        props? (m/translated? "java/util/Properties")
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
@@ -723,7 +737,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
         instant? (m/translated? "java/time/Instant")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant?)
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props?)
       [(apply list 'go/func 'init []
               (concat
                 (when (or pst-w? pst-s?)
@@ -743,6 +757,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetenv)))))])
+                (when props?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "getProperties" :Return Properties_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetProperties)))))])
                 (when ci?
                   ['(set! (.-Fields (.Info String_class))
                           (append (.-Fields (.Info String_class))

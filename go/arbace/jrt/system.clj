@@ -103,7 +103,9 @@ shutdown hooks registered with jrt run first.\n"
       (if (== err nil)
         (set "user.dir" wd)
         (set "user.dir" "/")))
-    (set "go.version" (runtime/Version))))
+    (set "go.version" (runtime/Version))
+    ;; JAVA_TOOL_OPTIONS' -D options, as the JVM takes them (tooloptions.clj)
+    (toolOptionProps h set)))
 
 (go/func checkKey ^string [^{:tag (* String)} key]
   (when (== key nil)
