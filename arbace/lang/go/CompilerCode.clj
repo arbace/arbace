@@ -412,8 +412,7 @@
                   n (.count es)]
               (if (== n 1)
                   (.compile this (cast Expr (.nth es 0)))
-                  (let [cs (.compileAll this es)]
-                    (CodeBody. cs))))
+                  (CodeCompiler/chain (.compileAll this es) 0)))
           (instance? InvokeExpr e)
             (let [ie (cast InvokeExpr e)]
               (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)))
@@ -451,7 +450,8 @@
             (let [io (cast InstanceOfExpr e)]
               (CodeInstanceOf. (.-c io) (.compile this (.-expr io))))
           (instance? StrConcatExpr e)
-            (CodeStrConcat. (.compileAll this (.-args (cast StrConcatExpr e))))
+            (let [se (cast StrConcatExpr e)]
+              (CodeStrConcat. (.compileAll this (.-args se)) (.-texts se)))
           (instance? CaseExpr e) (.compileCase this (cast CaseExpr e))
           (instance? DefExpr e)
             (let [de (cast DefExpr e)]
@@ -512,7 +512,25 @@
                 ;; the init is of the local's type: a Evaluator.prim conversion is not needed
                 (aset kinds i (let [k (.storeKind this (.getPrimitiveType lb))] (if (== k 1) 0 k))))
               (recur (unchecked-inc-int i))))
-          (CodeLet. inits kinds dest (.compile this (.-body le)) (.-isLoop le) compat)))
+          ;; the stores, then the body: a chain of pairs (an element of a Code[] read in Go is an
+          ;; interface assertion, a lookup of its method table: the hot nodes hold their parts in
+          ;; fields)
+          (let [body (.compile this (.-body le))
+                stores (new Code/1 n)]
+            (loop [^int i 0]
+              (when (< i n)
+                (aset stores i (CodeStore. (aget kinds i) (aget dest i) (aget inits i)))
+                (recur (unchecked-inc-int i))))
+            (cond
+              (.-isLoop le) (CodeLoop. (if (== n 0) nil (CodeCompiler/chain stores 0)) body compat)
+              (== n 0) body
+              :else (CodeSeq. (CodeCompiler/chain stores 0) body)))))
+
+      ;; cs[i..] run in order, the last one's value the chain's
+      (method ^:static chain ^Code [^Code/1 cs ^int i]
+        (if (== i (unchecked-dec-int (alength cs)))
+            (aget cs i)
+            (CodeSeq. (aget cs i) (CodeCompiler/chain cs (unchecked-inc-int i)))))
 
       (method compileRecur ^Code [this ^RecurExpr re]
         (let [args (.-args re)
@@ -644,10 +662,20 @@
     (defclass ^:public ^:static CodeConst
       :extends Code
       (field ^:public ^:final v)
-      (constructor ^:public [this v] (set! (.-v this) v))
+      ;; a number's long and double values, made once
+      (field ^:public ^:final ^long lv)
+      (field ^:public ^:final ^double dv)
+      (field ^:public ^:final ^boolean num)
+      (constructor ^:public [this v]
+        (set! (.-v this) v)
+        (set! (.-num this) (instance? Number v))
+        (set! (.-lv this) (if (instance? Number v) (.longValue (cast Number v)) 0))
+        (set! (.-dv this) (if (instance? Number v) (.doubleValue (cast Number v)) 0.0)))
       (method ^:public run [this ^Frame f] v)
-      (method ^:public runLong ^long [this ^Frame f] (.longValue (cast Number v)))
-      (method ^:public runDouble ^double [this ^Frame f] (.doubleValue (cast Number v)))))
+      (method ^:public runLong ^long [this ^Frame f]
+        (if num lv (.longValue (cast Number v))))
+      (method ^:public runDouble ^double [this ^Frame f]
+        (if num dv (.doubleValue (cast Number v))))))
 
   (c2g/add
     (defclass ^:public ^:static CodeEval
@@ -797,89 +825,73 @@
         (if (.holds this f) (.runBool thn f) (.runBool els f)))))
 
   (c2g/add
-    (defclass ^:public ^:static CodeBody
+    (defclass ^:public ^:static CodeSeq
       :extends Code
-      (field ^:public ^:final ^Code/1 cs)
-      (field ^:public ^:final ^Code last)
-      (constructor ^:public [this ^Code/1 cs]
-        (set! (.-cs this) cs)
-        (set! (.-last this) (aget cs (unchecked-dec-int (alength cs)))))
-      (method stmts ^void [this ^Frame f]
-        (let [n (unchecked-dec-int (alength cs))]
-          (loop [^int i 0]
-            (when (< i n)
-              (.run (aget cs i) f)
-              (recur (unchecked-inc-int i))))))
-      (method ^:public run [this ^Frame f] (.stmts this f) (.run last f))
-      (method ^:public runLong ^long [this ^Frame f] (.stmts this f) (.runLong last f))
-      (method ^:public runDouble ^double [this ^Frame f] (.stmts this f) (.runDouble last f))
-      (method ^:public runBool ^boolean [this ^Frame f] (.stmts this f) (.runBool last f))))
+      ;; a then b, b's value (a do's statements, a let's stores then its body)
+      (field ^:public ^:final ^Code a)
+      (field ^:public ^:final ^Code b)
+      (constructor ^:public [this ^Code a ^Code b] (set! (.-a this) a) (set! (.-b this) b))
+      (method ^:public run [this ^Frame f] (.run a f) (.run b f))
+      (method ^:public runLong ^long [this ^Frame f] (.run a f) (.runLong b f))
+      (method ^:public runDouble ^double [this ^Frame f] (.run a f) (.runDouble b f))
+      (method ^:public runBool ^boolean [this ^Frame f] (.run a f) (.runBool b f))))
 
   (c2g/add
-    (defclass ^:public ^:static CodeLet
+    (defclass ^:public ^:static CodeStore
       :extends Code
-      ;; the binding inits, each stored as CodeCompiler.storeKind says (1 never: the init is of
-      ;; the local's type), then the body, again while it recurs when a loop
-      (field ^:public ^:final ^Code/1 inits)
-      (field ^:public ^:final ^int/1 kinds)
-      (field ^:public ^:final ^int/1 dest)
+      ;; a let's or loop's binding: its init stored as CodeCompiler.storeKind says (1 never: the
+      ;; init is of the local's type)
+      (field ^:public ^:final ^int kind)
+      (field ^:public ^:final ^int d)
+      (field ^:public ^:final ^Code c)
+      (constructor ^:public [this ^int kind ^int d ^Code c]
+        (set! (.-kind this) kind)
+        (set! (.-d this) d)
+        (set! (.-c this) c))
+      (method ^:public run [this ^Frame f]
+        (cond
+          (== kind 0) (aset (.-slots f) d (.run c f))
+          (== kind 2) (aset (.-prims f) d (.runLong c f))
+          (== kind 3) (aset (.-prims f) d (Double/doubleToRawLongBits (.runDouble c f)))
+          (== kind 4) (aset (.-slots f) d (Long/valueOf (.runLong c f)))
+          :else (aset (.-slots f) d (Double/valueOf (.runDouble c f))))
+        nil)))
+
+  (c2g/add
+    (defclass ^:public ^:static CodeLoop
+      :extends Code
+      ;; a loop: its stores (or nil), then its body again while it recurs
+      (field ^:public ^:final ^Code stores)
       (field ^:public ^:final ^Code body)
-      (field ^:public ^:final ^boolean isLoop)
       (field ^:public ^:final ^boolean compat)
-      (constructor ^:public [this ^Code/1 inits ^int/1 kinds ^int/1 dest ^Code body ^boolean isLoop
-                             ^boolean compat]
-        (set! (.-inits this) inits)
-        (set! (.-kinds this) kinds)
-        (set! (.-dest this) dest)
+      (constructor ^:public [this ^Code stores ^Code body ^boolean compat]
+        (set! (.-stores this) stores)
         (set! (.-body this) body)
-        (set! (.-isLoop this) isLoop)
         (set! (.-compat this) compat))
-      (method bind ^void [this ^Frame f]
-        (let [n (alength inits)]
-          (loop [^int i 0]
-            (when (< i n)
-              (let [k (aget kinds i)
-                    c (aget inits i)
-                    d (aget dest i)]
-                (cond
-                  (== k 0) (aset (.-slots f) d (.run c f))
-                  (== k 2) (aset (.-prims f) d (.runLong c f))
-                  (== k 3) (aset (.-prims f) d (Double/doubleToRawLongBits (.runDouble c f)))
-                  (== k 4) (aset (.-slots f) d (Long/valueOf (.runLong c f)))
-                  :else (aset (.-slots f) d (Double/valueOf (.runDouble c f)))))
-              (recur (unchecked-inc-int i))))))
       (method again ^boolean [this ^Frame f r]
         (if (or (.-recur f) (and compat (identical? r Evaluator/RECUR)))
             (do (set! (.-recur f) false) true)
             false))
       (method ^:public run [this ^Frame f]
-        (.bind this f)
-        (if isLoop
-            (loop []
-              (let [r (.run body f)]
-                (if (.again this f r) (recur) r)))
-            (.run body f)))
+        (when (some? stores) (.run stores f))
+        (loop []
+          (let [r (.run body f)]
+            (if (.again this f r) (recur) r))))
       (method ^:public runLong ^long [this ^Frame f]
-        (.bind this f)
-        (if isLoop
-            (loop []
-              (let [r (.runLong body f)]
-                (if (.again this f nil) (recur) r)))
-            (.runLong body f)))
+        (when (some? stores) (.run stores f))
+        (loop []
+          (let [r (.runLong body f)]
+            (if (.again this f nil) (recur) r))))
       (method ^:public runDouble ^double [this ^Frame f]
-        (.bind this f)
-        (if isLoop
-            (loop []
-              (let [r (.runDouble body f)]
-                (if (.again this f nil) (recur) r)))
-            (.runDouble body f)))
+        (when (some? stores) (.run stores f))
+        (loop []
+          (let [r (.runDouble body f)]
+            (if (.again this f nil) (recur) r))))
       (method ^:public runBool ^boolean [this ^Frame f]
-        (.bind this f)
-        (if isLoop
-            (loop []
-              (let [r (.runBool body f)]
-                (if (.again this f nil) (recur) r)))
-            (.runBool body f)))))
+        (when (some? stores) (.run stores f))
+        (loop []
+          (let [r (.runBool body f)]
+            (if (.again this f nil) (recur) r))))))
 
   (c2g/add
     (defclass ^:public ^:static CodeRecur
@@ -893,6 +905,11 @@
       (field ^:public ^:final ^int/1 dest)
       (field ^:public ^:final ^int/1 tmp)
       (field ^:public ^:final ^Class/1 pcs)
+      ;; the first four values in fields (CodeSeq)
+      (field ^:public ^:final ^Code c0)
+      (field ^:public ^:final ^Code c1)
+      (field ^:public ^:final ^Code c2)
+      (field ^:public ^:final ^Code c3)
       (constructor ^:public [this ^Code/1 cs ^int/1 kinds ^int/1 vkinds ^int/1 dest ^int/1 tmp
                              ^Class/1 pcs]
         (set! (.-cs this) cs)
@@ -900,10 +917,17 @@
         (set! (.-vkinds this) vkinds)
         (set! (.-dest this) dest)
         (set! (.-tmp this) tmp)
-        (set! (.-pcs this) pcs))
+        (set! (.-pcs this) pcs)
+        (let [n (alength cs)]
+          (set! (.-c0 this) (when (> n 0) (aget cs 0)))
+          (set! (.-c1 this) (when (> n 1) (aget cs 1)))
+          (set! (.-c2 this) (when (> n 2) (aget cs 2)))
+          (set! (.-c3 this) (when (> n 3) (aget cs 3)))))
+      (method code ^Code [this ^int i]
+        (switch i 0 c0 1 c1 2 c2 3 c3 (aget cs i)))
       ;; value i for a long or double store: a long, or a double's raw bits
       (method bits ^long [this ^int i ^Frame f]
-        (let [c (aget cs i)
+        (let [c (.code this i)
               vk (aget vkinds i)]
           (if (or (== (aget kinds i) 2) (== (aget kinds i) 4))
               (if (== vk 1) (.runLong c f) (CodeRun/toLong (.run c f)))
@@ -913,7 +937,7 @@
                   :else (CodeRun/toDouble (.run c f)))))))
       ;; value i for a slot store
       (method value [this ^int i ^Frame f]
-        (let [v (.run (aget cs i) f)]
+        (let [v (.run (.code this i) f)]
           (if (== (aget kinds i) 1) (Evaluator/prim (aget pcs i) v) v)))
       ;; store i of a long (or double's bits) b, or of object v
       (method store ^void [this ^int i ^Frame f ^long b v]
@@ -1165,11 +1189,36 @@
   (c2g/add
     (defclass ^:public ^:static CodeStrConcat
       :extends Code
+      ;; (str x y ...) as the bytecode concatenates (StrConcatExpr.emit): a constant's text as
+      ;; folded; the values all computed first, then each converted as str converts it (nil to
+      ;; "", else its toString; the first one's null toString a NullPointerException, as
+      ;; (StringBuilder. nil) throws in str)
       (field ^:public ^:final ^Code/1 cs)
-      (constructor ^:public [this ^Code/1 cs] (set! (.-cs this) cs))
+      (field ^:public ^:final ^String/1 texts)
+      (constructor ^:public [this ^Code/1 cs ^String/1 texts]
+        (set! (.-cs this) cs)
+        (set! (.-texts this) texts))
       (method ^:public run [this ^Frame f]
-        (let [vs (CodeRun/runAll cs f)]
-          (.applyTo (cast IFn (.deref StrConcatExpr/STR_VAR)) (RT/seq vs))))))
+        (let [n (alength cs)
+              vs (new Object/1 n)
+              sb (StringBuilder.)]
+          (loop [^int i 0]
+            (when (< i n)
+              (when (nil? (aget texts i))
+                (aset vs i (.run (aget cs i) f)))
+              (recur (unchecked-inc-int i))))
+          (loop [^int i 0]
+            (when (< i n)
+              (let [t (aget texts i)]
+                (if (some? t)
+                    (.append sb t)
+                    (let [v (aget vs i)]
+                      (when (some? v)
+                        (let [x (.toString v)]
+                          (when (and (nil? x) (== i 0)) (throw (NullPointerException.)))
+                          (.append sb x))))))
+              (recur (unchecked-inc-int i))))
+          (.toString sb)))))
 
   (c2g/add
     (defclass ^:public ^:static CodeDef
@@ -1240,32 +1289,55 @@
   (c2g/add
     (defclass ^:public ^:static CodeInvoke
       :extends Code
+      ;; a call of a fn value: up to six arguments in fields (CodeSeq), more in args
       (field ^:public ^:final ^Code fexpr)
       (field ^:public ^:final ^Code/1 args)
+      (field ^:public ^:final ^int n)
       (field ^:public ^:final ^int line)
+      (field ^:public ^:final ^Code a0)
+      (field ^:public ^:final ^Code a1)
+      (field ^:public ^:final ^Code a2)
+      (field ^:public ^:final ^Code a3)
+      (field ^:public ^:final ^Code a4)
+      (field ^:public ^:final ^Code a5)
       (constructor ^:public [this ^Code fexpr ^Code/1 args ^int line]
         (set! (.-fexpr this) fexpr)
         (set! (.-args this) args)
-        (set! (.-line this) line))
+        (set! (.-n this) (alength args))
+        (set! (.-line this) line)
+        (set! (.-a0 this) (when (> (alength args) 0) (aget args 0)))
+        (set! (.-a1 this) (when (> (alength args) 1) (aget args 1)))
+        (set! (.-a2 this) (when (> (alength args) 2) (aget args 2)))
+        (set! (.-a3 this) (when (> (alength args) 3) (aget args 3)))
+        (set! (.-a4 this) (when (> (alength args) 4) (aget args 4)))
+        (set! (.-a5 this) (when (> (alength args) 5) (aget args 5))))
       (method ^:public run [this ^Frame f]
-        (let [fv (cast IFn (.run fexpr f))
-              as args]
-          (set! (.-line f) line)
-          (switch (alength as)
-            0 (.invoke fv)
-            1 (.invoke fv (.run (aget as 0) f))
-            2 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f))
-            3 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f))
-            4 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f) (.run (aget as 3) f))
-            5 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f) (.run (aget as 3) f)
-                       (.run (aget as 4) f))
-            6 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f) (.run (aget as 3) f)
-                       (.run (aget as 4) f) (.run (aget as 5) f))
-            7 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f) (.run (aget as 3) f)
-                       (.run (aget as 4) f) (.run (aget as 5) f) (.run (aget as 6) f))
-            8 (.invoke fv (.run (aget as 0) f) (.run (aget as 1) f) (.run (aget as 2) f) (.run (aget as 3) f)
-                       (.run (aget as 4) f) (.run (aget as 5) f) (.run (aget as 6) f) (.run (aget as 7) f))
-            (.applyTo fv (RT/seq (CodeRun/runAll as f))))))))
+        (let [fv (cast IFn (.run fexpr f))]
+          (switch n
+            0 (do (set! (.-line f) line) (.invoke fv))
+            1 (let [x0 (.run a0 f)] (set! (.-line f) line) (.invoke fv x0))
+            2 (let [x0 (.run a0 f) x1 (.run a1 f)] (set! (.-line f) line) (.invoke fv x0 x1))
+            3 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f)]
+                (set! (.-line f) line)
+                (.invoke fv x0 x1 x2))
+            4 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f)]
+                (set! (.-line f) line)
+                (.invoke fv x0 x1 x2 x3))
+            5 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)]
+                (set! (.-line f) line)
+                (.invoke fv x0 x1 x2 x3 x4))
+            6 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)
+                    x5 (.run a5 f)]
+                (set! (.-line f) line)
+                (.invoke fv x0 x1 x2 x3 x4 x5))
+            (let [vs (CodeRun/runAll args f)]
+              (set! (.-line f) line)
+              (switch n
+                7 (.invoke fv (aget vs 0) (aget vs 1) (aget vs 2) (aget vs 3) (aget vs 4) (aget vs 5)
+                           (aget vs 6))
+                8 (.invoke fv (aget vs 0) (aget vs 1) (aget vs 2) (aget vs 3) (aget vs 4) (aget vs 5)
+                           (aget vs 6) (aget vs 7))
+                (.applyTo fv (RT/seq vs)))))))))
 
   (c2g/add
     (defclass ^:public ^:static CodeKeywordInvoke
