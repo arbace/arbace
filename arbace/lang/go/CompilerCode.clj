@@ -423,7 +423,7 @@
                           (when-not (and (instance? LocalBindingExpr x) (< i (unchecked-dec-int n)))
                             (.add cs (.compile this x))))
                         (recur (unchecked-inc-int i))))
-                    (CodeCompiler/chain (.toArray cs (new Code/1 (.size cs))) 0))))
+                    (CodeCompiler/chain (cast Code/1 (.toArray cs (new Code/1 (.size cs)))) 0))))
           (instance? InvokeExpr e)
             (let [ie (cast InvokeExpr e)]
               (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)))
