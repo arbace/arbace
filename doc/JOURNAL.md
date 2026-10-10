@@ -1059,3 +1059,12 @@ decision (2026-10-08).
   after their agent has reported and stopped.
 - Main session on the merge: scripts only and docs; the agent's two essential gate runs (a miss
   and a hit) passed with no regressions; `--full` not run, by the user's policy until the freeze.
+
+## 2026-10-10: amendment Z1 accepted and folded
+
+- The user accepted Z1 (EVAL-NOTES.md, "Proxies of BufferedWriter"): a translated, non-final
+  class on c2g's proxy list is not a leaf, since its `DynSub_C` subclasses it; the list lives in
+  `arbace.c2g.model/proxy-supers` and includes `java.io.BufferedWriter`. Folded into C2G-SPEC
+  §5.3, §5.12 and §16; it records what main already does since the pprint merge. Alternative
+  considered: keeping leafness a condition on the list (a listed class must already be
+  non-leaf), which excluded BufferedWriter.

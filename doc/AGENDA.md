@@ -143,7 +143,7 @@ fallbacks of `arbace/core_classes.clj` are gone.
   - In progress (agents): step 7a (runtime speed), step 7b (the evaluator's closure
     compilation), and feature completion: class forms in the REPL, `java.io.File`, sockets and
     the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
-    (pprint's BufferedWriter proxy) awaits the user.
+    (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
   - Then: step 8 (the `.ae` rename), step 9 (the freeze, with `bin/gate --full`).
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure

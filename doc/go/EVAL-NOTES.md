@@ -1013,7 +1013,7 @@ and nil (flushes counted as the JVM counts them), `pprint` (the pretty writer ov
 
 ### Proposed amendments (for the user's review)
 
-- **Z1 (C2G-SPEC §5.3, §5.12)** A translated, non-final class of `proxy-supers` is not a leaf:
+- **Z1 (C2G-SPEC §5.3, §5.12; accepted by the user 2026-10-10, folded there and in §16)** A translated, non-final class of `proxy-supers` is not a leaf:
   its `DynSub_C` is a subclass in the program, so leafness counts it (it was a condition on the
   list, now a consequence of it; X1's "leafness stays a property of the closed world" reads: of
   the closed world and the proxy types c2g adds to it). The list moves to
