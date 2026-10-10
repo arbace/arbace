@@ -3133,6 +3133,30 @@ meaning in the Go build. No `/bin/sh` fallback for ENOEXEC (this machine's JVM h
   `waitpid`, so the child is reaped even when the Java side is slow, and its pid cannot be
   reused under a later `destroy`.
 
+## Results
+
+| check | result |
+|---|---|
+| `bin/jrt-convert` | 644 files (637 on main), all converted and compiled to javac's class shapes (640 identical, the 4 known differences), 1,880 classes |
+| `bin/c2g --program` | 2,753 classes analyzed, 2,693 reached, 24,898 methods; the build succeeds |
+| `bin/jrt test` (`process_test.clj`: `TestProcessStreams`, `TestProcessReapedUnwaited`, `TestProcessAvailable`, `TestProcessOptions`, `TestProcessErrors`, `TestProcessDestroy`, `TestProcessHandles`, `TestNoProcesses`) | all of jrt's tests pass on amd64 and on arm64 under `qemu-aarch64` |
+| `bin/arbace-go --smoke` (amd64) | passes |
+| the oracle's new `forms/processes.clj` (129 cases: programs, streams, readers and writers, errors and their texts, the builder and `Redirect`, environment and directory, redirections to and from temporary files, error output to standard output, `DISCARD`, `inheritIO`, `startPipeline`, timed waits, `destroy` and `destroyForcibly` (143, 137), `onExit`, `close`, handles and info, `Runtime.exec`, `arbace.java.shell`, `arbace.java.process`; recorded twice on the JVM, identical) | 129 of 129 on Go |
+| the whole oracle on Go (`--expected test/oracle/known-go-amd64.edn`) | 21,921 of 21,929; the 8 mismatches exactly the known ones |
+| Clojure's suite on Go | 68 namespaces, all load, 687 tests, 19,651 assertions, 19,647 pass, 4 errors (java.io's, expected); `java.process` 2 tests, 6 of 6, `java.shell` 4 tests, 13 of 13, as on the JVM; no regressions (one namespace, `compilation.examples`, was killed once by the kernel's OOM killer while other agents' runs shared the machine, and passed when run again) |
+
+`arbace.java.shell/sh` returns at once but a program using it ends 60 s later unless it calls
+`shutdown-agents`, on the JVM as on Go (its `future`'s pool threads are not daemons): Clojure's
+behaviour, not changed.
+
+## Size
+
+Against main's executable (`target/arbace-go/amd64/arbace`, 61,927,584 bytes): 62,738,592 bytes,
+**+811 KB (+1.3%)**: the six translated classes and their nested ones, the variants' natives,
+`hostproc`/`process` in jrt, and the reflection of the classes' public members. The image of
+prepared namespaces is 6,010,651 bytes (shell and process are not prepared: they load from their
+embedded sources when required). Start (`-e nil`): 0.20-0.22 s.
+
 ## Proposed amendments (for the user's review)
 
 Numbered PR (processes); no PR appears elsewhere in doc/.
