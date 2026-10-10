@@ -11,16 +11,20 @@
 ;;       Require every namespace listed in the file NSLIST, in order, as run_test.clj does before
 ;;       running anything (so that helpers such as clojure.test-helper's assert-expr methods are
 ;;       loaded), then run NS's clojure.test tests, less those the EXPECTED results file lists
-;;       under :skipped-tests {NS {test reason}}, and write a result map to OUT:
+;;       under :skipped-tests {NS {test reason}} (which are not compiled either: any
+;;       namespace's skipped tests define their vars without a body), and write a result map
+;;       to OUT:
 ;;         {:ns NS :test n :pass n :fail n :error n
 ;;          :failing {test-name {:fail n :error n}}  ; per top-level deftest
 ;;          :load-error "message"}                   ; only if NS itself failed to load
 ;;       Unlike run_test.clj, a namespace that fails to load is reported instead of aborting.
-;;   generative DIR OUT [NSLIST]
+;;   generative DIR OUT [NSLIST [EXPECTED]]
 ;;       What src/script/run_test_generative.clj does (clojure.test.generative.runner/-main on
 ;;       DIR), except that a namespace that fails to load is recorded instead of aborting the
 ;;       run; with NSLIST, the namespaces listed in that file instead of those found in DIR (the
-;;       Go build, which has no java.io.File for tools.namespace to search directories with). Writes {:tests n :failures n :failing #{spec} :load-errors #{ns}} to OUT.
+;;       Go build, which has no java.io.File for tools.namespace to search directories with), and
+;;       with EXPECTED its skipped tests not compiled (as in run). Writes {:tests n :failures n
+;;       :failing #{spec} :load-errors #{ns}} to OUT.
 ;;   report OUT EXPECTED RESULTS NSS
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
@@ -70,7 +74,24 @@
       (when-let [v (ns-resolve ns-sym t)]
         (alter-meta! v dissoc :test)))))
 
+(defn- skip-at-load!
+  "The tests that the reference EXPECTED skips are not compiled either, when the namespaces
+  load: deftest of a skipped test defines its var without a body, so that a test the Go build
+  cannot even analyze (one naming a class outside its world, java.awt.Point, or one that an
+  AOT-compiled fixture defines) does not keep its namespace from loading."
+  [expected]
+  (when expected
+    (let [skipped (:skipped-tests (read-string (slurp-file expected)))]
+      (when (seq skipped)
+        (alter-var-root #'t/deftest
+                        (fn [deftest]
+                          (fn [form env name & body]
+                            (if (contains? (get skipped (ns-name *ns*)) name)
+                              `(def ~name)
+                              (apply deftest form env name body)))))))))
+
 (defn- run-ns [ns-sym out nslist expected]
+  (skip-at-load! expected)
   (let [nss       (map symbol (re-seq #"\S+" (slurp-file nslist)))
         load-errs (into {} (for [n (distinct (concat nss [ns-sym]))
                                  :let [err (try-require n)]
@@ -97,7 +118,8 @@
   (require 'clojure.tools.namespace.find)
   ((resolve 'clojure.tools.namespace.find/find-namespaces-in-dir) (java.io.File. ^String dir)))
 
-(defn- run-generative [dir out nslist]
+(defn- run-generative [dir out nslist expected]
+  (skip-at-load! expected)
   (require 'clojure.test.generative.runner)
   (let [config    (resolve 'clojure.test.generative.runner/config)
         get-tests (resolve 'clojure.test.generative.runner/get-tests)
@@ -214,5 +236,5 @@
                                           (str n " " secs "\n")))))
                    (shutdown-agents))
     "run"        (run-ns (symbol a) b c d)
-    "generative" (run-generative a b c)
+    "generative" (run-generative a b c d)
     "report"     (report a b c d)))

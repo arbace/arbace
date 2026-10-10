@@ -530,7 +530,10 @@
             (when (< i n)
               (let [bi (cast BindingInit (.nth bis i))
                     lb (.-binding bi)]
-                (aset inits i (.compile this (.-init bi)))
+                ;; an init adapted to the local's functional interface (Evaluator.fiTarget)
+                (aset inits i (let [c (.compile this (.-init bi))
+                                    fi (Evaluator/fiTarget lb)]
+                                (if (some? fi) (CodeFI. fi c) c)))
                 (aset dest i (.-idx lb))
                 ;; the init is of the local's type: a Evaluator.prim conversion is not needed
                 (aset kinds i (let [k (.storeKind this (.getPrimitiveType lb))] (if (== k 1) 0 k))))
@@ -1524,6 +1527,10 @@
         (set! (.-ctor this) ctor)
         (set! (.-args this) args))
       (method ^:public run [this ^Frame f]
+        ;; compiled code's new of an abstract class: InstantiationError before the arguments
+        ;; (NewExpr.evalIn says why)
+        (when (and (some? ctor) (java.lang.reflect.Modifier/isAbstract (.getModifiers (Evaluator/destub c))))
+          (throw (InstantiationError. (.getName (Evaluator/destub c)))))
         (let [vs (CodeRun/runAll args f)
               dc (Evaluator/destub c)]
           (if (some? ctor)
@@ -1532,6 +1539,18 @@
                           (.getConstructor dc (.getParameterTypes ctor)))]
                 (CodeRun/construct k (CodeRun/directArgs (.getParameterTypes k) vs)))
               (Reflector/invokeConstructor dc vs))))))
+
+  (c2g/add
+    (defclass ^:public ^:static CodeFI
+      :extends Code
+      ;; a let or loop local's init adapted to its functional interface (Evaluator.fiAdapt)
+      (field ^:public ^:final ^Class c)
+      (field ^:public ^:final ^Code init)
+      (constructor ^:public [this ^Class c ^Code init]
+        (set! (.-c this) c)
+        (set! (.-init this) init))
+      (method ^:public run [this ^Frame f]
+        (Evaluator/fiAdapt c (.run init f)))))
 
   (c2g/add
     (defclass ^:public ^:static CodeHostField

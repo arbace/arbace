@@ -116,6 +116,10 @@
                 ["SequencedCollection" "SequencedSet" "SequencedMap" "ReverseOrderDequeView"
                  "ReverseOrderSortedSetView" "ReverseOrderSortedMapView"])
            ["jdk/internal/util/NullableKeyValueHolder.java"]
+           ;; the JVM's error for compiled code's new of an abstract class, which the
+           ;; evaluator's NewExpr throws as compiled code does (EVAL-NOTES.md, "The suite's
+           ;; Java fixtures")
+           ["java/lang/InstantiationError.java"]
            ;; the constant API's two interfaces, which String and the wrapper classes implement
            ;; (supers, bases and ancestors list them); their methods name classes outside the
            ;; world (Optional, MethodHandles.Lookup) and do not exist in Go

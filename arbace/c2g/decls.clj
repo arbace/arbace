@@ -403,8 +403,11 @@
                                      true comps)))]))))
 
 (defn derived-body
-  "Go statements of a derived method (enum values/valueOf/$values, bridges, record members)."
+  "Go statements of a derived method (enum values/valueOf/$values, bridges, record members).
+  The code's names are qualified as package pkg sees them (a bridge's casts in arbace/lang name
+  jrt's classes: the suite's Java fixtures, ConcreteClass)."
   [pkg n mm ps]
+  (binding [c/*f* (assoc c/*f* :pkg pkg)]
   (let [g (m/go-name n)
         d (a/decl n)
         leaf (m/leaf? n)
@@ -443,7 +446,7 @@
       :record-accessor (let [cm (:component mm)]
                          [(list 'return (list (symbol (str ".-" (nm/field-name (:name cm)))) 't))])
       :record-object-method (record-object-body pkg n mm ps)
-      [(list 'panic (list (m/jrt-sym pkg "C2g_NotTranslated") (str "derived " (name (:derived mm)))))])))
+      [(list 'panic (list (m/jrt-sym pkg "C2g_NotTranslated") (str "derived " (name (:derived mm)))))]))))
 
 (defn- touches-statics?
   "Does analyzed code ab access a static field of a class in classes (directly: the guarded

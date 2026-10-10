@@ -348,6 +348,19 @@
       ;; what RecurExpr returns to its loop or fn method
       (field ^:public ^:static ^:final RECUR (Object.))
 
+      ;; the functional interface a let or loop local's value is adapted to, as LetExpr.doEmit
+      ;; compiles its init (FISupport.maybeEmitFIAdapter): an object local whose tag names a
+      ;; functional interface of FISupport's; else nil
+      (method ^:public ^:static fiTarget ^Class [^LocalBinding lb]
+        (when (and (nil? (.getPrimitiveType lb)) (some? (.-tag lb)))
+          (let [c (HostExpr/maybeClass (.-tag lb) true)]
+            (when (some? (Compiler$FISupport/maybeFIMethod c)) c))))
+
+      ;; v as the adapted init stores it: a fn not already an instance of c adapted to it,
+      ;; anything else cast (the checkcast after the adapter)
+      (method ^:public ^:static fiAdapt [^Class c v]
+        (Reflector/boxArg c v))
+
       ;; the deepest nesting of evaluated fn and method calls on one thread before
       ;; StackOverflowError (EVAL-PLAN.md Q4; C2G-SPEC §10.5)
       (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
@@ -1060,6 +1073,11 @@
   ;; to the class itself where code names it (Evaluator.destub)
   (method ^:static compileStub ^Class [^String superName ^NewInstanceExpr ret
                                        ^String/1 interfaceNames frm]
+    ;; the JVM defines the stub through its class loader, whose ClassLoader.preDefineClass
+    ;; refuses a binary name with / or a leading [ (deftype Foo/2): the same error here
+    (let [n (java-str COMPILE_STUB_PREFIX "." (.-name ret))]
+      (when (or (>= (.indexOf n "/") 0) (.startsWith n "["))
+        (throw (NoClassDefFoundError. (java-str "IllegalName: " n)))))
     ;; (the closes of a reify are not known yet: its methods are analyzed after the stub)
     (Compiler$Image/event (new Object/1 ["stub" (java-str COMPILE_STUB_PREFIX "." (.-name ret))
                                          superName ret interfaceNames frm]))
@@ -1166,14 +1184,27 @@
 
 (c2g/variant Compiler$LetExpr
   (c2g/add
+    ;; each binding's functional interface (Evaluator.fiTarget), found at the first evaluation
+    (field ^Class/1 evalFI))
+  (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
       (let [bis bindingInits
             n (.count bis)
-            slots (.-slots f)]
+            slots (.-slots f)
+            ^:mutable fis evalFI]
+        (when (nil? fis)
+          (set! fis (new Class/1 n))
+          (loop [^int i 0]
+            (when (< i n)
+              (aset fis i (Compiler$Evaluator/fiTarget (.-binding (cast BindingInit (.nth bis i)))))
+              (recur (unchecked-inc-int i))))
+          (set! evalFI fis))
         (loop [^int i 0]
           (when (< i n)
-            (let [bi (cast BindingInit (.nth bis i))]
-              (aset slots (.-idx (.-binding bi)) (.evalIn (.-init bi) f))
+            (let [bi (cast BindingInit (.nth bis i))
+                  v (.evalIn (.-init bi) f)
+                  c (aget fis i)]
+              (aset slots (.-idx (.-binding bi)) (if (some? c) (Compiler$Evaluator/fiAdapt c v) v))
               (recur (unchecked-inc-int i)))))
         (if isLoop
             (loop []
@@ -1501,6 +1532,13 @@
 (c2g/variant Compiler$NewExpr
   (c2g/add
     (method ^:public evalIn [this ^Compiler$Frame f]
+      ;; a resolved constructor is compiled code's new (NewExpr.emit: NEW, then the
+      ;; arguments, then invokespecial): of an abstract class, the JVM's NEW throws
+      ;; InstantiationError, naming the class, before the arguments are evaluated (the
+      ;; reflective path below gives Constructor.newInstance's InstantiationException, as
+      ;; the JVM's Reflector.invokeConstructor does)
+      (when (and (some? ctor) (java.lang.reflect.Modifier/isAbstract (.getModifiers (Compiler$Evaluator/destub c))))
+        (throw (InstantiationError. (.getName (Compiler$Evaluator/destub c)))))
       (let [vs (Compiler$Evaluator/args args f)
             dc (Compiler$Evaluator/destub c)]
         (if (some? ctor)

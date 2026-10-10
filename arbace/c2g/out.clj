@@ -819,9 +819,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
         props? (m/translated? "java/util/Properties")
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
-        ;; the system loader; resources are the host's (the program's embedded sources), with
-        ;; no URLs (java.net is cut)
+        ;; the system loader; resources are the host's (the program's embedded sources, then
+        ;; ARBACE_PATH's files)
         loaders? (and (m/translated? "java/util/Collections") (m/translated? "java/io/ByteArrayInputStream"))
+        ;; getResource and getResources by URL (the class path's embedded resources and
+        ;; ARBACE_PATH's files; JRT-NOTES.md, "Resources by URL")
+        cp-resources? (m/translated? "jdk/internal/jrt/ClassPathResources")
         ci? (m/translated? "jdk/internal/jrt/CaseInsensitiveComparator")
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
@@ -863,15 +866,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     '(ClassLoader_GetSystemClassLoader__ClassLoader))
                                (sig "setContextClassLoader" '[ClassLoader_class] 'Prim_void 0x1 '(return nil))))
                    (list 'set! '(.-Methods (.Info ClassLoader_class))
-                         (list 'append '(.-Methods (.Info ClassLoader_class))
-                               (sig "getResources" '[String_class] 'Enumeration_class 0x1
-                                    '(Collections_EmptyEnumeration__Enumeration))
+                         (apply list 'append '(.-Methods (.Info ClassLoader_class))
+                               (concat
+                                 (if cp-resources?
+                                   ;; by URL: jdk.internal.jrt.ClassPathResources (overlay/jdk;
+                                   ;; JRT-NOTES.md, "Resources by URL"), a URLClassLoader's own
+                                   [(sig "getResource" '[String_class] 'URL_class 0x1
+                                         (list 'ClassPathResources_GetResource_ClassLoader_String__URL
+                                               '((inst As ClassLoader_I) this) s0))
+                                    (sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         (list 'ClassPathResources_GetResources_ClassLoader_String__Enumeration
+                                               '((inst As ClassLoader_I) this) s0))]
+                                   [(sig "getResources" '[String_class] 'Enumeration_class 0x1
+                                         '(Collections_EmptyEnumeration__Enumeration))])
+                                 [
                                (sig "getResourceAsStream" '[String_class] 'InputStream_class 0x1
                                     '(let [(values b ok) (ResourceOrPath (.String (NN ((inst As (* String)) (aget args 0)))))]
                                        (when (not ok) (return nil))
                                        (let [a (NewByteArray (conv int32 (len b)))]
                                          (range [i x b] (aset (.-A a) i (conv int8 x)))
-                                         (return (ByteArrayInputStream_New_B1 a)))))))])
+                                         (return (ByteArrayInputStream_New_B1 a)))))])))])
                 (when instant?
                   [(list 'set! '(.-Methods (.Info Date_class))
                          (list 'append '(.-Methods (.Info Date_class))
