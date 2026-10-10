@@ -2363,3 +2363,327 @@ deterministically (a late `tryDeflate` over a thin lock, then over a new monitor
 recycled index, and no index freed twice); `TestMonitorContention` has 24 goroutines contend
 for 3 monitors with yields, so that inflation and deflation churn. On the old code the first
 fails every time and the second crashes in `lookupMonitor` as the suite did.
+
+# Time: java.time in the Go build
+
+Branch `go-time` (2026-10-10, the user's decision): `java.time` whole but the non-ISO
+chronologies, with the time-zone database, the zone rules provider, `java.time.format` and
+`java.time.temporal`; jdk26u's `java.util.TimeZone` in place of jrt's fixed-offset one; the
+locale data of java.base (CLDR's root and English) for the formatters' text, zone names and
+week rules; the system clock and the default zone from the host. Sources and their origins:
+JRT-SOURCES.md, "Time"; licences: LICENSE.md.
+
+## What was done
+
+**java.time translated from jdk26u.** `java.time`, `java.time.temporal`, `java.time.format`
+and `java.time.zone` are translated whole but their serialization proxies (the `Ser` classes:
+`writeReplace` throws; java.time.zone's `Ser` is in, its read methods load the database) and
+`java.time.chrono` with the ISO chronology alone (`AbstractChronology`, `Chrono*`, `Era`,
+`IsoChronology`, `IsoEra`): **the Hijrah, Japanese, Minguo and Thai Buddhist chronologies are
+cut** (`Chronology.of("Japanese")` is the JDK's `DateTimeException("Unknown chronology")`,
+`getAvailableChronologies` has ISO alone; the Japanese calendar needs
+`sun.util.calendar.LocalGregorianCalendar` and its properties, the Hijrah one its configuration
+file). With them `DateTimeHelper` (the local types' `toString`), `ParsePosition`, `DataInput`
+and the exceptions of a corrupt database. `DateTimeFormatter.toFormat` throws (`java.text.Format`
+is not in the world). The variant of `Instant` (`toString` through jrt's `TimeText`, `now()` in
+milliseconds) and `TimeText` are gone: `Instant.toString` is `ISO_INSTANT`'s, `now()` is
+`Clock`'s, at the host clock's nanoseconds (`VM.getNanoTimeAdjustment`, jrt).
+
+Variants (`overlay/jdk/variants/`), each with its reason in its header:
+
+| class | variant |
+|---|---|
+| `ZoneRulesProvider` | the static initializer registers `TzdbZoneRulesProvider` alone (no `ServiceLoader`, the property `java.time.zone.DefaultZoneRulesProvider` not read); the provider list a synchronized `ArrayList` (no `CopyOnWriteArrayList`) |
+| `TzdbZoneRulesProvider`, `ZoneInfoFile` | read `tzdb.dat` from the embedded resource `lib/tzdb.dat` (`Class.getResourceAsStream`, RD1) where the JDK reads `$JAVA_HOME/lib/tzdb.dat` |
+| `AbstractChronology` | the cache registers `IsoChronology` alone; no `ServiceLoader` lookups |
+| `ZoneOffset` | the cache by quarter hours a `ConcurrentHashMap` (no `AtomicReferenceArray`); still one instance per quarter-hour offset |
+| `TimeZone` | the default zone set as the JDK sets it, `user.timezone` through `System.getProperty`/`setProperty` (jrt's `getProperties` is a copy); the package-private `getOffsets(long, int[])` cut (below) |
+| `CRC32` | the static initializer (the zip library) and the direct-buffer natives cut |
+| `OpenListResourceBundle` | its lazy map and key set in volatile fields (`java.lang.LazyConstant` is a preview API outside the world) |
+| `CLDRBaseLocaleDataMetaInfo` | the static initializer (parent locales and language aliases by `Locale.forLanguageTag`, which jrt's `Locale` has not) cut; the canonical zone IDs kept |
+
+**The time-zone database.** `bin/jrt-convert` makes `lib/tzdb.dat` as
+`make/modules/java.base/gendata/GendataTZDB.gmk` does (`TzdbZoneRulesCompiler` with
+java.time.zone's `ZoneRules`, `ZoneOffsetTransition`, `ZoneOffsetTransitionRule` and `Ser`
+copied into its package as `make/CopyInterimTZDB.gmk` copies them, on the generator JDK, over
+`src/java.base/share/data/tzdata`, tzdata2026b) into `.tmp/jrt/data`, compares it byte for byte
+with the image's `jdk/lib/tzdb.dat` (102,956 bytes, the same), and `bin/c2g --program` embeds it
+(RD1's resource data; the path `lib/` is the image's, so that the data directory mirrors the
+JDK image: module resources under their package, image files under `lib/`).
+
+**java.util.TimeZone is jdk26u's.** jrt's own `TimeZone` and `sun.util.calendar.ZoneInfo`
+(fixed offsets, region IDs as GMT) are replaced by jdk26u's `TimeZone`, `SimpleTimeZone`,
+`ZoneInfo` and `ZoneInfoFile` (which reads the same `tzdb.dat`), with the `sun.util.calendar`
+classes they compute with (`AbstractCalendar`, `BaseCalendar`, `CalendarDate`,
+`CalendarSystem`, `CalendarUtils`, `Era`, `Gregorian`, `JulianCalendar`,
+`ImmutableGregorianDate`) and `CRC32` (ZoneInfo's checksum; its two natives are jrt's over Go's
+`hash/crc32`). jrt's own `GregorianCalendar` takes a `ZoneInfo`'s offsets as jdk26u's does
+(`getOffsets` by the instant, `getOffsetsByWall` by the wall time), so a `Calendar` in
+`Europe/Paris` has its DST, and gains `toZonedDateTime` and `from(ZonedDateTime)`. Two names had
+to be dealt with: `sun.util.calendar.Era` collides with `java.time.chrono.Era` in Go (the rename
+table: `Calendar_Era`), and the first **package-private pair across packages** c2g found
+(C2G-SPEC §4.4, W4): `TimeZone.getOffsets(long, int[])` (package-private, java.util) and
+`ZoneInfo.getOffsets(long, int[])` (public, sun.util.calendar), which Go would make an override.
+The variant cuts `TimeZone`'s: only java.util's calendars call it (jdk26u's `GregorianCalendar`
+and `JapaneseImperialCalendar`, not in the world; jrt's `GregorianCalendar` computes the same
+from `getRawOffset` and `getOffset`), and `SimpleTimeZone` keeps its own, which nothing outside
+java.util reaches. A member entry of the rename table (§4.4's cure) was not needed.
+
+**The default zone and the clock come from the host.** `TimeZone.getDefault()` is jdk26u's
+`setDefaultZone`: `user.timezone` (settable with `JAVA_TOOL_OPTIONS=-Duser.timezone=...`, as on
+the JVM), else the natives `getSystemTimeZoneID` and `getSystemGMTOffsetID`, jrt's
+(`timezone.clj`), which follow jdk26u's `TimeZone_md.c` on Linux: `TZ` (without a leading `:` or
+`posix/`), else `/etc/localtime`'s symbolic link target after `zoneinfo/`, else the file of
+`/usr/share/zoneinfo` with the same contents (`UTC` and `GMT` first, then the directory in
+sorted order where the C code takes `readdir`'s, skipping hidden names, `ROC`, `posixrules`,
+`localtime`); an ID Java does not know falls back to the host's offset now (Go's local time) as
+`GMT+hh:mm`. The symbolic link is read through **`HostLinks`**, an optional interface of the
+host (`Readlink`; B1a's `OSHost` implements it over `os.Readlink`); the files through `Host`,
+which is unchanged. Checked against the JVM with `TZ` unset, `Europe/Paris`,
+`:America/New_York`, `posix/Asia/Tokyo`, `Bogus/Zone`, `EST5EDT`, `UTC` and
+`JAVA_TOOL_OPTIONS=-Duser.timezone=Asia/Kolkata`: the same zone, ID, property and names; jrt's
+test `TestSystemTimeZoneID` covers the file cases over a host whose files are a temporary
+directory's.
+
+**java.util.Date in the default zone.** jrt's hand-written `Date` (decision 7) computed its
+local fields and `toString` in GMT; with a real default zone that differed from the JVM on any
+host not in GMT. Its deprecated field accessors, `getTimezoneOffset`, `toString` and the
+deprecated local constructors now take the default zone through three hooks
+(`DateZoneOffset`, `DateZoneOffsetByWall`, `DateZoneName`), which c2g sets (its support code)
+to jrt's own Java `jdk.internal.jrt.DefaultZone` over the translated `TimeZone` (jrt's `Date`
+cannot name it); jrt's own tests, without the hooks, keep GMT. `Date.UTC`, `toGMTString` and
+`#inst`'s text stay GMT's. Checked against the JVM in GMT, `Europe/Paris`,
+`America/New_York` and `Asia/Kolkata`: `toString`, `getHours`, `getTimezoneOffset`, a local
+constructor in Paris's spring gap and `java.sql.Timestamp`'s `toString` (over `getYear` ...)
+are the JVM's. `Date.from(Instant)` now wraps `toEpochMilli`'s overflow in an
+`IllegalArgumentException`, as jdk26u's does (c2g's table entry).
+
+**The locale data: java.base's CLDR data, generated as the JDK build generates it.**
+`DateTimeFormatter`'s text (months, days, eras, AM/PM and day periods, quarters, field names),
+its localized styles (`ofLocalizedDate`...) and skeletons (`ofLocalizedPattern`),
+`WeekFields.of(Locale)`, and the zone names (`z`, `v`, `TimeZone.getDisplayName`,
+`ZoneId.getDisplayName`, zone name
+parsing) come from the JDK's locale providers, which read CLDR's data through resource bundles.
+`bin/jrt-convert` runs `build.tools.cldrconverter.CLDRConverter` as
+`make/modules/java.base/Gensrc.gmk` does (`-baselocales en-US -basemodule`, on
+`make/data/cldr/common`, CLDR 48, on the generator JDK) and takes into the closure
+`sun.text.resources.cldr.FormatData` and `FormatData_en`,
+`sun.util.resources.cldr.TimeZoneNames`, `TimeZoneNames_en` and `CalendarData`,
+`sun.util.cldr.CLDRBaseLocaleDataMetaInfo` and
+`java.time.format.ZoneName`: **all 7 byte-identical to the JDK build's** `support/gensrc`
+(compared with the other generated files, `generated.edn`). They are java.base's own locale
+data, the root locale's and English's; the JDK's others are `jdk.localedata`'s.
+
+The providers are jrt's own Java (`overlay/jdk/java.base/sun/util/locale/provider/`), in place
+of jrt's hand-written Go `LocaleProviderAdapter`, `LocaleResources` and
+`ResourceBundleBasedAdapter` (which Formatter's number patterns used; gone from `locale.clj`
+and the manifest): `LocaleProviderAdapter` (one adapter, of type CLDR, every provider class and
+locale), `LocaleResources` (a locale's bundles: `FormatData_en` then `FormatData` for the
+English language, `FormatData` alone for the others; their lookups transcribed from jdk26u's),
+`CalendarDataUtility` (`CalendarNameProviderImpl`'s keys and lookups, the week parameters by
+region from `CalendarData` as `CLDRCalendarDataProviderImpl`), `TimeZoneNameUtility`
+(`TimeZoneNameProviderImpl` and `CLDRTimeZoneNameProviderImpl`: the bundles' names, then the
+names CLDR derives where it has none: parent locales, the canonical zone, a fixed zone's
+generic name, the region format over the exemplar city, the GMT format; and
+`TimeZoneNameGetter`'s alias search), `JavaTimeDateTimePatternImpl` (over jdk26u's
+`JavaTimeDateTimePatternProvider` and `LocaleServiceProvider`, translated) and the marker
+`ResourceBundleBasedAdapter`. `LocaleServiceProviderPool`'s lookup is emulated: a locale's
+candidate locales (language_COUNTRY_variant, language_COUNTRY, language, root) that java.base's
+CLDR adapter supports (the root locale, `en`, `en_US`, `en_US_POSIX`), the first answer wins.
+The bundles need `java.util.ResourceBundle`: jrt's own, the lookups of a bundle and its parents
+(`getObject`, `containsKey`, `keySet`, transcribed) without `getBundle` and its loading; jdk26u's
+`ListResourceBundle`, `OpenListResourceBundle`, `TimeZoneNamesBundle`,
+`ResourceBundleEnumeration` and `MissingResourceException` are translated. `MessageFormat`
+(the CLDR date-time and region patterns) is a small subset in `LocaleResources`: quotes and
+`{n}` of strings, all those patterns hold.
+
+**Checked against the JDK before the Go build**: the providers compiled into a package of their
+own and run on the JVM next to the JDK's (`.tmp/lh`, scratch): **0 differences in 6,677
+lookups**: the 7 names of each of `TimeZone.getAvailableIDs()`' 632 zones in the root locale,
+`en` and `en_US`, the java.time names of eras, months, days and AM/PM in every style (the
+narrow months of `en`, whose duplicates make the JDK fall through to the root locale's
+numbers, found the candidate iteration missing), the date-time patterns of every style pair,
+the whole `FormatData` key set and values, the rules, the number patterns, 20 skeletons per
+locale, the week parameters of 8 locales.
+
+**Locale.** jrt's `Locale` gains `hasExtensions` (false), `stripExtensions`,
+`getUnicodeLocaleType` (null, after the JDK's check of the key: java.time asks for `ca`, `nu`,
+`rg`, `tz`, `fw`) and the JDK's other locale constants (`FRANCE`, `GERMANY`, `JAPAN`, ...);
+`DecimalFormatSymbols.getAvailableLocales` (`DecimalStyle`). Other locales than English and the
+root locale take the root locale's data, other English regions `en`'s (the JVM has
+`jdk.localedata`: `Locale.FRANCE`'s `juin`, `en_GB`'s `pm`): a deviation, 3 oracle cases (TM4).
+The week parameters are by region for every locale, as the JDK's.
+
+## Found on the way (c2g)
+
+- **Reflection reached stubs of unrooted overrides.** With `--program` the roots are every
+  public member of every class the REPL can name (RD2 leaves out `sun.*` and `jdk.internal.*`),
+  as direct entries: a REPL call of `TimeZone.observesDaylightTime` on a `ZoneInfo` found
+  `ZoneInfo`'s override a stub ("c2g: not translated"), nothing in Java having called it
+  virtually. A root instance method is now also a virtual call (`arbace/c2g/reach.clj`), so its
+  overrides in every instantiated class are translated: on main's world 19 methods more
+  (19,574 to 19,593).
+- **Reachability indexed.** With about 20,000 roots as virtual calls the reachability pass,
+  which matched each virtual call against every instantiated class and each new class against
+  every virtual call, took 167 s (68 s before on main); virtual calls are now indexed by their
+  receiver's type and instantiated classes by their supertypes: **3.6 s**, the same 21,511
+  methods reached (this branch before its last merge of main; checked against the scan on the
+  same input: the same translation but for
+  the order of a few overloads in five classes' member tables, which follows the order bridges
+  are added in).
+- `SoftReference_Cast`, `WeakReference_Cast` (jrt): java.time's caches cast to `SoftReference`.
+
+## Results
+
+- **`bin/jrt-convert`**: 580 Java files (475 on main at `1addaf2`; JRT-SOURCES.md, "Time"), all
+  converted; compiled from their class forms to javac's class shapes: 576 identical and the 4
+  known differences, 1,640 classes (deterministic: `--twice` gives the same sources, data and
+  class forms); the 26 generated sources byte-identical to the JDK build's (the 7 CLDR files
+  among them), the 4 data files to its image (`tzdb.dat` among them).
+- **`bin/c2g --program`**: 2,456 classes, 22,123 methods reached (main: 2,286 and 19,574), 389
+  with missing parts; the operations of the new classes that name something outside the world
+  are serialization's (`writeExternal`, `writeReplace`, `readObject`), `DateTimeFormatter.toFormat`
+  (`java.text.Format`), `CalendarSystem.forName("japanese")`, and `DateTimeTextProvider`'s
+  comparisons with `JapaneseChronology.INSTANCE`, which only a non-ISO chronology reaches.
+- **The oracle**: the new forms `test/oracle/forms/time.clj` (273: local and zoned types, instants,
+  durations, periods, zones and rules across DST, gaps and overlaps, offsets in 1890, 1950,
+  2025 and 2040, formatters ISO, pattern letters, localized styles and skeletons, parsing with
+  resolver styles and zone names, temporal fields, the ISO chronology, `TimeZone`, `Calendar`,
+  `Date`, `Timestamp`, `TimeUnit`, `%t`) and `time_zones.clj` (57: every zone's 4 or 6 names in
+  the US English and root locales, 632 zones), recorded on the JVM: **327 of 330** on Go, the 3
+  others the locale deviation (TM4: `Locale.FRANCE` and `UK`), added to
+  `test/oracle/known-go-amd64.edn`. The whole oracle on Go: 21,265 of 21,518 cases; the 253
+  mismatches are the 11 known ones (8 before, these 3) and 242 cases of `defclass.clj` and
+  `defclass_corpus.clj` that fail on main too (go-juc's build at main `70e6701` fails them
+  alike: "proxy of arbace.asm.ClassVisitor is not in the Go build" loading
+  `arbace.classes.native`; cf-repl's build passes them), not this branch's. Four forms printed
+  a `Parsed` (`{InstantSeconds=..., OffsetSeconds=0}`): its fields are a `HashMap` keyed by
+  enums, whose order follows their identity hashes, the JVM's not reproducible; they print the
+  fields one by one instead.
+- **Clojure's suite on Go**: 19,628 of 19,632 assertions (the 4 errors of `java.io`, expected),
+  66 namespaces, test.generative 26 of 26, no regressions against `test/arbace-go-results.edn`
+  (`reader`'s `#inst` tests: 7,796 of 7,796).
+- **`bin/arbace-go --smoke`**: passes. **`bin/jrt test`**: passes on amd64 and on arm64 under
+  `qemu-aarch64` (with `TestSystemTimeZoneID` and `TestCRC32`; `TestReflectAgainstJVM` needs
+  `bin/jrt testdata` again, which `bin/jrt test` does only when `test/jrt` changed, for
+  `Locale`'s and `DecimalFormatSymbols`' new members).
+- **The host's zone** (above): the JVM's in 8 settings; **Date** in 4 zones: the JVM's.
+- **Coverage** (`bin/jrt-coverage`, java.base's exported API): provided 7,745 of 17,546 members
+  (44.1%; main at `1addaf2`: 6,297, 35.9%), 508 classes in Go (442); **`java.time` and its
+  subpackages 1,353 of 1,565 (86.5%; was 25, 1.6%)**: `java.time`, `java.time.temporal`,
+  `java.time.zone` 100%, `java.time.format` 139 of 141 (`toFormat`), `java.time.chrono` 182 of
+  392 (the 12 classes of the cut chronologies).
+- **Start** (amd64): `-e nil` 0.19-0.32 s; the first `ZonedDateTime` in a region zone (loading
+  `tzdb.dat`) 0.19-0.21 s in all; a parse of a zone name (the prefix tree of all names) 0.28 s.
+
+## Size
+
+Measured against main at `1addaf2`, both built by `bin/arbace-go --build` (amd64, with the image
+of prepared namespaces, which is unchanged: 5,949,856 to 5,949,858 bytes): **88,241,171 to
+99,615,862 bytes (+11.37 MB, +12.9%)**. Of it, Go's symbols (`go tool nm -size`) +5.82 MB:
+java.base's CLDR data, as the generated classes' code, 1.01 MB (`FormatData` 0.49,
+`TimeZoneNames` 0.35, `ZoneName` 0.13, `CLDRBaseLocaleDataMetaInfo` 0.04); the translated
+classes of java.time, `TimeZone`, `sun.util.calendar`, the providers and the bundles 0.94 MB;
+function literals 2.00 MB and the member tables' initialization 0.84 MB (the reflection of
+about 1,450 more public members the REPL can call); the evaluator's dynamic types (`Dyn` and the
+17 `DynSub_C` of `arbace/lang`, which implement every interface of the world: java.time's
+`Temporal`, `TemporalAccessor`, `ChronoLocalDate` ... now too) 1.00 MB; the rest is Go's tables
+(line tables, type data). `tzdb.dat` adds 0.10 MB of data. The CLDR bundles as code are the
+largest single part; kept as the JDK's sources (fidelity) rather than turned into resource data.
+
+## Decisions
+
+- The locale data are java.base's CLDR data, generated and translated (fidelity: the JDK's own
+  data and lookups for the root and English locales, checked equal on 6,677 lookups), not
+  hand-written English tables (consistent with jrt's root-locale `DecimalFormatSymbols`, but
+  each name and pattern a chance to differ; zone names alone are thousands) nor a dump of the
+  running JDK's answers (exact, but data made by running the JVM, not as the build makes them).
+  The providers are transcribed rather than translated: jdk26u's adapter classes reach
+  `LocaleServiceProviderPool`, `ResourceBundle.getBundle` with its controls and module loading,
+  and the service loader.
+- jdk26u's `TimeZone` translated (with `ZoneInfo`, `ZoneInfoFile`, `sun.util.calendar`) rather
+  than jrt's own extended with region zones over `ZoneRules`: the JDK's semantics exactly
+  (`ZoneInfo`'s raw offsets and DST savings, `toString`, `getAvailableIDs`, the old short IDs).
+- The non-ISO chronologies cut (the task allowed it): the Japanese one needs
+  `LocalGregorianCalendar` and its era properties, the Hijrah one its configuration resource; the
+  Minguo and Thai Buddhist ones would be cheap but alone half a set.
+- `Date` follows the default zone (hooks) rather than staying GMT: with the host's zone the JVM
+  and the Go build would otherwise print different `toString`s.
+
+## Proposed amendments (for the user's review)
+
+Numbered TM (time); no TM appears elsewhere in doc/.
+
+- **TM1 (C2G-SPEC §4.1, the closed world; JRT-SOURCES.md)** `java.time` is in the world:
+  `java.time`, `.temporal`, `.format`, `.zone` whole but the serialization proxies, `.chrono`
+  with the ISO chronology alone (Hijrah, Japanese, Minguo, Thai Buddhist cut: `Chronology.of`
+  of them is the JDK's unknown-chronology exception); `DateTimeFormatter.toFormat` throws
+  (`java.text.Format` is outside); variants for `ZoneRulesProvider`, `TzdbZoneRulesProvider`,
+  `AbstractChronology`, `ZoneOffset` (above). `Instant`'s variant and jrt's `TimeText` are gone.
+- **TM2 (C2G-SPEC §10.3, RD1; JRT-SOURCES.md, RD4)** The resource data include an image file,
+  `lib/tzdb.dat`, made as `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib`
+  (a data file under `lib/` is the image's, the others the module's); `TzdbZoneRulesProvider`
+  and `ZoneInfoFile` read it as the resource `/lib/tzdb.dat`.
+- **TM3 (JRT-SOURCES.md, RD4)** The generated sources include java.base's CLDR data, made by
+  the JDK build's `CLDRConverter` with the build's arguments and compared byte for byte:
+  `FormatData`, `FormatData_en`, `TimeZoneNames`, `TimeZoneNames_en`, `CalendarData`,
+  `CLDRBaseLocaleDataMetaInfo` (its static initializer cut: parent locales and language
+  aliases need `Locale.forLanguageTag`), `ZoneName`.
+- **TM4 (C2G-SPEC §4.1, jrt's own Java, K1; §9.1, the manifest)** The locale providers are
+  jrt's own Java over those bundles (`LocaleProviderAdapter`, `LocaleResources`,
+  `CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`,
+  `ResourceBundleBasedAdapter`; their lookups transcribed from jdk26u, LICENSE.md), with a jrt
+  `java.util.ResourceBundle` without `getBundle`; jrt's hand-written `LocaleProviderAdapter`,
+  `LocaleResources` and `ResourceBundleBasedAdapter` (Go) are removed. **The locale data are the
+  root locale's and English's** (java.base's): another language takes the root locale's data,
+  another English region `en`'s, where the JVM has `jdk.localedata`'s (a deviation; 3 oracle
+  cases). The week parameters are by region for every locale. jrt's `Locale` answers
+  `getUnicodeLocaleType` (null), `hasExtensions` (false), `stripExtensions`, and has the JDK's
+  locale constants.
+- **TM5 (C2G-SPEC §4.1)** `java.util.TimeZone` is jdk26u's (with `SimpleTimeZone`, `ZoneInfo`,
+  `ZoneInfoFile`, `sun.util.calendar`, `CRC32`), replacing jrt's own fixed-offset `TimeZone` and
+  `ZoneInfo`; jrt's `GregorianCalendar` takes a `ZoneInfo`'s offsets as the JDK's, and has
+  `toZonedDateTime` and `from`; jrt's `Date` computes its local fields, `toString` and its local
+  constructors in the default zone through hooks c2g sets to jrt's `jdk.internal.jrt.DefaultZone`.
+- **TM6 (C2G-SPEC §9.4, the host interface)** The default zone is the host's, as the JDK finds
+  it on Linux (`TZ`, `/etc/localtime`; jrt's natives of `TimeZone`, after `TimeZone_md.c`),
+  with a second optional interface of the host, `HostLinks` (`Readlink`), as `HostFS` is; the
+  clock of `java.time.Clock` is the host's with its nanoseconds (`VM.getNanoTimeAdjustment`), so
+  `Instant.now()` is no longer in milliseconds.
+- **TM7 (C2G-SPEC §4.4, the rename table; W4)** `sun.util.calendar.Era` is `Calendar_Era` in
+  Go; the first package-private pair across packages c2g found, `TimeZone.getOffsets(long,
+  int[])` and `ZoneInfo`'s public one, is resolved by a variant that cuts `TimeZone`'s (nothing
+  in the world calls it on a `TimeZone`) instead of a member entry in the rename table, which
+  W4 foresaw and c2g has no mechanism for (a renamed method would need its callers' and
+  overrides' names to follow).
+- **TM8 (C2G-SPEC §10.6, the REPL's world; P2, RD2)** A root instance method is a virtual call
+  too: its overrides in every instantiated class are translated, those of classes the REPL
+  cannot name (RD2's) included, so that reflection on their instances does not reach a stub.
+  Reachability indexes virtual calls by receiver type (167 s to 3.6 s with the roots as virtual
+  calls; 68 s on main before).
+- **TM9 (`bin/jrt-convert`'s shape check)** In the overlay chunk the checker takes jrt's own
+  classes from their sources (`FROM_SOURCE`), not the running JDK's of the same names.
+
+## Sources
+
+https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/java/time/`
+(the files JRT-SOURCES.md, "Time", lists); `java/util/TimeZone.java`, `SimpleTimeZone.java`,
+`ListResourceBundle.java`, `MissingResourceException.java`, `ResourceBundle.java` (transcribed
+in part), `zip/CRC32.java`, `zip/Checksum.java`, `spi/LocaleServiceProvider.java`;
+`sun/util/calendar/` (the files listed); `sun/util/ResourceBundleEnumeration.java`,
+`sun/util/resources/OpenListResourceBundle.java`, `TimeZoneNamesBundle.java`;
+`sun/util/locale/provider/LocaleDataMetaInfo.java`, `sun/text/spi/JavaTimeDateTimePatternProvider.java`;
+transcribed in part: `sun/util/locale/provider/LocaleProviderAdapter.java`,
+`LocaleResources.java`, `CalendarDataUtility.java`, `CalendarNameProviderImpl.java`,
+`TimeZoneNameUtility.java`, `TimeZoneNameProviderImpl.java`, `JavaTimeDateTimePatternImpl.java`,
+`sun/util/cldr/CLDRCalendarDataProviderImpl.java`, `CLDRTimeZoneNameProviderImpl.java`,
+`CLDRLocaleProviderAdapter.java`; followed in Go: `src/java.base/unix/native/libjava/TimeZone_md.c`;
+`jdk/internal/util/DateTimeHelper.java`, `java/text/ParsePosition.java`, `java/io/DataInput.java`,
+`StreamCorruptedException.java`, `InvalidObjectException.java`;
+`make/modules/java.base/gendata/GendataTZDB.gmk`, `make/CopyInterimTZDB.gmk`,
+`make/jdk/src/classes/build/tools/tzdb/`, `src/java.base/share/data/tzdata/`;
+`make/modules/java.base/Gensrc.gmk` (GensrcCLDR), `make/ToolsJdk.gmk`, `make/CompileToolsJdk.gmk`,
+`make/jdk/src/classes/build/tools/cldrconverter/`, `make/data/cldr/common/`,
+`src/java.base/share/classes/java/time/format/ZoneName.java.template`;
+`src/java.base/share/legal/cldr.md`. The JDK build's outputs compared against:
+`build/linux-x86_64-server-release/support/gensrc/java.base/` and `jdk/lib/tzdb.dat`.

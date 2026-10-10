@@ -342,3 +342,69 @@ Two options of the conversion (amendment S2):
   the class's captured variables in capture order, javac in reverse (`Collectors` 3,
   `Gatherers` 9, `MatchOps` 12), and an `InnerClasses` entry javac's stack map frames name
   (`Nodes` 2).
+
+## Time (2026-10-10)
+
+java.time in the Go build (JRT-NOTES.md, "Time"; the user's decision of 2026-10-10), from jdk26u
+at `baf63fb`, `test/g2c/jrt_sources.clj`'s `time-sources` and `added-gensrc`:
+
+- **Sources added** (`time-sources`, 94 files of `src/java.base/share/classes`; `MissingResourceException` is also `util-sources`'): `java/time/`
+  but `Ser.java` (`Clock`, `DayOfWeek`, `Duration`, `InstantSource`, `LocalDate`,
+  `LocalDateTime`, `LocalTime`, `Month`, `MonthDay`, `OffsetDateTime`, `OffsetTime`, `Period`,
+  `Year`, `YearMonth`, `ZoneId`, `ZoneOffset`, `ZoneRegion`, `ZonedDateTime`; `Instant` and
+  `DateTimeException` were in); `java/time/chrono/`'s ISO part (`AbstractChronology`,
+  `ChronoLocalDate`, `ChronoLocalDateImpl`, `ChronoLocalDateTime`, `ChronoLocalDateTimeImpl`,
+  `ChronoPeriod`, `ChronoPeriodImpl`, `ChronoZonedDateTime`, `ChronoZonedDateTimeImpl`,
+  `Chronology`, `Era`, `IsoChronology`, `IsoEra`); `java/time/format/` (but the template of
+  `ZoneName`, generated below); `java/time/temporal/`; `java/time/zone/` (with its `Ser`, which
+  reads the database); `jdk/internal/util/DateTimeHelper`, `java/text/ParsePosition`,
+  `java/io/DataInput`, `StreamCorruptedException`, `InvalidObjectException`; jdk26u's
+  `java/util/TimeZone`, `SimpleTimeZone`, `zip/CRC32`, `zip/Checksum` and
+  `sun/util/calendar/`'s `ZoneInfo`, `ZoneInfoFile`, `AbstractCalendar`, `BaseCalendar`,
+  `CalendarDate`, `CalendarSystem`, `CalendarUtils`, `Era`, `Gregorian`, `JulianCalendar`,
+  `ImmutableGregorianDate` (jrt's own `TimeZone.java` and `sun/util/calendar/ZoneInfo.java` are
+  gone from the overlay, and `jdk/internal/jrt/TimeText.java`); the bundles' classes
+  `java/util/ListResourceBundle`, `MissingResourceException`, `sun/util/ResourceBundleEnumeration`,
+  `sun/util/resources/OpenListResourceBundle`, `TimeZoneNamesBundle`,
+  `sun/util/locale/provider/LocaleDataMetaInfo`, `java/util/spi/LocaleServiceProvider`,
+  `sun/text/spi/JavaTimeDateTimePatternProvider`.
+- **jrt's own Java** (KIND `overlay`): `java/util/ResourceBundle`, `jdk/internal/jrt/DefaultZone`,
+  and `sun/util/locale/provider/`'s `LocaleProviderAdapter`, `LocaleResources`,
+  `CalendarDataUtility`, `TimeZoneNameUtility`, `JavaTimeDateTimePatternImpl`,
+  `ResourceBundleBasedAdapter` (parts transcribed from jdk26u: LICENSE.md).
+- **Generated sources** (`added-gensrc`, the `generate` step): java.base's CLDR data as
+  `make/modules/java.base/Gensrc.gmk`'s `GensrcCLDR` makes it: `build.tools.cldrconverter.CLDRConverter`
+  (`make/jdk/src/classes/build/tools/cldrconverter/`, compiled with the generator JDK, its
+  `*.properties` copied next to its classes as `make/CompileToolsJdk.gmk` copies them) run with
+  the build's arguments (`-base make/data/cldr/common -baselocales "en-US" -basemodule -year
+  COPYRIGHT_YEAR -zntempfile .../java/time/format/ZoneName.java.template -tzdatadir
+  src/java.base/share/data/tzdata -utf8`, the year from the build's `spec.gmk`) into a directory
+  of its own, of which the closure takes `sun/text/resources/cldr/FormatData.java`,
+  `FormatData_en.java`, `sun/util/resources/cldr/TimeZoneNames.java`, `TimeZoneNames_en.java`,
+  `CalendarData.java`, `sun/util/cldr/CLDRBaseLocaleDataMetaInfo.java` and
+  `java/time/format/ZoneName.java` (the tool writes more: `LocaleNames`, `CurrencyNames`,
+  `FormatData_en_US_POSIX`, Windows' `tzmappings`). **All 7 are byte-identical to the JDK
+  build's** `support/gensrc/java.base` (`generated.edn`), on the generator JDK as before; about
+  11 s.
+- **Data** (`generate`, into `$JRT_WORK/data`): `lib/tzdb.dat`, as
+  `make/modules/java.base/gendata/GendataTZDB.gmk` makes it: `build.tools.tzdb.TzdbZoneRulesCompiler`
+  (`make/jdk/src/classes/build/tools/tzdb/`) compiled with `java/time/zone/`'s `ZoneRules`,
+  `ZoneOffsetTransition`, `ZoneOffsetTransitionRule` and `Ser` copied into its package
+  (`package java.time.zone` to `package build.tools.tzdb`, as `make/CopyInterimTZDB.gmk` does)
+  and run on `src/java.base/share/data/tzdata` with the build's file list (`africa antarctica asia
+  australasia europe northamerica southamerica backward etcetera gmt jdk11_backward`). **Byte-identical
+  to the image's** `jdk/lib/tzdb.dat` (102,956 bytes; a data file under `lib/` is compared with
+  the image's `jdk/lib`, the others with `jdk/modules/java.base`). `bin/c2g --program` embeds it as
+  the resource `lib/tzdb.dat`.
+- **The shape check** (`check`): jrt's own Java that replaces a JDK class and adds members to it
+  (`LocaleResources.candidateLocales`, `JavaTimeDateTimePatternImpl.INSTANCE`) is compiled by
+  `bin/class-forms-check` one file at a time, and the other files of its chunk found the
+  running JDK's class of that name, without the members. The checker takes the classes of
+  `FROM_SOURCE` (internal names, their nested classes too) from the sources only
+  (`test/classes/check_converted.clj`, `env/*from-source*`), and `bin/jrt-convert` gives it the
+  overlay chunk's classes.
+- **Result**: 580 files (475 on main at `1addaf2`): 525 of `share` (432), 3 `unix`, 26
+  generated (19), 24 of jrt's own (19: 8 added, `TimeZone`, `ZoneInfo` and `TimeText` gone), 2
+  of `java.sql`; all converted and compiled to javac's class shapes, 576 identical and the 4
+  known differences, 1,640 classes; deterministic (`--twice`); 26 of 26 generated sources and 4
+  of 4 data files equal to the JDK build's.
