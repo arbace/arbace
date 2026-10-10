@@ -80,6 +80,15 @@ run-time side the bytecode had.
   analyzer's `closeOver` adds it to every fn in between).
 - Primitive locals (`^long`, `^double`, loop locals with primitive inits) hold boxed values;
   the analyzer has chosen the primitive overloads, and the invokers convert (§2.6).
+- **Locals clearing** (amendment SL1, accepted 2026-10-10): locals are cleared as compiled code
+  clears them (`ObjExpr.emitLocal`): after a use the analyzer marks `shouldClear` (and the
+  binding `canBeCleared`, not primitive), the slot is set to null, and in a `^:once` fn the
+  closed-over value too; a local in a statement position is not evaluated (compiled code emits
+  nothing for it). `ObjExpr.compile`'s variant makes `closesExprs` as the JVM's does, so the
+  analysis sees a closure's creation as a use, and capturing clears the creating frame's local
+  where its entry says so. A lazy seq's head held in a local is then not retained. Each fn's
+  class declares its closed-over locals as fields (C2G-SPEC §10.2), which reflection reads
+  (Clojure's `clearing` tests).
 
 ### 2.2 Functions
 
@@ -165,9 +174,15 @@ run-time side the bytecode had.
 - Hinted calls (`StaticMethodExpr`, `InstanceMethodExpr` with a `method`), fields
   (`StaticFieldExpr`, `InstanceFieldExpr`) and constructors (`NewExpr`): their `java.lang
   .reflect` objects come from jrt's member tables at analysis; evaluation calls
-  `Reflector.invokeMatchingMethod` as their `eval` does (done for the two method kinds), which
-  converts arguments by `boxArgs` and calls the table's invoker. Step 7 may call the invoker
-  directly with Go values (§10.1).
+  `Reflector.invokeMatchingMethod` as their `eval` does, which converts arguments by `boxArgs`
+  and calls the table's invoker. **As built** (amendment SL2, accepted 2026-10-10): a resolved
+  method of a public class is called through the table's invoker directly
+  (`Evaluator.invokeResolved`, jrt's native `InvokeDirect`): the arguments as `typedArgs` makes
+  them (the bytecode's casts and conversions, a fn adapted for a functional interface as
+  `Reflector.boxArg` adapts it), no selection, no `boxArgs` copy, an exception propagating as it
+  is (what Reflector's unwrapping of `InvocationTargetException` gave); a method of a non-public
+  class keeps Reflector's path (its accessible-base search). Step 7 may call the invoker with Go
+  values (§10.1).
 - Un-hinted calls: `Reflector` at run time, as on the JVM.
 - Functional interfaces: `Reflector.boxArg` adapts an `IFn` with `jrt.AdaptFn`, which is the
   interface's `ClassInfo.FromFn` that c2g now generates (phase 2B, §7 of the notes); inside
