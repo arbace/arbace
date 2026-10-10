@@ -75,9 +75,9 @@
     (when (some #(-> % first arbace.core/name (.contains "-")) methods)
       (throw
         (IllegalArgumentException. "Interface methods must not contain '-'")))
-    (let [c (arbace.lang.Compiler$Dyn/defineInterface
+    (let [c (arbace.lang.Compiler$Image/defineInterface
               (str name) (into-array Class (map the-class extends)))]
       (doseq [[mname pclasses rclass] methods]
-        (arbace.lang.Compiler$Dyn/addInterfaceMethod
+        (arbace.lang.Compiler$Image/addInterfaceMethod
           c (str mname) (into-array Class (map the-class pclasses)) (the-class rclass)))
       c)))

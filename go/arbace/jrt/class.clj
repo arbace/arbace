@@ -99,6 +99,7 @@ by ArrayClass (array classes, on demand) and for the primitive types (Prim_int .
 object. A second class of the same name is an error.\n"
   ^{:tag (* Class)} [^{:tag (* ClassInfo)} info]
   (let [c (addr (lit Class :info info))]
+    (presetClassHash c (.-Name info))
     (.Lock registryMu)
     (when (!= (aget registry (.-Name info)) nil)
       (.Unlock registryMu)
@@ -152,10 +153,12 @@ no such class (V9).\n"
 ;; the primitive types
 
 (go/func defPrim ^{:tag (* Class)} [^string name ^byte desc]
-  (addr (lit Class
-             :info (addr (lit ClassInfo :Name name :Kind KindPrimitive
-                              :Modifiers (bit-or AccPublic AccFinal AccAbstract)))
-             :desc desc)))
+  (let [c (addr (lit Class
+                     :info (addr (lit ClassInfo :Name name :Kind KindPrimitive
+                                      :Modifiers (bit-or AccPublic AccFinal AccAbstract)))
+                     :desc desc))]
+    (presetClassHash c name)
+    c))
 
 (go/var
   [^{:doc "Prim_boolean ... Prim_void are the primitive types' classes (Integer.TYPE ...).\n"}
@@ -215,6 +218,7 @@ first use and then shared.\n"
                                           :Super Object_class
                                           :Interfaces (lit (slice (* Class)) Cloneable_class Serializable_class)))
                          :comp c))]
+        (presetClassHash n name)
         (when (.CompareAndSwap (.-array c) nil n)
           (return n))
         (.Load (.-array c))))))

@@ -124,7 +124,12 @@
                 (^[Object/1] RT/map Compiler$Evaluator/EMBEDDED_LOAD
                                     (Boolean/valueOf (instance? java.io.ByteArrayInputStream ins))))
               (try
-                (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file)
+                ;; an embedded source: replayed from the program's image of prepared
+                ;; namespaces when it holds it, recorded when the program prepares them
+                ;; (Compiler$Image, doc/go/EXEC-NOTES.md)
+                (if (instance? java.io.ByteArrayInputStream ins)
+                    (Compiler$Image/load (InputStreamReader. ins UTF8) scriptfile file)
+                    (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file))
                 (finally
                   (Var/popThreadBindings)
                   (.close ins)
@@ -173,3 +178,14 @@
 (c2g/variant RT
   ;; (baseLoader and classForName: above, from phase 2A)
   (method ^:public ^:static makeClassLoader ^ClassLoader [] nil))
+
+;; B1a step 6 (doc/go/EXEC-NOTES.md): the boot ns macro (core.clj's first form) sets *ns* when it
+;; expands, so a source of the image of prepared namespaces replays that: an event of the image
+(c2g/variant RT
+  (field ^:static ^:final ^IFn bootNamespace
+    (anon AFn []
+      (method ^:public invoke [this __form __env arg1]
+        (let [nsname (cast Symbol arg1) ns (Namespace/findOrCreate nsname)]
+          (Compiler$Image/event (new Object/1 ["ns" nil nsname]))
+          (.set CURRENT_NS ns)
+          ns)))))

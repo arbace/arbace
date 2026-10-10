@@ -127,6 +127,9 @@
 (defn- define-proxy
   "The proxy class of super and interfaces named pname, made at run time."
   [^String pname ^Class super interfaces]
+  ;; made while a form is analyzed (proxy's expansion): an event of the image of prepared
+  ;; namespaces (Compiler$Image), which makes it again by get-proxy-class
+  (arbace.lang.Compiler$Image/event (object-array ["proxy" pname super (into-array Class interfaces)]))
   (let [c (Compiler$Dyn/defineProxyClass pname super (into-array Class (cons IProxy interfaces)))
         {sms :super ims :ifaces mb :bridges} (proxy-methods super interfaces)
         fns (volatile! {})]
