@@ -14,7 +14,7 @@ import java.security.SecureRandomParameters;
  * constructor parameter class (SecureRandomParameters for SecureRandom) when it has one, else
  * the one without parameters (if the parameter is null). The Go build's closed world has no
  * reflection on the classes of non-exported packages (C2G-SPEC §10.6), so the services of the
- * SUN and SunJCE providers are constructed here (SunJCE's by com.sun.crypto.provider.JrtServices:
+ * SUN and SunJCE providers are constructed here (SunJCE's by com.sun.crypto.provider.JceServices:
  * the classes are package-private), directly, with the same choice of
  * constructor, the same NoSuchMethodException when there is none, and whatever the constructor
  * throws wrapped in an InvocationTargetException, as Constructor.newInstance wraps it.
@@ -91,7 +91,7 @@ public final class JrtServices {
                 case "sun.security.provider.SHA3$SHAKE256Hash":
                     return new SHA3.SHAKE256Hash();
                 default:
-                    return com.sun.crypto.provider.JrtServices.newInstance(className);
+                    return com.sun.crypto.provider.JceServices.newInstance(className);
             }
         } catch (Throwable t) {
             throw new InvocationTargetException(t);

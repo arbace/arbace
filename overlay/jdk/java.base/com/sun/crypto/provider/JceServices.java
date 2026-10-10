@@ -9,8 +9,8 @@ import java.security.NoSuchAlgorithmException;
  * The SunJCE services of the Go build (doc/go/JRT-NOTES.md, "Security"), constructed directly for
  * sun.security.provider.JrtServices (HmacCore and its nested classes are package-private).
  */
-public final class JrtServices {
-    private JrtServices() {
+public final class JceServices {
+    private JceServices() {
     }
 
     /** A new instance of the SunJCE service class className, or null if it is not one. */

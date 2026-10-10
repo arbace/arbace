@@ -93,8 +93,8 @@ covers what.
   `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`) where they
   keep it: Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); the rest of those files, `NativePRNG.clj`, `jdk/internal/jrt/HostRandom.java` and the
-  two `JrtServices.java` (`sun/security/provider/`, `com/sun/crypto/provider/`) are Arbace's
+  below); the rest of those files, `NativePRNG.clj`, `jdk/internal/jrt/HostRandom.java`,
+  `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
   own.
 - `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds
   code transcribed from https://github.com/openjdk/jdk26u at `baf63fb`
