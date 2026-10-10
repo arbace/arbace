@@ -1097,3 +1097,40 @@ decision (2026-10-08).
   from C2G-SPEC §4.1; FS3 C2G-SPEC §9.4 (an optional `HostFS`); FS4 §4.4's rename table; FS5
   §8.4 (`RunMain` runs the shutdown hooks); FS6 §4.1 (files in the closed world) and §10.3
   (namespace variants); FS7 LICENSE.md, kept. C2G-SPEC §16 has a "Files" entry.
+
+## 2026-10-10: the suite's last failures on Go
+
+- Agent, branch `suite-last` (9 commits to `5072bae`), merged (`6a33be8`). Amendments SL1-SL7 in
+  EVAL-NOTES.md, "The suite's last failures".
+- SL1 locals clearing in the evaluator, as compiled code does (`arbace/lang/go/Compiler.clj`:
+  `closesExprs` as the JVM's `compile` builds it, a slot cleared after a `shouldClear` use,
+  closed-overs cleared in a `^:once` fn, statement-position locals skipped, a fn's class declares
+  its closed-overs as fields through `Dyn.defineFnField`): `clearing` 12 → 31 of 31; a lazy
+  seq's head is no longer retained (5e6 elements: 619 → 121 MB resident).
+- SL2 a hinted call of a resolved public method goes through jrt's invoker
+  (`Evaluator.invokeResolved`), skipping `Reflector`'s selection and wrapping: transducers' trial
+  11.5 → 8.6 ms (JVM 0.11). SL3 the Go reference skips single tests (`:skipped-tests`; only
+  `seq-and-transducer`). SL6 `arbace.java.api.Clojure` is in the program (`api` loads). SL7 c2g
+  cuts a fixed list of JDK classes the test libraries import (`embed/library-cuts`), so
+  test.generative runs on Go (26 specs pass; about 3 more minutes in the suite on Go).
+- arm64 under qemu (before the merges): the oracle's forms 10,079 of 10,082, the same 3
+  mismatches as amd64; 14 suite namespaces (14,904 assertions) as on amd64.
+- Not done, with costs (EVAL-NOTES.md): SL4 the suite's Java fixtures as a test build (about 450
+  assertions), SL5 embedding D6's `metadata`/`javadoc` namespaces, `ProcessBuilder`, SAX,
+  serialization.
+- The user's decisions: SL1, SL2, SL3's skip, SL6, SL7 accepted (to fold); of the proposals,
+  only SL3's per-namespace timeouts, for after step 7; SL4, SL5 and `ProcessBuilder` not now.
+- Main session on the merge: `bin/gate` (the runner changed) passed in 6m39s, the JVM suite
+  20,750 of 20,750, the Go check built afresh (308 s); the Go oracle 20,566 of 20,600 as
+  recorded; Clojure's suite on Go 19,506 of 19,506 assertions, 0 failures, 0 errors (65
+  namespaces, `java.io` fails to load on `ServerSocket`), no regressions.
+
+## 2026-10-10: the user's decisions on step 7a, 7b and class forms; java.base's assessment
+
+- Class forms at the Go REPL (branch `cf-repl`): CF1-CF6 accepted, merge as is (executable
+  63.1 → 74.0 MB; size tuning later, with step 7); CF3 reverses D6 for `defclass`.
+- Step 7a: O1 (collector settings, closing D7), O2, O4, O6, O7 accepted; O3 (a shared
+  `getParameterTypes` array, a deviation from Java's contract) dropped; O5 accepted: the
+  freeze's executables are built with `--pgo`.
+- Before the freeze, an assessment of how much of `java.base` jrt implements (the user's
+  request): an agent measures it reproducibly (branch `jbase`, `doc/go/JAVA-BASE.md`).
