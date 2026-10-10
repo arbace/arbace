@@ -407,7 +407,8 @@
 (defn- mdesc-missing [d] (some class-missing (m/method-desc-classes d)))
 
 (defn- hw-static-exists? [cls base]
-  (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base)))
+  (or (contains? (:funcs (:jrt m/*w*)) (str (m/go-name cls) "_" base))
+      (m/c2g-static? cls base)))
 
 (defn- lookup-call?
   "MethodHandles.lookup(): the lookup VarHandle constants are found with (C2G-SPEC §8.5); in Go

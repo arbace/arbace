@@ -492,6 +492,12 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (!= v nil)
                       (.SetProperty_String_String__O p (Str k) v))))
                 p)))
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'System_GetProperties__Properties
+             "System_GetProperties__Properties is System.getProperties() as translated code calls it
+(m/c2g-static?).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(C2g_SystemGetProperties)))
      ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")

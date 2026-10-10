@@ -20,6 +20,15 @@
 
 (defn translated? [n] (contains? (T) n))
 
+(defn c2g-static?
+  "A static method of jrt's hand-written class cls (Go base name base) that c2g writes itself,
+  in the program's support code, because its type is a translated class jrt cannot name:
+  System.getProperties(), a Properties (out.clj; JRT-NOTES.md, \"Text and locales\":
+  StaticProperty reads it)."
+  [cls base]
+  (and (= cls "java/lang/System") (= base "GetProperties__Properties")
+       (translated? "java/util/Properties")))
+
 (defn jrt-class
   "jrt's hand-written (or stand-in) class n, when jrt defines it: {:go :var :standin :file}."
   [n]
