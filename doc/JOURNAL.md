@@ -1134,3 +1134,36 @@ decision (2026-10-08).
   freeze's executables are built with `--pgo`.
 - Before the freeze, an assessment of how much of `java.base` jrt implements (the user's
   request): an agent measures it reproducibly (branch `jbase`, `doc/go/JAVA-BASE.md`).
+
+## 2026-10-10: step 7b: the evaluator's closure compilation
+
+- Agent, branch `step7b` (`5754115` to `5561d9e`), fast-forwarded into main over `5ced273`. Each
+  method of an evaluated fn, deftype, defrecord or reify is compiled at its first call into a
+  tree of `Code` nodes (class forms translated by c2g; `arbace/lang/go/CompilerCode.clj`):
+  locals as slot indexes, `long`/`double` locals unboxed in a `prims` array, unboxed paths for
+  primitive-typed nodes (as the bytecode back end's `emitUnboxed`), constants made once, 578
+  public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` called directly (generated
+  by `test/c2g/eval_ops.clj` into `CompilerOps.clj`), `recur` as a frame flag, fixed-arity calls
+  without `RestFn`'s seq, frames reused per thread by depth, `str` concatenated directly. The
+  image keeps the analyzed Expr trees; methods compile lazily (compiling at replay started
+  slower). Node kinds it does not know fall back to their `evalIn`.
+- Integrated with suite-last (SL1's locals clearing in the compiled paths: `CodeLocalClear`,
+  `CodeClosedClear`, captures through `closesExprs`; SL2's `invokeResolved` replaces the
+  agent's own call native).
+- Speed (amd64, 19 benchmarks): geometric mean 12.8× faster; Go against the JVM from about 700×
+  to about 54× slower. `-e nil` 0.33 → 0.21 s; loading from source 3.5 → 1.8 s; `refer` per
+  namespace 18.6 → 5.7 ms; image preparation 32 → 11 s; suite `reducers` 345 → 67 s, `parse`
+  306 → 78 s; `transducers`' skipped test passes in 574 s. Tried and dropped (SPEED-NOTES.md):
+  child nodes in arrays (an interface assertion per read), one class per call signature, typed
+  function values in c2g's tables (step 7a's ground), compiling at replay, a new frame per call.
+- Amendments EC1-EC7 in SPEED-NOTES.md, for the user.
+- The agent's incidents: a `pkill -f` by pattern killed the sockets agent's queued build (re-run
+  since); disk at 86%, the shared Go build cache trimmed to entries used in the last 6 hours.
+- Checks (the agent's, on exactly this tree): smoke, `bin/c2g-evalproof` on amd64 and arm64,
+  the Go oracle 20,566 of 20,600 as recorded, Clojure's suite on Go 19,506 of 19,506, `clearing`
+  31 of 31.
+- Merge order changed (main session): the cf-repl merge (`51f5e3d`) broke class forms on Go
+  (`arbace.classes.interp` fails to load: a proxy of `arbace.asm.ClassVisitor`; 271 new oracle
+  mismatches), found before pushing. Local main was reset to the pushed `5ced273`; the cf-repl and
+  jbase merges are kept on the local branch `main-cf-pending` (`8ace8b1`) until the class forms
+  agent fixes the cause.
