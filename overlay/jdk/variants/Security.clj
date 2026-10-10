@@ -36,7 +36,7 @@
       (try
         (with-resources [in is]
           (Security$SecPropLoader/debugLoad true "conf/security/java.security")
-          (.load Security/props in)
+          (.load props in)
           (Security$SecPropLoader/debugLoad false "conf/security/java.security"))
         (catch java.io.IOException e
           (throw (InternalError. "Error loading java.security file" e)))))))

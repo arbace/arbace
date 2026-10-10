@@ -15,13 +15,13 @@
 (in-ns 'sun.security.provider)
 
 (c2g/variant NativePRNG
-  (method ^:private ^:static initIO ^NativePRNG$RandomIO [^NativePRNG$Variant v]
+  (method ^:private ^:static initIO ^RandomIO [^:final ^Variant v]
     (when (some? debug)
       (.println debug (java-str "NativePRNG." v " seedFile: host nextFile: host")))
-    (NativePRNG$RandomIO. nil nil)))
+    (RandomIO. nil nil)))
 
 (c2g/variant NativePRNG$RandomIO
-  (constructor ^:private [this ^File seedFile ^File nextFile]
+  (constructor :throws [IOException] ^:private [this ^File seedFile ^File nextFile]
     (set! (.-seedFile this) seedFile)
     (set! (.-seedIn this) jdk.internal.jrt.HostRandom/INSTANCE)
     (set! (.-nextIn this) jdk.internal.jrt.HostRandom/INSTANCE)

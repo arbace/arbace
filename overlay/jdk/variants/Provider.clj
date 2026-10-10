@@ -53,8 +53,8 @@
     (Provider/addEngine "TerminalFactory" false Object)))
 
 (c2g/variant Provider$Service
-  (method ^:private newInstanceUtil :throws [Exception] ^Object [this ^{:tag (Class ?)} ctrParamClz
-                                                                 ^Object ctorParamObj]
+  (method ^:private newInstanceUtil :throws [Exception] [this ^{:tag (Class ?)} ctrParamClz
+                                                          ctorParamObj]
     (let [o (sun.security.provider.JrtServices/newInstance className ctrParamClz ctorParamObj)]
       (when (some? o)
         (return o)))

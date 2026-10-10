@@ -346,7 +346,7 @@
   SecretKeySpec, the providers SUN and SunJCE with the services they implement in plain Java
   (the digests, the SHA1PRNG, NativePRNG and DRBG generators, the HMACs), and the provider
   framework (Provider, Security, sun.security.jca) over the JDK's java.security file. Paths
-  relative to jdk26u; NativePRNG and NativeSeedGenerator are src/java.base/unix/classes files."
+  relative to jdk26u; NativePRNG is a src/java.base/unix/classes file."
   (vec (sort
          (concat
            (map #(str "src/java.base/share/classes/" % ".java")
@@ -375,7 +375,7 @@
                   (map #(str "sun/security/provider/" %)
                        ["Sun" "SunEntries" "DigestBase" "MD2" "MD5" "SHA" "SHA2" "SHA5" "SHA3"
                         "ByteArrayAccess" "SecureRandom" "DRBG" "AbstractDrbg" "AbstractHashDrbg"
-                        "HashDrbg" "HmacDrbg" "EntropySource" "MoreDrbgParameters" "SeedGenerator"])
+                        "HashDrbg" "HmacDrbg" "EntropySource" "MoreDrbgParameters"])
                   ;; the SunJCE provider's HMACs
                   (map #(str "com/sun/crypto/provider/" %) ["SunJCE" "HmacCore" "HmacMD5" "HmacSHA1"])
                   ;; the provider framework, and what it uses of sun.security.util
@@ -385,9 +385,9 @@
                        ["Debug" "SecurityConstants" "SecurityProviderConstants" "SecurityProperties"
                         "KnownOIDs" "MessageDigestSpi2" "CryptoAlgorithmConstraints"
                         "AbstractAlgorithmConstraints" "AlgorithmDecomposer" "PropertyExpander"])))
-           ;; NativePRNG (the default SecureRandom on Linux) and its seed generator
-           (map #(str "src/java.base/unix/classes/sun/security/provider/" % ".java")
-                ["NativePRNG" "NativeSeedGenerator"])))))
+           ;; NativePRNG (the default SecureRandom on Linux); its seed generator is jrt's own
+           ;; SeedGenerator (overlay), over the host's random source
+           ["src/java.base/unix/classes/sun/security/provider/NativePRNG.java"]))))
 
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes

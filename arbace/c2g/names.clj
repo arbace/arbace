@@ -86,7 +86,10 @@
    "sun/text/Normalizer" "Sun_Normalizer"
    ;; java.time.chrono.Era's namesake in sun.util.calendar, which ZoneInfo's calendars use
    ;; (JRT-NOTES.md, "Time")
-   "sun/util/calendar/Era" "Calendar_Era"})
+   "sun/util/calendar/Era" "Calendar_Era"
+   ;; java.security.SecureRandom's namesake in sun.security.provider, the SHA1PRNG
+   ;; (JRT-NOTES.md, "Security", amendment SC2)
+   "sun/security/provider/SecureRandom" "Sun_SecureRandom"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it
