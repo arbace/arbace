@@ -1500,3 +1500,23 @@ decision (2026-10-08).
   plus about 40 in the optional interfaces. Proposed stages S0 (vendor) to S6, S1 a boxed REPL
   on amd64. Decisions D3, D8-D14 and risks R1-R8 for the user, after the freeze. Before the
   freeze: no code; new jrt work keeps OS calls in `linux`-tagged files.
+
+## 2026-10-10: processes on Go
+
+- Agent, branch `goproc` (11 commits), merged; the user accepted PR1-PR7 (JRT-NOTES.md,
+  "Processes"), reversing D6 for processes. Translated from jdk26u: `Process`, `ProcessBuilder`,
+  `ProcessHandle`, `ProcessHandleImpl` (share), `ProcessImpl`, `ProcessEnvironment` (unix), with
+  variants; a new optional host interface `HostProc` (`hostproc.clj`; Linux in
+  `hostproc_linux.clj` over `os.StartProcess`, `os.Pipe` and `/proc`; a goroutine reaps each
+  child; SIGTERM/SIGKILL for destroy); pipes in jrt's file table; `Runtime.exec` through jrt's
+  own `RuntimeExec`, written into `Runtime`'s member table by c2g; `arbace.java.shell` and
+  `arbace.java.process` embedded and their suite namespaces un-skipped. Error texts, PATH search
+  and exit statuses as this machine's JDK 26 (musl texts; "Exec failed, error: 2 (No such file
+  or directory)"). A c2g fix: a method reference to a private method of a non-leaf class. New
+  oracle forms `processes.clj` (129, all match). +0.8 MB.
+- Main session on the merge (over the base image, rlwrap, the reduce fix): `bin/jrt-convert`,
+  `bin/jrt manifest` (no change), `bin/jrt test`, the amd64 build (62.8 MB), smoke; the Go oracle
+  as recorded (8); Clojure's suite on Go 68 namespaces, 19,647 of 19,651 assertions, no
+  regressions.
+- `gosec` (java.security, SC1-SC6 accepted) follows, with its digests' compression over Go's
+  crypto first (the user: before the freeze).
