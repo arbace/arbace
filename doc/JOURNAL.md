@@ -1347,3 +1347,17 @@ decision (2026-10-08).
   test` on amd64 and arm64; start 0.20-0.21 s unchanged, memory after start 162 → 158 MB.
 - Earlier the same day (main session): JC1-JC10 folded and `doc/go/JAVA-BASE.md` measured again
   on `d97e0f9` (`b8584d8`): java.base members 50.1% (8,792 of 17,546), Arbace's own use 89.8%.
+
+## 2026-10-10: narrowing the Go build's gaps before the freeze
+
+- Compared (main session): the JVM build passes Clojure's suite whole (809 tests, 20,750
+  assertions); the Go build runs 66 of 85 namespaces, 19,628 of 19,632 assertions (94.6% of the
+  JVM's), the oracle 21,792 of 21,800; java.base 50.1% of members (Arbace's own use 89.8%);
+  start-up alike (0.17-0.20 s); throughput about 40-55× slower (no AOT to Go yet). The gaps,
+  by cost, offered to the user: (1) the suite's Java fixtures as a test build (SL4), (2) class
+  loader resources (java.io's 4 errors), (3) small oracle differences and more CLDR locales, (4)
+  processes, (5) java.security basics, (6) java.text formats; larger: (7) AOT of namespaces to
+  Go, (8) XML, (9) gen-class, (10) serialization.
+- The user's choice: 1-6 before the freeze; 7-10 after. Four agents: `gofix` (1-3 without the
+  locales), `gotext` (6 with the locales), `goproc` (4, reversing D6 for processes), `gosec`
+  (5).
