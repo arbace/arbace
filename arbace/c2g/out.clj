@@ -199,9 +199,10 @@
 (defn adapter-forms
   "The adapter F_Fn of functional interface fi (§7.11): its SAM calls Fn, default methods
   forward to their functions."
-  [pkg fi]
-  (let [g (m/go-name fi)
-        a (str g "_Fn")
+  [pkg key]
+  (let [[fi & markers] (if (vector? key) key [key])
+        g (m/go-name fi)
+        a (apply str g "_Fn" (map #(str "_" (m/go-name %)) markers))
         sam (a/find-sam fi)
         [ps r] (t/parse-method-desc (:desc sam))
         pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
@@ -211,13 +212,15 @@
                 (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
         call (apply list (list '.-Fn 't) pn)]
     (concat
-      [(list 'c2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")))
+      [(list 'c2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
+                               (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
        (list 'go/type (symbol a) (list 'struct (m/jrt-sym pkg "Object") (tag 'Fn ftype)))
        (list 'go/method (symbol (nm/method-base (:name sam) (:desc sam)))
              (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn ps)))
                (not= "V" r) (vary-meta assoc :tag (m/go-type pkg r)))
              (if (= "V" r) call (list 'return call)))]
-      (for [j (cons fi (d/interface-closure fi))]
+      (for [j (distinct (concat (cons fi (d/interface-closure fi))
+                                (mapcat #(cons % (d/interface-closure %)) markers)))]
         (list 'go/method (symbol (str "Is_" (m/go-name j))) [recv]))
       ;; default methods of the interface and its superinterfaces
       (for [[[name desc :as k] mm] (m/vmethods fi)
@@ -240,10 +243,12 @@
        (list 'go/var (symbol (str a "_class"))
              (list (m/jrt-sym pkg "Define")
                    (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
-                                     :Name (str (str/replace fi "/" ".") "$$Lambda")
+                                     :Name (apply str (str/replace fi "/" ".") "$$Lambda"
+                                                  (map #(str "$" (m/go-name %)) markers))
                                      :Modifiers 0x1010 :Kind (m/jrt-sym pkg "KindClass")
                                      :Super (m/jrt-sym pkg "Object_class")
-                                     :Interfaces (list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class"))) (m/class-sym pkg fi "_class"))
+                                     :Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
+                                                        (map #(m/class-sym pkg % "_class") (cons fi markers)))
                                      :Go (str (nm/pkg-path pkg) "." a)))))])))
 
 (def string-regex-methods
@@ -361,6 +366,33 @@ sequential stream (over an ArrayList: not jdk26u's lazy spliterator).\n"
             (range [_ x (splitLines (.-value t))]
               (.Add_O__Z l (NewStringUTF16 x)))
             (.Stream__Stream l)))])
+     ;; Class.getResourceAsStream over the host's resources (the program's embedded data, then
+     ;; ARBACE_PATH: jrt's ResourceOrPath) once ByteArrayInputStream is translated (JRT-NOTES.md,
+     ;; "The JDK's resource data"); jrt's Class cannot name the translated InputStream
+     (when (m/translated? "java/io/ByteArrayInputStream")
+       [(list 'go/method 'GetResourceAsStream_String__InputStream
+              "GetResourceAsStream_String__InputStream is Class.getResourceAsStream: the resource name
+resolved as Class.resolveName resolves it (absolute without its /, else in the package of the
+class or of its arrays' element class), from the host's resources, as a ByteArrayInputStream; null
+when there is none.\n"
+              (with-meta [(tag 'c '(* Class)) (tag 'name '(* String))] {:tag (m/go-type :jrt "Ljava/io/InputStream;")})
+              '(let [n (.String (NN name))]
+                 (if (strings/HasPrefix n "/")
+                   (set! n (subslice n 1))
+                   (let [e c]
+                     (while (.IsArray__Z e)
+                       (set! e (.GetComponentType__Class e)))
+                     (let [cn (.-Name (.Info e))
+                           i (strings/LastIndexByte cn \.)]
+                       (when (>= i 0)
+                         (set! n (+ (strings/ReplaceAll (subslice cn _ i) "." "/") "/" n))))))
+                 (let [(values b ok) (ResourceOrPath n)]
+                   (when (not ok)
+                     (return nil))
+                   (let [a (NewByteArray (conv int32 (len b)))]
+                     (range [i x b]
+                       (aset (.-A a) i (conv int8 x)))
+                     (return (ByteArrayInputStream_New_B1 a))))))])
      (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
@@ -436,6 +468,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                     (when (> i 0)
                       (.Put_O_O__O m (Str (subslice kv _ i)) (Str (subslice kv (+ i 1)))))))
                 (Collections_UnmodifiableMap_Map__Map m))))
+     ;; System.getProperties() (the socket server's start, arbace.core.server/start-servers;
+     ;; JRT-NOTES.md, "Sockets"): a Properties holding a copy of the properties
+     (when (m/translated? "java/util/Properties")
+       (list 'go/func 'C2g_SystemGetProperties
+             "C2g_SystemGetProperties is System.getProperties(): a Properties with the system properties
+(a copy: the Go build keeps them in jrt's table, System.setProperty's).\n"
+             (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
+             '(let [p (Properties_New)]
+                (range [_ k (PropertyNames)]
+                  (let [v (System_GetProperty_String__String (Str k))]
+                    (when (!= v nil)
+                      (.SetProperty_String_String__O p (Str k) v))))
+                p)))
      ;; jrt's statics whose values are translated objects (C2G-NOTES.md, phase 2C)
      (when (m/translated? "jdk/internal/jrt/StandardStreams")
        (let [is (m/go-type :jrt "Ljava/io/InputStream;")
@@ -749,6 +794,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         pst-w? (m/translated? "java/io/PrintWriter")
         pst-s? (m/translated? "java/io/PrintStream")
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
+        props? (m/translated? "java/util/Properties")
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
@@ -757,7 +803,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
         instant? (m/translated? "java/time/Instant")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant?)
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props?)
       [(apply list 'go/func 'init []
               (concat
                 (when (or pst-w? pst-s?)
@@ -777,6 +823,11 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetenv)))))])
+                (when props?
+                  ['(set! (.-Methods (.Info System_class))
+                          (append (.-Methods (.Info System_class))
+                                  (lit MethodInfo :Name "getProperties" :Return Properties_class :Modifiers 0x9
+                                       :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetProperties)))))])
                 (when ci?
                   ['(set! (.-Fields (.Info String_class))
                           (append (.-Fields (.Info String_class))

@@ -78,8 +78,12 @@
    "sun/net/www/protocol/http/Handler" "Http_Handler"
    "sun/net/www/protocol/https/Handler" "Https_Handler"
    "sun/net/www/protocol/jar/Handler" "Jar_Handler"
-   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members name
-   "java/net/Proxy" "Net_Proxy"})
+   ;; jrt's java.lang.reflect.Proxy is Proxy; java.net.Proxy, which URL's members and
+   ;; Socket(Proxy) name (JRT-NOTES.md, "Files", "Sockets")
+   "java/net/Proxy" "Net_Proxy"
+   ;; java.text.Normalizer's internal twin, which Pattern calls for combining classes
+   ;; (JRT-NOTES.md, "The JDK's resource data")
+   "sun/text/Normalizer" "Sun_Normalizer"})
 
 (defn go-class-name
   "The Go type name of a class: its binary name after the package, $ as _; X prepended when it

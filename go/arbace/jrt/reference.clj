@@ -119,18 +119,19 @@ that enqueues it.\n"
 
 (go/method Self_Reference ^{:tag (* Reference)} [^{:tag (* Reference)} r] r)
 
-(go/func Reference_ReachabilityFence_O__V
-  "Reference_ReachabilityFence_O__V is Reference.reachabilityFence: x stays reachable until here
-(runtime.KeepAlive; Executors' delegating executors).\n"
-  [^any x]
-  (runtime/KeepAlive x))
-
 (go/func Reference_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Reference_I x)] ok))
 (go/func Reference_Cast ^Reference_I [^any x]
   (when (== x nil) (return nil))
   (let [(values v ok) (assert Reference_I x)]
     (when (not ok) (panic (ClassCast x Reference_class)))
     v))
+
+(go/func Reference_ReachabilityFence_O__V
+  "Reference_ReachabilityFence_O__V is Reference.reachabilityFence: o stays reachable until
+here (Go's runtime.KeepAlive; ScopedMemoryAccess's accesses, JRT-NOTES.md \"The JDK's resource
+data\").\n"
+  [^any o]
+  (runtime/KeepAlive o))
 
 ;; ---------------------------------------------------------------------------------------
 ;; WeakReference and SoftReference (leaves here)

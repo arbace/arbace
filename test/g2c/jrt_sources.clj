@@ -109,7 +109,81 @@
            ;; \"Dates\"): Instant and the exception it throws; the rest of java.time stays
            ;; outside the world (its uses in Instant are operation-level stubs, toString a
            ;; variant)
-           ["java/time/Instant.java" "java/time/DateTimeException.java"]))))
+           ["java/time/Instant.java" "java/time/DateTimeException.java"]
+           ;; sockets and the socket REPL (arbace.core.server; JRT-NOTES.md, "Sockets"): the plain
+           ;; Java of java.net's sockets and addresses, over jrt's own HostSocketImpl
+           ;; (overlay/jdk) in place of sun.nio.ch.NioSocketImpl; the name service through
+           ;; Inet6AddressImpl's natives (variants over the host's). NetworkInterface, Proxy, the
+           ;; SOCKS and HTTP-tunnel impls and the resolver SPI's providers stay outside the world
+           (map #(str "java/net/" % ".java")
+                ["ServerSocket" "Socket" "SocketImpl" "SocketImplFactory" "SocketAddress"
+                 "InetSocketAddress" "InetAddress" "Inet4Address" "Inet6Address" "InetAddressImpl"
+                 "Inet4AddressImpl" "Inet6AddressImpl" "SocketOptions" "SocketOption"
+                 "StandardSocketOptions" "SocketException" "BindException" "ConnectException"
+                 "NoRouteToHostException" "UnknownHostException" "SocketTimeoutException"
+                 "spi/InetAddressResolver"])
+           ;; (IPAddressUtil, Exceptions and Hashtable, which System.getProperties()'s Properties
+           ;; extends, are file-sources')
+           ["java/io/InterruptedIOException.java" "sun/net/PlatformSocketImpl.java"]
+           ;; the regex flag CANON_EQ (JRT-NOTES.md, "The JDK's resource data"): java.text's
+           ;; Normalizer over jdk.internal.icu's normalizer, whose loader reads ICU's nfc.nrm and
+           ;; nfkc.nrm through java.nio's heap buffers (the buffers' generated files are
+           ;; added-gensrc's); ScopedMemoryAccess's heap paths and the two foreign memory types
+           ;; the buffers' constructors and accessors name
+           (map #(str "java/text/" % ".java") ["Normalizer" "CharacterIterator"])
+           (map #(str "jdk/internal/icu/" % ".java")
+                ["text/NormalizerBase" "text/UTF16" "text/UCharacterIterator" "text/Replaceable"
+                 "text/ReplaceableString" "impl/UCharacterProperty" "impl/CharacterIteratorWrapper"
+                 "impl/ReplaceableUCharacterIterator" "impl/Trie2" "impl/Trie2_16"
+                 "util/OutputInt"])
+           (map #(str "java/nio/" % ".java")
+                ["Buffer" "ByteOrder" "StringCharBuffer" "BufferUnderflowException" "BufferOverflowException"
+                 "ReadOnlyBufferException" "InvalidMarkException"])
+           ["java/lang/foreign/MemorySegment.java" "jdk/internal/foreign/MemorySessionImpl.java"]
+           ;; \N{name} (CharacterName's uniName.dat is zlib-compressed: the overlay's
+           ;; InflaterInputStream throws ZipException)
+           ["java/util/zip/ZipException.java"]))))
+
+(def added-gensrc
+  "Files the JDK build generates (make/modules/java.base/gensrc/GensrcBuffer.gmk,
+  GensrcScopedMemoryAccess.gmk) added to the closure, as paths below gensrc/java.base: the heap
+  byte, char and int buffers and their views of a byte buffer in either byte order (ICU's data
+  loader: JRT-NOTES.md, \"The JDK's resource data\"), and ScopedMemoryAccess, through which the
+  buffers reach Unsafe. bin/jrt-convert generates them as the JDK build does."
+  (vec (concat (map #(str "java/nio/" % ".java")
+                    ["ByteBuffer" "CharBuffer" "IntBuffer" "HeapByteBuffer" "HeapCharBuffer"
+                     "HeapIntBuffer" "ByteBufferAsCharBufferB" "ByteBufferAsCharBufferL"
+                     "ByteBufferAsIntBufferB" "ByteBufferAsIntBufferL"])
+               ["jdk/internal/misc/ScopedMemoryAccess.java"])))
+
+(def util-sources
+  "Files of src/java.base/share/classes added for java.util's plain Java (doc/go/JAVA-BASE.md,
+  amendment JB1; the user's decision of 2026-10-10): first the files whose absence made
+  translated members throw (operation-level stubs), then the plain Java of java.util that
+  Clojure users reach for. java.time and java.util.concurrent are other branches'."
+  (vec (sort
+         (concat
+           ;; Arrays.sort of the primitive arrays (and its parallel sorts on jrt's pool),
+           ;; parallelSort of objects, parallelPrefix
+           (map #(str "java/util/" % ".java")
+                ["DualPivotQuicksort" "ArraysParallelSortHelpers" "ArrayPrefixHelpers"
+                 ;; Comparator.naturalOrder, nullsFirst, nullsLast; Collections.reverseOrder
+                 "Comparators"
+                 ;; TreeSet's and NavigableSet's SortedSet members, Collections' SortedSet
+                 ;; methods, instance? SortedSet
+                 "SortedSet"])
+           ;; RandomGenerator's bounded defaults and streams, Random's streams, SplittableRandom
+           ["jdk/internal/util/random/RandomSupport.java"]
+           ;; BigInteger.nextProbablePrime of large numbers
+           ["java/math/BitSieve.java"]
+           ;; plain Java of java.util
+           (map #(str "java/util/" % ".java")
+                ["BitSet" "PriorityQueue" "WeakHashMap" "StringTokenizer" "Base64"
+                 "SplittableRandom" "EventObject" "EventListener" "EventListenerProxy"
+                 "Observable" "Observer" "TooManyListenersException" "InputMismatchException"
+                 "MissingResourceException" "IllformedLocaleException"
+                 "InvalidPropertiesFormatException" "FormattableFlags"
+                 "ServiceConfigurationError"])))))
 
 (def added-module-sources
   "Files of other modules' src/MODULE/share/classes added to the closure (paths relative to
@@ -222,6 +296,7 @@
   (vec (sort (distinct (concat (keys (get-in (read-data f) [:closure :repl :sources]))
                                (map #(str "src/java.base/share/classes/" %) added-sources)
                                (map #(str "src/java.base/share/classes/" %) concurrent-sources)
+                               (map #(str "src/java.base/share/classes/" %) util-sources)
                                added-module-sources
                                file-sources)))))
 
@@ -242,6 +317,13 @@
       (if-let [[_ m rel] (re-find #"^build/[^/]+/support/gensrc/([^/]+)/(.*)$" s)]
         (println m "gensrc" rel)
         (throw (ex-info (str "unexpected source path " s) {:source s}))))))
+  ;; generated files added to the closure (added-gensrc), unless the measured closure has them
+  (let [measured (set (for [s (sources f)
+                            :let [[_ rel] (re-find #"^build/[^/]+/support/gensrc/java\.base/(.*)$" s)]
+                            :when rel]
+                        rel))]
+    (doseq [rel added-gensrc :when (not (measured rel))]
+      (println "java.base gensrc" rel)))
   ;; KIND overlay: overlay/jdk/MODULE/REL, jrt's own (replacing jdk26u's file of that path)
   (doseq [s (overlay-sources)
           :let [[_ m rel] (re-find #"^([^/]+)/(.*)$" s)]]

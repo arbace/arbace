@@ -3,7 +3,7 @@
   executable (doc/go/BUILD.md).
 
   bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file]
-                [--work DIR] [--overlay FILE] DIR
+                [--work DIR] [--overlay FILE] [--pgo FILE] DIR
   bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
                 [--line-file] SRC
   runs -m arbace.g2c.build with the same arguments. DIR holds the program's packages as forms
@@ -26,6 +26,8 @@
                   after the build
     --overlay FILE  passed to go build as -overlay FILE (absolute): a JSON file replacing
                   files of the build, such as patched Go runtime files (BUILD.md, \"Overlays\")
+    --pgo FILE    passed to go build as -pgo FILE (absolute): a CPU profile for gc's
+                  profile-guided optimization (doc/go/SPEED-NOTES.md)
     --print-only  print the module into --work DIR/mod and stop: no build, and no main
                   package required (a library such as jrt, built and tested by bin/jrt)
     --tests       also print the packages' :test-files (SPEC §4.2), for go test
@@ -266,6 +268,8 @@
                           (when (seq tags) ["-tags" (str/join "," tags)])
                           (when-let [o (:overlay opts)]
                             ["-overlay" (.getPath (.getAbsoluteFile (File. (str o))))])
+                          (when-let [f (:pgo opts)]
+                            ["-pgo" (.getPath (.getAbsoluteFile (File. (str f))))])
                           ["-o" (.getPath (.getAbsoluteFile out)) (:path main)])
               env (cond-> (go-env goroot arch)
                     (seq (:goexperiment config)) (assoc "GOEXPERIMENT" (:goexperiment config)))
@@ -276,7 +280,7 @@
 
 (defn -main [& argv]
   (let [goroot (or (System/getenv "G2C_GOROOT") "/root/tamago-go")
-        usage (str "usage: bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] DIR\n"
+        usage (str "usage: bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] DIR\n"
                    "       bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines] [--line-file] SRC")]
     (loop [as argv opts {:arch "amd64" :goroot goroot}]
       (case (first as)
@@ -286,6 +290,7 @@
         "--line-file" (recur (next as) (assoc opts :line-file true))
         "--work" (recur (nnext as) (assoc opts :work (second as)))
         "--overlay" (recur (nnext as) (assoc opts :overlay (second as)))
+        "--pgo" (recur (nnext as) (assoc opts :pgo (second as)))
         "--print-only" (recur (next as) (assoc opts :print-only true))
         "--tests" (recur (next as) (assoc opts :tests true))
         "--module" (recur (nnext as) (assoc opts :module (second as)))

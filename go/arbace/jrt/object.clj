@@ -5,16 +5,17 @@
   :doc "Package jrt is the Java runtime of Arbace on Go: the hand-written edge of the JDK (the
 object model, strings, Math, exceptions, ...) under the classes c2g translates from jdk26u
 (doc/go/C2G-SPEC.md, doc/go/JRT-NOTES.md).\n"
-  :imports [[fmt "fmt"] [atomic "sync/atomic"]])
+  :imports [[fmt "fmt"] [atomic "sync/atomic"] [unsafe "unsafe"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The header
 
 (go/type Object
   "Object is the header every Java object embeds first (C2G-SPEC §5.2): one 64-bit word,
-accessed atomically, holding the identity hash in its low 32 bits (0 until first asked) and
-the lock word in its high 32 bits (monitor.go). It also makes every object non-empty, so that
-distinct objects have distinct addresses.\n"
+accessed atomically, holding the identity hash in its low 31 bits (0 until first asked), the
+dynamic flag in bit 31 (an object of a class made at run time, IsDynamic) and the lock word in
+its high 32 bits (monitor.go). It also makes every object non-empty, so that distinct objects
+have distinct addresses.\n"
   (struct ^uint64 hdr))
 
 (go/type Object_I
@@ -67,8 +68,8 @@ locked), as c2g's Clone__O does after copying the struct.\n"
 (go/method identityHash ^int32 [^{:tag (* Object)} o]
   (while true
     (let [w (atomic/LoadUint64 (addr (.-hdr o)))]
-      (when (!= (bit-and w 0xffffffff) 0)
-        (return (conv int32 (conv uint32 w))))
+      (when (!= (bit-and w 0x7fffffff) 0)
+        (return (conv int32 (conv uint32 (bit-and w 0x7fffffff)))))
       (let [h (nextIdentityHash)]
         (when (atomic/CompareAndSwapUint64 (addr (.-hdr o)) w (bit-or w (conv uint64 h)))
           (return (conv int32 h)))))))
@@ -79,6 +80,27 @@ locked), as c2g's Clone__O does after copying the struct.\n"
   (when (== x nil)
     (return 0))
   (.identityHash (.Self_Object (asObject x))))
+
+;; ---------------------------------------------------------------------------------------
+;; The dynamic flag (doc/go/SPEED-NOTES.md): c2g's instanceof and checkcast of an interface
+;; add a nominal check for the objects of classes made at run time (Dyn, which has every
+;; interface's methods). The flag in the header lets the check skip the assertion to Dynamic
+;; for every other object.
+
+(go/const ^{:tag uint64 :val 2147483648} dynamicFlag 0x80000000)
+
+(go/method MarkDynamic
+  "MarkDynamic sets the dynamic flag of a new object of a class made at run time (c2g's Dyn and
+proxies), before it is published.\n"
+  [^{:tag (* Object)} o]
+  (atomic/OrUint64 (addr (.-hdr o)) dynamicFlag))
+
+(go/func IsDynamic
+  "IsDynamic says whether x, a Java object, not nil (a pointer to a struct whose first field is the
+header, as every Java object's), is of a class made at run time; small enough to inline.\n"
+  ^bool [^any x]
+  (let [p (aget (deref (conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr x)))) 1)]
+    (!= (bit-and (atomic/LoadUint64 (conv (* uint64) p)) dynamicFlag) 0)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Object's methods on values whose Go type is any (§5.8)
@@ -109,8 +131,14 @@ on Object-typed values are hot in translated code), the failures out of line.\n"
   ^{:tag (* String)} [^any x]
   (.ToString__String (asObject x)))
 
-(go/func GetClass "GetClass is x.getClass() on an Object.\n"
+(go/func GetClass "GetClass is x.getClass() on an Object. The most frequent classes (boxed
+numbers and strings, Numbers.ops and Util.hasheq ask for them) are found by a type switch on the
+dynamic type, without the assertion to Object_I and the interface call.\n"
   ^{:tag (* Class)} [^any x]
+  (type-switch x
+    (case [(* Long)] (return Long_class))
+    (case [(* Double)] (return Double_class))
+    (case [(* String)] (return String_class)))
   (.GetClass__Class (asObject x)))
 
 (go/func Object_toString

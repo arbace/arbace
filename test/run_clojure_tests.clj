@@ -1,10 +1,12 @@
 ;; Helper for bin/clojure-tests: runs Clojure's upstream test suite (clojure/clojure test/) against
 ;; the Clojure on the class path and compares the outcome with a recorded reference.
 ;;
-;;   list DIR EXPECTED
+;;   list DIR EXPECTED [TIMEOUTS]
 ;;       Print the test namespaces under DIR, one per line, in the order in which upstream's
 ;;       src/script/run_test.clj finds and requires them (clojure.tools.namespace.find), minus
-;;       the :skipped ones of the EXPECTED results file.
+;;       the :skipped ones of the EXPECTED results file; with TIMEOUTS, write to that file the
+;;       EXPECTED file's per-namespace timeouts (:timeouts {ns seconds}), one "ns seconds" line
+;;       each.
 ;;   run NS OUT NSLIST [EXPECTED]
 ;;       Require every namespace listed in the file NSLIST, in order, as run_test.clj does before
 ;;       running anything (so that helpers such as clojure.test-helper's assert-expr methods are
@@ -190,7 +192,8 @@
                       :skipped (:skipped expected)
                       :namespaces results}
                gen (assoc :generative gen)
-               (:skipped-tests expected) (assoc :skipped-tests (:skipped-tests expected))))))
+               (:skipped-tests expected) (assoc :skipped-tests (:skipped-tests expected))
+               (:timeouts expected) (assoc :timeouts (:timeouts expected))))))
     (println "results written to" results-file)
     (shutdown-agents)
     (if (seq @bad)
@@ -202,9 +205,13 @@
 
 (let [[mode a b c d] *command-line-args*]
   (case mode
-    "list"       (let [skipped (set (keys (:skipped (read-edn b))))]
+    "list"       (let [expected (read-edn b)
+                       skipped (set (keys (:skipped expected)))]
                    (doseq [n (find-namespaces a) :when (not (skipped n))]
                      (println n))
+                   (when c
+                     (spit c (apply str (for [[n secs] (sort-by key (:timeouts expected))]
+                                          (str n " " secs "\n")))))
                    (shutdown-agents))
     "run"        (run-ns (symbol a) b c d)
     "generative" (run-generative a b c)

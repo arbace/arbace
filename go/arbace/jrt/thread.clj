@@ -633,6 +633,7 @@ thread main (#1 when called first, non-daemon); an uncaught exception goes to th
 threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns the exit status
 (System.exit ends the process before).\n"
   ^int [^{:tag (func [])} run]
+  (StartRuntime)
   (let [^{:tag (* Thread)} t nil]
     (if (== (getLocal) nil)
       (set! t (adopt (Str "main")))
@@ -648,6 +649,7 @@ threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns t
         (set! status 1))
       (WaitNonDaemon)
       (runShutdownHooks)
+      (StopProfile)
       status)))
 
 (go/func Go

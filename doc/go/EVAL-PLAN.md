@@ -66,6 +66,13 @@ the questions the user should decide (§9).
 The design follows what Clojure's `Compiler` already decides; the evaluator adds only the
 run-time side the bytecode had.
 
+**As built in step 7** (amendment EC1, accepted 2026-10-10; SPEED-NOTES.md, "The evaluator:
+closure compilation"; C2G-SPEC §10.1): the tree is not walked at each call. Each method is
+compiled at its first call into `Code` nodes, closures over the method's decisions (slot
+indexes, unboxed `long` and `double` locals, constants, direct static calls, resolved members),
+with the semantics described below; `evalIn` evaluates top-level forms and, in compat mode, node
+kinds the compiler does not know.
+
 ### 2.1 Frames and locals
 
 - The analyzer numbers locals (`LocalBinding.idx`, `NEXT_LOCAL_NUM`, `ObjMethod.maxLocal`) as
@@ -80,6 +87,23 @@ run-time side the bytecode had.
   analyzer's `closeOver` adds it to every fn in between).
 - Primitive locals (`^long`, `^double`, loop locals with primitive inits) hold boxed values;
   the analyzer has chosen the primitive overloads, and the invokers convert (§2.6).
+- **Locals clearing** (amendment SL1, accepted 2026-10-10): locals are cleared as compiled code
+  clears them (`ObjExpr.emitLocal`): after a use the analyzer marks `shouldClear` (and the
+  binding `canBeCleared`, not primitive), the slot is set to null, and in a `^:once` fn the
+  closed-over value too; a local in a statement position is not evaluated (compiled code emits
+  nothing for it). `ObjExpr.compile`'s variant makes `closesExprs` as the JVM's does, so the
+  analysis sees a closure's creation as a use, and capturing clears the creating frame's local
+  where its entry says so. A lazy seq's head held in a local is then not retained. Each fn's
+  class declares its closed-over locals as fields (C2G-SPEC §10.2), which reflection reads
+  (Clojure's `clearing` tests).
+- **As built in step 7** (amendments EC1, EC4, accepted 2026-10-10): `long` and `double`
+  locals of a compiled method live unboxed in the frame's `prims` (a `long[]`, a `double` as its
+  raw bits), boxed anew at each use where an `Object` is wanted, as the bytecode boxes them;
+  `recur` stores its values (through temporaries in the frame when there are several) and sets
+  the frame's `recur` flag, which its loop clears. Frames are reused: each thread's `EvalState`
+  keeps its frames by depth (calls nest, and no frame outlives its call, a fn closing over
+  values copied when it is made); a call takes the frame of its depth, and clears its slots when
+  it returns.
 
 ### 2.2 Functions
 
@@ -97,6 +121,12 @@ run-time side the bytecode had.
   "Functions").
 - Step 7 replaces `doInvoke`'s seq with per-arity `invoke` methods (Q3) and the tree walk with
   closures.
+- **As built in step 7** (amendment EC3, accepted 2026-10-10): `EvalFn` answers `invoke` of 0 to
+  5 arguments itself, calling the compiled method of that fixed arity (`FnExpr.evalArities`)
+  with the arguments bound in a frame, without a seq; variadic calls and `apply` go through
+  `RestFn` to `doInvoke` as before (the seq's arguments taken before the frame). `EvalMethod`
+  answers `invoke` of 1 to 4 arguments, and `Dyn`'s dispatch calls the `invoke` of the arity
+  (`dynCallFast`).
 
 ### 2.3 Control
 
@@ -165,9 +195,15 @@ run-time side the bytecode had.
 - Hinted calls (`StaticMethodExpr`, `InstanceMethodExpr` with a `method`), fields
   (`StaticFieldExpr`, `InstanceFieldExpr`) and constructors (`NewExpr`): their `java.lang
   .reflect` objects come from jrt's member tables at analysis; evaluation calls
-  `Reflector.invokeMatchingMethod` as their `eval` does (done for the two method kinds), which
-  converts arguments by `boxArgs` and calls the table's invoker. Step 7 may call the invoker
-  directly with Go values (§10.1).
+  `Reflector.invokeMatchingMethod` as their `eval` does, which converts arguments by `boxArgs`
+  and calls the table's invoker. **As built** (amendment SL2, accepted 2026-10-10): a resolved
+  method of a public class is called through the table's invoker directly
+  (`Evaluator.invokeResolved`, jrt's native `InvokeDirect`): the arguments as `typedArgs` makes
+  them (the bytecode's casts and conversions, a fn adapted for a functional interface as
+  `Reflector.boxArg` adapts it), no selection, no `boxArgs` copy, an exception propagating as it
+  is (what Reflector's unwrapping of `InvocationTargetException` gave); a method of a non-public
+  class keeps Reflector's path (its accessible-base search). Step 7 may call the invoker with Go
+  values (§10.1).
 - Un-hinted calls: `Reflector` at run time, as on the JVM.
 - Functional interfaces: `Reflector.boxArg` adapts an `IFn` with `jrt.AdaptFn`, which is the
   interface's `ClassInfo.FromFn` that c2g now generates (phase 2B, §7 of the notes); inside
@@ -254,6 +290,12 @@ A tree walk per form with seq-packed arguments and boxed locals: expect Joker's 
 plan stays: per-arity `invoke`, closure compilation of the tree (each `Expr` to a Go closure
 once, at `fn*` evaluation), invokers called with Go values on hinted interop, then AOT of the
 core namespaces to Go forms.
+
+**As built in step 7b** (amendments EC1-EC6, accepted 2026-10-10; SPEED-NOTES.md): the closure
+compilation is per method at its first call, not at `fn*` evaluation; the hot static methods
+are called directly (EC2, generated `CodeOpN`), other resolved members through their invoker
+(EC5). The benchmarks run 5 to 69 times faster than the tree walk (geometric mean 12.8x), about
+54 times slower than the JVM. AOT to Go forms remains.
 
 ## 7. Checks
 

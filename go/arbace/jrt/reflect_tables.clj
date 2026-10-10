@@ -1836,6 +1836,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSetLong_O_J_J_J__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2)) (assert int64 (aget args 3)))))
         (lit MethodInfo :Name "compareAndSetReference" :Params (lit (slice (* Class)) Object_class Prim_long Object_class Object_class) :Return Prim_boolean :Modifiers 0x111
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CompareAndSetReference_O_J_O_O__Z (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2) (aget args 3))))
+        (lit MethodInfo :Name "copyMemory" :Params (lit (slice (* Class)) Object_class Prim_long Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CopyMemory_O_J_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2) (assert int64 (aget args 3)) (assert int64 (aget args 4))) nil))
+        (lit MethodInfo :Name "copySwapMemory" :Params (lit (slice (* Class)) Object_class Prim_long Object_class Prim_long Prim_long Prim_long) :Return Prim_void :Modifiers 0x1
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.CopySwapMemory_O_J_O_J_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2) (assert int64 (aget args 3)) (assert int64 (aget args 4)) (assert int64 (aget args 5))) nil))
         (lit MethodInfo :Name "fullFence" :Params nil :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.FullFence__V (assert (* Unsafe) this)) nil))
         (lit MethodInfo :Name "getAndAddInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_int :Modifiers 0x11
@@ -1850,10 +1854,14 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetByte_O_J__B (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_char :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCharUnaligned_O_J__C (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_boolean) :Return Prim_char :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetCharUnaligned_O_J_Z__C (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert bool (aget args 2)))))
         (lit MethodInfo :Name "getInt" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetInt_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetIntUnaligned_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_boolean) :Return Prim_int :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetIntUnaligned_O_J_Z__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert bool (aget args 2)))))
         (lit MethodInfo :Name "getIntVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_int :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetIntVolatile_O_J__I (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getLong" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x101
@@ -1862,6 +1870,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongOpaque_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongUnaligned_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_boolean) :Return Prim_long :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongUnaligned_O_J_Z__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert bool (aget args 2)))))
         (lit MethodInfo :Name "getLongVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_long :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetLongVolatile_O_J__J (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getReference" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Object_class :Modifiers 0x101
@@ -1870,6 +1880,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReferenceAcquire_O_J__O (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getReferenceVolatile" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Object_class :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetReferenceVolatile_O_J__O (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
+        (lit MethodInfo :Name "getShortUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_boolean) :Return Prim_short :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetShortUnaligned_O_J_Z__S (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert bool (aget args 2)))))
+        (lit MethodInfo :Name "getShortUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long) :Return Prim_short :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.GetShortUnaligned_O_J__S (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)))))
         (lit MethodInfo :Name "getUnsafe" :Params nil :Return Unsafe_class :Modifiers 0x9
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (Unsafe_GetUnsafe__Unsafe)))
         (lit MethodInfo :Name "isBigEndian" :Params nil :Return Prim_boolean :Modifiers 0x11
@@ -1884,12 +1898,16 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutByte_O_J_B__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int8 (aget args 2))) nil))
         (lit MethodInfo :Name "putCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_char) :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutCharUnaligned_O_J_C__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert uint16 (aget args 2))) nil))
+        (lit MethodInfo :Name "putCharUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_char Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutCharUnaligned_O_J_C_Z__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert uint16 (aget args 2)) (assert bool (aget args 3))) nil))
         (lit MethodInfo :Name "putFloat" :Params (lit (slice (* Class)) Object_class Prim_long Prim_float) :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutFloat_O_J_F__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert float32 (aget args 2))) nil))
         (lit MethodInfo :Name "putInt" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutInt_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
         (lit MethodInfo :Name "putIntOpaque" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutIntOpaque_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
+        (lit MethodInfo :Name "putIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutIntUnaligned_O_J_I_Z__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2)) (assert bool (aget args 3))) nil))
         (lit MethodInfo :Name "putIntUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutIntUnaligned_O_J_I__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int32 (aget args 2))) nil))
         (lit MethodInfo :Name "putIntVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Prim_int) :Return Prim_void :Modifiers 0x101
@@ -1898,6 +1916,8 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLong_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
         (lit MethodInfo :Name "putLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLongUnaligned_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
+        (lit MethodInfo :Name "putLongUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLongUnaligned_O_J_J_Z__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2)) (assert bool (aget args 3))) nil))
         (lit MethodInfo :Name "putLongVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Prim_long) :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutLongVolatile_O_J_J__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int64 (aget args 2))) nil))
         (lit MethodInfo :Name "putReference" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x101
@@ -1906,6 +1926,10 @@
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReferenceRelease_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
         (lit MethodInfo :Name "putReferenceVolatile" :Params (lit (slice (* Class)) Object_class Prim_long Object_class) :Return Prim_void :Modifiers 0x101
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutReferenceVolatile_O_J_O__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (aget args 2)) nil))
+        (lit MethodInfo :Name "putShortUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_short) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutShortUnaligned_O_J_S__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int16 (aget args 2))) nil))
+        (lit MethodInfo :Name "putShortUnaligned" :Params (lit (slice (* Class)) Object_class Prim_long Prim_short Prim_boolean) :Return Prim_void :Modifiers 0x11
+         :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.PutShortUnaligned_O_J_S_Z__V (assert (* Unsafe) this) (aget args 0) (assert int64 (aget args 1)) (assert int16 (aget args 2)) (assert bool (aget args 3))) nil))
         (lit MethodInfo :Name "storeFence" :Params nil :Return Prim_void :Modifiers 0x11
          :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (.StoreFence__V (assert (* Unsafe) this)) nil))
         (lit MethodInfo :Name "storeStoreFence" :Params nil :Return Prim_void :Modifiers 0x11

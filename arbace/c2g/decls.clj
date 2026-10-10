@@ -453,11 +453,12 @@
     (letfn [(w [x]
               (when-not @hit
                 (cond
-                  (map? x) (when (:op x)
-                             (when (and (#{:get-static :set-static :var-deref :var-invoke} (:op x))
-                                        (contains? classes (or (:declarer (:field x)) (:owner (:field x)))))
-                               (vreset! hit true))
-                             (run! w (vals x)))
+                  ;; every map, not only nodes: a switch's cases are a map of bodies
+                  (map? x) (do (when (and (:op x)
+                                          (#{:get-static :set-static :var-deref :var-invoke} (:op x))
+                                          (contains? classes (or (:declarer (:field x)) (:owner (:field x)))))
+                                 (vreset! hit true))
+                               (run! w (vals x)))
                   (or (vector? x) (seq? x)) (run! w x)
                   :else nil)))]
       (w (:body ab)))
@@ -679,7 +680,8 @@
     (if (m/interface? n)
       ;; an interface: the Go assertion succeeds for every object of a class made at run time
       ;; (Dyn, §5.12), whose class must implement the interface (the nominal check)
-      (let [dyn-check (list 'when 'ok
+      ;; (only objects with the header's dynamic flag are asked: SPEED-NOTES.md)
+      (let [dyn-check (list 'when (list 'and 'ok (list (m/jrt-sym pkg "IsDynamic") 'x))
                             (list 'let [(list 'values 'd 'dyn) (list 'assert (m/jrt-sym pkg "Dynamic") 'x)]
                                   (list 'when 'dyn (list 'set! 'ok (list '.DynImplements 'd (symbol (str g "_class")))))))]
         [(list 'go/func (symbol (str g "_InstanceOf")) (with-meta [(tag 'x 'any)] {:tag 'bool})

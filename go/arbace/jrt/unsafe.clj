@@ -531,6 +531,59 @@ the deadline in epoch milliseconds (absolute) or the nanoseconds (relative; 0: n
 (go/method PutLongUnaligned_O_J_J__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^int64 x]
   (.PutUint64 binary/LittleEndian (unalignedBytes o off 8) (conv uint64 x)))
 
+;; the byte-order overloads of jdk26u's Unsafe (plain Java there: convEndian over the native
+;; order), which ScopedMemoryAccess's heap paths call (java.nio's buffers; JRT-NOTES.md, "The
+;; JDK's resource data")
+
+(go/func unalignedOrder ^{:tag binary/ByteOrder} [^bool bigEndian]
+  (when bigEndian
+    (return binary/BigEndian))
+  binary/LittleEndian)
+
+(go/method GetShortUnaligned_O_J__S ^int16 [^{:tag (* Unsafe)} u ^any o ^int64 off]
+  (conv int16 (.Uint16 binary/LittleEndian (unalignedBytes o off 2))))
+(go/method PutShortUnaligned_O_J_S__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^int16 x]
+  (.PutUint16 binary/LittleEndian (unalignedBytes o off 2) (conv uint16 x)))
+
+(go/method GetCharUnaligned_O_J_Z__C ^uint16 [^{:tag (* Unsafe)} u ^any o ^int64 off ^bool be]
+  (.Uint16 (unalignedOrder be) (unalignedBytes o off 2)))
+(go/method GetShortUnaligned_O_J_Z__S ^int16 [^{:tag (* Unsafe)} u ^any o ^int64 off ^bool be]
+  (conv int16 (.Uint16 (unalignedOrder be) (unalignedBytes o off 2))))
+(go/method GetIntUnaligned_O_J_Z__I ^int32 [^{:tag (* Unsafe)} u ^any o ^int64 off ^bool be]
+  (conv int32 (.Uint32 (unalignedOrder be) (unalignedBytes o off 4))))
+(go/method GetLongUnaligned_O_J_Z__J ^int64 [^{:tag (* Unsafe)} u ^any o ^int64 off ^bool be]
+  (conv int64 (.Uint64 (unalignedOrder be) (unalignedBytes o off 8))))
+(go/method PutCharUnaligned_O_J_C_Z__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^uint16 x ^bool be]
+  (.PutUint16 (unalignedOrder be) (unalignedBytes o off 2) x))
+(go/method PutShortUnaligned_O_J_S_Z__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^int16 x ^bool be]
+  (.PutUint16 (unalignedOrder be) (unalignedBytes o off 2) (conv uint16 x)))
+(go/method PutIntUnaligned_O_J_I_Z__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^int32 x ^bool be]
+  (.PutUint32 (unalignedOrder be) (unalignedBytes o off 4) (conv uint32 x)))
+(go/method PutLongUnaligned_O_J_J_Z__V [^{:tag (* Unsafe)} u ^any o ^int64 off ^int64 x ^bool be]
+  (.PutUint64 (unalignedOrder be) (unalignedBytes o off 8) (conv uint64 x)))
+
+(go/method CopyMemory_O_J_O_J_J__V
+  "CopyMemory_O_J_O_J_J__V is copyMemory between primitive arrays (the heap buffers' bulk
+gets and puts; overlapping ranges as memmove).\n"
+  [^{:tag (* Unsafe)} u ^any src ^int64 srcOff ^any dst ^int64 dstOff ^int64 n]
+  (when (== n 0)
+    (return))
+  (copy (unalignedBytes dst dstOff n) (unalignedBytes src srcOff n)))
+
+(go/method CopySwapMemory_O_J_O_J_J_J__V
+  "CopySwapMemory_O_J_O_J_J_J__V is copySwapMemory between primitive arrays: n bytes as
+elements of elemSize (2, 4 or 8) bytes, each byte-reversed.\n"
+  [^{:tag (* Unsafe)} u ^any src ^int64 srcOff ^any dst ^int64 dstOff ^int64 n ^int64 elemSize]
+  (when (== n 0)
+    (return))
+  (let [from (unalignedBytes src srcOff n)
+        tmp (make (slice byte) n)]
+    (for [i 0] (< i (conv int n)) (inc! i)
+      (let [e (conv int elemSize)
+            base (* (/ i e) e)]
+        (aset tmp i (aget from (+ base (- (- e 1) (- i base)))))))
+    (copy (unalignedBytes dst dstOff n) tmp)))
+
 (go/func unalignedBytes ^{:tag (slice byte)} [^any o ^int64 off ^int64 n]
   (when (== o nil)
     (panic (NPE)))

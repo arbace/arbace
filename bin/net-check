@@ -1,0 +1,118 @@
+#!/bin/bash
+# The socket server on the Go build against the JVM's (doc/go/JRT-NOTES.md, "Sockets"): each
+# server is started from the arbace.server.* system property, given through JAVA_TOOL_OPTIONS
+# (which both builds read), and the test client test/net/client.clj (on the JVM Arbace) talks to
+# it:
+#   repl        a socket REPL session (arbace.core.server/repl): the transcripts equal, but for
+#               the evaluated fns' class names (user/evalN)
+#   prepl       an io-prepl session: the messages equal (:ms and exceptions' frames set aside)
+#   concurrent  8 socket REPL sessions at once on the Go server
+#   remote      remote-prepl run by the Go executable against the JVM's io-prepl server, its
+#               messages equal to the JVM's remote-prepl's (:ms aside)
+#   stop        start-server and stop-server at the Go REPL; a connection after stop is refused
+#
+# Usage: bin/net-check [CHECK...]   (default: all)
+# Environment: ARBACE_GO_ARCH (amd64, or arm64 under qemu-aarch64), ARBACE_GO (the executable,
+# default target/arbace-go/$ARBACE_GO_ARCH/arbace). Needs target/arbace.jar (bin/build-arbace).
+# Exit status 0 when every check passes.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+arch=${ARBACE_GO_ARCH:-amd64}
+exe=${ARBACE_GO:-$root/target/arbace-go/$arch/arbace}
+go_run() { if [ "$arch" = arm64 ]; then /usr/bin/qemu-aarch64 "$exe" "$@"; else "$exe" "$@"; fi; }
+jvm_run() { "$root/bin/arbace" "$@"; }
+mkdir -p "$root/.tmp"
+work=$(mktemp -d "$root/.tmp/net-check.XXXXXX")
+pids=()
+cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$work"; }
+trap cleanup EXIT
+status=0
+
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
+# the Go build starts in about 5 s natively, much slower under qemu-aarch64
+hold=10; [ "$arch" = arm64 ] && hold=90
+wait_port() { local i; for i in $(seq 1 3000); do nc -z 127.0.0.1 "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+
+# server BUILD PORT ACCEPT: a server of BUILD (go or jvm) at PORT, in the background
+server() {
+  local opts="-Darbace.server.repl=\"{:port $2 :accept $3}\""
+  local cmd
+  if [ "$1" = go ]; then
+    if [ "$arch" = arm64 ]; then cmd=(/usr/bin/qemu-aarch64 "$exe"); else cmd=("$exe"); fi
+  else
+    cmd=("$root/bin/arbace")   # it execs java: the PID is the JVM's
+  fi
+  # the port opens in RT's initialization, before arbace.main has loaded (and requiring at once
+  # from two threads races, on the JVM too): the server is used once its -e runs
+  JAVA_TOOL_OPTIONS=$opts "${cmd[@]}" -e '(do (println "ready") (flush) (Thread/sleep 600000))' > "$work/server-$2.log" 2>&1 &
+  pids+=($!)
+  wait_port "$2" || { echo "  no $1 server at $2:"; cat "$work/server-$2.log"; return 1; }
+  local i; for i in $(seq 1 3000); do grep -q '^ready' "$work/server-$2.log" && return 0; sleep 0.1; done
+  echo "  $1 server at $2 not ready:"; cat "$work/server-$2.log"; return 1
+}
+
+client() { jvm_run "$root/test/net/client.clj" "$@"; }
+
+result() { # result NAME OK-FILE-A FILE-B
+  if cmp -s "$2" "$3"; then echo "  ok   $1"; else echo "  FAIL $1"; diff "$2" "$3" | head -40; status=1; fi
+}
+
+check_repl() {
+  local pj pg; pj=$(free_port); pg=$(free_port)
+  server jvm "$pj" arbace.core.server/repl && server go "$pg" arbace.core.server/repl || { status=1; return; }
+  client repl "$pj" | sed -E 's/eval[0-9]+/evalN/g' > "$work/repl-jvm.txt"
+  client repl "$pg" | sed -E 's/eval[0-9]+/evalN/g' > "$work/repl-go.txt"
+  result "socket REPL session (JVM, Go)" "$work/repl-jvm.txt" "$work/repl-go.txt"
+}
+
+check_prepl() {
+  local pj pg; pj=$(free_port); pg=$(free_port)
+  server jvm "$pj" arbace.core.server/io-prepl && server go "$pg" arbace.core.server/io-prepl || { status=1; return; }
+  client prepl "$pj" > "$work/prepl-jvm.txt"
+  client prepl "$pg" > "$work/prepl-go.txt"
+  result "io-prepl session (JVM, Go)" "$work/prepl-jvm.txt" "$work/prepl-go.txt"
+}
+
+check_concurrent() {
+  local pg; pg=$(free_port)
+  server go "$pg" arbace.core.server/repl || { status=1; return; }
+  echo "8 sessions ok" > "$work/conc-expected.txt"
+  client concurrent "$pg" 8 > "$work/conc-go.txt"
+  result "8 concurrent socket REPL sessions (Go)" "$work/conc-expected.txt" "$work/conc-go.txt"
+}
+
+check_remote() {
+  local pj; pj=$(free_port)
+  server jvm "$pj" arbace.core.server/io-prepl || { status=1; return; }
+  local prog="(require 'arbace.core.server) (arbace.core.server/remote-prepl \"127.0.0.1\" $pj *in* (fn [m] (prn (cond-> m (:ms m) (assoc :ms 0)))))"
+  local input='(+ 1 2)
+(println "out")
+(keyword "a" "b")
+:repl/quit
+'
+  # stdin stays open until the answers are in (the Go build starts in about 5 s): remote-prepl
+  # closes its reader at the input's end
+  # (and the JVM then prints the reading thread's "Stream closed": stderr is set aside)
+  { printf '%s' "$input"; sleep $hold; } | jvm_run -e "$prog" > "$work/remote-jvm.txt" 2> "$work/remote-jvm.err"
+  { printf '%s' "$input"; sleep $hold; } | go_run -e "$prog" > "$work/remote-go.txt" 2> "$work/remote-go.err"
+  result "remote-prepl from Go (against the JVM's io-prepl)" "$work/remote-jvm.txt" "$work/remote-go.txt"
+}
+
+check_stop() {
+  local p; p=$(free_port)
+  local prog="(require '[arbace.core.server :as s])
+(def ss (s/start-server {:name \"t\" :port $p :accept 'arbace.core.server/repl}))
+(println (.getLocalPort ss) (.isClosed ss))
+(println (with-open [c (java.net.Socket. \"127.0.0.1\" $p)] (.isConnected c)))
+(println (s/stop-server \"t\") (.isClosed ss) (s/stop-server \"t\"))
+(println (try (java.net.Socket. \"127.0.0.1\" $p) (catch java.net.ConnectException e (.getMessage e))))"
+  printf '%s\n' "#'user/ss" "$p false" "true" "true true nil" "Connection refused" > "$work/stop-expected.txt"
+  go_run -e "$prog" > "$work/stop-go.txt" 2>&1
+  result "start-server, stop-server (Go)" "$work/stop-expected.txt" "$work/stop-go.txt"
+}
+
+[ -x "$exe" ] || { echo "net-check: no $exe (bin/arbace-go --build)" >&2; exit 1; }
+checks=${*:-repl prepl concurrent remote stop}
+echo "== bin/net-check ($arch: $exe)"
+for c in $checks; do "check_$c"; for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done; pids=(); done
+exit $status

@@ -6,7 +6,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "natives.go"
-  :imports [[md5 "crypto/md5"]])
+  :imports [[bytes "bytes"] [zlib "compress/zlib"] [md5 "crypto/md5"] [errors "errors"] [io "io"]])
 
 (go/func NullPointerException_GetExtendedNPEMessage__String_native
   "NullPointerException_GetExtendedNPEMessage__String_native is the native
@@ -48,6 +48,39 @@ stack traces (C2G-SPEC §10.7).\n"
   "Compiler_Evaluator_MonitorExit_O__V_native is the evaluator's monitor-exit.\n"
   [^any o]
   (MonitorExit o))
+
+;; ---------------------------------------------------------------------------------------
+;; arbace.lang.Compiler$CodeRun (variant, CompilerCode.clj; doc/go/SPEED-NOTES.md): the closure
+;; compiler's calls of resolved constructors, through their member table's invoker as compiled
+;; code calls them: the arguments already of their parameters' types (boxed), no Reflector, no
+;; InvocationTargetException (resolved methods: Evaluator.invokeDirect, below)
+
+(go/func directArgs
+  "directArgs: the boxed arguments args for the parameters ps in the tables' convention
+(Unbox: a primitive's wrapper to its Go value).\n"
+  ^{:tag (slice any)} [^{:tag (slice (* Class))} ps ^{:tag (* RefArray)} args]
+  (let [out (make (slice any) (len ps))]
+    (range [i p ps]
+      (let [x (aget (.-A args) i)]
+        (if (.IsPrimitive__Z p)
+          (let [(values v ok) (Unbox p x)]
+            (when (not ok)
+              (panic (NPE)))
+            (aset out i v))
+          (aset out i x))))
+    out))
+
+(go/func Compiler_CodeRun_Construct_Constructor_O1__O_native
+  "Compiler_CodeRun_Construct_Constructor_O1__O_native makes an object with constructor k and
+args, the class initialized first; InstantiationException for an abstract class or an
+interface.\n"
+  ^any [^{:tag (* Constructor)} k ^{:tag (* RefArray)} args]
+  (let [c (.-clazz k)]
+    (when (or (!= (bit-and (.GetModifiers__I c) (bit-or AccAbstract AccInterface)) 0) (== (.-New (.-info k)) nil))
+      (panic (InstantiationException_New)))
+    (when (!= (.-Init (.-info c)) nil)
+      ((.-Init (.-info c))))
+    ((.-New (.-info k)) (directArgs (.-params k) args))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; arbace.lang.RT (variant; doc/go/EVAL-NOTES.md): the program's embedded sources
@@ -111,3 +144,30 @@ NullPointerException.\n"
       (when (== (.-Invoke info) nil)
         (panic (AbstractMethodError_New_String (Str (+ (.GoName (.-clazz m)) "." (.-Name info))))))
       (Box ((.-Invoke info) obj cargs)))))
+
+;; ---------------------------------------------------------------------------------------
+;; java.util.zip.InflaterInputStream (jrt's own Java, overlay/jdk; JRT-NOTES.md, "The JDK's
+;; resource data")
+
+(go/func InflaterInputStream_Inflate0_B1_String1__B1_native
+  "InflaterInputStream_Inflate0_B1_String1__B1_native is the data of the zlib stream input
+(RFC 1950, as the JDK's default Inflater reads it), over Go's compress/zlib; or null with the
+reason in error[0]: zlib's \"Unexpected end of ZLIB input stream\" (the JDK's message for a
+truncated stream), else Go's description of the malformed data.\n"
+  ^{:tag (* ByteArray)} [^{:tag (* ByteArray)} input ^{:tag (* RefArray)} error]
+  (let [in (make (slice byte) (len (.-A (NN input))))]
+    (range [i x (.-A input)]
+      (aset in i (conv byte x)))
+    (let [(values r err) (zlib/NewReader (bytes/NewReader in))
+          ^{:tag (slice byte)} out nil]
+      (when (== err nil)
+        (set! (values out err) (io/ReadAll r)))
+      (when (!= err nil)
+        (if (or (errors/Is err io/ErrUnexpectedEOF) (errors/Is err io/EOF))
+          (aset (.-A error) 0 (Str "Unexpected end of ZLIB input stream"))
+          (aset (.-A error) 0 (Str (.Error err))))
+        (return nil))
+      (let [a (NewByteArray (conv int32 (len out)))]
+        (range [i x out]
+          (aset (.-A a) i (conv int8 x)))
+        a))))

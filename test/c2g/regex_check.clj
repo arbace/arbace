@@ -95,8 +95,13 @@
                (str/join "\n" (map out/form-text main-forms))
                "\n"))))
 
+(def ^:dynamic *env*
+  "Environment variables added to the processes sh starts."
+  {})
+
 (defn sh [& args]
   (let [pb (ProcessBuilder. ^java.util.List (map str args))
+        _ (doseq [[k v] *env*] (.put (.environment pb) k v))
         _ (.redirectErrorStream pb true)
         p (.start pb)
         o (slurp (.getInputStream p))]
@@ -137,7 +142,10 @@
                 (shutdown-agents)
                 (System/exit 1))
             (let [t0 (System/nanoTime)
-                  [rc ro] (if (= arch "arm64") (sh "/usr/bin/qemu-aarch64" exe cases-file) (sh exe cases-file))
+                  ;; the JDK's resource data (\N{name}, CANON_EQ) from bin/jrt-convert's data
+                  ;; directory, which the program finds as ARBACE_PATH's resources (it embeds none)
+                  [rc ro] (binding [*env* {"ARBACE_PATH" (.getAbsolutePath (io/file ".tmp/jrt/data"))}]
+                            (if (= arch "arm64") (sh "/usr/bin/qemu-aarch64" exe cases-file) (sh exe cases-file)))
                   secs (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0)
                   got (into {} (for [l (str/split-lines ro)
                                      :when (str/starts-with? l "@@rx ")

@@ -2,7 +2,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "string.go"
-  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"] [utf8 "unicode/utf8"]])
+  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"] [utf8 "unicode/utf8"] [unsafe "unsafe"]])
 
 (go/type String
   "String is java.lang.String (final: *String): immutable UTF-16 code units, the hash code
@@ -30,9 +30,45 @@ classes build Latin-1 byte arrays (StringLatin1) where Java's would.\n"}
 
 (go/func NewStringUTF16 "NewStringUTF16 is a String of a copy of the code units v.\n"
   ^{:tag (* String)} [^{:tag (slice uint16)} v]
-  (let [c (make (slice uint16) (len v))]
-    (copy c v)
-    (newString c)))
+  (let [s (allocString (len v))]
+    (copy (.-value s) v)
+    s))
+
+(go/type stringBuf
+  "stringBuf is a String whose code units follow its header in the same allocation
+(doc/go/SPEED-NOTES.md): B is an array type [N]uint16.\n"
+  :type-params [B]
+  (struct String ^B buf))
+
+(go/func newStringBuf
+  "newStringBuf allocates a String of n <= N code units in one object, its units the array B.\n"
+  :type-params [B] ^{:tag (* String)} [^int n]
+  (let [p (addr (lit (stringBuf B)))]
+    (set! (.-value p) (unsafe/Slice (conv (* uint16) (conv unsafe/Pointer (addr (.-buf p)))) n))
+    (addr (.-String p))))
+
+(go/func allocString
+  "allocString is a new String of n code units, all 0, for the caller to fill before it
+publishes it: up to 108 units in one allocation with the header (the lengths rounded up to
+Go's size classes), longer ones as a header and a slice.\n"
+  ^{:tag (* String)} [^int n]
+  (switch
+    (case [(== n 0)] (return (addr (lit String :value (lit (slice uint16))))))
+    (case [(<= n 4)] (return ((inst newStringBuf (array 4 uint16)) n)))
+    (case [(<= n 12)] (return ((inst newStringBuf (array 12 uint16)) n)))
+    (case [(<= n 20)] (return ((inst newStringBuf (array 20 uint16)) n)))
+    (case [(<= n 28)] (return ((inst newStringBuf (array 28 uint16)) n)))
+    (case [(<= n 36)] (return ((inst newStringBuf (array 36 uint16)) n)))
+    (case [(<= n 44)] (return ((inst newStringBuf (array 44 uint16)) n)))
+    (case [(<= n 52)] (return ((inst newStringBuf (array 52 uint16)) n)))
+    (case [(<= n 60)] (return ((inst newStringBuf (array 60 uint16)) n)))
+    (case [(<= n 68)] (return ((inst newStringBuf (array 68 uint16)) n)))
+    (case [(<= n 76)] (return ((inst newStringBuf (array 76 uint16)) n)))
+    (case [(<= n 84)] (return ((inst newStringBuf (array 84 uint16)) n)))
+    (case [(<= n 92)] (return ((inst newStringBuf (array 92 uint16)) n)))
+    (case [(<= n 100)] (return ((inst newStringBuf (array 100 uint16)) n)))
+    (case [(<= n 108)] (return ((inst newStringBuf (array 108 uint16)) n))))
+  (newString (make (slice uint16) n)))
 
 (go/func appendUTF8 "appendUTF8 appends the UTF-16 of Go's UTF-8 s (U+FFFD for invalid bytes).\n"
   ^{:tag (slice uint16)} [^{:tag (slice uint16)} b ^string s]
@@ -157,12 +193,13 @@ which a Go string cannot hold).\n"
       (if (== p nil)
         (set! n (+ n 4))
         (set! n (+ n (len (.-value p))))))
-    (let [v (make (slice uint16) 0 n)]
+    (let [s (allocString n)
+          v (subslice (.-value s) _ 0)]
       (range [_ p parts]
         (if (== p nil)
           (set! v (appendUTF8 v "null"))
           (set! v (append v (spread (.-value p))))))
-      (newString v))))
+      s)))
 
 (go/var [litNull (Intern "null")] [litTrue (Intern "true")] [litFalse (Intern "false")]
         [litEmpty (Intern "")])
@@ -207,10 +244,11 @@ if that returns null).\n"
   (Str (FormatDouble d)))
 
 (go/func latin1String ^{:tag (* String)} [^{:tag (slice byte)} b]
-  (let [v (make (slice uint16) (len b))]
+  (let [s (allocString (len b))
+        v (.-value s)]
     (range [i c b]
       (aset v i (conv uint16 c)))
-    (newString v)))
+    s))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Bounds checks with Java's exceptions (jdk.internal.util.Preconditions' messages)

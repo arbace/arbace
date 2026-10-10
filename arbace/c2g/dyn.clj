@@ -265,6 +265,7 @@
                                             (concat
                                               (when-not (or (m/hand-written? n) (m/trivial-init? n)) [(list (m/class-sym :lang n "_Init"))])
                                               [(list 'let ['t (list 'addr (list 'lit (symbol g) :D 'dc :F '(make (slice any) 1)))]
+                                                     '(.MarkDynamic t)
                                                      (apply list (symbol (str "." (nm/ctor-base real)))
                                                             (list (symbol (str ".-" (m/go-name n))) 't) 't
                                                             (map-indexed (fn [i p] (arg-conv p (list 'aget 'args i))) ps))
@@ -308,6 +309,20 @@
                                                 (fn [pn r] (iface-fallback ifaces k pn r))))))
                     ks)
       [(ctor-infos n)])))
+
+(def ^:private dyn-call-fast
+  "dynCall's call of a method of up to 3 arguments: the fn's invoke of that arity, without a seq
+  (the evaluator's methods, EvalMethod.invoke: doc/go/SPEED-NOTES.md, \"The evaluator\"). (A def
+  of its own: forms is at the JVM's limit of a method's size.)"
+  '(go/func dynCallFast
+     "dynCallFast calls a method's fn of up to 3 arguments with the object and the arguments,
+boxed, through its invoke of that arity.\n"
+     ^any [^IFn impl ^any this ^{:tag (slice any)} args]
+     (switch (len args)
+       (case [0] (return (.Invoke_O__O impl this)))
+       (case [1] (return (.Invoke_O_O__O impl this (jrt/Box (aget args 0)))))
+       (case [2] (return (.Invoke_O_O_O__O impl this (jrt/Box (aget args 0)) (jrt/Box (aget args 1))))))
+     (.Invoke_O_O_O_O__O impl this (jrt/Box (aget args 0)) (jrt/Box (aget args 1)) (jrt/Box (aget args 2)))))
 
 (defn- fn-field-native
   "Compiler$Dyn.defineFnField: a fn class's field, the fn's i-th closed-over value, as the
@@ -380,6 +395,12 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
           (jrt/Thrown (jrt/AbstractMethodError_New_String
                         (jrt/Str (+ "Receiver class " (.-Name (.Info (.-Cls (.DynClassOf t))))
                                     " does not define or inherit an implementation of the resolved method " m)))))
+       '(go/func newDyn
+          "newDyn is a new object of a class made at run time, with the header's dynamic flag.\n"
+          ^{:tag (* Dyn)} [^{:tag (* DynClass)} dc ^{:tag (slice any)} f]
+          (let [d (addr (lit Dyn :D dc :F f))]
+            (.MarkDynamic d)
+            d))
        '(go/method DynImplements ^bool [^{:tag (* Dyn)} t ^{:tag (* jrt/Class)} c]
           (aget (.-Ifaces (.-D t)) c))
        '(go/method DynClassOf ^{:tag (* DynClass)} [^{:tag (* Dyn)} t] (.-D t))
@@ -499,7 +520,7 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
                                           (let [f (make (slice any) 0 (+ (len args) (len tl)))]
                                             (range [_ x args] (set! f (append f (jrt/Box x))))
                                             (set! f (append f (spread tl)))
-                                            (addr (lit Dyn :D dc :F f)))))))))
+                                            (newDyn dc f))))))))
        (list 'go/func (symbol (native-name "defineInterface" "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/Class;"))
              (with-meta [(tag 'name '(* jrt/String)) (tag 'extends '(* jrt/RefArray))] {:tag '(* jrt/Class)})
              '(let [info (addr (lit jrt/ClassInfo :Name (.String (jrt/NN name))
@@ -560,10 +581,12 @@ Invoke): Clojure's conversion to a primitive, as compiled deftype methods conver
               (range [_ x (.-A a)]
                 (set! ps (append ps (assert (* jrt/Class) x)))))
             ps))
+       dyn-call-fast
        '(go/func dynCall
           "dynCall calls a method's fn with the object (none for a static method) and the
 arguments, boxed.\n"
           ^any [^IFn impl ^any this ^{:tag (slice any)} args]
+          (when (and (!= this nil) (<= (len args) 3)) (return (dynCallFast impl this args)))
           (let [^{:tag (slice any)} a nil]
             (when (!= this nil)
               (set! a (append a this)))
@@ -571,7 +594,7 @@ arguments, boxed.\n"
             (.ApplyTo_ISeq__O impl (RT_Seq_O__ISeq (jrt/RefArrayOf jrt/Object_class (spread a))))))
        (list 'go/func (symbol (native-name "newInstance" "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;"))
              (with-meta [(tag 'c '(* jrt/Class)) (tag 'fieldValues '(* jrt/RefArray))] {:tag 'any})
-             '(let [d (addr (lit Dyn :D (dynClassOf c)))]
+             '(let [d (newDyn (dynClassOf c) nil)]
                 (when (!= fieldValues nil)
                   (set! (.-F d) (append (lit (slice any)) (spread (.-A fieldValues)))))
                 d))
@@ -622,7 +645,7 @@ classes) and that have no fn yet: the fn factory makes of their name.\n"
                          '(set! (.-Ctors info) (lit (slice jrt/CtorInfo)
                                                     (lit jrt/CtorInfo :Modifiers jrt/AccPublic
                                                          :New (fn ^any [^{:tag (slice any)} args]
-                                                                (addr (lit Dyn :D dc :F (make (slice any) 1)))))))
+                                                                (newDyn dc (make (slice any) 1))))))
                          '(return c)))
              '(let [(values slots ctors own) (dynSubFor super)]
                 (when (== slots nil)
