@@ -17,8 +17,8 @@
 ;; with the proxy and the arguments; without one, a superclass method runs the superclass's
 ;; implementation (the fn answers Compiler$Dyn/superMarker) and an interface method throws
 ;; UnsupportedOperationException. Everything else is arbace/core_proxy.clj's. A proxy of a
-;; class the Go build cannot extend expands to a throw, so that code using it loads; bean
-;; finds the properties by reflection (java.beans is not in the Go build).
+;; class the Go build cannot extend expands to a throw, so that code using it loads. bean is
+;; arbace/core_bean.clj's, shared with the JVM (by reflection, without java.beans).
 
 (in-ns 'arbace.core)
 
@@ -291,63 +291,3 @@
   {:added "1.0"}
   [meth & args]
  `(proxy-call-with-super (fn [] (. ~'this ~meth ~@args))  ~'this ~(name meth)))
-
-(defn- bean-decapitalize
-  "java.beans.Introspector/decapitalize."
-  [^String s]
-  (if (and (> (count s) 1) (Character/isUpperCase (.charAt s 1)) (Character/isUpperCase (.charAt s 0)))
-    s
-    (str (Character/toLowerCase (.charAt s 0)) (subs s 1))))
-
-(defn- bean-properties
-  "The Go build: the readable JavaBean properties of class c as java.beans.Introspector finds
-  them (java.beans is not in the Go build): {name getter}, from the public instance methods
-  getX() with a result and isX() returning boolean (preferred)."
-  [^Class c]
-  (let [ms (filter (fn [^java.lang.reflect.Method m]
-                     (and (not (Modifier/isStatic (.getModifiers m)))
-                          (zero? (alength (.getParameterTypes m)))
-                          (not= Void/TYPE (.getReturnType m))))
-                   (.getMethods c))
-        prop (fn [^java.lang.reflect.Method m]
-               (let [n (.getName m)]
-                 (cond
-                   (and (.startsWith n "get") (> (count n) 3)) [(bean-decapitalize (subs n 3)) m]
-                   (and (.startsWith n "is") (> (count n) 2) (= Boolean/TYPE (.getReturnType m)))
-                     [(bean-decapitalize (subs n 2)) m])))
-        gets (remove nil? (map prop (remove #(.startsWith (.getName ^java.lang.reflect.Method %) "is") ms)))
-        iss (remove nil? (map prop (filter #(.startsWith (.getName ^java.lang.reflect.Method %) "is") ms)))]
-    (into1 (sorted-map) (concat gets iss))))
-
-(defn bean
-  "Takes a Java object and returns a read-only implementation of the
-  map abstraction based upon its JavaBean properties."
-  {:added "1.0"}
-  [^Object x]
-  (let [c (. x (getClass))
-	pmap (reduce1 (fn [m [name ^java.lang.reflect.Method method]]
-			(assoc m (keyword name) (fn [] (arbace.lang.Reflector/prepRet (.getReturnType method) (. method (invoke x nil))))))
-				 {}
-				 (bean-properties c))
-	v (fn [k] ((pmap k)))
-        snapshot (fn []
-                   (reduce1 (fn [m e]
-                             (assoc m (key e) ((val e))))
-                           {} (seq pmap)))
-        thisfn (fn thisfn [plseq]
-                 (lazy-seq
-                   (when-let [pseq (seq plseq)]
-                     (cons (arbace.lang.MapEntry/create (first pseq) (v (first pseq)))
-                           (thisfn (rest pseq))))))]
-    (proxy [arbace.lang.APersistentMap]
-           []
-      (iterator [] (arbace.lang.SeqIterator. ^java.util.Iterator (thisfn (keys pmap))))
-      (containsKey [k] (contains? pmap k))
-      (entryAt [k] (when (contains? pmap k) (arbace.lang.MapEntry/create k (v k))))
-      (valAt ([k] (when (contains? pmap k) (v k)))
-			 ([k default] (if (contains? pmap k) (v k) default)))
-      (cons [m] (conj (snapshot) m))
-      (count [] (count pmap))
-      (assoc [k v] (assoc (snapshot) k v))
-      (without [k] (dissoc (snapshot) k))
-      (seq [] (thisfn (keys pmap))))))

@@ -180,6 +180,7 @@ found exactly once. Used for:
 |---|---|
 | `genclass.clj` | `gen-interface` at run time (Q5); `gen-class` throws (D6); ASM's imports out |
 | `core_proxy.clj` | `proxy` expands to a throw (D6: core_print's `PrintWriter-on` and pprint's writers load, and fail when used) |
+| `core_bean.subst.clj` | `bean` (`arbace/core_bean.clj`, shared with the JVM since 2026-10-10, VENDOR-NOTES hand change 15): no modules, every package counts as exported |
 | `instant.clj` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants throw |
 | `main.after.clj` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; pprint needs proxy) |
 | `main.subst.clj` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn` into `java.io.tmpdir` through `FileOutputStream` |

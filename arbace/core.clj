@@ -6972,6 +6972,8 @@ fails, attempts to require sym's namespace and retries."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; helper files ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (alter-meta! (find-ns 'arbace.core) assoc :doc "Fundamental library of the Clojure language")
 (load "core_proxy")
+;; Arbace (hand change 15): bean
+(load "core_bean")
 (load "core_print")
 (load "genclass")
 (load "core_deftype")
@@ -7023,8 +7025,9 @@ fails, attempts to require sym's namespace and retries."
      ~@body
      (catch ClassNotFoundException _#)))
 
-(when-class "java.sql.Timestamp"
-  (load "instant"))
+;; Arbace (hand change 16): #inst needs only java.base, its java.sql.Timestamp part is loaded by
+;; instant.clj when the runtime has java.sql
+(load "instant")
 
 (defprotocol Inst
   (inst-ms* [inst]))
@@ -8152,8 +8155,7 @@ fails, attempts to require sym's namespace and retries."
   overridden by binding *data-readers*."
   (merge
     {'uuid #'arbace.uuid/default-uuid-reader}
-    (when-class "java.sql.Timestamp"
-      {'inst #'arbace.instant/read-instant-date})))
+    {'inst #'arbace.instant/read-instant-date}))
 
 (def ^{:added "1.4" :dynamic true} *data-readers*
   "Map from reader tag symbols to data reader Vars.

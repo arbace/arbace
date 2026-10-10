@@ -7,8 +7,7 @@
 ;   You must not remove this notice, or any other, from this software.
 
 (ns arbace.instant
-  (:import [java.util Calendar Date GregorianCalendar TimeZone]
-           [java.sql Timestamp]))
+  (:import [java.util Calendar Date GregorianCalendar TimeZone]))
 
 (set! *warn-on-reflection* true)
 
@@ -201,33 +200,6 @@ with invalid arguments."
   [^java.util.Calendar c, ^java.io.Writer w]
   (print-calendar c w))
 
-(def ^:private ^ThreadLocal thread-local-utc-timestamp-format
-  ;; SimpleDateFormat is not thread-safe, so we use a ThreadLocal proxy for access.
-  ;; http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4228335
-  (proxy [ThreadLocal] []
-    (initialValue []
-      (doto (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss")
-        (.setTimeZone (java.util.TimeZone/getTimeZone "GMT"))))))
-
-(defn- print-timestamp
-  "Print a java.sql.Timestamp as RFC3339 timestamp, always in UTC."
-  [^java.sql.Timestamp ts, ^java.io.Writer w]
-  (let [^java.text.DateFormat utc-format (.get thread-local-utc-timestamp-format)]
-    (.write w "#inst \"")
-    (.write w (.format utc-format ts))
-    ;; add on nanos and offset
-    ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
-    (.write w (format ".%09d-00:00" (.getNanos ts)))
-    (.write w "\"")))
-
-(defmethod print-method java.sql.Timestamp
-  [^java.sql.Timestamp ts, ^java.io.Writer w]
-  (print-timestamp ts w))
-
-(defmethod print-dup java.sql.Timestamp
-  [^java.sql.Timestamp ts, ^java.io.Writer w]
-  (print-timestamp ts w))
-
 ;;; ------------------------------------------------------------------------
 ;;; reader integration
 
@@ -253,18 +225,6 @@ milliseconds since the epoch, UTC."
                                 hours minutes seconds nanoseconds
                                 offset-sign offset-hours offset-minutes)))
 
-(defn- construct-timestamp
-  "Construct a java.sql.Timestamp, which has nanosecond precision."
-  [years months days hours minutes seconds nanoseconds
-   offset-sign offset-hours offset-minutes]
-  (doto (Timestamp.
-         (.getTimeInMillis
-          (construct-calendar years months days
-                              hours minutes seconds 0
-                              offset-sign offset-hours offset-minutes)))
-    ;; nanos must be set separately, pass 0 above for the base calendar
-    (.setNanos nanoseconds)))
-
 (defn read-instant-date
   "To read an instant as a java.util.Date, bind *data-readers* to a map with
 this var as the value for the 'inst key. The timezone offset will be used
@@ -279,10 +239,8 @@ offset."
   [^CharSequence cs]
   (parse-timestamp (validated construct-calendar) cs))
 
-(defn read-instant-timestamp
-  "To read an instant as a java.sql.Timestamp, bind *data-readers* to a
-map with this var as the value for the 'inst key. Timestamp preserves
-fractional seconds with nanosecond precision. The timezone offset will
-be used to convert into UTC."
-  [^CharSequence cs]
-  (parse-timestamp (validated construct-timestamp) cs))
+;; Arbace (hand change 16, doc/VENDOR-NOTES.md): java.sql.Timestamp's printing and reader, only
+;; when the runtime has java.sql (a runtime image of java.base has not); #inst as
+;; java.util.Date, above, needs only java.base
+(when (try (Class/forName "java.sql.Timestamp") (catch ClassNotFoundException _ nil))
+  (load "instant_timestamp"))
