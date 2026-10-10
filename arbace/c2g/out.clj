@@ -818,6 +818,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         pst-s? (m/translated? "java/io/PrintStream")
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
         props? (m/translated? "java/util/Properties")
+        ;; Runtime.exec over the translated ProcessBuilder, through jrt's own Java RuntimeExec
+        ;; (JRT-NOTES.md, "Processes")
+        exec? (m/translated? "jdk/internal/jrt/RuntimeExec")
         ;; the context class loader and resources (core's data_readers lookup, io/resource):
         ;; the system loader; resources are the host's (the program's embedded sources), with
         ;; no URLs (java.net is cut)
@@ -826,7 +829,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
         ;; Date's members that name java.time.Instant, which jrt's own build cannot (JRT-NOTES.md,
         ;; phase 2B "Dates")
         instant? (m/translated? "java/time/Instant")]
-    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props?)
+    (when (or (seq str-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec?)
       [(apply list 'go/func 'init []
               (concat
                 (when (or pst-w? pst-s?)
@@ -846,6 +849,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getenv" :Return Map_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (C2g_SystemGetenv)))))])
+                (when exec?
+                  (let [s '((inst As (* String)) (aget args 0))
+                        a0 '((inst As (* RefArray)) (aget args 0))
+                        a1 '((inst As (* RefArray)) (aget args 1))
+                        f2 '((inst As (* File)) (aget args 2))
+                        sa '(.ArrayClass String_class)]
+                    [(list 'set! '(.-Methods (.Info Runtime_class))
+                           (list 'append '(.-Methods (.Info Runtime_class))
+                                 (sig "exec" '[String_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String__Process s))
+                                 (sig "exec" ['String_class sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1__Process s a1))
+                                 (sig "exec" ['String_class sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String_String1_File__Process s a1 f2))
+                                 (sig "exec" [sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1__Process a0))
+                                 (sig "exec" [sa sa] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1__Process a0 a1))
+                                 (sig "exec" [sa sa 'File_class] 'Process_class 0x1
+                                      (list 'RuntimeExec_Exec_String1_String1_File__Process a0 a1 f2))))]))
                 (when props?
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))

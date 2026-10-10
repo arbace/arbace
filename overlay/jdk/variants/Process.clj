@@ -1,0 +1,38 @@
+;; Go-build variant of java.lang.Process (C2G-SPEC §4.6; doc/go/JRT-NOTES.md, "Processes"): read
+;; by c2g only. The pipe streams read and write without jdk.internal.misc.Blocker (the virtual
+;; threads' compensation for a blocking call, not in the Go build: a goroutine blocks alone), and
+;; the native charset is native.encoding's through System.getProperty (StaticProperty, the JDK's
+;; snapshot of the properties at start-up, is not in the Go build). The replacing methods keep
+;; jdk26u's code where they keep it (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2
+;; with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse
+;; Public License 1.0.
+(in-ns 'java.lang)
+
+(c2g/variant Process$PipeInputStream
+  (method ^:public read :throws [java.io.IOException] ^int [this]
+    (.read super))
+
+  (method ^:public read :throws [java.io.IOException] ^int [this ^byte/1 b]
+    (.read super b))
+
+  (method ^:public read :throws [java.io.IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.read super b off len)))
+
+(c2g/variant Process$PipeOutputStream
+  (method ^:public write :throws [java.io.IOException] ^void [this ^int b]
+    (.write super b))
+
+  (method ^:public write :throws [java.io.IOException] ^void [this ^byte/1 b]
+    (.write super b))
+
+  (method ^:public write :throws [java.io.IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (.write super b off len)))
+
+(c2g/variant Process$CharsetHolder
+  (static-initializer
+    (let [^:mutable ^java.nio.charset.Charset cs nil]
+      (try
+        (set! cs (java.nio.charset.Charset/forName (System/getProperty "native.encoding")))
+        (catch java.nio.charset.UnsupportedCharsetException uce
+          (set! cs (java.nio.charset.Charset/defaultCharset))))
+      (set! nativeCharset cs))))

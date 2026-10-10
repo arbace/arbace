@@ -422,3 +422,23 @@ here and in C2G-SPEC §4.1, §10.3:
   of `java.sql`; all converted and compiled to javac's class shapes, 576 identical and the 4
   known differences, 1,640 classes; deterministic (`--twice`); 26 of 26 generated sources and 4
   of 4 data files equal to the JDK build's.
+
+## Processes (2026-10-10)
+
+Processes in the Go build (JRT-NOTES.md, "Processes"; the user's decision of 2026-10-10), from
+jdk26u at `baf63fb`, `test/g2c/jrt_sources.clj`'s `process-sources`:
+
+- **Sources added**: `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
+  `ProcessHandle.java`, `ProcessHandleImpl.java`; `src/java.base/unix/classes/java/lang/ProcessImpl.java`
+  and `ProcessEnvironment.java` (KIND `unix`).
+- **jrt's own Java** (KIND `overlay`): `jdk/internal/jrt/RuntimeExec.java` (new); `java/io/FileDescriptor.java`
+  and `jdk/internal/jrt/HostFiles.java` gain the descriptor access (`HostFiles.DescriptorAccess`,
+  `setHandle`).
+- **Variants**: `ProcessImpl`, `Process`, `ProcessBuilder`, `ProcessHandleImpl` (JRT-NOTES.md).
+- **Natives** (jrt's Go, `process.clj`): `ProcessImpl.hostForkAndExec` (the variant's),
+  `ProcessEnvironment.environ`, `ProcessHandleImpl`'s `getCurrentPid0`, `isAlive0`,
+  `waitForProcessExit0`, `destroy0`, `parent0`, `getProcessPids0`, and `ProcessHandleImpl.Info.hostInfo`
+  (the variant's).
+- **Result** (`bin/jrt-convert`): 644 files (637 on main: 6 sources and RuntimeExec added; 581 of `share`, 5 `unix`, 26 generated,
+  30 of jrt's own), all converted and compiled to javac's class shapes, 640 identical and the 4
+  known differences, 1,880 classes.
