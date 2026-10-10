@@ -340,6 +340,55 @@
            (map #(str "java/util/concurrent/locks/" % ".java")
                 ["AbstractQueuedSynchronizer" "AbstractOwnableSynchronizer" "AbstractQueuedLongSynchronizer"])))))
 
+(def security-sources
+  "java.security basics in the Go build (the user's decision of 2026-10-10; doc/go/JRT-NOTES.md,
+  \"Security\"): MessageDigest and its streams, SecureRandom, javax.crypto.Mac with
+  SecretKeySpec, the providers SUN and SunJCE with the services they implement in plain Java
+  (the digests, the SHA1PRNG, NativePRNG and DRBG generators, the HMACs), and the provider
+  framework (Provider, Security, sun.security.jca) over the JDK's java.security file. Paths
+  relative to jdk26u; NativePRNG and NativeSeedGenerator are src/java.base/unix/classes files."
+  (vec (sort
+         (concat
+           (map #(str "src/java.base/share/classes/" % ".java")
+                (concat
+                  ;; the API: the engines, their SPIs, the digest streams, keys and parameters,
+                  ;; the exceptions
+                  (map #(str "java/security/" %)
+                       ["MessageDigest" "MessageDigestSpi" "DigestInputStream" "DigestOutputStream"
+                        "SecureRandom" "SecureRandomSpi" "SecureRandomParameters" "DrbgParameters"
+                        "Provider" "Security" "Key" "AlgorithmConstraints" "CryptoPrimitive"
+                        "spec/AlgorithmParameterSpec" "spec/KeySpec"
+                        "GeneralSecurityException" "NoSuchAlgorithmException" "NoSuchProviderException"
+                        "DigestException" "InvalidKeyException" "KeyException" "InvalidParameterException"
+                        "InvalidAlgorithmParameterException" "ProviderException"])
+                  (map #(str "javax/crypto/" %)
+                       ["Mac" "MacSpi" "SecretKey" "ShortBufferException" "spec/SecretKeySpec"])
+                  ["javax/security/auth/Destroyable" "javax/security/auth/DestroyFailedException"]
+                  ;; the constructor parameter types of two engine types Provider describes (its
+                  ;; static initializer names them), and the events Provider.getService and
+                  ;; Security.setProperty commit (never enabled: no JFR in the Go build)
+                  ["java/security/cert/CertStoreParameters" "javax/crypto/KDFParameters"
+                   "jdk/internal/event/Event" "jdk/internal/event/SecurityProviderServiceEvent"
+                   "jdk/internal/event/SecurityPropertyModificationEvent"]
+                  ;; the SUN provider: the digests (the JDK's own, plain Java), the generators,
+                  ;; the seed generator
+                  (map #(str "sun/security/provider/" %)
+                       ["Sun" "SunEntries" "DigestBase" "MD2" "MD5" "SHA" "SHA2" "SHA5" "SHA3"
+                        "ByteArrayAccess" "SecureRandom" "DRBG" "AbstractDrbg" "AbstractHashDrbg"
+                        "HashDrbg" "HmacDrbg" "EntropySource" "MoreDrbgParameters" "SeedGenerator"])
+                  ;; the SunJCE provider's HMACs
+                  (map #(str "com/sun/crypto/provider/" %) ["SunJCE" "HmacCore" "HmacMD5" "HmacSHA1"])
+                  ;; the provider framework, and what it uses of sun.security.util
+                  (map #(str "sun/security/jca/" %)
+                       ["GetInstance" "ProviderList" "Providers" "ProviderConfig" "ServiceId" "JCAUtil"])
+                  (map #(str "sun/security/util/" %)
+                       ["Debug" "SecurityConstants" "SecurityProviderConstants" "SecurityProperties"
+                        "KnownOIDs" "MessageDigestSpi2" "CryptoAlgorithmConstraints"
+                        "AbstractAlgorithmConstraints" "AlgorithmDecomposer" "PropertyExpander"])))
+           ;; NativePRNG (the default SecureRandom on Linux) and its seed generator
+           (map #(str "src/java.base/unix/classes/sun/security/provider/" % ".java")
+                ["NativePRNG" "NativeSeedGenerator"])))))
+
 (defn overlay-sources
   "jrt's own Java sources (overlay/jdk/MODULE/...), which replace or add to jdk26u's: classes
   whose JDK sources need what is cut (java.nio's encoders and channels), written for jrt.
@@ -363,7 +412,8 @@
                                (map #(str "src/java.base/share/classes/" %) concurrent-sources)
                                (map #(str "src/java.base/share/classes/" %) util-sources)
                                added-module-sources
-                               file-sources)))))
+                               file-sources
+                               security-sources)))))
 
 (defn print-sources
   "Prints the closure's sources of surface file f, one per line, as \"MODULE KIND REL\": KIND

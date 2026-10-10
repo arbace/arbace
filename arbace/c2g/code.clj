@@ -439,8 +439,11 @@
     (lookup-call? node) ::vh-ok
     (and (= :invoke (:op node)) (= vh/varhandle (:owner node)))
     (if-let [h (vh-op node)]
-      (let [d (if (= :array (:kind h)) (t/elem-type (:desc h)) (:desc h))]
-        (if (vh-supported? (:kind h) (:mode h) d)
+      (let [d (if (#{:array :view} (:kind h)) (t/elem-type (:desc h)) (:desc h))]
+        (if (if (= :view (:kind h))
+              ;; a byte[] view: its plain get and set (amendment SC1)
+              (#{"get" "set"} (:name node))
+              (vh-supported? (:kind h) (:mode h) d))
           ::vh-ok
           (str "VarHandle." (:name node) " on " d " (C2G-SPEC §8.5)")))
       (str "VarHandle." (:name node) " on a handle that is not a constant of its class (C2G-SPEC §8.5)"))
@@ -998,7 +1001,17 @@
             op (case m :get "Get" :set "Set" :cas "Cas" :cmpxchg "CmpXchg" :swap "Swap" :add "GetAndAdd"
                      :or "GetAndOr" :and "GetAndAnd" :xor "GetAndXor")
             x (apply list (jsym (str "Vh" kind op)) (:x av) (:x iv) (map :x vs))]
-        (vh-result x (case m :set "V" :cas "Z" vd) r)))))
+        (vh-result x (case m :set "V" :cas "Z" vd) r))
+      ;; a view of byte[] as int or long elements in a byte order (amendment SC1): jrt's
+      ;; VhView{Get,Set}{Int,Long}{BE,LE}, plain accesses with the view's bounds check
+      :view
+      (let [et (t/elem-type (:desc h))
+            [av iv & vs] (operands (concat [(vh-arg (first args) "[B") (second args)]
+                                           (map #(vh-arg % et) (drop 2 args)))
+                                   (concat ["[B" "I"] (repeat et)))
+            x (apply list (jsym (str "VhView" (case m :get "Get" :set "Set") (if (= et "I") "Int" "Long") (:order h)))
+                     (:x av) (:x iv) (map :x vs))]
+        (vh-result x (case m :set "V" et) r)))))
 
 (defn invoke-val [node]
   (let [{:keys [kind owner name desc]} node

@@ -1,0 +1,40 @@
+;; jrt's tests of the byte[] view handles (C2G-SPEC §8.5, amendment SC1; doc/go/JRT-NOTES.md,
+;; "Security"): the big- and little-endian int and long views of sun.security.provider's
+;; digests, their values and their bounds.
+(in-ns 'go.arbace.jrt)
+
+(go/file "security_test.go"
+  :imports [[testing "testing"]])
+
+(go/func TestVhView [^{:tag (* testing.T)} t]
+  (let [a (NewByteArray 9)]
+    (range [i _ (.-A a)]
+      (aset (.-A a) i (conv int8 (conv uint8 (+ 0x81 (* i 0x11))))))
+    ;; 81 92 a3 b4 c5 d6 e7 f8 09
+    (when (!= (VhViewGetIntBE a 0) (conv int32 -2121096268))
+      (.Errorf t "int BE: %x" (VhViewGetIntBE a 0)))
+    (when (!= (VhViewGetIntLE a 1) (conv int32 -978017390))
+      (.Errorf t "int LE: %x" (VhViewGetIntLE a 1)))
+    (when (!= (VhViewGetLongBE a 1) (conv int64 -7880256161161152503))
+      (.Errorf t "long BE: %x" (VhViewGetLongBE a 1)))
+    (when (!= (VhViewGetLongLE a 0) (conv int64 -511203888055741823))
+      (.Errorf t "long LE: %x" (VhViewGetLongLE a 0)))
+    (VhViewSetIntBE a 5 0x01020304)
+    (VhViewSetIntLE a 0 0x01020304)
+    (when (or (!= (aget (.-A a) 0) 4) (!= (aget (.-A a) 3) 1) (!= (aget (.-A a) 5) 1) (!= (aget (.-A a) 8) 4))
+      (.Errorf t "int sets: %v" (.-A a)))
+    (VhViewSetLongBE a 1 -2)
+    (when (or (!= (aget (.-A a) 1) -1) (!= (aget (.-A a) 8) -2))
+      (.Errorf t "long BE set: %v" (.-A a)))
+    (VhViewSetLongLE a 0 -2)
+    (when (or (!= (aget (.-A a) 0) -2) (!= (aget (.-A a) 7) -1) (!= (aget (.-A a) 8) -2))
+      (.Errorf t "long LE set: %v" (.-A a)))
+    ;; the view's bounds: the last whole element, with the reduced length in the message
+    (when (!= (res (fn ^string [] (VhViewGetIntBE a 6) "x")) "!java.lang.ArrayIndexOutOfBoundsException: Index 6 out of bounds for length 6")
+      (.Error t "an int view out of bounds"))
+    (when (!= (res (fn ^string [] (VhViewSetLongLE a 2 0) "x")) "!java.lang.ArrayIndexOutOfBoundsException: Index 2 out of bounds for length 2")
+      (.Error t "a long view out of bounds"))
+    (when (!= (res (fn ^string [] (VhViewGetIntLE a -1) "x")) "!java.lang.ArrayIndexOutOfBoundsException: Index -1 out of bounds for length 6")
+      (.Error t "a negative index"))
+    (when (!= (res (fn ^string [] (VhViewGetLongBE nil 0) "x")) "!java.lang.NullPointerException")
+      (.Error t "a null array"))))

@@ -284,3 +284,52 @@ the array's component type).\n"
     (let [v @p]
       (set! @p x)
       v)))
+
+;; ---------------------------------------------------------------------------------------
+;; Views of byte[] as int or long elements (MethodHandles.byteArrayViewVarHandle; amendment
+;; SC1): the plain get and set of sun.security.provider's digests. The bounds check is the
+;; view's (jdk26u's X-VarHandleByteArrayView.java.template, index): the index must be below the
+;; array's length less the element's size less one, else ArrayIndexOutOfBoundsException with
+;; that reduced length.
+
+(go/func vhView ^{:tag (slice int8)} [^{:tag (* ByteArray)} a ^int32 i ^int n]
+  (when (== a nil)
+    (panic (NPE)))
+  (let [l (- (len (.-A a)) (- n 1))]
+    (when (or (< i 0) (>= (conv int i) l))
+      (panic (IndexOutOfBounds (conv int i) l)))
+    (subslice (.-A a) (conv int i) (+ (conv int i) n))))
+
+(go/func vhViewShift "vhViewShift: the shift of byte k of an n-byte element in a byte order.\n"
+  ^uint [^int k ^int n ^bool be]
+  (when be
+    (return (conv uint (* 8 (- (- n 1) k)))))
+  (conv uint (* 8 k)))
+
+(go/func vhViewU64 ^uint64 [^{:tag (slice int8)} b ^int n ^bool be]
+  (let [x (conv uint64 0)]
+    (for [k 0] (< k n) (inc! k)
+      (set! x (bit-or x (<< (conv uint64 (conv uint8 (aget b k))) (vhViewShift k n be)))))
+    x))
+
+(go/func vhViewPut [^{:tag (slice int8)} b ^int n ^bool be ^uint64 x]
+  (for [k 0] (< k n) (inc! k)
+    (aset b k (conv int8 (conv uint8 (>> x (vhViewShift k n be)))))))
+
+(go/func VhViewGetIntBE "VhViewGetIntBE is a big-endian int view's get.\n"
+  ^int32 [^{:tag (* ByteArray)} a ^int32 i]
+  (conv int32 (conv uint32 (vhViewU64 (vhView a i 4) 4 true))))
+(go/func VhViewGetIntLE ^int32 [^{:tag (* ByteArray)} a ^int32 i]
+  (conv int32 (conv uint32 (vhViewU64 (vhView a i 4) 4 false))))
+(go/func VhViewGetLongBE ^int64 [^{:tag (* ByteArray)} a ^int32 i]
+  (conv int64 (vhViewU64 (vhView a i 8) 8 true)))
+(go/func VhViewGetLongLE ^int64 [^{:tag (* ByteArray)} a ^int32 i]
+  (conv int64 (vhViewU64 (vhView a i 8) 8 false)))
+(go/func VhViewSetIntBE [^{:tag (* ByteArray)} a ^int32 i ^int32 x]
+  (vhViewPut (vhView a i 4) 4 true (conv uint64 (conv uint32 x))))
+(go/func VhViewSetIntLE [^{:tag (* ByteArray)} a ^int32 i ^int32 x]
+  (vhViewPut (vhView a i 4) 4 false (conv uint64 (conv uint32 x))))
+(go/func VhViewSetLongBE [^{:tag (* ByteArray)} a ^int32 i ^int64 x]
+  (vhViewPut (vhView a i 8) 8 true (conv uint64 x)))
+(go/func VhViewSetLongLE [^{:tag (* ByteArray)} a ^int32 i ^int64 x]
+  (vhViewPut (vhView a i 8) 8 false (conv uint64 x)))
