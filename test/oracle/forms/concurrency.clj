@@ -328,8 +328,10 @@
 (let [h (int-array 1)] [(.get asr h) (aget h 0)])
 [(.compareAndSet asr :v0 :v1 0 1) (.compareAndSet asr :v1 :v2 0 2) (.getReference asr) (.getStamp asr)]
 [(.attemptStamp asr :v1 7) (.getStamp asr)]
-(def amr (AtomicMarkableReference. "r" false))
-[(.compareAndSet amr "r" "s" false true) (.isMarked amr) (.getReference amr) (.attemptMark amr "s" false) (.isMarked amr)]
+(def r-ref (String. "r"))
+(def s-ref (String. "s"))
+(def amr (AtomicMarkableReference. r-ref false))
+[(.compareAndSet amr (String. "r") s-ref false true) (.compareAndSet amr r-ref s-ref false true) (.isMarked amr) (.getReference amr) (.attemptMark amr s-ref false) (.isMarked amr)]
 
 ;; ----- locks
 (def sl (StampedLock.))
@@ -361,4 +363,5 @@
 ;; ----- ConcurrentHashMap and ForkJoinPool from many threads
 (let [m (ConcurrentHashMap.) fs (doall (for [t (range 8)] (future (dotimes [i 1000] (.merge m (mod i 50) 1 (reify BiFunction (apply [_ a b] (+ a b))))))))] (run! timed fs) [(.size m) (reduce + (vals m)) (.mappingCount m)])
 (.invoke (ForkJoinPool/commonPool) (ForkJoinTask/adapt ^Callable (fn [] :fj)))
-(.get (CompletableFuture/supplyAsync (reify Supplier (get [_] (.getParallelism (ForkJoinPool/commonPool))))) 10 TimeUnit/SECONDS)
+(.get (CompletableFuture/supplyAsync (reify Supplier (get [_] (pos? (.getParallelism (ForkJoinPool/commonPool)))))) 10 TimeUnit/SECONDS)
+(shutdown-agents)
