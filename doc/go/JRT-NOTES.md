@@ -3629,7 +3629,10 @@ encoded in a Go string (arrays as `[class,count,`, strings length-prefixed, `n`u
   generated, 31 of jrt's own, 2 of `java.sql`; then 113 bundles, 13 collation files, the index),
   all converted, compiled to javac's class shapes: 862 identical and the 5 known differences,
   2,144 classes; 144 of 144 generated sources and 9 of 9 data files equal to the JDK build's.
-  With `JRT_LOCALES=all`: 2,310 files, 1,562 generated, all equal to the JDK build's.
+  With `JRT_LOCALES=all`: 2,310 files, 1,562 generated, all equal to the JDK build's; the shape
+  check then failed on `LocaleDataIndex.bundle` alone (one switch of 1,569 cases: "Method too
+  large" for a class file), which the generator now splits into switches of 250 cases (checked
+  by its generate step; the `all` conversion was not run again).
 - **`bin/c2g --program`**: 2,970 classes, 26,955 methods reached (main: 2,456 and 22,123 at
   "Time"), 410 with missing parts; the new ones are serialization's, `System.Logger` in the
   provider pool's error paths, `Bidi`'s java.desktop attributes, the Thai dictionary break
