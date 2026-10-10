@@ -26,7 +26,7 @@
   (c2g/cut (static-initializer 0))
 
   (method ^:static start :throws [java.io.IOException] ^Process [^String/1 cmdarray
-                                                                ^{:tag (java.util.Map String String)} environment
+                                                                ^{:tag (Map String String)} environment
                                                                 ^String dir
                                                                 ^ProcessBuilder$Redirect/1 redirects
                                                                 ^boolean redirectErrorStream]

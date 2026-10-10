@@ -11,7 +11,7 @@
 (c2g/variant ProcessBuilder
   (c2g/cut (field ^:private ^:static ^System$Logger LOGGER))
 
-  (method ^:private start :throws [java.io.IOException] ^Process [this ^ProcessBuilder$Redirect/1 redirects]
+  (method ^:private start :throws [java.io.IOException] ^Process [this ^Redirect/1 redirects]
     (let [^:mutable cmdarray (cast String/1 (.toArray command (new String/1 (.size command))))]
       (set! cmdarray (.clone cmdarray))
       (for-each [^String arg cmdarray] (when (nil? arg) (throw (NullPointerException.))))
