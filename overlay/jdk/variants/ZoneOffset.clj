@@ -9,7 +9,7 @@
   (field ^:private ^:static ^:final ^ConcurrentMap QUARTER_CACHE (ConcurrentHashMap. 16 (float 0.75) 4))
 
   (method ^:public ^:static ofTotalSeconds ^ZoneOffset [^int totalSeconds]
-    (when (or (> totalSeconds MAX_SECONDS) (< totalSeconds (- MAX_SECONDS)))
+    (when (or (< totalSeconds (unchecked-negate-int MAX_SECONDS)) (> totalSeconds MAX_SECONDS))
       (throw (DateTimeException. "Zone offset not in valid range: -18:00 to +18:00")))
     (let [quarters (unchecked-divide-int totalSeconds SECONDS_PER_QUARTER)]
       (if (== (unchecked-multiply-int quarters SECONDS_PER_QUARTER) totalSeconds)
