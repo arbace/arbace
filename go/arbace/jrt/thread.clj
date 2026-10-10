@@ -381,6 +381,11 @@ RUNNABLE (jrt does not tell a thread blocked or waiting from a running one: JC8)
 (go/method CompareTo_Enum__I ^int32 [^{:tag (* Thread_State)} t ^Enum_I o] (.Impl_CompareTo_Enum__I t t o))
 (go/method CompareTo_O__I ^int32 [^{:tag (* Thread_State)} t ^any o] (.Impl_CompareTo_O__I t t o))
 (go/method GetDeclaringClass__Class ^{:tag (* Class)} [^{:tag (* Thread_State)} t] (.Impl_GetDeclaringClass__Class t t))
+(go/func Thread_State_Cast ^{:tag (* Thread_State)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* Thread_State) x)]
+    (when (not ok) (panic (ClassCast x Thread_State_class)))
+    v))
 (go/func Thread_State_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Thread_State) x)] ok))
 
 (go/method Impl_GetUncaughtExceptionHandler__Thread_UncaughtExceptionHandler
@@ -694,6 +699,12 @@ factory and threads; Executors.newVirtualThreadPerTaskExecutor calls factory() o
   (Define (addr (lit ClassInfo :Name "java.lang.Thread$Builder" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccStatic AccInterface AccAbstract)
                      :Declaring Thread_class :Simple "Builder" :Go "arbace/jrt.Thread_Builder"))))
+
+(go/func Thread_Builder_Cast ^Thread_Builder [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert Thread_Builder x)]
+    (when (not ok) (panic (ClassCast x Thread_Builder_class)))
+    v))
 
 (go/type Thread_Builder_OfVirtual
   "Thread_Builder_OfVirtual is java.lang.Thread$Builder$OfVirtual (the members Arbace uses).\n"

@@ -116,6 +116,11 @@
 (go/method CompareTo_Enum__I ^int32 [^{:tag (* Future_State)} t ^Enum_I o] (.Impl_CompareTo_Enum__I t t o))
 (go/method CompareTo_O__I ^int32 [^{:tag (* Future_State)} t ^any o] (.Impl_CompareTo_O__I t t o))
 (go/method GetDeclaringClass__Class ^{:tag (* Class)} [^{:tag (* Future_State)} t] (.Impl_GetDeclaringClass__Class t t))
+(go/func Future_State_Cast ^{:tag (* Future_State)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* Future_State) x)]
+    (when (not ok) (panic (ClassCast x Future_State_class)))
+    v))
 (go/func Future_State_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* Future_State) x)] ok))
 
 (go/func futureGet
