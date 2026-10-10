@@ -6,23 +6,24 @@ jdk26u sources translated by `bin/jrt-convert` (j2c) and c2g, jrt's own Java in 
 translated the same way, and hand-written Go forms in `go/arbace/jrt/`; c2g stubs what it does
 not translate ([JRT-SOURCES.md](JRT-SOURCES.md), [JRT-NOTES.md](JRT-NOTES.md),
 [C2G-SPEC.md](C2G-SPEC.md) §4.1).
-Measured on the branch `jbase` from main at `6a33be8` (2026-10-10): c2g's program output made
-there (`bin/jrt-convert`, then `bin/c2g --program`, as `bin/arbace-go --build` does), JDK
-26.0.2.1 built from `/root/jdk26u`.
+Measured on the branch `jbase` (2026-10-10), first from main at `6a33be8`, then after
+"java.util completed" (from main at `8ace8b1`): c2g's program output made there
+(`bin/arbace-go --build`), JDK 26.0.2.1 built from `/root/jdk26u`.
 
 Summary: java.base exports **1,636 API classes with 17,546 members** (public and protected
-methods, constructors and fields, of its 58 exported packages). The Go build has **384 of the
-classes (23.5%)**, and 91 more as names only, and provides **5,598 of the members (31.9%)**:
-4,414 translated with their bodies, 108 translated with an operation that throws (it names
-something outside the build), 1,076 hand-written in jrt; 15 more exist as stubs that throw.
-The classes the Go build has are nearly complete (90.5% of their members); the rest is whole
+methods, constructors and fields, of its 58 exported packages). The Go build has **405 of the
+classes (24.8%)**, and 100 more as names only, and provides **5,787 of the members (33.0%)**:
+4,686 translated with their bodies, 25 translated with an operation that throws (it names
+something outside the build), 1,076 hand-written in jrt; 12 more exist as stubs that throw.
+The classes the Go build has are nearly complete (90.9% of their members); the rest is whole
 packages left out: `java.lang.classfile`, `java.security` and `javax.*`, `java.time` but
 `Instant`, `java.text`, `java.nio` buffers and channels, `java.lang.invoke`,
 `java.lang.foreign`, most of `java.net` and of `java.util.concurrent`. Of the **896 members
 Arbace's runtime and REPL namespaces reference, 793 are provided (88.5%)**; the others are
-D6's cuts and reworks (processes, sockets, method handles, class loading). Two gaps found on
-the way are worth closing before the freeze: primitive `Arrays.sort` and
-`Comparator.naturalOrder` throw on Go ("Notable gaps").
+D6's cuts and reworks (processes, sockets, method handles, class loading). The first
+measurement (main at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
+`Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
+plain Java ("java.util completed"; the numbers below are after it).
 
 ## Method
 
@@ -201,7 +202,10 @@ processes (`Process`, `ProcessBuilder`, its `Redirect`, 21), class loading and r
   JDK 26's Unicode tables, the exceptions and errors of `java.lang`; `java.math` whole;
   `java.util`'s collections (lists, sets, maps, deques, `Hashtable`/`Vector`/`Stack`,
   `IdentityHashMap`, `EnumSet`/`EnumMap`, the sequenced and immutable collections),
-  `Arrays` (but its primitive sorts), `Collections`, `Objects`, `Optional*`, `Formatter`, `Properties`, `Random`,
+  `Arrays` (with the primitive and parallel sorts since JB1), `Collections`, `Objects`,
+  `Optional*`, `Comparator`'s natural-order comparators, `SortedSet`, `BitSet`,
+  `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, `SplittableRandom`, the event
+  classes, `Formatter`, `Properties`, `Random`,
   `UUID`, `HexFormat`, `StringJoiner`, `Spliterators`; `java.util.stream` and
   `java.util.function` whole; `java.util.regex` (D5); `java.util.random`'s
   `RandomGenerator`; in `java.util.concurrent`: `ConcurrentHashMap`, `ArrayBlockingQueue`,
@@ -364,7 +368,12 @@ before the freeze (java.time and java.util.concurrent are other branches'). Done
 | `java.util` (the package) provided | 1,731 of 2,239 (77.3%) | 1,916 (85.6%) |
 | executable, amd64 | 80,126,079 bytes | 82,283,432 bytes (+2.16 MB, +2.7%) |
 
-@@CHECKS@@
+Checks (amd64; arm64 not built on this branch): `bin/jrt-convert` (414 files, shape check as
+above), `bin/c2g --program`, `bin/arbace-go --build` and `--smoke` pass; Clojure's suite on Go
+19,506 of 19,506 assertions, no regression against `test/arbace-go-results.edn`; the oracle
+against `known-go-amd64.edn`: the only new mismatches besides the three recorded above are the
+271 `defclass`/`defclass_corpus` cases that main at `8ace8b1` has too (the class forms at the
+REPL, checked on an executable built from `8ace8b1`: the same 271), not recorded here.
 
 ### Amendments (JB), for the user's review
 
