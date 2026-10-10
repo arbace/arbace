@@ -158,7 +158,13 @@ settings are part a's (D7).
 - Clojure's suite on Go (`CLOJURE_TESTS_GO=... bin/clojure-tests -j 12`): 19,379 of 19,398
   assertions (646 tests, 0 errors), no regressions against `test/arbace-go-results.edn` (before
   that merge 19,255 of 19,280); `transducers` alone (not skipped) 108 of 108.
-- `bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
+- After merging step 7b (`bfedb18`, main at `48ba45c`): `bin/jrt test` amd64 and
+`bin/arbace-go --smoke` pass; Clojure's suite on Go has no regressions against
+`test/arbace-go-results.edn`; the oracle matches 20,780 of 21,027, with 242 new mismatches
+against `test/oracle/known-go-amd64.edn`, all in `defclass.clj` and `defclass_corpus.clj`
+(`Unable to resolve classname: Compiler$CF$Node`): main's own executable of that commit fails
+the same way (class forms at the REPL after the merges), so they are not this branch's.
+`bin/gate` was not run: no source the bootstrap compiles changed (the variants and c2g are
   read by c2g only).
 
 ## Tried and dropped
