@@ -1253,3 +1253,9 @@ Details, alternatives and measurements: `doc/ALPINE.md`.
 - README and FREEZE.md brought up to date (the user's request, 2026-10-10): the releases v1-v3,
   the base image, the Alpine package and `arb`, ALPINE.md in the documentation list, and the
   licences beyond EPL-1.0. Docs only, after the tag: no new release.
+- After v3: `bean`'s keys were no longer in upstream's order (v3's `bean-properties` built a hash
+  map; upstream inserts the Introspector's name-sorted properties, so `(keys (bean x))` came
+  sorted). `bean-properties` now accumulates into a sorted map. Checked: `bin/build-arbace
+  --suite --image` (stages identical, 20,750/20,750 on stages 1 and 2), key order equal to
+  v2's for a `Double`, an `Optional` and a `URI`. Not released: a v3.1 (or the next tag) would
+  carry it; the APKBUILD would then move to that tag.

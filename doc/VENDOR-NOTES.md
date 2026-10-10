@@ -725,7 +725,9 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `java.awt.Component` has an explicit `BeanInfo` (`com.sun.beans.infos.ComponentBeanInfo`)
     that limits the Introspector to a few of Component's properties; `bean` now lists all of
     them. Explicit `BeanInfo` classes and `@JavaBean` annotations are not consulted; outside
-    `java.desktop` the JDK has none.
+    `java.desktop` the JDK has none. Since v3, the properties come sorted by name, as the Introspector returns them,
+    so that `bean`'s map keeps upstream's key order (v3 inserted them unsorted: e.g. the keys of
+    `(bean (java.net.URI. "http://a/b"))` came in hash order).
 
 15. **`#inst` on `java.base`; `java.sql.Timestamp` optional** (2026-10-10, same decision):
     `core.clj` loaded `instant.clj` only when `java.sql.Timestamp` exists, and

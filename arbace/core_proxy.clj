@@ -494,7 +494,8 @@
   "{name getter}: the readable JavaBean properties of class c with a getter without
   parameters, as java.beans.Introspector/getBeanInfo finds them without an explicit BeanInfo:
   each class from Object down to c contributes its own read methods, a later one replacing an
-  earlier one unless that one is an isX() of another name."
+  earlier one unless that one is an isX() of another name. Sorted by name, the Introspector's
+  order, which bean's map keeps."
   [^Class c]
   (reduce1 (fn [props ^Class k]
              (reduce1 (fn [props [n ^java.lang.reflect.Method m]]
@@ -503,7 +504,7 @@
                             props
                             (assoc props n m))))
                       props (bean-class-reads k)))
-           {} (reverse (take-while some? (iterate #(.getSuperclass ^Class %) c)))))
+           (sorted-map) (reverse (take-while some? (iterate #(.getSuperclass ^Class %) c)))))
 
 (defn bean
   "Takes a Java object and returns a read-only implementation of the
