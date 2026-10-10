@@ -71,9 +71,9 @@
 ;; B1a step 5 (doc/go/EVAL-NOTES.md): sources by name. The Go build has no class files and no
 ;; URLs: RT.load reads a namespace's .clj (or .cljc) from the program's embedded sources (jrt's
 ;; host resources, C2G-SPEC §10.3), else from the directories of ARBACE_PATH (separated by :),
-;; and evaluates it; RT's initialization loads arbace.core so. RT.doInit starts the socket
-;; servers of the arbace.server.* properties as the JVM's does, but loads arbace.core.server only
-;; when there is one (doc/go/JRT-NOTES.md, "Sockets")
+;; and evaluates it; RT's initialization loads arbace.core so. RT.doInit loads arbace.core.server
+;; and starts the socket servers of the arbace.server.* properties as the JVM's does
+;; (doc/go/JRT-NOTES.md, "Sockets")
 (c2g/variant RT
   (method ^:public ^:static resourceAsStream ^InputStream [^ClassLoader loader ^String name]
     (let [b (RT/hostResource name)]
@@ -171,20 +171,14 @@
           (.invoke in_ns USER)
           (.invoke refer CLOJURE)
           (RT/maybeLoadResourceScript "user.clj")
-          ;; System.getProperties() through the reflection tables, where c2g writes it
-          (let [props (cast java.util.Properties
-                            (Reflector/invokeStaticMethod "java.lang.System" "getProperties" (new Object/1 0)))
-                it (.iterator (.stringPropertyNames props))
-                ^:mutable server false]
-            (while (.hasNext it)
-              (when (.startsWith (cast String (.next it)) "arbace.server.")
-                (set! server true)))
-            (when server
-              (let [require (RT/var "arbace.core" "require")
-                    SERVER (Symbol/intern "arbace.core.server")]
-                (.invoke require SERVER)
-                (let [start_servers (RT/var "arbace.core.server" "start-servers")]
-                  (.invoke start_servers props))))))
+          ;; as the JVM's: arbace.core.server, then the servers of the arbace.server.*
+          ;; properties; System.getProperties() through the reflection tables, where c2g writes it
+          (let [require (RT/var "arbace.core" "require")
+                SERVER (Symbol/intern "arbace.core.server")]
+            (.invoke require SERVER)
+            (let [start_servers (RT/var "arbace.core.server" "start-servers")]
+              (.invoke start_servers
+                       (Reflector/invokeStaticMethod "java.lang.System" "getProperties" (new Object/1 0))))))
         (catch Exception e (throw (Util/sneakyThrow e)))
         (finally (Var/popThreadBindings))))))
 
