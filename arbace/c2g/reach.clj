@@ -164,13 +164,33 @@
         :when (and (not (m/static? mm)) (not (m/private? mm)) (not= "<init>" (:name mm)))]
     [(:name mm) (:desc mm)]))
 
+(def ^:private scan-reach?
+  "C2G_REACH=scan: virtual calls matched to instantiated classes by scanning (the algorithm
+  before the indexes, kept to check that both reach the same)."
+  (= "scan" (System/getenv "C2G_REACH")))
+
+(defn- supertypes-of
+  "The types class d is a subtype of (env/subclass?): d, its supertypes and Object."
+  [d]
+  (let [s (env/all-supertypes d)]
+    (if (some #(= "java/lang/Object" %) s) s (conj (vec s) "java/lang/Object"))))
+
+(defn- vcalls-on
+  "The virtual calls [name desc] whose receiver's static type is a supertype of d."
+  [d]
+  (if scan-reach?
+    (for [[o name desc] @(:vcalls *st*) :when (env/subclass? d o)] [name desc])
+    (let [by @(:vcalls-by *st*)]
+      (for [s (supertypes-of d) nd (get by s)] nd))))
+
 (defn instantiate!
   [d]
   (when (and (m/translated? d) (not (contains? @(:inst *st*) d)))
     (swap! (:inst *st*) conj d)
-    (doseq [[o name desc] @(:vcalls *st*)
-            :when (env/subclass? d o)]
-      (when-let [k (java-impl-of d [name desc])] (reach! k)))
+    (doseq [s (supertypes-of d)]
+      (swap! (:inst-by *st*) update s (fnil conj []) d))
+    (doseq [nd (vcalls-on d)]
+      (when-let [k (java-impl-of d nd)] (reach! k)))
     (doseq [k (distinct (external-keys d))]
       (when-let [impl (java-impl-of d k)] (reach! impl)))))
 
@@ -180,7 +200,11 @@
   (let [k [o name desc]]
     (when-not (contains? @(:vcalls *st*) k)
       (swap! (:vcalls *st*) conj k)
-      (doseq [d (concat @(:inst *st*) @(:lambda-fis *st*)) :when (env/subclass? d o)]
+      (swap! (:vcalls-by *st*) update o (fnil conj []) [name desc])
+      (doseq [d (concat (if scan-reach?
+                          (filter #(env/subclass? % o) @(:inst *st*))
+                          (get @(:inst-by *st*) o))
+                        (filter #(env/subclass? % o) @(:lambda-fis *st*)))]
         (when-let [impl (java-impl-of d [name desc])] (reach! impl))))))
 
 (defn lambda!
@@ -189,8 +213,8 @@
   [fi]
   (when-not (contains? @(:lambda-fis *st*) fi)
     (swap! (:lambda-fis *st*) conj fi)
-    (doseq [[o name desc] @(:vcalls *st*) :when (env/subclass? fi o)]
-      (when-let [impl (java-impl-of fi [name desc])] (reach! impl)))
+    (doseq [nd (vcalls-on fi)]
+      (when-let [impl (java-impl-of fi nd)] (reach! impl)))
     (doseq [k (distinct (external-keys fi))]
       (when-let [impl (java-impl-of fi k)] (reach! impl)))))
 
@@ -373,6 +397,7 @@
   :instantiate; functional interfaces with adapters :fis). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
   [{:keys [roots instantiate classes slice? fis]}]
   (let [st {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
+            :vcalls-by (atom {}) :inst-by (atom {})
             :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})
             :lambda-fis (atom #{})}]
     (binding [*st* st
