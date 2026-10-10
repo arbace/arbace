@@ -1926,7 +1926,12 @@ socket's are a constant in the Go build (131072, 16384: there is no socket to as
 
 ## Size
 
-RESULTS-SIZE
+Measured against main at `b20b577` (go-file merged), both built by `bin/arbace-go --build` with
+the image of prepared namespaces: amd64 66,931,956 to 68,856,988 bytes (+1.93 MB, +2.9%), arm64
+64,071,080 to 65,932,776 (+1.86 MB); the image 3,834,917 to 3,893,244 bytes (+58 KB:
+`arbace.core.server`). The translated java.net classes, `HostNet`, `HostSocketImpl` and jrt's
+`net.clj` are about 176 KB of symbols (`go tool nm -size`), the rest their type and member
+tables. Start (`-e nil`, amd64, 5 runs): 0.38-0.41 s against 0.34-0.44 s.
 
 ## Proposed amendments (for the user's review)
 
