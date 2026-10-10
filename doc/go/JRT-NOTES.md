@@ -2100,6 +2100,12 @@ code and most of the reflection tables' growth.
   (unchanged: the suite does not use `\N{}`, `CANON_EQ` or `Normalizer`). The essential
   `bin/gate` was not run: the bootstrap compiles none of the changed sources (`arbace/c2g` is a
   tool), as the gate policy of 2026-10-09 allows. arm64's executable: 58,465,447 bytes.
+- **After merging main** (step 6's image, the files of `go-file`): 424 files translated; the
+  executable 69,415,929 bytes with step 6's image of prepared namespaces; the smoke test, the
+  direct checks (identical to the JVM's), the oracle 20,595 of 20,600 (exactly the 5 known
+  mismatches), the regex corpus 1,233 of 1,233, `bin/jrt test` on amd64 pass again; Clojure's
+  suite on the Go build 19,379 of 19,398 assertions, no regression against
+  `test/arbace-go-results.edn`.
 - The amendments are numbered RD (resource data): the single letters are taken (Z since by
   EVAL-NOTES.md's proxies of `BufferedWriter`).
 
