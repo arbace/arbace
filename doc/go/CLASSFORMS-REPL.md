@@ -1,7 +1,8 @@
 # The class forms at the REPL of the Go build
 
-Status: design and first implementation (branch `cf-repl`, 2026-10-09), the user's decision of
-2026-10-09: class forms in the Go build's REPL. It reverses, for `defclass` and the code forms,
+Status: built (branch `cf-repl`, 2026-10-09/10), the user's decision of 2026-10-09: class forms
+in the Go build's REPL. The amendments CF1-CF6 (§8) were accepted on 2026-10-10 and folded into
+C2G-SPEC (§16, "Class forms at the REPL"), B1-PLAN (D6) and ORACLE.md. It reverses, for `defclass` and the code forms,
 B1-PLAN.md's D6 ("a first REPL without the class forms"); `gen-class` stays out.
 
 On the JVM, `defclass` and the code forms ([SPEC §9.5](../classes/SPEC.md)) are compiled by the
@@ -272,27 +273,29 @@ restricted to what an interpreted class can extend or implement; 674 KB for the 
 
 ## 8. Amendments
 
-Proposed for the user's review (prefix CF):
+All accepted by the user on 2026-10-10 and folded where each says (size tuning is later, with
+step 7):
 
 - **CF1** A cut class's constants (static final primitive or `String` fields) are readable: its
   member table's getter returns the JVM's value instead of throwing (`arbace.c2g.out`). The class
-  forms' analysis reads ASM's `Opcodes` about 150 times.
+  forms' analysis reads ASM's `Opcodes` about 150 times. Folded: C2G-SPEC §4.1.
 - **CF2** The class forms compiler's analysis is embedded in the Go program (`types`, `env`,
   `parse`, `lower`, `analyze`; not the back end) with the namespace variants of §4, and loaded on
   the first class form without checking macro specs (`Compiler.classForms`' variant), as the JVM
-  loads it compiled.
+  loads it compiled. Folded: C2G-SPEC §10.3.
 - **CF3** The class forms at the REPL are interpreted (§2): the interpreter is the `Compiler`
   variant's `Compiler$CF`, the host `Compiler$CFGo` with c2g's natives (`c2g_cf.go`,
   `arbace.c2g.dyncf`), the builder `arbace.classes.interp` (a Go-build namespace). This reverses
-  B1-PLAN's D6 for `defclass` and the code forms; `gen-class` stays out.
+  B1-PLAN's D6 for `defclass` and the code forms; `gen-class` stays out. Folded: C2G-SPEC §10.4,
+  B1-PLAN.md D6.
 - **CF4** C2G-SPEC §5.12: `DynClass` gains a field `CF` (the interpreted class), and the
   DynSub types are made for `class-supers` too (so these classes can also be proxied); an
   interpreted class extending one has DynSub objects, with natives for allocation without
   constructor, the superclass's constructor on an allocated object, and its implementations
-  (super calls).
+  (super calls). Folded: C2G-SPEC §5.12.
 - **CF5** `c2g --program` embeds `arbace/classes/generics.edn`: the generic signatures of the
   world's interfaces and extendable classes, and the constructors of abstract ones, which jrt's
-  reflection does not have (javac's bridges need them).
+  reflection does not have (javac's bridges need them). Folded: C2G-SPEC §10.3.
 - **CF6** ORACLE.md's exclusion of the class forms is lifted: `forms/defclass.clj` and
   `forms/defclass_corpus.clj` (generated) check them; `test/classforms/` holds the JVM-side check,
-  the class scripts through defclass and the timings.
+  the class scripts through defclass and the timings. Folded: ORACLE.md (contents, exclusions).
