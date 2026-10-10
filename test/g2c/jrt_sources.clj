@@ -191,10 +191,11 @@
            ["java/util/concurrent/ThreadLocalRandom.java" "jdk/internal/util/random/RandomSupport.java"]
            ;; the executors: ThreadPoolExecutor (its workers are AbstractQueuedSynchronizers),
            ;; ScheduledThreadPoolExecutor, FutureTask, Executors' factories, the completion
-           ;; service (jrt's hand-written pools and FutureTask are gone; jrt keeps the
-           ;; interfaces, which its ForkJoinPool implements)
+           ;; service, ExecutorService (jrt's hand-written pools and FutureTask are gone; jrt keeps
+           ;; a stand-in of ExecutorService and the other interfaces, which its ForkJoinPool
+           ;; implements)
            (map #(str "java/util/concurrent/" % ".java")
-                ["ThreadPoolExecutor" "ScheduledThreadPoolExecutor" "AbstractExecutorService" "FutureTask"
+                ["ExecutorService" "ThreadPoolExecutor" "ScheduledThreadPoolExecutor" "AbstractExecutorService" "FutureTask"
                  "Executors" "RejectedExecutionHandler" "ExecutorCompletionService" "CompletionService"
                  "RunnableFuture" "ScheduledExecutorService" "ScheduledFuture" "RunnableScheduledFuture"])
            (map #(str "java/util/concurrent/locks/" % ".java")

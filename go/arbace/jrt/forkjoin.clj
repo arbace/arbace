@@ -33,7 +33,10 @@
     (CompleteExceptionally_Throwable__V [^Throwable_I ex])
     (TryUnfork__Z ^bool [])
     (QuietlyComplete__V [])
-    (TrySetThrown_Throwable__Z ^bool [^Throwable_I ex])))
+    (TrySetThrown_Throwable__Z ^bool [^Throwable_I ex])
+    (GetForkJoinTaskTag__S ^int16 [])
+    (SetForkJoinTaskTag_S__S ^int16 [^int16 v])
+    (CompareAndSetForkJoinTaskTag_S_S__Z ^bool [^int16 e ^int16 v])))
 
 (go/type ForkJoinTask
   "ForkJoinTask is java.util.concurrent.ForkJoinTask's struct: the task's state (fjNew, then
@@ -44,7 +47,8 @@ and the channel its waiters receive from (made by the first waiter, closed when 
           ^Throwable_I exc
           ^bool cancelled
           ^{:tag sync/Mutex} mu
-          ^{:tag (chan (struct))} doneCh))
+          ^{:tag (chan (struct))} doneCh
+          ^{:tag atomic/Int32 :doc "the task's tag (getForkJoinTaskTag; CompletableFuture's claims)\n"} tag))
 
 (go/const
   [^{:tag int32 :val 0} fjNew iota]
@@ -60,6 +64,17 @@ and the channel its waiters receive from (made by the first waiter, closed when 
 (go/method Ctor "Ctor is ForkJoinTask().\n" [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this])
 (go/method Self_ForkJoinTask ^{:tag (* ForkJoinTask)} [^{:tag (* ForkJoinTask)} t] t)
 (go/method Is_Future [^{:tag (* ForkJoinTask)} t])
+(go/method GetForkJoinTaskTag__S "GetForkJoinTaskTag__S is the final getForkJoinTaskTag.\n"
+  ^int16 [^{:tag (* ForkJoinTask)} t]
+  (conv int16 (.Load (.-tag t))))
+(go/method SetForkJoinTaskTag_S__S "SetForkJoinTaskTag_S__S is setForkJoinTaskTag: the previous tag.\n"
+  ^int16 [^{:tag (* ForkJoinTask)} t ^int16 v]
+  (conv int16 (.Swap (.-tag t) (conv int32 v))))
+(go/method CompareAndSetForkJoinTaskTag_S_S__Z
+  "CompareAndSetForkJoinTaskTag_S_S__Z is compareAndSetForkJoinTaskTag (CompletableFuture's
+claim of a completion).\n"
+  ^bool [^{:tag (* ForkJoinTask)} t ^int16 e ^int16 v]
+  (.CompareAndSwap (.-tag t) (conv int32 e) (conv int32 v)))
 (go/method Impl_ResultNow__O "Impl_ResultNow__O is resultNow: Future's default (JDK 19).\n"
   ^any [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this] (Future_ResultNow__O this))
 (go/method Impl_ExceptionNow__Throwable ^Throwable_I [^{:tag (* ForkJoinTask)} t ^ForkJoinTask_I this]
@@ -660,6 +675,7 @@ RunnableExecuteAction does).\n"
     t))
 (go/method Is_Executor [^{:tag (* ForkJoinPool)} p])
 (go/method Is_ExecutorService [^{:tag (* ForkJoinPool)} p])
+(go/method Is_AutoCloseable "Is_AutoCloseable: ExecutorService is an AutoCloseable (JDK 19).\n" [^{:tag (* ForkJoinPool)} p])
 
 (go/func ForkJoinPool_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ForkJoinPool) x)] ok))
 

@@ -77,11 +77,13 @@ covers what.
   "Concurrency": its states and their transitions, `ensureNotShutdown`, `tryTerminate`,
   `tryShutdownAndTerminate`, `shutdown`, `shutdownNow`), the methods `DefaultThreadFactory.newThread`
   and `AutoShutdownDelegatedExecutorService`'s of `overlay/jdk/variants/Executors.clj`,
-  `arrangeTimeout` of `overlay/jdk/variants/CompletableFuture.clj`, and `ExecutorService_Close__V`
-  in `go/arbace/jrt/executor.clj` (`ExecutorService.close`) follow the code of
-  https://github.com/openjdk/jdk26u at `baf63fb`
+  `arrangeTimeout` of `overlay/jdk/variants/CompletableFuture.clj`, `doInvokeAny` of
+  `overlay/jdk/java.base/jdk/internal/jrt/ForkJoinPools.java`, and the default methods of
+  `Future` in `go/arbace/jrt/executor.clj` (`Future_ResultNow__O`, `Future_ExceptionNow__Throwable`,
+  `Future_State__Future_State`) follow the code of https://github.com/openjdk/jdk26u at `baf63fb`
   (`src/java.base/share/classes/java/util/concurrent/ThreadPerTaskExecutor.java`,
-  `Executors.java`, `CompletableFuture.java`, `ExecutorService.java`): Copyright (c) Oracle and/or
+  `Executors.java`, `CompletableFuture.java`, `AbstractExecutorService.java`, `Future.java`):
+  Copyright (c) Oracle and/or
   its affiliates, under the GNU General Public License version 2 with the Classpath Exception
   (text below); recorded as ports to be safe, by the rule of B7. The rest of the concurrency
   work's files (the other variants and overlay classes, `varhandle.clj`) is Arbace's own.

@@ -20,18 +20,6 @@
     (Is_Executor [])
     (Execute_Runnable__V [^Runnable r])))
 
-(go/type ExecutorService "ExecutorService is java.util.concurrent.ExecutorService (the members jrt has).\n"
-  (interface Executor
-    (Is_ExecutorService [])
-    (Submit_Callable__Future ^Future [^Callable task])
-    (Submit_Runnable__Future ^Future [^Runnable task])
-    (Submit_Runnable_O__Future ^Future [^Runnable task ^any result])
-    (Shutdown__V [])
-    (IsShutdown__Z ^bool [])
-    (IsTerminated__Z ^bool [])
-    (AwaitTermination_J_TimeUnit__Z ^bool [^int64 timeout ^{:tag (* TimeUnit)} unit])
-    (Close__V [])))
-
 (go/type Future "Future is java.util.concurrent.Future.\n"
   (interface Object_I
     (Is_Future [])
@@ -50,17 +38,12 @@
 (go/var Executor_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.Executor" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Executor"))))
-(go/var ExecutorService_class
-  (Define (addr (lit ClassInfo :Name "java.util.concurrent.ExecutorService" :Kind KindInterface
-                     :Modifiers (bit-or AccPublic AccInterface AccAbstract)
-                     :Interfaces (lit (slice (* Class)) Executor_class) :Go "arbace/jrt.ExecutorService"))))
 (go/var Future_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.Future" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.Future"))))
 
 (go/func ThreadFactory_InstanceOf ^bool [^any x] (let [(values _ ok) (assert ThreadFactory x)] (dynNominal x ThreadFactory_class ok)))
 (go/func Executor_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Executor x)] (dynNominal x Executor_class ok)))
-(go/func ExecutorService_InstanceOf ^bool [^any x] (let [(values _ ok) (assert ExecutorService x)] (dynNominal x ExecutorService_class ok)))
 (go/func Future_InstanceOf ^bool [^any x] (let [(values _ ok) (assert Future x)] (dynNominal x Future_class ok)))
 (go/func Future_Cast ^Future [^any x]
   (when (== x nil) (return nil))
@@ -77,12 +60,6 @@
   (let [(values v ok) (assert ThreadFactory x)]
     (when (not (dynNominal x ThreadFactory_class ok)) (panic (ClassCast x ThreadFactory_class)))
     v))
-(go/func ExecutorService_Cast ^ExecutorService [^any x]
-  (when (== x nil) (return nil))
-  (let [(values v ok) (assert ExecutorService x)]
-    (when (not (dynNominal x ExecutorService_class ok)) (panic (ClassCast x ExecutorService_class)))
-    v))
-
 ;; ---- Future's default methods (JDK 19) and Future.State
 
 (go/type Future_State "Future_State is the enum java.util.concurrent.Future.State.\n" (struct Enum))
@@ -184,30 +161,11 @@ that failed, else IllegalStateException.\n"
       (return Future_State_FAILED))
     (panic exc)))
 
-(go/func ExecutorService_Close__V
-  "ExecutorService_Close__V is ExecutorService's default close() (JDK 19): shutdown, then
-waiting for termination a day at a time; an interrupt while waiting is kept and set again at
-the end. The JDK's also calls shutdownNow at the first interrupt, which jrt's interface cannot
-name (its result is a List, a translated type): here the executor's tasks run on.\n"
-  [^ExecutorService this]
-  (let [terminated (.IsTerminated__Z this)]
-    (when terminated
-      (return))
-    (.Shutdown__V this)
-    (let [interrupted false]
-      (while (not terminated)
-        (let [exc (runCatching (fn [] (set! terminated (.AwaitTermination_J_TimeUnit__Z this 1 TimeUnit_DAYS))))]
-          (when (!= exc nil)
-            (if (InterruptedException_InstanceOf exc)
-              (set! interrupted true)
-              (panic exc)))))
-      (when interrupted
-        (.Interrupt__V (Thread_CurrentThread__Thread))))))
-
 ;; ---------------------------------------------------------------------------------------
 ;; Executors, ThreadPoolExecutor, ScheduledThreadPoolExecutor and FutureTask are translated
-;; from jdk26u (doc/go/JRT-NOTES.md, "Concurrency", JC5); jrt keeps the interfaces, which its
-;; ForkJoinPool implements and the translated classes implement.
+;; from jdk26u (doc/go/JRT-NOTES.md, "Concurrency", JC5), and ExecutorService too: jrt keeps a
+;; stand-in of it (standin_executor.clj) and the other interfaces, which its ForkJoinPool
+;; implements and the translated classes implement.
 
 ;; ---------------------------------------------------------------------------------------
 ;; CountDownLatch
@@ -399,7 +357,6 @@ zero or less tries once.\n"
 (go/func init []
   (set! (.-IsInstance (.Info ThreadFactory_class)) ThreadFactory_InstanceOf)
   (set! (.-IsInstance (.Info Executor_class)) Executor_InstanceOf)
-  (set! (.-IsInstance (.Info ExecutorService_class)) ExecutorService_InstanceOf)
   (set! (.-IsInstance (.Info Future_class)) Future_InstanceOf)
   (set! (.-IsInstance (.Info Future_State_class)) Future_State_InstanceOf)
   (set! (.-Enum (.Info Future_State_class)) Future_State_Values__Future_State1)

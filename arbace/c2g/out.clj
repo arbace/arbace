@@ -304,6 +304,38 @@
             (not= "V" mr) (vary-meta assoc :tag (m/go-type :jrt mr)))
           (if (= "V" mr) call (list 'return call)))))
 
+(def fjp-support-class "jdk/internal/jrt/ForkJoinPools")
+
+(def fjp-support-methods
+  "The methods of ExecutorService jrt's hand-written ForkJoinPool cannot define (their types are
+  translated), as [name desc]: c2g gives ForkJoinPool Go methods calling jrt's own
+  jdk.internal.jrt.ForkJoinPools (JRT-NOTES.md, \"Concurrency\", JC7)."
+  [["shutdownNow" "()Ljava/util/List;"]
+   ["invokeAll" "(Ljava/util/Collection;)Ljava/util/List;"]
+   ["invokeAll" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/util/List;"]
+   ["invokeAny" "(Ljava/util/Collection;)Ljava/lang/Object;"]
+   ["invokeAny" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"]])
+
+(defn fjp-support-key
+  "The static method of ForkJoinPools behind ExecutorService method [name desc]: the pool first."
+  [[name desc]]
+  [fjp-support-class name (str "(Ljava/util/concurrent/ForkJoinPool;" (subs desc 1))])
+
+(defn fjp-support-forms
+  "ForkJoinPool's Go methods for fjp-support-methods, once ExecutorService and ForkJoinPools are
+  translated and ForkJoinPool is jrt's."
+  []
+  (when (and (m/translated? "java/util/concurrent/ExecutorService") (m/translated? fjp-support-class)
+             (m/hand-written? "java/util/concurrent/ForkJoinPool"))
+    (for [[name desc :as k] fjp-support-methods
+          :let [[ps r] (t/parse-method-desc desc)
+                [_ hn hd] (fjp-support-key k)
+                pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]]
+      (list 'go/method (symbol (nm/method-base name desc))
+            (vary-meta (vec (cons (tag 't '(* ForkJoinPool)) (map #(tag %1 (m/go-type :jrt %2)) pn ps)))
+                       assoc :tag (m/go-type :jrt r))
+            (list 'return (apply list (m/class-sym :jrt fjp-support-class (str "_" (nm/method-base hn hd))) 't pn))))))
+
 (defn support-forms
   "c2g's helpers in package jrt (c2g_support): what translated code calls besides jrt's API."
   []
@@ -313,6 +345,8 @@
      ;; String's regex methods
      (when (m/translated? "java/util/regex/Pattern") (map second string-regex-methods))
      (jrt-default-forwarders)
+     ;; ForkJoinPool's ExecutorService methods over translated types (JC7)
+     (fjp-support-forms)
      ;; String's members over translated classes (jrt's String cannot name them): Constable's
      ;; describeConstable once Optional is in the world, and lines() once streams are
      (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))

@@ -171,8 +171,8 @@
    ["java.util.concurrent.locks.LockSupport" [] false]
    ["java.util.concurrent.ThreadFactory" [] false]
    ["java.util.concurrent.Executor" [] false]
-   ["java.util.concurrent.ExecutorService" ["java.util.concurrent.Executor"] false]
-   ;; Executors, FutureTask and ThreadLocalRandom are translated (JRT-NOTES.md, "Concurrency")
+   ;; ExecutorService (a stand-in), Executors, FutureTask and ThreadLocalRandom are translated
+   ;; (JRT-NOTES.md, "Concurrency")
    ["java.util.concurrent.Future" [] false]
    ["java.util.concurrent.Future$State" [] false]
    ;; step 5 phase 2B: the fork-join pool (reducers' fold), an ExecutorService since JC7
