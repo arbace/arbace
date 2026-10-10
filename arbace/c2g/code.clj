@@ -909,7 +909,7 @@
   checked cast unless its static type is assignable."
   [node d]
   (let [t0 (vt node)]
-    (if (or (t/prim? d) (= t0 :null) (= t0 :none) (env/assignable? t0 d))
+    (if (or (t/prim? d) (object-like? d) (= t0 :null) (= t0 :none) (keyword? t0) (env/assignable? t0 d))
       node
       {:op :cast :class d :expr node :type d})))
 
@@ -920,6 +920,8 @@
   (cond
     (= r "V") (v x "V")
     (or (= d r) (t/prim? r)) (v x d)
+    ;; a polymorphic call's result as Object (a statement's): boxed, no cast
+    (object-like? r) (v (coerce x d "Ljava/lang/Object;" false) "Ljava/lang/Object;")
     :else (cast-val {:op :cast :class r :expr {:op ::go :x x :t d} :type r})))
 
 (defn- vh-field-form
