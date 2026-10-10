@@ -20,6 +20,18 @@ VM's start for the JDK's internal use. There are none: the caches it configures
   ^{:tag (* String)} [^{:tag (* String)} key]
   nil)
 
+(go/func VM_GetNanoTimeAdjustment_J__J
+  "VM_GetNanoTimeAdjustment_J__J is VM.getNanoTimeAdjustment (java.time.Clock's system clock;
+JRT-NOTES.md, \"Time\"): the host's wall clock as nanoseconds from the second offset, or -1 when
+that is more than 2^32 seconds away (the JDK's sentinel, after which Clock takes a new offset).
+The host's clock has Go's precision, nanoseconds on Linux, as the JDK's clock_gettime.\n"
+  ^int64 [^int64 offset]
+  (let [now (.Now (CurrentHost))
+        diff (- (.Unix now) offset)]
+    (when (or (> diff 4294967296) (< diff -4294967296))
+      (return -1))
+    (+ (* diff 1000000000) (conv int64 (.Nanosecond now)))))
+
 (go/func VM_IsBooted__Z "VM_IsBooted__Z is VM.isBooted: the program runs after initialization.\n"
   ^bool []
   true)

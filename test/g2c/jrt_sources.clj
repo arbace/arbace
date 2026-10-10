@@ -26,6 +26,61 @@
 ;; ---------------------------------------------------------------------------------------
 ;; the closure's sources
 
+(def time-sources
+  "java.time in the Go build (the user's decision of 2026-10-10; doc/go/JRT-NOTES.md, \"Time\"):
+  paths below src/java.base/share/classes. java.time, java.time.temporal, java.time.format and
+  java.time.zone whole but their serialization proxies (the Ser classes, but java.time.zone's,
+  whose read methods load tzdb.dat) and ZoneName (generated from CLDR's metazones; zone names
+  are jrt's: overlay TimeZoneNameUtility); java.time.chrono with the ISO chronology only (the
+  Hijrah, Japanese, Minguo and Thai Buddhist chronologies are cut: AbstractChronology's
+  variant registers IsoChronology alone). With them what they use outside the closure:
+  DateTimeHelper (the toString of the local types), ParsePosition (DateTimeFormatter's
+  parse), DataInput (TzdbZoneRulesProvider and the zone rules' Ser read through it) and the
+  exceptions of a corrupt time-zone database; and
+  java.util.TimeZone's family (below)."
+  (vec (concat
+         (map #(str "java/time/" % ".java")
+              ["Clock" "DayOfWeek" "Duration" "InstantSource" "LocalDate" "LocalDateTime"
+               "LocalTime" "Month" "MonthDay" "OffsetDateTime" "OffsetTime" "Period" "Year"
+               "YearMonth" "ZoneId" "ZoneOffset" "ZoneRegion" "ZonedDateTime"])
+         (map #(str "java/time/chrono/" % ".java")
+              ["AbstractChronology" "ChronoLocalDate" "ChronoLocalDateImpl" "ChronoLocalDateTime"
+               "ChronoLocalDateTimeImpl" "ChronoPeriod" "ChronoPeriodImpl" "ChronoZonedDateTime"
+               "ChronoZonedDateTimeImpl" "Chronology" "Era" "IsoChronology" "IsoEra"])
+         (map #(str "java/time/format/" % ".java")
+              ["DateTimeFormatter" "DateTimeFormatterBuilder" "DateTimeParseContext"
+               "DateTimeParseException" "DateTimePrintContext" "DateTimeTextProvider" "DecimalStyle"
+               "FormatStyle" "Parsed" "ResolverStyle" "SignStyle" "TextStyle"])
+         (map #(str "java/time/temporal/" % ".java")
+              ["ChronoField" "ChronoUnit" "IsoFields" "JulianFields" "Temporal" "TemporalAccessor"
+               "TemporalAdjuster" "TemporalAdjusters" "TemporalAmount" "TemporalField"
+               "TemporalQueries" "TemporalQuery" "TemporalUnit" "UnsupportedTemporalTypeException"
+               "ValueRange" "WeekFields"])
+         (map #(str "java/time/zone/" % ".java")
+              ["Ser" "TzdbZoneRulesProvider" "ZoneOffsetTransition" "ZoneOffsetTransitionRule"
+               "ZoneRules" "ZoneRulesException" "ZoneRulesProvider"])
+         ["jdk/internal/util/DateTimeHelper.java" "java/text/ParsePosition.java"
+          "java/io/DataInput.java" "java/io/StreamCorruptedException.java"
+          "java/io/InvalidObjectException.java"]
+         ;; java.util.TimeZone, jdk26u's own since the time-zone database is in the Go build
+         ;; (replacing jrt's fixed-offset TimeZone and ZoneInfo): SimpleTimeZone, ZoneInfo
+         ;; and ZoneInfoFile (which reads tzdb.dat too) and the sun.util.calendar classes they
+         ;; compute with; CRC32 (ZoneInfo's checksum; its natives are jrt's over Go's
+         ;; hash/crc32)
+         (map #(str "java/util/" % ".java") ["TimeZone" "SimpleTimeZone" "zip/CRC32" "zip/Checksum"])
+         ;; the bundles of java.base's CLDR locale data (added-gensrc) and what they extend;
+         ;; jrt's own ResourceBundle and locale providers (overlay/jdk) read them
+         ["java/util/ListResourceBundle.java" "java/util/MissingResourceException.java"
+          "sun/util/ResourceBundleEnumeration.java" "sun/util/resources/OpenListResourceBundle.java"
+          "sun/util/resources/TimeZoneNamesBundle.java" "sun/util/locale/provider/LocaleDataMetaInfo.java"
+          ;; the service provider class of java.time's localized patterns, which jrt's
+          ;; JavaTimeDateTimePatternImpl extends
+          "java/util/spi/LocaleServiceProvider.java" "sun/text/spi/JavaTimeDateTimePatternProvider.java"]
+         (map #(str "sun/util/calendar/" % ".java")
+              ["ZoneInfo" "ZoneInfoFile" "AbstractCalendar" "BaseCalendar" "CalendarDate"
+               "CalendarSystem" "CalendarUtils" "Era" "Gregorian" "JulianCalendar"
+               "ImmutableGregorianDate"]))))
+
 (def added-sources
   "Files of src/java.base/share/classes added to the measured closure (B1a step 4, phase 2C,
   doc/go/JRT-NOTES.md \"Phase 2C\"): plain Java that jrt had as stand-ins (C2G-SPEC §4.3) or
@@ -142,7 +197,8 @@
            ["java/lang/foreign/MemorySegment.java" "jdk/internal/foreign/MemorySessionImpl.java"]
            ;; \N{name} (CharacterName's uniName.dat is zlib-compressed: the overlay's
            ;; InflaterInputStream throws ZipException)
-           ["java/util/zip/ZipException.java"]))))
+           ["java/util/zip/ZipException.java"]
+           time-sources))))
 
 (def added-gensrc
   "Files the JDK build generates (make/modules/java.base/gensrc/GensrcBuffer.gmk,
@@ -154,7 +210,14 @@
                     ["ByteBuffer" "CharBuffer" "IntBuffer" "HeapByteBuffer" "HeapCharBuffer"
                      "HeapIntBuffer" "ByteBufferAsCharBufferB" "ByteBufferAsCharBufferL"
                      "ByteBufferAsIntBufferB" "ByteBufferAsIntBufferL"])
-               ["jdk/internal/misc/ScopedMemoryAccess.java"])))
+               ["jdk/internal/misc/ScopedMemoryAccess.java"]
+               ;; java.time's locale data (JRT-NOTES.md, \"Time\"): java.base's CLDR bundles of
+               ;; the root and English locales (GensrcCLDR's CLDRConverter), the metazones of
+               ;; zone names (ZoneName) and the CLDR meta data (parent locales, canonical zone IDs)
+               ["sun/text/resources/cldr/FormatData.java" "sun/text/resources/cldr/FormatData_en.java"
+                "sun/util/resources/cldr/TimeZoneNames.java" "sun/util/resources/cldr/TimeZoneNames_en.java"
+                "sun/util/resources/cldr/CalendarData.java" "sun/util/cldr/CLDRBaseLocaleDataMetaInfo.java"
+                "java/time/format/ZoneName.java"])))
 
 (def util-sources
   "Files of src/java.base/share/classes added for java.util's plain Java (doc/go/JAVA-BASE.md,

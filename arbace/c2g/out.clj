@@ -359,6 +359,17 @@ when there is none.\n"
                      (range [i x b]
                        (aset (.-A a) i (conv int8 x)))
                      (return (ByteArrayInputStream_New_B1 a))))))])
+     ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
+     ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
+     ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
+     ;; (jrt's Date cannot name them)
+     (when (m/translated? "jdk/internal/jrt/DefaultZone")
+       ['(go/func c2gSetDateZone "c2gSetDateZone sets jrt's DateZone hooks to DefaultZone's methods.\n" ^bool []
+          (set! DateZoneOffset DefaultZone_Offset_J__I)
+          (set! DateZoneOffsetByWall DefaultZone_OffsetByWall_J__I)
+          (set! DateZoneName (fn ^string [^int64 ms] (return (.String (DefaultZone_Name_J__String ms)))))
+          true)
+        '(go/var ^bool c2gDateZoneSet (c2gSetDateZone))])
      (remove nil? [(list 'go/var (tag 'C2g_AssertionsDisabled 'bool) true)
      (list 'go/func 'C2g_NotTranslated (with-meta [(tag 'what 'string)] {:tag 'Throwable_I})
            (list 'UnsupportedOperationException_New_String (list 'Str (list '+ "c2g: not translated: " 'what))))
@@ -818,8 +829,19 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                 (when instant?
                   [(list 'set! '(.-Methods (.Info Date_class))
                          (list 'append '(.-Methods (.Info Date_class))
+                               ;; jdk26u's Date.from: toEpochMilli's ArithmeticException
+                               ;; becomes the cause of an IllegalArgumentException
                                (sig "from" '[Instant_class] 'Date_class 0x9
-                                    '(Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                                    '(let [^any d nil
+                                           exc ((fn [] :results [^Throwable_I exc]
+                                                  (defer (Catch (addr exc)))
+                                                  (set! d (Date_New_J (.ToEpochMilli__J (NN ((inst As (* Instant)) (aget args 0))))))
+                                                  (return nil)))]
+                                       (when (!= exc nil)
+                                         (when (ArithmeticException_InstanceOf exc)
+                                           (panic (IllegalArgumentException_New_Throwable exc)))
+                                         (panic exc))
+                                       (return d)))
                                (sig "toInstant" [] 'Instant_class 0x1
                                     '(Instant_OfEpochMilli_J__Instant (.GetTime__J (assert Date_I this))))))])
                 (when (seq str-ms)

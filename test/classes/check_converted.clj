@@ -22,10 +22,14 @@
 ;;                    the classes javac made from the Java file (by SourceFile) that the class
 ;;                    forms did not make are differences too, and defpackage and defmodule forms
 ;;                    are compiled and compared (package-info, module-info)
+;;   FROM_SOURCE=a/B,c/D  classes (internal names; their nested classes too) compiled from the
+;;                    sources under DIR, never taken from the class path even when the running
+;;                    JDK has them (jrt's own Java that replaces a JDK class and adds members to
+;;                    it, used by the other files of its chunk: bin/jrt-convert)
 ;; For a JDK module run the JVM with --add-modules ALL-SYSTEM (bin/class-forms-check passes
 ;; JAVA_OPTS) so that all of the JDK's classes resolve.
 (require '[arbace.classes.compiler :as compiler] '[arbace.classes.analyze :as a]
-         '[arbace.classes.emit :as e] '[arbace.classes.shape :as shape]
+         '[arbace.classes.emit :as e] '[arbace.classes.shape :as shape] '[arbace.classes.env :as env]
          '[arbace.java.io :as io] '[arbace.string :as str])
 
 (def src-root (or (first *command-line-args*)
@@ -87,7 +91,13 @@
      (for [fm forms :when (and (seq? fm) (= 'defmodule (first fm)))]
        {:name "module-info" :bytes (compiler/module-bytes ns (rest fm))}))))
 
+(def from-source
+  (when-let [v (System/getenv "FROM_SOURCE")]
+    (let [names (set (remove str/blank? (str/split v #",")))]
+      (fn [n] (contains? names (first (str/split n #"\$")))))))
+
 (defn check-file [f]
+  (binding [env/*from-source* (or from-source env/*from-source*)]
   (try
     (let [forms (read-forms f)
           cforms (for [fm forms :when (and (seq? fm) (= 'defclass (first fm)))] (rest fm))]
@@ -133,7 +143,7 @@
       (when (System/getenv "TRACE") (.printStackTrace e))
       (swap! results conj {:file (str f)
                            :error (let [m (str (.getMessage e) (when-let [c (.getCause e)] (str " / " (.getMessage c))))]
-                                    (subs m 0 (min 400 (count m))))}))))
+                                    (subs m 0 (min 400 (count m))))})))))
 
 (doseq [f (if-let [l (System/getenv "FILES")]
             (map #(io/file src-root %) (remove str/blank? (str/split-lines (slurp l))))

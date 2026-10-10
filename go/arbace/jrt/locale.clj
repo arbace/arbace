@@ -1,6 +1,7 @@
-;; jrt: java.util.Locale and Locale.Category, java.text.DecimalFormatSymbols and the locale
-;; providers Formatter names (sun.util.locale.provider.LocaleProviderAdapter, LocaleResources,
-;; ResourceBundleBasedAdapter), and String's Locale overloads (doc/go/JRT-NOTES.md, "Phase 2b").
+;; jrt: java.util.Locale and Locale.Category, java.text.DecimalFormatSymbols, and String's Locale
+;; overloads (doc/go/JRT-NOTES.md, "Phase 2b"). The locale providers Formatter and java.time
+;; name (sun.util.locale.provider.LocaleProviderAdapter, LocaleResources, ...) are jrt's own Java
+;; since java.time came into the Go build (overlay/jdk; JRT-NOTES.md, "Time").
 ;; One set of locale data, the root locale's, as decided for Formatter (JAVA-SURFACE.md,
 ;; decision 2): every locale formats and maps case as the root locale does; the default locale
 ;; is en_US, so that Formatter takes its Locale.US paths, as on a JVM started with
@@ -32,7 +33,28 @@ variant; scripts and extensions are not kept.\n"
   [^{:tag (* Locale) :doc "Locale_ROOT is Locale.ROOT.\n"} Locale_ROOT (newLocale "" "" "")]
   [^{:tag (* Locale)} Locale_ENGLISH (newLocale "en" "" "")]
   [^{:tag (* Locale)} Locale_US (newLocale "en" "US" "")]
-  [^{:tag (* Locale)} Locale_UK (newLocale "en" "GB" "")])
+  [^{:tag (* Locale)} Locale_UK (newLocale "en" "GB" "")]
+  ;; the JDK's other locale constants (java.time's forms name them; JRT-NOTES.md, "Time")
+  [^{:tag (* Locale)} Locale_FRENCH (newLocale "fr" "" "")]
+  [^{:tag (* Locale)} Locale_GERMAN (newLocale "de" "" "")]
+  [^{:tag (* Locale)} Locale_ITALIAN (newLocale "it" "" "")]
+  [^{:tag (* Locale)} Locale_JAPANESE (newLocale "ja" "" "")]
+  [^{:tag (* Locale)} Locale_KOREAN (newLocale "ko" "" "")]
+  [^{:tag (* Locale)} Locale_CHINESE (newLocale "zh" "" "")]
+  [^{:tag (* Locale)} Locale_SIMPLIFIED_CHINESE (newLocale "zh" "CN" "")]
+  [^{:tag (* Locale)} Locale_TRADITIONAL_CHINESE (newLocale "zh" "TW" "")]
+  [^{:tag (* Locale)} Locale_FRANCE (newLocale "fr" "FR" "")]
+  [^{:tag (* Locale)} Locale_GERMANY (newLocale "de" "DE" "")]
+  [^{:tag (* Locale)} Locale_ITALY (newLocale "it" "IT" "")]
+  [^{:tag (* Locale)} Locale_JAPAN (newLocale "ja" "JP" "")]
+  [^{:tag (* Locale)} Locale_KOREA (newLocale "ko" "KR" "")]
+  [^{:tag (* Locale)} Locale_CANADA (newLocale "en" "CA" "")]
+  [^{:tag (* Locale)} Locale_CANADA_FRENCH (newLocale "fr" "CA" "")])
+
+(go/var
+  [^{:tag (* Locale) :doc "Locale_CHINA is Locale.CHINA, Locale.SIMPLIFIED_CHINESE.\n"} Locale_CHINA Locale_SIMPLIFIED_CHINESE]
+  [^{:tag (* Locale)} Locale_PRC Locale_SIMPLIFIED_CHINESE]
+  [^{:tag (* Locale)} Locale_TAIWAN Locale_TRADITIONAL_CHINESE])
 
 (go/func Locale_Of_String__Locale "Locale_Of_String__Locale is Locale.of(language).\n"
   ^{:tag (* Locale)} [^{:tag (* String)} l]
@@ -64,6 +86,29 @@ variant; scripts and extensions are not kept.\n"
 (go/method GetCountry__String ^{:tag (* String)} [^{:tag (* Locale)} t] (.-country t))
 (go/method GetVariant__String ^{:tag (* String)} [^{:tag (* Locale)} t] (.-variant t))
 (go/method GetScript__String ^{:tag (* String)} [^{:tag (* Locale)} t] litEmpty)
+
+(go/method HasExtensions__Z
+  "HasExtensions__Z is Locale.hasExtensions: false, jrt's locales have no extensions (JRT-NOTES.md,
+\"Time\").\n"
+  ^bool [^{:tag (* Locale)} t]
+  false)
+
+(go/method StripExtensions__Locale "StripExtensions__Locale is Locale.stripExtensions: the locale.\n"
+  ^{:tag (* Locale)} [^{:tag (* Locale)} t]
+  t)
+
+(go/method GetUnicodeLocaleType_String__String
+  "GetUnicodeLocaleType_String__String is Locale.getUnicodeLocaleType: null (no Unicode locale
+extension), after the JDK's check of the key: two letters or digits, else
+IllegalArgumentException.\n"
+  ^{:tag (* String)} [^{:tag (* Locale)} t ^{:tag (* String)} key]
+  (let [k (.String (NN key))]
+    (when (or (!= (len k) 2) (not (alnum (aget k 0))) (not (alnum (aget k 1))))
+      (panic (IllegalArgumentException_New_String (Str (+ "Ill-formed Unicode locale key: " k)))))
+    nil))
+
+(go/func alnum ^bool [^byte c]
+  (or (and (>= c \a) (<= c \z)) (and (>= c \A) (<= c \Z)) (and (>= c \0) (<= c \9))))
 
 (go/method ToString__String
   "ToString__String is Locale.toString: language, _COUNTRY, _VARIANT as Java joins them
@@ -203,6 +248,12 @@ DecimalFormatSymbols.getInstance(Locale): a new instance (they are mutable in Ja
   ^{:tag (* DecimalFormatSymbols)} [^{:tag (* Locale)} l]
   (DecimalFormatSymbols_New_Locale l))
 
+(go/func DecimalFormatSymbols_GetAvailableLocales__Locale1
+  "DecimalFormatSymbols_GetAvailableLocales__Locale1 is DecimalFormatSymbols.getAvailableLocales:
+the locales of java.base's CLDR data, the root locale, en and en_US (JRT-NOTES.md, \"Time\").\n"
+  ^{:tag (* RefArray)} []
+  (RefArrayOf Locale_class Locale_ROOT Locale_ENGLISH Locale_US))
+
 (go/method GetLocale__Locale ^{:tag (* Locale)} [^{:tag (* DecimalFormatSymbols)} t] (.-locale t))
 (go/method GetZeroDigit__C ^uint16 [^{:tag (* DecimalFormatSymbols)} t] \0)
 (go/method GetGroupingSeparator__C ^uint16 [^{:tag (* DecimalFormatSymbols)} t] \,)
@@ -239,66 +290,6 @@ DecimalFormatSymbols.getInstance(Locale): a new instance (they are mutable in Ja
 (go/method HashCode__I ^int32 [^{:tag (* DecimalFormatSymbols)} t] (+ (* 37 \0) \,))
 
 ;; ---------------------------------------------------------------------------------------
-;; sun.util.locale.provider: one adapter with the root locale's resources
-
-(go/type ResourceBundleBasedAdapter
-  "ResourceBundleBasedAdapter is sun.util.locale.provider.ResourceBundleBasedAdapter (a
-marker here: jrt's one adapter implements it).\n"
-  (interface Object_I (Is_ResourceBundleBasedAdapter [])))
-
-(go/var ResourceBundleBasedAdapter_class
-  (Define (addr (lit ClassInfo :Name "sun.util.locale.provider.ResourceBundleBasedAdapter" :Kind KindInterface
-                     :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.ResourceBundleBasedAdapter"))))
-(go/func ResourceBundleBasedAdapter_InstanceOf ^bool [^any x]
-  (let [(values _ ok) (assert ResourceBundleBasedAdapter x)] ok))
-
-(go/type LocaleProviderAdapter
-  "LocaleProviderAdapter is sun.util.locale.provider.LocaleProviderAdapter: jrt's single
-adapter, resource bundle based.\n"
-  (struct Object))
-
-(go/var LocaleProviderAdapter_class
-  (Define (addr (lit ClassInfo :Name "sun.util.locale.provider.LocaleProviderAdapter" :Kind KindClass
-                     :Modifiers (bit-or AccPublic AccAbstract) :Super Object_class
-                     :Go "arbace/jrt.LocaleProviderAdapter"))))
-
-(go/var ^{:tag (* LocaleProviderAdapter)} theLocaleAdapter (addr (lit LocaleProviderAdapter)))
-
-(go/func LocaleProviderAdapter_GetAdapter_Class_Locale__LocaleProviderAdapter
-  ^{:tag (* LocaleProviderAdapter)} [^{:tag (* Class)} provider ^{:tag (* Locale)} l]
-  theLocaleAdapter)
-(go/func LocaleProviderAdapter_GetResourceBundleBased__LocaleProviderAdapter
-  ^{:tag (* LocaleProviderAdapter)} []
-  theLocaleAdapter)
-(go/method GetLocaleResources_Locale__LocaleResources
-  ^{:tag (* LocaleResources)} [^{:tag (* LocaleProviderAdapter)} t ^{:tag (* Locale)} l]
-  (addr (lit LocaleResources :locale l)))
-(go/method Is_ResourceBundleBasedAdapter [^{:tag (* LocaleProviderAdapter)} t])
-(go/method Ref ^any [^{:tag (* LocaleProviderAdapter)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* LocaleProviderAdapter)} t] LocaleProviderAdapter_class)
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* LocaleProviderAdapter)} t] (Object_toString t))
-(go/method Clone__O ^any [^{:tag (* LocaleProviderAdapter)} t] (panic (CloneNotSupported t)))
-
-(go/type LocaleResources
-  "LocaleResources is sun.util.locale.provider.LocaleResources: the root locale's number
-patterns.\n"
-  (struct Object ^{:tag (* Locale)} locale))
-
-(go/var LocaleResources_class
-  (Define (addr (lit ClassInfo :Name "sun.util.locale.provider.LocaleResources" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.LocaleResources"))))
-
-(go/method GetNumberPatterns__String1
-  "GetNumberPatterns__String1 is LocaleResources.getNumberPatterns: the root locale's number,
-currency and percent patterns (CLDR).\n"
-  ^{:tag (* RefArray)} [^{:tag (* LocaleResources)} t]
-  (RefArrayOf String_class (Intern "#,##0.###") (Intern "¤ #,##0.00") (Intern "#,##0%")))
-(go/method Ref ^any [^{:tag (* LocaleResources)} t] (when (== t nil) (return nil)) t)
-(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* LocaleResources)} t] LocaleResources_class)
-(go/method ToString__String ^{:tag (* String)} [^{:tag (* LocaleResources)} t] (Object_toString t))
-(go/method Clone__O ^any [^{:tag (* LocaleResources)} t] (panic (CloneNotSupported t)))
-
-;; ---------------------------------------------------------------------------------------
 ;; String's Locale overloads: the root locale's case mapping for every locale (no Turkish,
 ;; Azerbaijani or Lithuanian rules: JRT-NOTES.md, "Locales")
 
@@ -313,5 +304,4 @@ currency and percent patterns (CLDR).\n"
 (go/func init []
   (set! (.-IsInstance (.Info Locale_class)) Locale_InstanceOf)
   (set! (.-IsInstance (.Info Locale_Category_class)) Locale_Category_InstanceOf)
-  (set! (.-Enum (.Info Locale_Category_class)) Locale_Category_Values__Locale_Category1)
-  (set! (.-IsInstance (.Info ResourceBundleBasedAdapter_class)) ResourceBundleBasedAdapter_InstanceOf))
+  (set! (.-Enum (.Info Locale_Category_class)) Locale_Category_Values__Locale_Category1))

@@ -164,13 +164,27 @@
         :when (and (not (m/static? mm)) (not (m/private? mm)) (not= "<init>" (:name mm)))]
     [(:name mm) (:desc mm)]))
 
+(defn- supertypes-of
+  "The types class d is a subtype of (env/subclass?): d, its supertypes and Object."
+  [d]
+  (let [s (env/all-supertypes d)]
+    (if (some #(= "java/lang/Object" %) s) s (conj (vec s) "java/lang/Object"))))
+
+(defn- vcalls-on
+  "The virtual calls [name desc] whose receiver's static type is a supertype of d (indexed by
+  receiver type: the roots of --program are each a virtual call, about 20,000)."
+  [d]
+  (let [by @(:vcalls-by *st*)]
+    (for [s (supertypes-of d) nd (get by s)] nd)))
+
 (defn instantiate!
   [d]
   (when (and (m/translated? d) (not (contains? @(:inst *st*) d)))
     (swap! (:inst *st*) conj d)
-    (doseq [[o name desc] @(:vcalls *st*)
-            :when (env/subclass? d o)]
-      (when-let [k (java-impl-of d [name desc])] (reach! k)))
+    (doseq [s (supertypes-of d)]
+      (swap! (:inst-by *st*) update s (fnil conj []) d))
+    (doseq [nd (vcalls-on d)]
+      (when-let [k (java-impl-of d nd)] (reach! k)))
     (doseq [k (distinct (external-keys d))]
       (when-let [impl (java-impl-of d k)] (reach! impl)))))
 
@@ -180,7 +194,9 @@
   (let [k [o name desc]]
     (when-not (contains? @(:vcalls *st*) k)
       (swap! (:vcalls *st*) conj k)
-      (doseq [d (concat @(:inst *st*) @(:lambda-fis *st*)) :when (env/subclass? d o)]
+      (swap! (:vcalls-by *st*) update o (fnil conj []) [name desc])
+      (doseq [d (concat (get @(:inst-by *st*) o)
+                        (filter #(env/subclass? % o) @(:lambda-fis *st*)))]
         (when-let [impl (java-impl-of d [name desc])] (reach! impl))))))
 
 (defn lambda!
@@ -189,8 +205,8 @@
   [fi]
   (when-not (contains? @(:lambda-fis *st*) fi)
     (swap! (:lambda-fis *st*) conj fi)
-    (doseq [[o name desc] @(:vcalls *st*) :when (env/subclass? fi o)]
-      (when-let [impl (java-impl-of fi [name desc])] (reach! impl)))
+    (doseq [nd (vcalls-on fi)]
+      (when-let [impl (java-impl-of fi nd)] (reach! impl)))
     (doseq [k (distinct (external-keys fi))]
       (when-let [impl (java-impl-of fi k)] (reach! impl)))))
 
@@ -373,17 +389,26 @@
   :instantiate; functional interfaces with adapters :fis). Returns {:T #{} :reached #{} :inst #{} :unavailable {k #{why}} :missing {}}."
   [{:keys [roots instantiate classes slice? fis]}]
   (let [st {:T (atom #{}) :reached (atom #{}) :queue (atom []) :inst (atom #{}) :vcalls (atom #{})
+            :vcalls-by (atom {}) :inst-by (atom {})
             :inited (atom #{}) :unavailable (atom {}) :missing (atom {}) :failed-classes (atom {})
             :lambda-fis (atom #{})}]
     (binding [*st* st
               *slice?* (or slice? (constantly true))
               m/*w* (assoc m/*w* :T (:T st))]
       (doseq [c classes] (use! c))
-      (doseq [[c :as k] roots]
+      (doseq [[c name desc :as k] roots]
         (when (use! c)
           (reach! k)
           ;; a root constructor: its class is instantiated (by the caller of the roots)
-          (when (and (= "<init>" (second k)) (*slice?* c)) (instantiate! c))))
+          (when (and (= "<init>" name) (*slice?* c)) (instantiate! c))
+          ;; a root instance method is a virtual call too: its callers (the REPL's reflection,
+          ;; the evaluator) call it on instances of any subclass, whose overrides must be
+          ;; translated, those of classes that are not roots themselves included (JRT-NOTES.md,
+          ;; "Time": ZoneInfo's, in a package java.base does not export)
+          (when-not (#{"<init>" "<clinit>"} name)
+            (when-let [mm (m/find-method c name desc)]
+              (when-not (or (m/static? mm) (m/private? mm))
+                (vcall! c name desc))))))
       (doseq [c instantiate] (when (use! c) (instantiate! c)))
       ;; functional interfaces whose adapters exist without a lambda (FromFn, C2G-SPEC §7.11)
       (doseq [fi fis] (when (use! fi) (lambda! fi)))
