@@ -1238,3 +1238,7 @@ decision (2026-10-08).
   mismatches; Clojure's suite on Go 19,628 of 19,632 assertions, 66 namespaces all loading, 4
   errors (`java.io`'s class loader cases), test.generative 26 of 26, no regressions. Before it,
   the main session's essential `bin/gate` on `48ba45c` passed (8m39s).
+- Corrected by the user the same day: the baseline of every Arbace image is `java.base` plus
+  `jdk.unsupported` (for `sun.misc.Signal`, the REPL's break handler, which stays as it is);
+  java.sql, java.xml and java.desktop are optional. `bin/arbace-image`'s default modules:
+  `java.base,jdk.unsupported`, plus `ARBACE_IMAGE_MODULES`.
