@@ -150,6 +150,8 @@ fallbacks of `arbace/core_classes.clj` are gone.
     compilation), and feature completion: class forms in the REPL, sockets and
     the socket REPL, the suite's last failures, regex `\N{name}` and `CANON_EQ`. Amendment Z1
     (pprint's BufferedWriter proxy) accepted and folded (2026-10-10).
+  - The jlinked images become headless (the user, 2026-10-10): no java.desktop; with the Alpine
+    package work, then main's `bin/arbace-image`.
   - Before the freeze: an assessment of how much of `java.base` jrt implements (the user's
     request, an agent; `doc/go/JAVA-BASE.md`); SL3's per-namespace timeouts once step 7 lands;
     the agents-without-`shutdown-agents` deadlock found by step 7a.

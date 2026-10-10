@@ -1174,3 +1174,17 @@ decision (2026-10-08).
   `arbace-for-go1.27.1`), as the JVM freeze's `arbace-for-java-26-v1`/`-v2`: fixes on the same
   Go toolchain are released as `-v2`, `-v3`..., and the name before the suffix still names the
   exact toolchain. The branch stays `arbace-for-golang`. B1-PLAN and the agenda updated.
+
+## 2026-10-10: jlinked images are headless
+
+- The user's decision: every jlinked image (`bin/arbace-image`, on main and on the
+  `arbace-for-java-26` line, and the Alpine package built from it) is headless: Arbace targets
+  the server side only. Today's image (2026-10-08) holds java.base, java.datatransfer,
+  java.desktop, java.logging, java.prefs, java.sql, java.transaction.xa, java.xml,
+  jdk.unsupported and jdk.unsupported.desktop (133 MB): `jdeps --print-module-deps` of the jar
+  (java.desktop through `arbace.inspector` and `arbace.java.browse`/`browse_ui`) plus
+  jdk.unsupported.desktop, added for the AOT cache's class linking on JDK 26.0.2. The desktop
+  modules leave the image; the desktop namespaces stay in the jar and work on a full JDK. The
+  Alpine package agent (branch `apk26`) makes the change, re-examines the AOT linking workaround
+  and measures; main's `bin/arbace-image` (identical to the frozen branch's) takes the same
+  change after. The Go build already leaves Swing/AWT out (D6).
