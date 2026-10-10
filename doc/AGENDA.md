@@ -163,7 +163,7 @@ fallbacks of `arbace/core_classes.clj` are gone.
     Alpine package, `bin/arbace-j`, the licences).
   - Then: step 8, the freeze (`bin/gate --full`, PGO executables, the branch `arbace-for-golang`,
     the tag `arbace-for-go1.27.1-v1`, the READMEs' "Arbace for Golang" sections: main's pointing to the branch,
-    the branch's own); right after it, as the first task, the `.ae` rename.
+    the branch's own; main's journal starts over, as at the JVM freeze); right after it, as the first task, the `.ae` rename.
 
 - The `.ae` file extension (the user's decision, 2026-10-09): Arbace's sources hold forms Clojure
   cannot evaluate (class forms, Go forms), so `.clj` misleads; they move to `.ae` (ASCII; `.æ`

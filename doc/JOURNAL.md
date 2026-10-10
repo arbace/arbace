@@ -1388,3 +1388,8 @@ decision (2026-10-08).
   the JVM freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26",
   pointing to the branch `arbace-for-golang`, its tags and the branch's freeze document; the
   branch's README describes the frozen executables locally.
+- The user's decision: after the Go freeze main's journal starts over, as after the JVM freeze
+  (2026-10-08): the journal up to the freeze stays on `arbace-for-golang`, its tag
+  `arbace-for-go1.27.1-v1` and in git; main's new journal opens with a paragraph pointing to
+  them, as this one points to `arbace-for-java-26`. Part of B1-PLAN step 8; CLAUDE.md's Records
+  paragraph is updated then to name both freezes.
