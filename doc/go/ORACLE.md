@@ -111,7 +111,7 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
 
   `:form` is the case's text (shortened), for the reader; only `:case` is compared.
   `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (34 cases in 7 groups,
-  2026-10-09), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
+  2026-10-09; 6 cases in 4 groups since the branch `gofix`, 2026-10-10), against which `bin/gate --full` checks it (with `--timeout 900`: the reducers
   file takes about 285 s there).
 - `SEL` selects parts (`forms`, `classes`, `regex`) or files by a part of their path
   (`forms/numbers`, `harvest`); `-j` the concurrent runs (default 16), `--timeout` the seconds

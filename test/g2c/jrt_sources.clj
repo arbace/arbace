@@ -116,6 +116,10 @@
                 ["SequencedCollection" "SequencedSet" "SequencedMap" "ReverseOrderDequeView"
                  "ReverseOrderSortedSetView" "ReverseOrderSortedMapView"])
            ["jdk/internal/util/NullableKeyValueHolder.java"]
+           ;; the JVM's error for compiled code's new of an abstract class, which the
+           ;; evaluator's NewExpr throws as compiled code does (EVAL-NOTES.md, "The suite's
+           ;; Java fixtures")
+           ["java/lang/InstantiationError.java"]
            ;; the constant API's two interfaces, which String and the wrapper classes implement
            ;; (supers, bases and ancestors list them); their methods name classes outside the
            ;; world (Optional, MethodHandles.Lookup) and do not exist in Go
@@ -278,7 +282,12 @@
                 ["Paths" "OpenOption" "StandardOpenOption" "LinkOption" "CopyOption"
                  "StandardCopyOption" "FileSystemException" "NoSuchFileException"
                  "FileAlreadyExistsException" "DirectoryNotEmptyException" "AccessDeniedException"
-                 "InvalidPathException" "ProviderMismatchException" "attribute/FileAttribute"])
+                 "InvalidPathException" "ProviderMismatchException" "attribute/FileAttribute"
+                 ;; Files.newDirectoryStream (Clojure's suite, java-interop's reflective call
+                 ;; with a fn for a DirectoryStream$Filter): the stream's interface, its
+                 ;; error, and glob patterns as UnixFileSystem.getPathMatcher makes them
+                 "DirectoryStream" "NotDirectoryException"])
+           ["src/java.base/share/classes/sun/nio/fs/Globs.java"]
            ;; URLs (io/as-url, readers on file: URLs, slurp of a path string, RT.toUrl): URL and
            ;; its handlers (file:, and http:, https: and jar: for their syntax; their
            ;; connections are outside the world), the file: connection, URLDecoder, and what

@@ -11,6 +11,15 @@
 #                                      the host's executable runs test/arbace-go-pgo.clj with a
 #                                      CPU profile (target/arbace-go/pgo.pprof), and every
 #                                      executable is built again with it (go build -pgo)
+#        bin/arbace-go --build-tests [DIR]
+#                                      the test build (doc/go/EVAL-NOTES.md, "The suite's Java
+#                                      fixtures"): the same program with the class forms of DIR
+#                                      (default: Clojure's suite's Java fixtures, test/java,
+#                                      converted by j2c: bin/clojure-tests --java-fixtures)
+#                                      translated into it, built into
+#                                      target/arbace-go/<arch>/arbace-tests for
+#                                      $ARBACE_GO_ARCHES; what bin/clojure-tests runs the suite
+#                                      on. The shipped executable does not carry them
 #        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
 #                                      forms, doc/go/EXEC-NOTES.md) with the built executables
 #                                      and link them again with it
@@ -54,15 +63,21 @@ ldflags=()
 # the seconds since $1 (date +%s)
 since() { echo "$(( $(date +%s) - $1 )) s"; }
 
+# what a build makes: the shipped executable (the defaults), or the test build (--build-tests:
+# its own c2g output, work modules, executables and logs, beside the shipped one's)
+variant=          # "" or "-tests"
+c2g_args=()       # bin/c2g's extra arguments (--input DIR for the test build)
+exe=arbace        # the executable's name in target/arbace-go/<arch>/
+
 build() {
   mkdir -p "$dir"
   local t0
   t0=$(date +%s)
   # Go's build cache, trimmed before each build (bin/lib/gocache.bash)
   gocache_trim "${G2C_GOROOT:-/root/tamago-go}/bin/go" >&2
-  echo "== bin/c2g --program" >&2
-  (cd "$root" && bin/c2g --program --out "$dir/c2g") > "$dir/c2g.log" 2>&1 \
-    || { tail -20 "$dir/c2g.log" >&2; echo "arbace-go: c2g failed ($dir/c2g.log)" >&2; return 1; }
+  echo "== bin/c2g --program ${c2g_args[*]}" >&2
+  (cd "$root" && bin/c2g --program "${c2g_args[@]}" --out "$dir/c2g$variant") > "$dir/c2g$variant.log" 2>&1 \
+    || { tail -20 "$dir/c2g$variant.log" >&2; echo "arbace-go: c2g failed ($dir/c2g$variant.log)" >&2; return 1; }
   echo "   c2g: $(since "$t0")" >&2
   local overlay host
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
@@ -71,9 +86,9 @@ build() {
     echo "== bin/g2c build $a" >&2
     mkdir -p "$dir/$a"
     t0=$(date +%s)
-    (cd "$root" && bin/g2c build --line-file --arch "$a" --work "$dir/work-$a" -o "$dir/$a/arbace" \
-       --overlay "$overlay" "$dir/c2g/prog") > "$dir/build-$a.log" 2>&1 \
-      || { grep -v '^==' "$dir/build-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
+    (cd "$root" && bin/g2c build --line-file --arch "$a" --work "$dir/work$variant-$a" -o "$dir/$a/$exe" \
+       --overlay "$overlay" "$dir/c2g$variant/prog") > "$dir/build$variant-$a.log" 2>&1 \
+      || { grep -v '^==' "$dir/build$variant-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "   g2c build $a: $(since "$t0")" >&2
   done
   image || return 1
@@ -117,38 +132,58 @@ build_order() {
 # with the image, the main package's embedded file (the other packages are in go build's
 # cache: only the main package changes)
 image() {
-  local overlay main=$dir/c2g/prog/go/arbace/cmd/arbace a
+  local overlay main=$dir/c2g$variant/prog/go/arbace/cmd/arbace a
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
   local t0
   t0=$(date +%s)
-  prepare "$dir/$(host_arch)/arbace" "$main/image.bin" || return 1
+  prepare "$dir/$(host_arch)/$exe" "$main/image.bin" || return 1
   echo "   prepare: $(since "$t0")" >&2
   for a in $(build_order); do
     t0=$(date +%s)
-    [ -d "$dir/work-$a/mod" ] || { echo "arbace-go: $a: not built" >&2; return 1; }
-    cp "$main/image.bin" "$dir/work-$a/mod/cmd/arbace/image.bin"
-    (cd "$dir/work-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
-       -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -o "$dir/$a/arbace" arbace/cmd/arbace) >> "$dir/build-$a.log" 2>&1 \
-      || { tail -20 "$dir/build-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
-    echo "arbace-go: $dir/$a/arbace ($(stat -c %s "$dir/$a/arbace") bytes; linked in $(since "$t0"))" >&2
+    [ -d "$dir/work$variant-$a/mod" ] || { echo "arbace-go: $a: not built" >&2; return 1; }
+    cp "$main/image.bin" "$dir/work$variant-$a/mod/cmd/arbace/image.bin"
+    (cd "$dir/work$variant-$a/mod" && env $(go_env "$a") "${G2C_GOROOT:-/root/tamago-go}/bin/go" build -trimpath \
+       -buildvcs=false "${ldflags[@]}" -overlay "$overlay" -o "$dir/$a/$exe" arbace/cmd/arbace) >> "$dir/build$variant-$a.log" 2>&1 \
+      || { tail -20 "$dir/build$variant-$a.log" >&2; echo "arbace-go: $a: link with the image failed" >&2; return 1; }
+    echo "arbace-go: $dir/$a/$exe ($(stat -c %s "$dir/$a/$exe") bytes; linked in $(since "$t0"))" >&2
   done
+}
+
+# build_tests [DIR]: the test build, the program with the class forms of DIR (default: the
+# suite's Java fixtures, converted by bin/clojure-tests --java-fixtures into
+# target/arbace-go/java-fixtures), into target/arbace-go/<arch>/arbace-tests
+build_tests() {
+  local fx=${1:-} t0
+  t0=$(date +%s)
+  if [ -z "$fx" ]; then
+    fx=$dir/java-fixtures
+    echo "== the suite's Java fixtures (bin/clojure-tests --java-fixtures)" >&2
+    mkdir -p "$dir"
+    (cd "$root" && bin/clojure-tests --java-fixtures "$fx") > "$dir/java-fixtures.log" 2>&1 \
+      || { tail -20 "$dir/java-fixtures.log" >&2; echo "arbace-go: the fixtures failed ($dir/java-fixtures.log)" >&2; return 1; }
+  fi
+  [ -d "$fx" ] || { echo "arbace-go: --build-tests: no directory $fx" >&2; return 1; }
+  fx=$(cd "$fx" && pwd)
+  variant=-tests exe=arbace-tests c2g_args=(--input "$fx")
+  build || return 1
+  echo "arbace-go: the test build in $(since "$t0")" >&2
 }
 
 # prepare EXE IMAGE: run the executable once with ARBACE_PREPARE, requiring every namespace
 # embedded in it (the sources whose first form is ns), and write the image of their analyzed
 # forms (Compiler$Image)
 prepare() {
-  local exe=$1 image=$2 res=$dir/c2g/prog/go/arbace/cmd/arbace/res nss
+  local exe=$1 image=$2 nss
   echo "== prepare the namespaces (the image)" >&2
   # the embedded namespaces, as c2g lists them (its sources may be compressed: amendment SZ2)
-  nss=$(tr '\n' ' ' < "$dir/c2g/prog/namespaces.txt")
+  nss=$(tr '\n' ' ' < "$dir/c2g$variant/prog/namespaces.txt")
   rm -f "$image"
   printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
-    > "$dir/prepare.clj"
-  GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare.clj" > "$dir/prepare.log" 2>&1 \
-    || { tail -20 "$dir/prepare.log" >&2; echo "arbace-go: prepare failed ($dir/prepare.log)" >&2; return 1; }
-  [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare.log)" >&2; return 1; }
-  grep '^image:' "$dir/prepare.log" >&2
+    > "$dir/prepare$variant.clj"
+  GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare$variant.clj" > "$dir/prepare$variant.log" 2>&1 \
+    || { tail -20 "$dir/prepare$variant.log" >&2; echo "arbace-go: prepare failed ($dir/prepare$variant.log)" >&2; return 1; }
+  [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare$variant.log)" >&2; return 1; }
+  grep '^image:' "$dir/prepare$variant.log" >&2
   echo "arbace-go: image $(stat -c %s "$image") bytes" >&2
 }
 
@@ -294,6 +329,7 @@ gate() {
 case ${1:-} in
   --gate) gate ;;
   --build) [ "${2:-}" = --pgo ] && pgo=1; build ;;
+  --build-tests) build_tests "${2:-}" ;;
   --image) image ;;
   --smoke) for a in ${arches//,/ }; do [ -x "$dir/$a/arbace" ] || { build || exit 1; break; }; done; smoke ;;
   *)

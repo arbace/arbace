@@ -3195,3 +3195,65 @@ Numbered PR (processes). All seven were accepted on 2026-10-10 and folded into C
 - **PR7 (C2G-SPEC §7.11, method references)** A bound method reference to a private method of a
   non-leaf class is a call of its `Impl_` with the receiver's struct and the receiver, as an
   invocation of it is. *Accepted 2026-10-10: C2G-SPEC §7.11.*
+
+# Resources by URL: `ClassLoader.getResource`, `URLClassLoader` (branch `gofix`)
+
+The user's decision of 2026-10-10 (before the freeze): `java.io`'s 4 errors on Go, the class
+loader's `getResource(s)` and `URLClassLoader`, keeping the JVM's semantics where they apply.
+
+## What was done
+
+**The class path's resources by URL.** `jdk.internal.jrt.ClassPathResources` (overlay/jdk, jrt's
+own Java, translated) finds a resource as the Go build's class path has it, in `RT.load`'s and
+`ResourceOrPath`'s order: the resources embedded in the executable, then the directories of
+`ARBACE_PATH`. An embedded resource's URL is a `jar:` URL naming the executable,
+`jar:file:/path/to/arbace!/arbace/core.clj`, as the JVM's names a resource of `arbace.jar`
+(`jar:file:/path/to/arbace.jar!/arbace/core.clj`); its handler is `ClassPathResources`' own
+(a subclass of the `jar:` handler, for its syntax and comparisons), whose connection reads the
+embedded resource (`openStream`, `slurp`), since the JDK's `jar:` connection is outside the
+world. A file of an `ARBACE_PATH` directory has its `file:` URL as the JVM's class path
+directories give it (`URLClassPath.FileLoader`: the directory's URL resolving the encoded name,
+a name with `..` only within the directory). Natives (jrt's Go, `resources.clj`): whether a
+resource is embedded and its bytes (`Host.Resource`), and the executable's path, from an
+optional host interface `HostExecutable` (as `HostFS`), which B1a's `OSHost` implements on Linux
+(`resources_linux.clj`, `//go:build linux`: `os.Executable`, links resolved); a host without it
+(B1b's box, `GOOS=tamago`) names `/arbace`.
+
+**`ClassLoader.getResource` and `getResources`** of the built-in loaders are c2g's member table
+entries (as `getResourceAsStream` was): the application loader's are `ClassPathResources`'
+(`getResources` was an empty enumeration); the platform loader and the bootstrap loader find
+none. `(io/resource "arbace/core.clj")` is a URL now, and `slurp` reads it.
+
+**`java.net.URLClassLoader`** (overlay/jdk, jrt's own Java, translated): jdk26u's public API,
+finding resources as the JDK's does, the parent first, then its URLs in order, a `file:` URL
+ending with `/` a directory searched as above. It loads no classes (there are no class files: a
+class is found by name in the closed world, through the parent). It left c2g's library cuts
+(SL7), where it was a class whose members throw.
+
+**`Files.newDirectoryStream`** (jrt's `Files`, overlay/jdk; java-interop's reflective call of it
+with a fn for a `DirectoryStream$Filter`, EVAL-NOTES.md "The suite's Java fixtures"): the three
+overloads, jdk26u's `DirectoryStream` and `NotDirectoryException`, a glob read as
+`UnixFileSystem.getPathMatcher` reads it (jdk26u's `sun.nio.fs.Globs`, through a public helper
+`sun.nio.fs.GlobPatterns`, its method being package-private). Deviation: the entries are listed
+and filtered when the stream is opened (jdk26u's read them as the iteration goes), so a filter's
+`IOException` is thrown by `newDirectoryStream`, not wrapped in `DirectoryIteratorException`.
+
+**`VM.isSystemDomainLoader`** (jrt, `resources.clj`): `URL` asks it of a handler that is not one
+of the JDK's (`isBuiltinStreamHandler`); the JDK's answer, the bootstrap or the platform loader.
+
+## Deviations
+
+- `URLClassLoader` extends `ClassLoader`, not `SecureClassLoader` (`java.security`'s code sources
+  and permissions are outside the world); `getResource` and `getResources` are declared by it,
+  the Go build's `ClassLoader` having none of its own for translated code to inherit.
+- A `URLClassLoader`'s `jar:` URLs and other protocols find nothing (`java.util.jar` is outside the
+  world).
+- The URL of an embedded resource opens only through the URL `getResource` returns: a URL made
+  again from its text has the JDK's `jar:` handler, whose connection is outside the world.
+
+## Results
+
+`clojure.test-clojure.java.io` on Go: 15 tests, 115 of 115 assertions (before: 109 of 113, 4
+errors), as on the JVM. `test-resource` and `test-resources-with-spaces` pass: a resource found
+through a `URLClassLoader` of a temporary directory equals the file's URL (`as-url`), and
+`spit` and `slurp` through it work.

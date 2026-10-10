@@ -5,10 +5,15 @@
 # only under .tmp/clojure-tests/.
 #
 # Usage: bin/clojure-tests [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
+#        bin/clojure-tests --java-fixtures OUT
 #   -j JOBS          parallel test JVMs (default: number of CPUs)
 #   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
 #   --generative     run it (the default, with CLOJURE_TESTS_GO too)
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
+#   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as in
+#                    rename mode, into class forms under OUT with j2c (run CLOJURE_TESTS_RUN,
+#                    default java-fixtures): what bin/arbace-go --build-tests translates into
+#                    the Go build's test executable
 # Environment:
 #   CLOJURE_SRC             class path of the Clojure under test: its Java classes and .clj
 #                           sources (default: .tmp/frozen, whose clojure/ is the baseline)
@@ -35,9 +40,10 @@
 #                           in its own process, the renamed suite and test libraries on ARBACE_PATH;
 #                           listing and reporting run on the JVM Arbace of CLOJURE_SRC (default
 #                           target/stage2). Steps 3 and 4 are skipped: the Go build loads no class
-#                           files, so the AOT fixtures load from source and the Java fixtures
-#                           (test/java) do not exist; the namespaces needing them are :skipped in
-#                           its reference, test/arbace-go-results.edn (the default
+#                           files, so the AOT fixtures load from source, and the Java fixtures
+#                           (test/java) are translated into the executable: it must be the test
+#                           build, bin/arbace-go --build-tests's target/arbace-go/<arch>/arbace-tests
+#                           (checked); the reference is test/arbace-go-results.edn (the default
 #                           CLOJURE_TESTS_EXPECTED; CLOJURE_TESTS_RUN defaults to go). Each
 #                           process loads every test namespace first, as upstream does: about
 #                           a minute; GOGC defaults to 400 for them (half the CPU time of the
@@ -66,6 +72,15 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 base=$root/.tmp/clojure-tests
+java_fixtures=
+if [ "${1:-}" = --java-fixtures ]; then
+  java_fixtures=${2:?usage: bin/clojure-tests --java-fixtures OUT}
+  case $java_fixtures in /*) ;; *) java_fixtures=$PWD/$java_fixtures ;; esac
+  CLOJURE_TESTS_RENAME=arbace
+  : "${CLOJURE_TESTS_RUN:=java-fixtures}" "${CLOJURE_SRC:=$root/target/stage2:$root}"
+  unset CLOJURE_TESTS_GO
+  set --
+fi
 go_exe=${CLOJURE_TESTS_GO:-}
 if [ -n "$go_exe" ]; then
   CLOJURE_TESTS_RENAME=arbace
@@ -146,8 +161,10 @@ libcp() {
 # Upstream's test class path: maven.test.classpath (the test libraries), target/test-classes,
 # test, then the build (here: the AOT classes, then the Clojure under test).
 test_cp() { echo "$(libcp)$suite/target/test-classes:$suite/test:$work/classes:$clojure_src"; }
-# The Go build's ARBACE_PATH: the test libraries, then the suite's sources.
-go_path() { local cp; cp=$(libcp); echo "$cp$suite/test"; }
+# The Go build's ARBACE_PATH: the test libraries, then the suite's sources, then the stand-ins
+# of namespaces the Go build leaves out that test namespaces require (test/suite-go:
+# arbace.inspector, for java-interop's ns form)
+go_path() { local cp; cp=$(libcp); echo "$cp$suite/test:$root/test/suite-go"; }
 # go_run TIMEOUT ARG...: the Go build, in the suite, on the suite's ARBACE_PATH
 go_run() {
   local t=$1; shift
@@ -237,6 +254,20 @@ if [ -n "$rename" ]; then
   rn < "$root/test/run_clojure_tests.clj" > "$runner"
 fi
 
+# --java-fixtures: the renamed test/java as class forms (j2c), for the Go build's test build
+if [ -n "$java_fixtures" ]; then
+  step "[$run] convert the Java fixtures (test/java) into $java_fixtures with j2c"
+  rm -rf "$java_fixtures"
+  # javac's class path: the Clojure under test (the fixtures name arbace.lang.IFn and the
+  # Java API)
+  J2C_JVM_OPTS=${J2C_JVM_OPTS:--Xmx4g} "$root/bin/j2c" -m arbace.j2c.main convert \
+    --javac -cp --javac "$clojure_src" "$java_fixtures" "$suite/test/java" > "$work/java-fixtures.log" 2>&1 \
+    || { cat "$work/java-fixtures.log"; exit 1; }
+  grep -q ' 0 failed, 0 javac errors' "$work/java-fixtures.log" || { cat "$work/java-fixtures.log"; exit 1; }
+  tail -1 "$work/java-fixtures.log"
+  exit 0
+fi
+
 # 2. deps (shared by concurrent runs, as bin/gate makes them: one at a time)
 mkdir -p "$base/lib"
 exec 9> "$base/lib.lock"
@@ -276,7 +307,13 @@ fi
 
 # 4. fixtures
 if [ -n "$go_exe" ]; then
-  step "[$run] no fixtures to compile: the Go build loads no class files"
+  step "[$run] no fixtures to compile: the Go build loads no class files; its test build holds the Java fixtures"
+  if ! go_run 120 -e '(Class/forName "arbace.test.SwissArmy")' > "$work/fixtures.log" 2>&1; then
+    cat "$work/fixtures.log"
+    echo "CLOJURE_TESTS_GO: $go_exe lacks the suite's Java fixtures (test/java); run the suite on the" \
+      "test build: bin/arbace-go --build-tests, then target/arbace-go/<arch>/arbace-tests" >&2
+    exit 1
+  fi
 else
 step "[$run] compile the test fixtures into $suite/target/test-classes"
 # shellcheck disable=SC2046
@@ -312,7 +349,7 @@ if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
     # test.generative's run time: its runner reads the property, which the Go build cannot be
     # given on its command line
     go_run "$timeout_s" -e "(System/setProperty \"clojure.test.generative.msec\" \"$gen_msec\")" \
-      "$runner" generative test "$work/out/generative.edn" "$work/namespaces.txt" > "$work/out/generative.log" 2>&1 || status=$?
+      "$runner" generative test "$work/out/generative.edn" "$work/namespaces.txt" "$expected" > "$work/out/generative.log" 2>&1 || status=$?
   else
   (cd "$suite" && timeout "$timeout_s" java -cp "$(test_cp)" "${jvm_props[@]}" \
     -Dclojure.test.generative.msec="$gen_msec" $main_class "$runner" \

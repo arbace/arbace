@@ -5,8 +5,10 @@
  * suite use and their common kin, with the documented behaviour, over java.io.File and the file
  * streams (the host's file system, jrt's UnixFileSystem): reading and writing (streams,
  * readers, writers, bytes, strings, lines), the tests of a file (exists, isDirectory, size...),
- * creating and deleting files and directories, temporary files, copy and move of a file. Not
- * here: channels, attribute views, directory streams and walks, links, file stores.
+ * creating and deleting files and directories, temporary files, copy and move of a file,
+ * directory streams (newDirectoryStream: the directory's entries listed when the stream is
+ * opened, then filtered; a glob as UnixFileSystem.getPathMatcher reads it, sun.nio.fs.Globs).
+ * Not here: channels, attribute views, walks, links, file stores.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.nio.file;
@@ -31,6 +33,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Random;
 import java.util.stream.Stream;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
+import java.util.regex.Pattern;
 
 /** Static methods on the files and directories of the host's file system. */
 public final class Files {
@@ -464,5 +469,91 @@ public final class Files {
                 return true;
         }
         return false;
+    }
+
+    // -- directory streams
+
+    /** The entries of directory dir: newDirectoryStream(dir, filter) accepting all. */
+    public static DirectoryStream<Path> newDirectoryStream(Path dir) throws IOException {
+        return newDirectoryStream(dir, new DirectoryStream.Filter<Path>() {
+            @Override
+            public boolean accept(Path entry) {
+                return true;
+            }
+        });
+    }
+
+    /**
+     * The entries of directory dir whose names match glob ("*": all), the glob read as
+     * UnixFileSystem.getPathMatcher("glob:" + glob) reads it.
+     */
+    public static DirectoryStream<Path> newDirectoryStream(Path dir, String glob) throws IOException {
+        if (glob.equals("*"))
+            return newDirectoryStream(dir);
+        final Pattern pattern = Pattern.compile(sun.nio.fs.GlobPatterns.toUnixRegex(glob));
+        return newDirectoryStream(dir, new DirectoryStream.Filter<Path>() {
+            @Override
+            public boolean accept(Path entry) {
+                Path name = entry.getFileName();
+                return name != null && pattern.matcher(name.toString()).matches();
+            }
+        });
+    }
+
+    /**
+     * The entries of directory dir that filter accepts, as dir resolving their names: listed
+     * when the stream is opened (jdk26u's reads them as the iteration goes) and filtered then,
+     * an IOException of the filter thrown here. NotDirectoryException when dir is not a
+     * directory, NoSuchFileException when it does not exist.
+     */
+    public static DirectoryStream<Path> newDirectoryStream(Path dir, DirectoryStream.Filter<? super Path> filter)
+            throws IOException {
+        Objects.requireNonNull(filter);
+        File d = dir.toFile();
+        if (!d.exists())
+            throw new NoSuchFileException(dir.toString());
+        if (!d.isDirectory())
+            throw new NotDirectoryException(dir.toString());
+        String[] names = d.list();
+        if (names == null)
+            throw new AccessDeniedException(dir.toString());
+        final List<Path> entries = new ArrayList<>();
+        for (String n : names) {
+            Path entry = dir.resolve(n);
+            if (filter.accept(entry))
+                entries.add(entry);
+        }
+        return new DirectoryStream<Path>() {
+            private boolean iterated;
+            private boolean closed;
+
+            @Override
+            public Iterator<Path> iterator() {
+                if (closed)
+                    throw new IllegalStateException("Directory stream is closed");
+                if (iterated)
+                    throw new IllegalStateException("Iterator already obtained");
+                iterated = true;
+                final Iterator<Path> it = entries.iterator();
+                return new Iterator<Path>() {
+                    @Override
+                    public boolean hasNext() {
+                        return !closed && it.hasNext();
+                    }
+
+                    @Override
+                    public Path next() {
+                        if (!hasNext())
+                            throw new NoSuchElementException();
+                        return it.next();
+                    }
+                };
+            }
+
+            @Override
+            public void close() {
+                closed = true;
+            }
+        };
     }
 }
