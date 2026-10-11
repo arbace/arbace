@@ -52,7 +52,8 @@ Prior art:
   - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang`, `arbace.asm`
     and the rest; the Java parts are class forms). It is hand-maintained source; its
     derivation is recorded in `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`).
-    `bin/build-arbace [--suite]` bootstraps it: stage 0 (the seed) builds `target/stage1`,
+    `bin/build-arbace [--suite]` bootstraps it: stage 0 (the seed, which reads `.clj` only,
+    through `target/seed-view`, `.clj` links to the `.ae` sources) builds `target/stage1`,
     which builds `target/stage2`, which must rebuild itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
     its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
     (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,

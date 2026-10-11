@@ -2558,8 +2558,8 @@ leaves out (JAVA-SURFACE.md decision 6; D6's Swing and SAX: `inspector`, `xml`; 
 path (VENDOR-NOTES.md, hand change 19: Arbace's sources are `.ae` since 2026-10-11, `.clj` stays
 for Clojure libraries, such as the renamed suite on `ARBACE_PATH`); the embedded sources' resource
 paths, and so the image's keys (EXEC-NOTES.md) and the file names of stack traces (§10.7), are
-the `.ae` names (`arbace/core.ae`); `RT.doInit` loads `user.ae`, else `user.clj`; `ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches
-the same places. RT's initialization loads `arbace.core` when the program has its sources.
+the `.ae` names (`arbace/core.ae`); `RT.doInit` loads `user.ae`, else `user.clj`;
+`ClassLoader.getResourceAsStream` (a table entry c2g writes, §11) searches the same places. RT's initialization loads `arbace.core` when the program has its sources.
 
 **Resources by URL** (amendment FX6, accepted 2026-10-10; JRT-NOTES.md, "Resources by URL").
 jrt's own Java `jdk.internal.jrt.ClassPathResources` finds a resource in `RT.load`'s order, the
