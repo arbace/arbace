@@ -582,6 +582,22 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
   "Whether member tables list the public methods that do not exist in Go (bin/a2g --program)."
   false)
 
+(def ^:private archived-classes
+  "The classes of the running JDK's default CDS archive (its lib/classlist, the archive's
+  input; internal names), when the JVM maps the archive (java.vm.info says sharing), else
+  #{}. HotSpot sorts a class's methods by the address of their name's Symbol, so the order of
+  getDeclaredMethods, a name's overloads included, varies from one JVM process to the next
+  for a class it loads and parses (Arbace's own, the JDK's outside the archive); an archived
+  class keeps the order of the archive, fixed for the JDK build."
+  (delay
+    (let [f (io/file (System/getProperty "java.home") "lib" "classlist")]
+      (if (and (.isFile f) (str/includes? (str (System/getProperty "java.vm.info")) "sharing"))
+        (into #{} (remove #(re-find #"[\s@#]" %)) (str/split-lines (slurp f)))
+        (do (binding [*out* *err*]
+              (println "a2g: warning: the JVM does not use the JDK's CDS archive: member tables order"
+                       "every class's overloads by descriptor"))
+            #{})))))
+
 (defn- dotted-desc
   "A descriptor with binary names (java.util.Map$Entry), as jrt's member tables hold them."
   [d]
@@ -654,8 +670,10 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                            ;; m: absent, jrt makes the throwing function (MemberTable)
                            {:line (str "m" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))}))))
           methods (concat methods absent)
-          ;; a name's overloads in the order the JVM's getDeclaredMethods gives them (when the
-          ;; class is on this JVM), which Reflector's choice among applicable overloads follows
+          ;; a name's overloads in the order the JVM's getDeclaredMethods gives them, which
+          ;; Reflector's choice among applicable overloads follows, when that order is stable:
+          ;; the class is on this JVM and in the JDK's CDS archive (archived-classes); else,
+          ;; and after it, by descriptor
           mms (concat (for [mm (d/class-methods n) :when (and (public? mm) (not= "<init>" (:name mm)))] mm)
                       (when *absent-members*
                         (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
@@ -663,8 +681,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                 :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
                                            (not (present [(:name mm) (:desc mm)])))]
                             mm))))
-          methods (let [^Class jc (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
-                                       (catch Throwable _ nil))
+          methods (let [^Class jc (when (contains? @archived-classes n)
+                                    (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
+                                         (catch Throwable _ nil)))
                         order (when jc
                                 (into {} (map-indexed (fn [i ^java.lang.reflect.Method x]
                                                         [[(.getName x) (vec (map #(.getName ^Class %) (.getParameterTypes x)))] i])
@@ -672,15 +691,17 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                         jname (fn [d] (cond (t/prim? d) (t/prim-desc->name d)
                                             (t/array? d) (str/replace d "/" ".")
                                             :else (str/replace (t/desc->internal d) "/" ".")))]
-                    (if (and order (= (count mms) (count methods)))
-                      (map (fn [[_ i]] (nth (vec methods) i))
-                           (sort-by (fn [[mm i]]
-                                             [(:name mm)
-                                              (get order [(:name mm) (vec (map jname (first (t/parse-method-desc (:desc mm)))))]
-                                                   Integer/MAX_VALUE)
-                                              i])
-                                    (map vector mms (range))))
-                      methods))
+                    (assert (= (count mms) (count methods)))
+                    (map (fn [[_ i]] (nth (vec methods) i))
+                         (sort-by (fn [[mm i]]
+                                    [(:name mm)
+                                     (if order
+                                       (get order [(:name mm) (vec (map jname (first (t/parse-method-desc (:desc mm)))))]
+                                            Integer/MAX_VALUE)
+                                       0)
+                                     (:desc mm)
+                                     i])
+                                  (map vector mms (range)))))
           absent-ctors (when (and *absent-members* (not abstract) (not iface))
                          (let [present (set (map :desc (filter #(= "<init>" (:name %)) (d/class-methods n))))]
                            (for [mm (:methods (a/decl n))
@@ -1007,7 +1028,8 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                          (catch Throwable _ nil))]
                      :when c
                      :let [texpr #(cut-type-expr pkg cuts %)
-                           ms (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %))))
+                           ms (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %)))
+                                                                              " " (.getReturnType ^java.lang.reflect.Method %))
                                                                          (.getMethods c))
                                     :when (= c (.getDeclaringClass mt))
                                     :let [ps (map texpr (.getParameterTypes mt))

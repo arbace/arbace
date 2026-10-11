@@ -44,7 +44,7 @@ qualified `arbace.core/` (before, `clojure.core/` for Clojure's own names). The 
 
 ```
 bin/j2a -m arbace.j2a.main convert [--rename FROM=TO] [--javac OPT]... [--check] OUT ROOT [PATH...]
-bin/j2a -m arbace.j2a.main jdk [--check] OUT MODULE MODULE-SRC [PATH...]
+bin/j2a -m arbace.j2a.main jdk [--check] [--origins FILE] OUT MODULE MODULE-SRC [PATH...]
 bin/j2a -m arbace.j2a.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
 bin/j2a -m arbace.j2a.coverage REPORT.edn...
 bin/j2a-check [--suite]
@@ -66,7 +66,12 @@ bin/j2a-check --jdk [MODULE...]
 - `jdk` converts a JDK module's sources against the running JDK's own classes: the files are
   copied into `--patch-module` directories under `.tmp/j2a-patch/`, in chunks of packages
   converted in parallel (`J2A_THREADS`, default 12). A `module-info.java` cannot be patched in
-  and is skipped (modules are converted from ordinary source trees, `test/j2a/module`).
+  and is skipped (modules are converted from ordinary source trees, `test/j2a/module`). Each
+  output file's header (`;; Converted from ...`) names the original file under `MODULE-SRC`,
+  not its copy, whose numbered directory depends on the chunking; `--origins FILE` (a map
+  `{"path/below/MODULE-SRC.java" "name"}`, read with `read`) names them instead, so that the
+  output does not depend on where the tree was made (`bin/jrt-convert` names each by its
+  jdk26u path, 2026-10-11; before, the headers named the copy, `.tmp/j2a-patch/java.base-N`).
 - `bin/jrt-convert` (doc/go/JRT-SOURCES.md) runs `jdk --check` on java.base's translation
   closure for the Go build's runtime jrt, then checks the output with `bin/class-forms-check`.
 - `build` compiles converted files with the class forms compiler (`arbace.classes`, the other
