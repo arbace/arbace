@@ -1604,3 +1604,16 @@ decision (2026-10-08).
   what stays out for good, the step table), EVAL-NOTES/EVAL-PLAN (FX1-FX7 folded), ORACLE.md,
   VENDOR-NOTES (the dialect divergences), the specs and notes. Round 2 follows: C2G-SPEC, the
   JRT notes, JAVA-BASE, JAVA-SURFACE, BOX-SURVEY, LICENSE.md (the Go executables' licences).
+- Documentation, round 2 (three agents, merged): C2G-SPEC (24 findings: the status header names
+  every amendment set and D6's reversals; FX1-FX7 folded into §4.1, §9.4, §10.2, §10.3, §10.6,
+  §11 and §16; SZ2-SZ4 and JC folded where §16 cited them; §12 says what stays out for good;
+  §3.2 gains V14-V16; the misplaced SC6 paragraph moved); JRT-NOTES (a reading guide and the
+  state of jrt's 81 files), JRT-SOURCES (835 files today), JAVA-BASE (regenerated: 9,807 members,
+  55.9%; Arbace's use 93.0%), JAVA-SURFACE, BOX-SURVEY; LICENSE.md: an entry for the Go build's
+  executables (Arbace's EPL-1.0 code, jdk26u's translated code under GPLv2+CE, the embedded
+  Unicode/ICU/CLDR data under Unicode-3.0 and tzdb, Go's runtime and standard library
+  statically linked under BSD-3-Clause, and what a distribution must carry: the licence texts,
+  jdk26u's source or a written offer, the notice that Arbace's source is available), c2g among
+  Arbace's own tools, a BSD-3 entry for test/g2c's excerpts of Go's sources, NativePRNG.clj and
+  TreeMap.clj recorded as keeping jdk26u code; the known mismatches' reasons (the NaN case: Go
+  reuses one boxed NaN, not the fixed dcmpg bug).
