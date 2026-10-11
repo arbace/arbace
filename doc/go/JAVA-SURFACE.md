@@ -3,25 +3,29 @@
 B1a step 1 ([B1-PLAN.md](B1-PLAN.md)): every JDK class, method, constructor and field that
 Arbace's runtime and namespaces use, measured from the compiled classes, so that the scope of
 jrt (the Java runtime in Go forms under the a2g-translated runtime, decision D1) can be decided.
-Measured on main at `c8f271b` (2026-10-08), JDK 26.0.2.1, jdk26u's sources at `/root/jdk26u`.
+Measured on main at `c8f271b` (2026-10-08), JDK 26.0.2.1, jdk26u's sources at `/root/jdk26u`;
+the figures and tables regenerated on 2026-10-11 against main at `9f15aea` (the decisions below
+were taken on the first measurement; what changed: `bean` by reflection, without `java.beans`,
+the version, `data_readers.ae`, the class forms compiler's own changes; the translation closure
+of runtime + REPL kept its 422 classes and 184 files).
 
 Summary for the reader in a hurry: the runtime plus the namespaces loaded at a REPL's start use
-**278 JDK classes and 970 distinct members**. Of these, 150 classes (509 members) are plain Java
+**274 JDK classes and 970 distinct members**. Of these, 150 classes (511 members) are plain Java
 that j2a already converts exactly: translated with what they need in turn, they make a closure
-of **422 JDK classes, 3,223 methods, 279 KB of bytecode, from 184 source files of which all
+of **422 JDK classes, 3,226 methods, 279 KB of bytecode, from 184 source files of which all
 176 that j2a-check covers convert to javac's class shapes** (the other 8 are generated at the
-JDK's build). What is left for hand-written Go is 57 classes used directly (300 members) and
+JDK's build). What is left for hand-written Go is 57 classes used directly (302 members) and
 the 69 classes (342 members) where the translated code stops, largely the same ones: the
 object model, strings, `Class` and reflection, threads, atomics and locks, `Unsafe`'s CAS, the
 host's files and clock. 7 `java.lang.invoke` classes and class loading are made unnecessary by
-the evaluator, and 62 classes are cut (D6). The port of `java.util.regex` (D5) is 5,148 code lines that j2a
+the evaluator, and 58 classes are cut (D6). The port of `java.util.regex` (D5) is 5,148 code lines that j2a
 converts exactly; its closure is dominated by Unicode tables. The decisions for the user are
 in the last section.
 
 ## Method
 
 `bin/java-surface` (script) and `test/jrt/java_surface.ae` (the tool, on Arbace's stage 2)
-read every class file of `target/stage2` (5,740 classes, after `bin/build-arbace`) with the
+read every class file of `target/stage2` (5,777 classes, after `bin/build-arbace`) with the
 JDK's class file API (`java.lang.classfile`), and collect each reference to a class outside
 Arbace (`java.*`, `javax.*`, `jdk.*`, `sun.*`, `org.xml`, `org.w3c`):
 
@@ -46,10 +50,10 @@ a **group**:
 | group | what | classes | units |
 |---|---|---:|---:|
 | runtime | `arbace.lang`, the class forms of the runtime | 774 | 142 |
-| REPL | `arbace.core` and the 21 namespaces loaded at a REPL's start (measured: stage 2's REPL, `loaded-libs` at the first prompt) | 2,779 | 22 |
+| REPL | `arbace.core` and the 21 namespaces loaded at a REPL's start (measured: stage 2's REPL, `loaded-libs` at the first prompt) | 2,811 | 22 |
 | shipped | the other namespaces Clojure ships (pprint's parts are in REPL), spec, `arbace.java.api` | 693 | 18 |
 | asm | `arbace.asm`, the vendored ASM | 45 | 42 |
-| class forms | `arbace.classes`, the class forms compiler (AOT-compiled into the stage) | 1,449 | 11 |
+| class forms | `arbace.classes`, the class forms compiler (AOT-compiled into the stage) | 1,454 | 11 |
 
 The REPL's start loads, besides `arbace.core`: `core.protocols`, `core.server`, `edn`,
 `instant`, `java.basis`, `java.basis.impl`, `java.browse`, `java.io`, `java.javadoc`,
@@ -80,8 +84,8 @@ touched, until it reaches a class not proposed for translation (the **boundary**
 translated code needs of the shims). JDK-internal classes count as translated (`jdk.internal.math`,
 `jdk.internal.util`, ICU), except the VM's interfaces (`Unsafe`, `VM`, `SharedSecrets`,
 `sun.nio.cs`, the locale providers), which count as shims. Each source file of the closure is
-looked up in a `bin/j2a-check --jdk java.base` run (2026-10-08, this branch: 3,002 of 3,025
-compiled files shape-identical, as in [CONVERTER-NOTES.md](../classes/CONVERTER-NOTES.md),
+looked up in a `bin/j2a-check --jdk java.base` run (2026-10-08: 3,002 of 3,025 compiled
+files shape-identical; 2026-10-11: 3,003 of 3,025, as in [CONVERTER-NOTES.md](../classes/CONVERTER-NOTES.md),
 "The converted JDK").
 
 **Treatments.** Each JDK class gets one proposed treatment (the table `treatments` in the
@@ -109,29 +113,30 @@ the j2a statuses come from a prior `bin/j2a-check --jdk java.base`, about 10 min
 | | JDK classes | distinct members |
 |---|---:|---:|
 | runtime (`arbace.lang`) | 224 | 682 (573 referenced directly; the rest overrides and inherited members) |
-| REPL namespaces | 161 | 560 (20 plumbing) |
-| runtime + REPL | **278** | **970** |
-| runtime + REPL + shipped | 308 | 1,092 |
+| REPL namespaces | 158 | 564 (20 plumbing) |
+| runtime + REPL | **274** | **970** |
+| runtime + REPL + shipped | 305 | 1,095 |
 | asm (cut) | 39 | 125 |
-| class forms compiler (cut) | 59 | 144 |
+| class forms compiler (cut) | 59 | 145 |
 
 By proposed treatment, runtime + REPL:
 
 | treatment | JDK classes | members | what |
 |---|---:|---:|---|
-| translate | 150 | 509 | boxed numbers, `Character`, exceptions, the collections, `Arrays`, `Collections`, `Objects`, the functional interfaces, `java.math`, `java.util.regex`, readers and writers, `ConcurrentHashMap`, the blocking queues, `TimeUnit`, `UUID`, `Random`, `Formatter`, `Properties` |
-| shim | 57 | 300 | `Object`, `String`, `StringBuilder`, `Math`, `Class`, `java.lang.reflect`, `System`, `Runtime`, `Thread`, `ThreadLocal`, `Throwable`, `Enum`, atomics, locks, executors, `CountDownLatch`, references, `File` and its streams, `PrintStream`, the charset readers and writers, `Date`, `Locale`, `Charset`, `sun.misc.Signal` |
-| a2g | 2 | 2 | `StringConcatFactory`, `LambdaMetafactory` (the runtime's own string `+` and lambdas: 246 and 9 sites) |
+| translate | 150 | 511 | boxed numbers, `Character`, exceptions, the collections, `Arrays`, `Collections`, `Objects`, the functional interfaces, `java.math`, `java.util.regex`, readers and writers, `ConcurrentHashMap`, the blocking queues, `TimeUnit`, `UUID`, `Random`, `Formatter`, `Properties` |
+| shim | 57 | 302 | `Object`, `String`, `StringBuilder`, `Math`, `Class`, `java.lang.reflect`, `System`, `Runtime`, `Thread`, `ThreadLocal`, `Throwable`, `Enum`, atomics, locks, executors, `CountDownLatch`, references, `File` and its streams, `PrintStream`, the charset readers and writers, `Date`, `Locale`, `Charset`, `sun.misc.Signal` |
+| a2g | 2 | 2 | `StringConcatFactory`, `LambdaMetafactory` (the runtime's own string `+` and lambdas: 247 and 9 sites) |
 | rework | 7 | 47 | `ClassLoader`; `CallSite`, `MutableCallSite`, `MethodHandle`, `MethodHandles`, `Lookup`, `MethodType` |
-| cut | 62 | 112 | `java.net`, `java.nio`, processes, `java.beans`, `java.sql`, `java.time`, `java.text`, calendars, streams, serialization, XML, the VM-only error classes of `RT`'s default imports, annotations |
+| cut | 58 | 108 | `java.net`, `java.nio`, processes, `java.sql`, `java.time`, `java.text`, calendars, streams, serialization, XML, the VM-only error classes of `RT`'s default imports, annotations |
 
-The translation closure (runtime + REPL; adding the shipped namespaces adds nothing):
+The translation closure (runtime + REPL; adding the shipped namespaces adds `java.util.Optional`,
+for `ModuleLayer.findModule` in `arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui`):
 
 | | |
 |---|---:|
 | classes | 422 |
-| methods | 3,223 |
-| bytecode | 278,666 bytes |
+| methods | 3,226 |
+| bytecode | 279,047 bytes |
 | source files | 184 (147,831 lines, 67,756 code lines, whole files) |
 | of which j2a-identical | 176 (62,090 code lines) |
 | of which generated at the JDK's build | 8 (`CharacterData*`, `CaseFolding`, `IndicConjunctBreak`; 5,666 code lines) |
@@ -172,7 +177,7 @@ What depends on reflection at the Clojure level: all interop (analysis and evalu
 calls and `set!` of fields (`Reflector`), functional-interface adaptation, `instance?`,
 `class`, `cast`, `supers`/`bases`, `make-array`/`into-array`, reflective `aget`/`aset`,
 `print-method` of objects (class name, `identityHashCode`), `arbace.reflect` (shipped), `bean`
-(also needs `java.beans`: cut). The compiled namespaces contain only **32 reflective call
+(by reflection since 2026-10-10, on the JVM too: no `java.beans`). The compiled namespaces contain only **32 reflective call
 sites** (REPL group; 8 shipped): Clojure's own code is hinted, so on the JVM reflection is rare
 at run time; in the evaluator every call is resolved at run time anyway.
 
@@ -284,7 +289,8 @@ S5); `java.util.stream` is translated whole with `java.util.function`; `java.tim
 `java.sql.Timestamp` and `java.sql.Date` are translated, and `Calendar`, `GregorianCalendar`
 and `TimeZone` are jrt's own Java (fixed-offset zones), so `#inst` reads and prints all of
 `arbace.instant`'s types (decision 7 stands: jrt's `Date` stays small and hand-written); `bean`
-works over reflection (`java.beans` stays cut); `java.net.URI` is translated (the rest of
+works over reflection (`java.beans` stays cut; since 2026-10-10 the JVM's `bean` does too, so
+the surface no longer names `java.beans`); `java.net.URI` is translated (the rest of
 `java.net` stays cut). `proxy` itself is back (amendments X1, X2; B1-PLAN.md D6), not through
 `ProxyHandler`.
 
@@ -405,13 +411,13 @@ declarations.
 
 | group | classes | units | JDK classes | JDK members | of which plumbing | reference sites |
 |---|---:|---:|---:|---:|---:|---:|
-| runtime | 774 | 142 | 224 | 682 | 23 | 14,899 |
-| REPL | 2,779 | 22 | 161 | 560 | 20 | 45,169 |
-| shipped | 693 | 18 | 73 | 217 | 13 | 10,787 |
+| runtime | 774 | 142 | 224 | 682 | 23 | 14,910 |
+| REPL | 2,811 | 22 | 158 | 564 | 20 | 45,527 |
+| shipped | 693 | 18 | 75 | 220 | 13 | 10,805 |
 | asm | 45 | 42 | 39 | 125 | 15 | 1,533 |
-| class forms | 1,449 | 11 | 59 | 144 | 18 | 27,336 |
-| **runtime + REPL** |  |  | 278 | 970 |  |  |
-| **runtime + REPL + shipped** |  |  | 308 | 1,092 |  |  |
+| class forms | 1,454 | 11 | 59 | 145 | 18 | 27,436 |
+| **runtime + REPL** |  |  | 274 | 970 |  |  |
+| **runtime + REPL + shipped** |  |  | 305 | 1,095 |  |  |
 
 ### Categories
 
@@ -420,11 +426,11 @@ classes treated otherwise counted under "other treatments".
 
 | category | treatment | runtime | REPL | shipped | asm | class forms | other treatments |
 |---|---|---:|---:|---:|---:|---:|---|
-| lang-core | translate | 28 / 118 | 23 / 108 | 11 / 66 | 13 / 68 | 14 / 46 | cut 3, shim 7 |
-| lang-exceptions | translate | 52 / 25 | 11 / 15 | 6 / 9 | 10 / 14 | 6 / 3 | shim 1 |
+| lang-core | translate | 28 / 118 | 23 / 110 | 11 / 66 | 13 / 68 | 14 / 47 | cut 3, shim 7 |
+| lang-exceptions | translate | 52 / 25 | 12 / 15 | 6 / 9 | 10 / 14 | 6 / 3 | shim 1 |
 | lang-system | shim | 14 / 27 | 8 / 52 | 2 / 7 | 1 / 2 | 3 / 3 | cut 5 |
-| class | shim | 5 / 34 | 3 / 24 | 2 / 8 | 2 / 11 | 5 / 34 | rework 1, cut 3 |
-| reflect | shim | 8 / 35 | 5 / 30 | 3 / 15 | 2 / 4 | 9 / 27 | cut 5, translate 1 |
+| class | shim | 5 / 34 | 3 / 28 | 3 / 10 | 2 / 11 | 5 / 34 | rework 1, cut 3 |
+| reflect | shim | 8 / 35 | 5 / 32 | 3 / 15 | 2 / 4 | 9 / 27 | cut 5, translate 1 |
 | invoke | rework | 8 / 36 | 1 / 1 | 1 / 1 | 1 / 1 | 1 / 1 | a2g 2 |
 | ref | shim | 4 / 5 |  |  |  |  |  |
 | lang-misc | cut | 4 / 0 |  |  |  |  |  |
@@ -433,10 +439,10 @@ classes treated otherwise counted under "other treatments".
 | stream | cut | 2 / 4 | 1 / 1 |  |  |  |  |
 | atomics-locks | shim | 9 / 30 | 2 / 7 |  |  |  |  |
 | concurrency | translate | 9 / 23 | 12 / 21 | 3 / 6 |  | 1 / 0 | shim 6, cut 2 |
-| collections | translate | 30 / 182 | 16 / 95 | 6 / 17 | 5 / 11 | 6 / 12 |  |
+| collections | translate | 30 / 182 | 16 / 95 | 7 / 18 | 5 / 11 | 6 / 12 |  |
 | util-misc | translate | 2 / 1 | 6 / 11 | 1 / 0 |  |  | cut 4, shim 1 |
 | math | translate | 3 / 60 | 2 / 6 |  |  | 1 / 3 |  |
-| io | translate | 21 / 47 | 29 / 120 | 6 / 3 | 4 / 13 | 6 / 9 | shim 7, cut 2 |
+| io | translate | 21 / 47 | 29 / 121 | 6 / 3 | 4 / 13 | 6 / 9 | shim 7, cut 2 |
 | nio | cut | 1 / 1 | 8 / 7 |  |  | 2 / 1 | shim 1 |
 | net | cut | 7 / 13 | 9 / 18 | 1 / 0 |  | 1 / 1 |  |
 | text | cut |  | 2 / 3 |  |  |  |  |
@@ -444,17 +450,17 @@ classes treated otherwise counted under "other treatments".
 | desktop | cut |  |  | 24 / 65 |  |  |  |
 | xml | cut | 4 / 23 |  | 6 / 19 |  |  |  |
 | jdk-internal | translate |  | 2 / 3 |  |  |  | shim 2 |
-| other | cut | 3 / 2 | 6 / 7 |  |  | 3 / 3 |  |
+| other | cut | 3 / 2 | 2 / 2 |  |  | 3 / 3 |  |
 
 ### Treatments, runtime + REPL
 
 | treatment | JDK classes | members | sites | classes (runtime + REPL + shipped) | members |
 |---|---:|---:|---:|---:|---:|
-| translate | 150 | 509 | 17,559 | 150 | 509 |
-| shim | 57 | 300 | 41,467 | 57 | 343 |
-| a2g | 2 | 2 | 553 | 2 | 2 |
-| rework | 7 | 47 | 172 | 7 | 47 |
-| cut | 62 | 112 | 317 | 92 | 191 |
+| translate | 150 | 511 | 17,663 | 151 | 512 |
+| shim | 57 | 302 | 41,731 | 57 | 345 |
+| a2g | 2 | 2 | 557 | 2 | 2 |
+| rework | 7 | 47 | 176 | 7 | 47 |
+| cut | 58 | 108 | 310 | 88 | 189 |
 
 ### The translation closure, runtime + REPL
 
@@ -463,15 +469,15 @@ classes treated otherwise counted under "other treatments".
 | lang-core | 32 | 495 | 74,950 |
 | jdk-internal | 56 | 277 | 61,790 |
 | math | 8 | 316 | 34,736 |
-| collections | 122 | 909 | 28,424 |
+| collections | 122 | 910 | 28,506 |
 | regex | 59 | 367 | 28,309 |
 | util-misc | 56 | 376 | 27,356 |
 | concurrency | 34 | 209 | 14,901 |
-| io | 27 | 207 | 7,510 |
+| io | 27 | 209 | 7,809 |
 | lang-exceptions | 23 | 57 | 614 |
 | reflect | 1 | 6 | 76 |
 | functional | 4 | 4 | 0 |
-| **all** | 422 | 3,223 | 278,666 |
+| **all** | 422 | 3,226 | 279,047 |
 
 Source files touched: 184, 147,831 lines, 67,756 code lines (whole files).
 By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 176 files identical (62,090 code lines).
@@ -556,18 +562,18 @@ Boundary (calls from translated code into shimmed, reworked or cut classes): 69 
 | lang-core | 32 | 495 | 74,950 |
 | jdk-internal | 56 | 277 | 61,790 |
 | math | 8 | 316 | 34,736 |
-| collections | 122 | 909 | 28,424 |
+| collections | 123 | 916 | 28,628 |
 | regex | 59 | 367 | 28,309 |
 | util-misc | 56 | 376 | 27,356 |
 | concurrency | 34 | 209 | 14,901 |
-| io | 27 | 207 | 7,510 |
+| io | 27 | 209 | 7,809 |
 | lang-exceptions | 23 | 57 | 614 |
 | reflect | 1 | 6 | 76 |
 | functional | 4 | 4 | 0 |
-| **all** | 422 | 3,223 | 278,666 |
+| **all** | 423 | 3,232 | 279,169 |
 
-Source files touched: 184, 147,831 lines, 67,756 code lines (whole files).
-By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 176 files identical (62,090 code lines).
+Source files touched: 185, 148,295 lines, 67,889 code lines (whole files).
+By j2a (`bin/j2a-check --jdk java.base`): 8 files generated (5,666 code lines), 177 files identical (62,223 code lines).
 Boundary (calls from translated code into shimmed, reworked or cut classes): 69 classes, 342 members.
 
 ### The translation closure, java.util.regex alone (Pattern and Matcher as used)
@@ -641,7 +647,7 @@ JDK members used by each `arbace.lang` class (with its nested classes), by treat
 | Main |  | 1 |  |  |  |  |
 | MapEntry | 2 |  |  |  |  |  |
 | MethodImplCache | 1 | 1 |  |  |  |  |
-| MultiFn | 7 | 8 |  |  |  |  |
+| MultiFn | 7 | 10 |  |  |  |  |
 | Murmur3 | 6 | 1 |  |  |  |  |
 | Namespace | 9 | 11 | 1 |  |  |  |
 | Numbers | 63 | 19 | 1 |  |  |  |
@@ -685,10 +691,10 @@ JDK members used by each `arbace.lang` class (with its nested classes), by treat
 
 | bootstrap | runtime | REPL | shipped | asm | class forms |
 |---|---:|---:|---:|---:|---:|
-| `arbace.lang.KeywordInvokeSite.bootstrap` |  | 579 | 104 |  | 2,648 |
-| `arbace.lang.ReflectorCallSite.bootstrap` |  | 32 | 8 |  | 6 |
+| `arbace.lang.KeywordInvokeSite.bootstrap` |  | 581 | 104 |  | 2,665 |
+| `arbace.lang.ReflectorCallSite.bootstrap` |  | 32 | 8 |  | 10 |
 | `java.lang.invoke.LambdaMetafactory.metafactory` | 9 |  |  |  |  |
-| `java.lang.invoke.StringConcatFactory.makeConcatWithConstants` | 246 | 298 | 28 | 29 | 332 |
+| `java.lang.invoke.StringConcatFactory.makeConcatWithConstants` | 247 | 301 | 28 | 29 | 332 |
 
 ### Reflective call sites (`ReflectorCallSite`), by group
 
@@ -696,7 +702,7 @@ JDK members used by each `arbace.lang` class (with its nested classes), by treat
 |---|---:|---:|---|
 | REPL | 32 | 18 | arbace.core, arbace.java.browse, arbace.main, arbace.repl, arbace.spec.gen.alpha |
 | shipped | 8 | 6 | arbace.inspector, arbace.java.browse-ui, arbace.test.junit, arbace.xml |
-| class forms | 6 | 5 | arbace.classes.analyze, arbace.classes.emit, arbace.classes.env, arbace.classes.shape, arbace.classes.types |
+| class forms | 10 | 7 | arbace.classes.analyze, arbace.classes.emit, arbace.classes.env, arbace.classes.shape, arbace.classes.types |
 
 ### arbace.lang members the namespaces reference
 
@@ -706,10 +712,10 @@ JDK (members the compiler emits on its own: fn classes, `Var` roots, literals) a
 
 | group | classes | members | of which plumbing | sites |
 |---|---:|---:|---:|---:|
-| REPL | 97 | 588 | 143 | 52,950 |
-| shipped | 34 | 124 | 68 | 16,097 |
-| class forms | 28 | 176 | 85 | 24,100 |
-| REPL + shipped | 99 | 601 | 144 | 69,047 |
+| REPL | 97 | 589 | 143 | 53,255 |
+| shipped | 34 | 124 | 68 | 16,100 |
+| class forms | 28 | 174 | 83 | 24,189 |
+| REPL + shipped | 99 | 602 | 144 | 69,355 |
 
 ### Per JDK class
 
@@ -722,28 +728,28 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.lang.Appendable` | lang-core | translate | t | 3 |  |  |  | RT | 7 |
 | `java.lang.AutoCloseable` | lang-core | translate | t | 1 |  |  |  | RT | 4 |
 | `java.lang.Boolean` | lang-core | translate | 7 | 4 | 3 | 4 | 3 | AFunction, Agent, ArrayIter, ArraySeq +11 | 84 |
-| `java.lang.Byte` | lang-core | translate | 3 | 2 |  | 4 | 4 | ArrayIter, ArraySeq, Compiler, FnInvokers +5 | 138 |
+| `java.lang.Byte` | lang-core | translate | 3 | 2 |  | 4 | 3 | ArrayIter, ArraySeq, Compiler, FnInvokers +5 | 138 |
 | `java.lang.CharSequence` | lang-core | translate | 2 | 3 |  |  |  | Murmur3, RT, StringSeq | 121 |
-| `java.lang.Character` | lang-core | translate | 9 | 7 | 1 | 3 | 2 | ArrayIter, ArraySeq, Compiler, EdnReader +6 | 6,469 |
+| `java.lang.Character` | lang-core | translate | 9 | 8 | 1 | 3 | 2 | ArrayIter, ArraySeq, Compiler, EdnReader +6 | 6,469 |
 | `java.lang.Cloneable` | lang-core | translate | t |  |  |  |  | RT | 3 |
 | `java.lang.Comparable` | lang-core | translate | 1 | 1 |  |  |  | APersistentVector, Keyword, PersistentTreeMap, RT +4 | 5 |
 | `java.lang.Deprecated` | lang-core | cut | t |  |  |  |  | RT | 10 |
-| `java.lang.Double` | lang-core | translate | 6 | 8 | 1 | 6 | 6 | ArrayIter, ArraySeq, Compiler, EdnReader +8 | 186 |
+| `java.lang.Double` | lang-core | translate | 6 | 8 | 1 | 6 | 7 | ArrayIter, ArraySeq, Compiler, EdnReader +8 | 186 |
 | `java.lang.Enum` | lang-core | shim | 4 | t |  |  | 2 | Compiler, Numbers, RT | 110 |
-| `java.lang.Float` | lang-core | translate | 4 | 5 |  | 6 | 3 | Compiler, FnInvokers, Numbers, ProxyHandler +3 | 226 |
+| `java.lang.Float` | lang-core | translate | 4 | 5 |  | 6 | 5 | Compiler, FnInvokers, Numbers, ProxyHandler +3 | 226 |
 | `java.lang.FunctionalInterface` | lang-core | cut | t |  |  |  |  | Compiler | 6 |
-| `java.lang.Integer` | lang-core | translate | 8 | 7 | 1 | 4 | 5 | APersistentVector, Agent, ArityException, ArraySeq +16 | 593 |
+| `java.lang.Integer` | lang-core | translate | 8 | 7 | 1 | 4 | 4 | APersistentVector, Agent, ArityException, ArraySeq +16 | 593 |
 | `java.lang.Iterable` | lang-core | translate | 2 | 3 | 1 |  |  | APersistentMap, APersistentSet, APersistentVector, ASeq +16 | 18 |
-| `java.lang.Long` | lang-core | translate | 3 | 4 | 1 | 3 | 2 | Agent, ArrayIter, Compiler, FnInvokers +8 | 596 |
+| `java.lang.Long` | lang-core | translate | 3 | 4 | 1 | 3 | 3 | Agent, ArrayIter, Compiler, FnInvokers +8 | 596 |
 | `java.lang.Math` | lang-core | shim | 16 | 5 | 45 | 2 | 1 | Compiler, LongRange, Numbers, PersistentArrayMap +3 | 863 |
 | `java.lang.Number` | lang-core | translate | 7 | 3 | 1 |  | 2 | AFunction, APersistentVector, ArraySeq, BigInt +11 | 16 |
 | `java.lang.Object` | lang-core | shim | 6 | 6 | 6 | 5 | 5 | AFn, AFunction, AMapEntry, APersistentMap +135 | 58 |
 | `java.lang.Override` | lang-core | cut | t |  |  |  |  | RT | 6 |
 | `java.lang.Readable` | lang-core | translate | t | 1 |  |  |  | RT | 5 |
 | `java.lang.Runnable` | lang-core | translate | 1 | 1 |  |  |  | AFn, Agent, Compiler, IFn +4 | 5 |
-| `java.lang.Short` | lang-core | translate | 3 | 2 |  | 4 | 4 | ArraySeq, Compiler, FnInvokers, Numbers +4 | 146 |
+| `java.lang.Short` | lang-core | translate | 3 | 2 |  | 4 | 3 | ArraySeq, Compiler, FnInvokers, Numbers +4 | 146 |
 | `java.lang.StrictMath` | lang-core | shim | t |  |  |  |  | RT | 367 |
-| `java.lang.String` | lang-core | shim | 27 | 26 | 2 | 15 | 5 | APersistentMap, APersistentSet, APersistentVector, ASeq +38 | 1,879 |
+| `java.lang.String` | lang-core | shim | 27 | 27 | 2 | 15 | 5 | APersistentMap, APersistentSet, APersistentVector, ASeq +38 | 1,879 |
 | `java.lang.StringBuffer` | lang-core | shim | t | 2 |  |  |  | RT | 363 |
 | `java.lang.StringBuilder` | lang-core | shim | 8 | 13 | 4 | 11 | 2 | Compiler, EdnReader, LineNumberingPushbackReader, LispReader +1 | 246 |
 | `java.lang.Void` | lang-core | translate | 1 | 1 |  | 1 |  | Compiler, ProxyHandler, RT, ReflectorCallSite +1 | 6 |
@@ -782,7 +788,7 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.lang.NoSuchFieldError` | lang-exceptions | translate | t |  |  |  |  | RT | 11 |
 | `java.lang.NoSuchFieldException` | lang-exceptions | translate | t |  |  |  |  | Compiler, RT | 11 |
 | `java.lang.NoSuchMethodError` | lang-exceptions | translate | t |  |  |  |  | RT | 11 |
-| `java.lang.NoSuchMethodException` | lang-exceptions | translate | t |  |  |  |  | Compiler, RT, Reflector | 11 |
+| `java.lang.NoSuchMethodException` | lang-exceptions | translate | t | t |  |  |  | Compiler, RT, Reflector | 11 |
 | `java.lang.NullPointerException` | lang-exceptions | translate | 2 |  |  |  |  | Namespace, RT, Util | 36 |
 | `java.lang.NumberFormatException` | lang-exceptions | translate | 1 | t |  |  |  | EdnReader, LispReader, RT | 23 |
 | `java.lang.OutOfMemoryError` | lang-exceptions | translate | t |  |  |  |  | RT | 11 |
@@ -814,11 +820,11 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.lang.Thread$State` | lang-system | shim | t |  |  |  |  | RT | 790 |
 | `java.lang.Thread$UncaughtExceptionHandler` | lang-system | shim | t |  |  |  |  | RT | 790 |
 | `java.lang.ThreadLocal` | lang-system | shim | 5 | 9 |  |  |  | Agent, LockingTransaction, RT, Var | 371 |
-| `java.lang.Class` | class | shim | 23 | 19 | 7 | 9 | 27 | AFn, Compiler, DynamicClassLoader, EnumerationSeq +14 | 1,482 |
+| `java.lang.Class` | class | shim | 23 | 22 | 7 | 9 | 27 | AFn, Compiler, DynamicClassLoader, EnumerationSeq +15 | 1,482 |
 | `java.lang.ClassLoader` | class | rework | 11 | 4 | 1 | 2 | 3 | Compiler, DynamicClassLoader, FnLoaderThunk, RT | 846 |
 | `java.lang.ClassValue` | class | shim | t |  |  |  |  | RT | 362 |
-| `java.lang.Module` | class | cut |  | 1 |  |  | 1 |  | 911 |
-| `java.lang.ModuleLayer` | class | cut | t |  |  |  | 2 | RT | 303 |
+| `java.lang.Module` | class | cut |  | 2 |  |  | 1 |  | 911 |
+| `java.lang.ModuleLayer` | class | cut | t |  | 2 |  | 2 | RT | 303 |
 | `java.lang.Package` | class | cut | t |  |  |  | 1 | RT | 215 |
 | `java.lang.reflect.Array` | reflect | shim | 4 | 12 |  |  |  | ArrayIter, ArraySeq, RT | 59 |
 | `java.lang.reflect.Constructor` | reflect | shim | 2 | 2 | 5 | 1 | 3 | Compiler, FnLoaderThunk, LispReader, Reflector +1 | 328 |
@@ -826,7 +832,7 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.lang.reflect.Field` | reflect | shim | 5 | 3 | 4 |  | 3 | Compiler, Reflector, ReflectorCallSite | 683 |
 | `java.lang.reflect.GenericArrayType` | reflect | cut |  |  |  |  | 1 |  | 4 |
 | `java.lang.reflect.InvocationHandler` | reflect | shim | 1 |  |  |  |  | ProxyHandler, Reflector | 15 |
-| `java.lang.reflect.Method` | reflect | shim | 11 | 7 | 6 | 3 | 8 | Compiler, ProxyHandler, Reflector, ReflectorCallSite | 342 |
+| `java.lang.reflect.Method` | reflect | shim | 11 | 9 | 6 | 3 | 8 | Compiler, ProxyHandler, Reflector, ReflectorCallSite | 342 |
 | `java.lang.reflect.Modifier` | reflect | translate | 5 | 6 |  |  | 4 | Compiler, Reflector | 120 |
 | `java.lang.reflect.ParameterizedType` | reflect | cut |  |  |  |  | 2 |  | 6 |
 | `java.lang.reflect.Proxy` | reflect | shim | 1 |  |  |  |  | Reflector | 535 |
@@ -912,7 +918,7 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.util.Map$Entry` | collections | translate | 3 | 2 |  |  |  | AMapEntry, APersistentMap, ARef, ATransientMap +14 | 277 |
 | `java.util.NoSuchElementException` | collections | translate | 1 | 1 |  |  |  | APersistentVector, ArrayIter, LongRange, PersistentArrayMap +10 | 17 |
 | `java.util.Objects` | collections | translate | 2 |  |  |  |  | AFunction, APersistentMap, APersistentSet, APersistentVector +12 | 96 |
-| `java.util.Optional` | collections | translate |  |  |  |  | 2 |  | 133 |
+| `java.util.Optional` | collections | translate |  |  | 1 |  | 2 |  | 133 |
 | `java.util.Queue` | collections | translate | 4 |  |  |  |  | TransformerIterator | 9 |
 | `java.util.RandomAccess` | collections | translate | t | t |  |  |  | APersistentVector, RT | 3 |
 | `java.util.SequencedCollection` | collections | translate |  | 1 |  |  |  |  | 28 |
@@ -951,7 +957,7 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `java.io.FilterReader` | io | translate | 2 | 8 |  |  |  | LineNumberingPushbackReader | 32 |
 | `java.io.Flushable` | io | translate |  | 1 |  |  |  |  | 5 |
 | `java.io.IOException` | io | translate | 1 | 1 |  | 1 |  | Compile, Compiler, EdnReader, LispReader +1 | 17 |
-| `java.io.InputStream` | io | translate | 1 | 2 | 1 | 3 | 1 | RT | 238 |
+| `java.io.InputStream` | io | translate | 1 | 3 | 1 | 3 | 1 | RT | 238 |
 | `java.io.InputStreamReader` | io | shim | 2 | 3 |  |  | 1 | Compiler, RT | 55 |
 | `java.io.LineNumberReader` | io | translate | 5 | 2 |  |  |  | LineNumberingPushbackReader | 145 |
 | `java.io.NotSerializableException` | io | translate | 2 | 1 | 1 |  |  | EnumerationSeq, FnLoaderThunk, IteratorSeq | 11 |
@@ -1027,10 +1033,6 @@ constant); the runtime's users; the code lines of the class's jdk26u source file
 | `org.xml.sax.helpers.DefaultHandler` | xml | cut | 12 |  |  |  |  | XMLHandler | 104 |
 | `sun.misc.Signal` | jdk-internal | shim |  | 2 |  |  |  |  | 89 |
 | `sun.misc.SignalHandler` | jdk-internal | shim |  | 1 |  |  |  |  | 8 |
-| `java.beans.BeanInfo` | other | cut |  | 1 |  |  |  |  | 16 |
-| `java.beans.FeatureDescriptor` | other | cut |  | 1 |  |  |  |  | 193 |
-| `java.beans.Introspector` | other | cut |  | 1 |  |  |  |  | 869 |
-| `java.beans.PropertyDescriptor` | other | cut |  | 2 |  |  |  |  | 460 |
 | `java.lang.annotation.Annotation` | other | cut | t |  |  |  |  | WarnBoxedMath | 7 |
 | `java.lang.annotation.Retention` | other | cut |  | 1 |  |  | 1 |  | 7 |
 | `java.lang.annotation.RetentionPolicy` | other | cut |  | 1 |  |  |  |  | 6 |

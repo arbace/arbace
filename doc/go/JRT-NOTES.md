@@ -889,7 +889,7 @@ phase 2b's: `Class.getResourceAsStream`, `System.err`, `getProperty`, `lineSepar
 `nanoTime` (phase 2a), `String.format` (after a2g, over the translated `Formatter`),
 `String.lines` (`Stream`: cut).
 
-Arbace's reflective uses (`java-surface.edn`, runtime and REPL): all of `Class`'s 23 and 19
+Arbace's reflective uses (`java-surface.edn`, runtime and REPL): all of `Class`'s 23 and 22
 except `getAnnotation`, `getModule`, `getPackage`, `getNestHost`, `getRecordComponents`,
 `getTypeParameters` (annotations, modules and generics are cut, §12); all of `Method`'s,
 `Executable`'s, `Field`'s, `Constructor`'s and `Array`'s except `Method.getAnnotation` (used for
