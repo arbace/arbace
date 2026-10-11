@@ -500,7 +500,11 @@ an Alpine netboot: left for B1b), the Mac.
 
 ## 10. Risks, open questions, recommendations
 
-Decisions for the user (after the freeze):
+Decisions for the user (after the freeze). **Decided by the user 2026-10-11, all as recommended**: D3 (a)
+vendored as Go forms, copied unchanged first, then the dispatch made generic; D8 EPL-1.0 for the
+vendored parts, stated in LICENSE.md; D9 S1 first; D10 the host's time at entry in a register,
+the board's clock offset by it; D11 memory, then the store; D12 at S5; D13 processes cut for
+good in the box; D14 the monitor stays a Go program on the host.
 
 - **D3 How Arbace depends on go-whim.** (a) vendor `hv/`, `vmm/`, `guest/abi`, the board and
   `internal/libsys` as Go forms under Arbace (g2a convert; the round trip proves them), the

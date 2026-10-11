@@ -131,3 +131,17 @@ the first. The history before it is on the frozen branches and in git history:
   reads and merges all three); `--keep-ext` and `project.clj` unchanged. The suite has no
   data_readers files (its digest unchanged); `bin/c2a-check --libs` adds a small library with a
   `data_readers.cljc` and a tag, 15 of 15 on both builds.
+
+## 2026-10-11: B1b, the box: the user's decisions
+
+- On BOX-SURVEY.md's decisions, all as recommended: D3 go-whim's box (`hv/`, `vmm/`,
+  `guest/abi`, the board, `internal/libsys`) vendored as Go forms converted by g2a, its origin
+  recorded, first unchanged (a byte-identical build), then the editor-specific dispatch made
+  generic as an Arbace change; D8 the vendored parts are EPL-1.0, stated in LICENSE.md (the
+  user's own code, not vim-derived, under Vim's licence in go-whim by that repository's
+  default); D9 the first target S1, a boxed REPL on amd64 (REPL, `-e`, `-m` over the console
+  doorbell; files in memory; no network, no processes; four vCPUs by default, one in the
+  tests); D10 the host's wall-clock time at entry in a register, the board's clock offset by it
+  (no new call); D11 files in memory, then the content-addressed store (S3), no host file
+  system; D12 the network decided at S5; D13 processes cut for good in the box; D14 the monitor
+  stays a Go program on the host.
