@@ -53,7 +53,7 @@ default locale data, stripped since amendment SZ1), against the 58 MB the survey
   network design (go-whim sketched netstack in the guest over a datagram call); processes do
   not make sense in a box and stay cut; rlwrap moves to the host side (rlwrap runs the
   launcher).
-- **Recommended first target (S1)**: the same c2g program, built `GOOS=tamago` with a jrt
+- **Recommended first target (S1)**: the same a2g program, built `GOOS=tamago` with a jrt
   host over the doorbell (console, clocks, random, exit, embedded resources; no net or
   proc interface; files in memory, since Go's `os` gives them for free), amd64 on /dev/kvm,
   go-whim's default of four vCPUs, the console read bounded so that it yields: `arbace -e`,
@@ -81,12 +81,12 @@ default locale data, stripped since amendment SZ1), against the 58 MB the survey
 
 ## 1. Context
 
-B1a's executable is c2g's translation of `arbace.lang` plus the JDK closure, on jrt (hand-written
+B1a's executable is a2g's translation of `arbace.lang` plus the JDK closure, on jrt (hand-written
 Go forms), printed and built by gc as a static `linux/amd64` and `linux/arm64` program
 (EXEC-NOTES.md). Its build already uses TamaGo's distribution as `GOROOT` (`bin/arbace-go`,
-`go_env`: `G2C_GOROOT=/root/tamago-go`, `GOOS=linux`), and g2c's round trip covers std for
+`go_env`: `G2A_GOROOT=/root/tamago-go`, `GOOS=linux`), and g2a's round trip covers std for
 `tamago` and `linux` (AGENDA.md). jrt reaches the operating system only through `jrt.Host`
-(C2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
+(A2G-SPEC §9.4), so that "B1b swaps one value" (`go/arbace/jrt/host.ae`).
 
 B1b: the same program built with `GOOS=tamago`, its host answered by go-whim's doorbell
 through a TamaGo board, run by go-whim's monitor; amd64 on /dev/kvm here, arm64 under QEMU
@@ -365,7 +365,7 @@ Each stage a gate, as B1a's steps.
 
 | stage | content | gate |
 |---|---|---|
-| **S0 vendor** (after the freeze) | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (g2c convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
+| **S0 vendor** (after the freeze) | `hv/`, `vmm/` (dispatch made a call table), `guest/abi`, the board, `internal/libsys` into Arbace as Go forms (g2a convert, round trip), or as a pinned checkout (D3, §10); `LICENSE.md`, `doc/ARBACE.md`, journal | go-whim's `hv` and `vmm` tests pass from Arbace's copy; a hello TamaGo image on the vendored board and monitor runs on /dev/kvm |
 | **S1 the boxed REPL, amd64** | jrt's `BoxHost` (console via `WaitRead`/`Write`/`Message`, `Exit`, `Random`, the wall clock, args, env, resources; no `NetHost`, `HostProc`, `HostFS`, `HostLinks`); the main package's box variant (no rlwrap, the board imported); the launcher `bin/arbace-box` (image appended, rlwrap around it on a tty, an env allow-list); the evaluator's periodic yield (R2); files in TamaGo's in-memory fs (OSHost's file calls, unchanged; its `RandomBytes` is Linux-only since `gosec`, the box host's own); four vCPUs, the console read bounded (R3) | `-e`, `-m`, the REPL on stdin answer as the native executable on the smoke test's forms; the oracle's box subset; Clojure's suite in the box, its known exclusions recorded (`test/arbace-box-results.edn`) |
 | **S2 measured and hardened** | the start (63 `Random` exits batched, the 85 MB image's DWARF: the box image keeps its symbol table, which the monitor reads, §9.4, while the native executables are stripped since SZ1; `-w` alone could drop the DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
 | **S3 the store** | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
@@ -387,16 +387,16 @@ Not staged: processes (cut for good in the box), the terminal's raw mode.
   to a `//go:build linux` file with a stub beside it (`goproc`'s `hostproc_linux.ae` is
   already tagged).
 - **The closure stays the same at first.** Cutting by build configuration (no `NetHost`, no
-  `HostProc` on `tamago`) leaves c2g's program and its type table (`image_types.go`) identical,
+  `HostProc` on `tamago`) leaves a2g's program and its type table (`image_types.go`) identical,
   so the image prepared by the linux/amd64 executable is valid in the box, as it is for
   arm64 today (EXEC-NOTES.md, "Determinism"). A slimmer closure (no `java.net`, no processes:
-  a smaller image) is a second c2g program with its own image, prepared by its own linux
+  a smaller image) is a second a2g program with its own image, prepared by its own linux
   build: later, and only if the size matters (58 MB executable at the survey, 66.4 MB on 2026-10-11; go-whim's slot is 3 GiB).
-- **The tools.** `bin/g2c build` takes `--goos tamago` (it fixes `GOOS=linux` today:
-  `arbace.g2c.build/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
+- **The tools.** `bin/g2a build` takes `--goos tamago` (it fixes `GOOS=linux` today:
+  `arbace.g2a.build/go-env`, `bin/arbace-go`'s `go_env`) and the go.mod's `require
   github.com/usbarmory/tamago v1.27.1` with `GOOSPKG` (from the module cache, `GOPROXY=off`);
   the ldflags `-T 0x201000 -R 0x1000`. `bin/arbace-go --build` gains the box flavour
-  (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`), sharing c2g's
+  (`ARBACE_GO_TARGETS=linux/amd64,linux/arm64,tamago/amd64,tamago/arm64`), sharing a2g's
   output, the overlay (the patched `proc.go`/`runtime2.go` are TamaGo's own files, converted
   from `/root/tamago-go`, so they carry the `GOOS == "tamago"` branches already) and the
   image. `bin/jrt-convert` is unchanged. The monitor is a separate, ordinary `linux` (or
@@ -503,7 +503,7 @@ an Alpine netboot: left for B1b), the Mac.
 Decisions for the user (after the freeze):
 
 - **D3 How Arbace depends on go-whim.** (a) vendor `hv/`, `vmm/`, `guest/abi`, the board and
-  `internal/libsys` as Go forms under Arbace (g2c convert; the round trip proves them), the
+  `internal/libsys` as Go forms under Arbace (g2a convert; the round trip proves them), the
   dispatch made generic, the origin recorded; (b) a checkout pinned by commit, built as Go;
   (c) a Go module dependency on `github.com/arbace/go-whim`. *Recommended: (a)*, on the
   CLAUDE.md line (Arbace in Arbace down to the metal; vendoring allowed), in two steps: first
@@ -556,7 +556,7 @@ Risks:
   through the host only, or the board's clock carries the offset.
 - **R5 Go-version coupling.** TamaGo is pinned at go1.27.1, as Arbace's toolchain is; a Go
   upgrade waits for TamaGo's release.
-- **R6 Image and closure.** The image is valid in the box only while the c2g program is
+- **R6 Image and closure.** The image is valid in the box only while the a2g program is
   the same; a different closure needs its own preparation (§7).
 - **R7 KVM here is nested** (16-18 µs an exit): the box's start and per-line costs measured
   here are worst cases; the Mac's numbers are the realistic ones.
@@ -590,4 +590,4 @@ the main package or the build. What could be done without disturbing it:
 - purego `github.com/ebitengine/purego@v0.11.1` (`LICENSE`).
 - Arbace: `go/arbace/jrt/{host,hostfs,hostfs_linux,net,timezone,tuning,throwable}.ae`,
   `go/arbace/cmd/arbace/{rlwrap_linux,rlwrap_other,image}.ae`, branch `goproc`'s
-  `go/arbace/jrt/hostproc.ae`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,C2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.
+  `go/arbace/jrt/hostproc.ae`; `bin/arbace-go`, `bin/jrt`; `doc/go/{B1-PLAN,A2G-SPEC,EXEC-NOTES,JAVA-BASE}.md`.

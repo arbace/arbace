@@ -1,10 +1,10 @@
-// Command godump is g2c's front end helper: it loads Go packages for one build configuration,
+// Command godump is g2a's front end helper: it loads Go packages for one build configuration,
 // type-checks them with go/types and writes, per package, one forms file for Arbace's reader
 // (the Clojure reader with *read-eval* false, not strict EDN). The file holds the typed AST of
 // every file, generically (one form per go/ast node), with what go/types decided as reader
 // metadata, the package view (the build configuration, file lists, init order, method sets,
 // struct layouts, directives) and the type table, every type mentioned as structured data. It
-// decides nothing: the converter (arbace.g2c) does.
+// decides nothing: the converter (arbace.g2a) does.
 //
 // Usage:
 //

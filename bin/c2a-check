@@ -1,0 +1,87 @@
+#!/bin/bash
+# c2a's checks (doc/C2A.md), on Arbace (bin/lib/tools.bash: target/stage2).
+#
+# Usage: bin/c2a-check            the unit tests (test/c2a/c2a_test.ae)
+#        bin/c2a-check --suite    Clojure's test suite (test/, src/script/ and the top-level files
+#                                 at the pinned revision bin/clojure-tests uses) translated in place
+#                                 with --keep-ext, as bin/clojure-tests does; the tree's digest
+#                                 must equal test/c2a/suite.sha256 (the translation by
+#                                 arbace.j2c.rename and bin/clojure-tests' sed before c2a, which it
+#                                 reproduced exactly on 2026-10-11)
+#        bin/c2a-check --libs [GO-EXE]
+#                                 the suite's test libraries (test.check, test.generative,
+#                                 tools.namespace, data.generators, tools.reader, java.classpath:
+#                                 the jars bin/clojure-tests downloads) translated into .ae files,
+#                                 then test/c2a/libs.ae run on them by the JVM build (target/stage2)
+#                                 and by the Go build (GO-EXE, default
+#                                 target/arbace-go/amd64/arbace): every check must hold and the two
+#                                 standard outputs must be equal (standard error is shown). Skips the Go build when GO-EXE is missing.
+# Writes under .tmp/c2a-check/. Exit status 0 when every check passed.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tools.bash"
+arbace_runtime
+work=$root/.tmp/c2a-check
+mkdir -p "$work"
+rev=98d735fab02f337cee654cb0629bddc09883a75a   # bin/clojure-tests' revision of Clojure
+
+digest() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+
+case ${1:-} in
+"")
+  rm -rf "$work"/unit*
+  exec java -Xss16m -cp "$ARBACE_CP:$root/test" -Dc2a.work="$work" arbace.lang.Main -e "
+(require 'arbace.test 'c2a.c2a-test)
+(let [r (arbace.test/run-tests 'c2a.c2a-test)]
+  (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))" ;;
+--suite)
+  src=$work/clojure
+  if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" != "$rev" ]; then
+    echo "== fetch clojure/clojure $rev"
+    rm -rf "$src"; mkdir -p "$src"
+    git -C "$src" init -q
+    git -C "$src" remote add origin https://github.com/clojure/clojure
+    git -C "$src" fetch -q --depth 1 origin "$rev"
+    git -C "$src" checkout -q -f FETCH_HEAD
+  fi
+  t=$work/suite
+  rm -rf "$t"; mkdir -p "$t/src"
+  cp -r "$src/test" "$t/"; cp -r "$src/src/script" "$t/src/"
+  find "$src" -maxdepth 1 -type f -exec cp {} "$t/" \;
+  "$root/bin/c2a" --in-place --keep-ext "$t"
+  got=$(digest "$t") want=$(cat "$root/test/c2a/suite.sha256")
+  echo "suite digest $got"
+  if [ "$got" = "$want" ]; then echo "c2a suite: as recorded"; else echo "c2a suite: DIFFERS from test/c2a/suite.sha256 ($want)"; exit 1; fi ;;
+--libs)
+  go=${2:-$root/target/arbace-go/amd64/arbace}
+  libs=$root/.tmp/clojure-tests/lib
+  jars="test.check-1.1.3 test.generative-1.1.1 tools.namespace-1.5.1 data.generators-1.1.1 tools.reader-1.6.0 java.classpath-1.1.1"
+  for j in $jars; do
+    [ -f "$libs/$j.jar" ] || { echo "no $libs/$j.jar: run bin/clojure-tests once (it downloads the jars)" >&2; exit 2; }
+  done
+  rm -rf "$work/jars" "$work/ae"; mkdir -p "$work/jars"
+  for j in $jars; do mkdir -p "$work/jars/$j"; (cd "$work/jars/$j" && jar xf "$libs/$j.jar"); done
+  "$root/bin/c2a" -o "$work/ae" "$work/jars"/*
+  # nothing of Clojure's own may be left (the jars' .clj and .cljc files all became .ae)
+  if find "$work/ae" -name '*.clj' -o -name '*.cljc' | grep -q .; then
+    echo "c2a libs: .clj or .cljc files left in $work/ae" >&2; exit 1
+  fi
+  status=0
+  echo "== JVM (target/stage2)"
+  java -cp "$ARBACE_CP:$work/ae" arbace.lang.Main "$root/test/c2a/libs.ae" > "$work/jvm.out" 2> "$work/jvm.err" || status=1
+  cat "$work/jvm.out" "$work/jvm.err"
+  tail -1 "$work/jvm.out" | grep -q '^c2a libs: all' || status=1
+  if [ -x "$go" ]; then
+    echo "== Go ($go)"
+    (cd "$work" && ARBACE_PATH=$work/ae "$go" "$root/test/c2a/libs.ae") > "$work/go.out" 2> "$work/go.err" || status=1
+    if cmp -s "$work/jvm.out" "$work/go.out"; then echo "the Go build's output equals the JVM's"
+    else echo "the Go build's output differs:"; diff "$work/jvm.out" "$work/go.out" || true; status=1; fi
+    # warnings (standard error) are reported, not compared: the Go build's reflection data is
+    # its own (a reflection warning the JVM does not give)
+    cmp -s "$work/jvm.err" "$work/go.err" || { echo "standard error (not compared):"; diff "$work/jvm.err" "$work/go.err" || true; }
+  else
+    echo "== Go: no $go, skipped (bin/arbace-go --build)"
+  fi
+  exit $status ;;
+*) echo "usage: bin/c2a-check [--suite | --libs [GO-EXE]]" >&2; exit 2 ;;
+esac

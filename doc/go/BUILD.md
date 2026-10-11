@@ -1,21 +1,21 @@
-# g2c's program build: Go forms → a static Linux executable
+# g2a's program build: Go forms → a static Linux executable
 
-A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.g2c.print`,
+A Go program held as Go forms ([SPEC.md](SPEC.md)) is printed back to Go (`arbace.g2a.print`,
 [PRINTER-NOTES.md](PRINTER-NOTES.md)) into a temporary module and built by gc into a static
 executable for `linux/amd64` or `linux/arm64`. This is B1a's step 0 ([B1-PLAN.md](B1-PLAN.md)):
 the path by which Arbace itself is built from forms (`bin/arbace-go`).
 
 ```sh
-bin/g2c build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR]
+bin/g2a build [--arch amd64|arm64] [-o OUT] [--layout gofmt|lines] [--line-file] [--work DIR]
               [--overlay FILE] [--pgo FILE] DIR
-bin/g2c build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
+bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
               [--line-file] SRC
-bin/g2c-build-tests [--arch amd64|arm64]... [PROG...]
+bin/g2a-build-tests [--arch amd64|arm64]... [PROG...]
 ```
 
-The logic is `arbace/g2c/build.ae` (`arbace.g2c.build`), run on Arbace's `target/stage2`
-through `bin/lib/tools.bash` like the rest of `bin/g2c` (so `bin/build-arbace` first).
-`bin/g2c build` without arguments still builds g2c's helper (`tools/godump`).
+The logic is `arbace/g2a/build.ae` (`arbace.g2a.build`), run on Arbace's `target/stage2`
+through `bin/lib/tools.bash` like the rest of `bin/g2a` (so `bin/build-arbace` first).
+`bin/g2a build` without arguments still builds g2a's helper (`tools/godump`).
 
 ## The program's layout
 
@@ -53,9 +53,9 @@ DIR/
   path without `.ae` (`go/example_com/multi/greet/banner.txt`); embedded files are checked
   against the SHA-256 the forms record. (Amendment B2, accepted 2026-10-08, folded into SPEC
   §9.5, §9.6 and §12.4.)
-- **Data directories** (amendment M5 of C2G-SPEC §16, accepted 2026-10-09). A directory under
-  `DIR/go` holding a file `.g2c-data` holds data, not forms: its `.ae` files (and those of its
-  subdirectories) are not read as Go forms. `bin/c2g --program` marks so the main package's
+- **Data directories** (amendment M5 of A2G-SPEC §16, accepted 2026-10-09). A directory under
+  `DIR/go` holding a file `.g2a-data` holds data, not forms: its `.ae` files (and those of its
+  subdirectories) are not read as Go forms. `bin/a2g --program` marks so the main package's
   embedded namespace sources (`go/arbace/cmd/arbace/res/`, its `:embed-files`).
 - **Files.** One Go file per `go/file` form; when `go/package` has `:files`, the two must name
   the same files.
@@ -81,9 +81,9 @@ DIR/
    and `HOME` included):
 
    ```
-   GOROOT=$G2C_GOROOT GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off
+   GOROOT=$G2A_GOROOT GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off
    CGO_ENABLED=0 GOEXPERIMENT= GOOS=linux GOARCH=amd64|arm64 GOAMD64=v1 | GOARM64=v8.0
-   $G2C_GOROOT/bin/go build -trimpath -buildvcs=false [-tags ...] -o OUT <main package path>
+   $G2A_GOROOT/bin/go build -trimpath -buildvcs=false [-tags ...] -o OUT <main package path>
    ```
 
    `OUT` defaults to the main package path's last element in the current directory, as
@@ -91,9 +91,9 @@ DIR/
    `-overlay FILE` ("Overlays" below), `--pgo FILE` adds `-pgo FILE` (made absolute): a CPU
    profile for gc's profile-guided optimization (amendment O5, SPEED-NOTES.md).
 
-**Toolchain.** `$G2C_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
-toolchain of the rest of g2c (the round trip); it builds `linux` targets like upstream Go.
-Alpine's own go1.27.1 (`/usr/lib/go`, `G2C_GOROOT=/usr/lib/go`) works too and passes the same
+**Toolchain.** `$G2A_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
+toolchain of the rest of g2a (the round trip); it builds `linux` targets like upstream Go.
+Alpine's own go1.27.1 (`/usr/lib/go`, `G2A_GOROOT=/usr/lib/go`) works too and passes the same
 tests, but its executables differ from TamaGo's (code and data, not only the build ID: the two
 trees differ in `cmd/` and std, TamaGo's additions and Alpine's patches); each is reproducible.
 
@@ -117,17 +117,17 @@ as `../go/...`, would keep the host's directory).
 `--overlay FILE` passes `-overlay FILE` (made absolute) to `go build`: a JSON file in Go's
 overlay format, `{"Replace": {"/path/of/a/file/the/build/reads.go": "/path/of/its/replacement.go",
 ...}}`, which replaces or adds files of the build without changing the tree they belong to.
-This is how the patched Go runtime of C2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
+This is how the patched Go runtime of A2G-SPEC §9.3 (the goroutine-local slot: a field of `g`,
 its clearing in `gdestroy`, the new file `arbace_local.go`) enters a build: the overlay maps
-`$G2C_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
+`$G2A_GOROOT/src/runtime/runtime2.go` and `proc.go` to the patched copies and adds
 `arbace_local.go`, all printed from Go forms (the patch itself is jrt's phase 2). The option
-is C2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
+is A2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build stays
 reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
-forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; C2G-SPEC §9.3, amendment T15);
-`bin/jrt overlay` prints them and writes the overlay file for `$G2C_GOROOT`, and `bin/jrt
+forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; A2G-SPEC §9.3, amendment T15);
+`bin/jrt overlay` prints them and writes the overlay file for `$G2A_GOROOT`, and `bin/jrt
 overlay --check` compares them with the toolchain's runtime.
 
-Checked (2026-10-08) with the experiment's overlay of `.tmp/c2g-exp/gls/` (C2G-SPEC §13.3): a
+Checked (2026-10-08) with the experiment's overlay of `.tmp/a2g-exp/gls/` (A2G-SPEC §13.3): a
 program of Go forms pulling `runtime.arbace_getLocal` with `//go:linkname` fails to link
 without the overlay (`relocation target runtime.arbace_getLocal not defined`) and builds and
 runs with it, for amd64 and for arm64 under `qemu-aarch64`.
@@ -142,22 +142,22 @@ gives the module path when `SRC` has no `program.edn`. `--tests` also prints eac
 collected by the package file's `load`, but not printed). `bin/jrt`
 ([JRT-NOTES.md](JRT-NOTES.md)) builds, vets and tests jrt this way, with the environment of
 "The build" above, and `go test -exec qemu-aarch64` for arm64. (Amendment B6, proposed in
-JRT-NOTES.md and accepted 2026-10-08 with C2G-SPEC's amendments, §16; it adds options to
-`bin/g2c build` only and changes no form, so nothing of SPEC is amended.)
+JRT-NOTES.md and accepted 2026-10-08 with A2G-SPEC's amendments, §16; it adds options to
+`bin/g2a build` only and changes no form, so nothing of SPEC is amended.)
 
 ## Cross-compilation and arm64
 
 gc cross-compiles without a C toolchain: `--arch arm64` gives an `ARM aarch64` executable on
 this amd64 host. It is tested under QEMU's user-mode emulation, `/usr/bin/qemu-aarch64 EXE
 ARGS...`, which runs a static Linux arm64 executable as a process here (Linux system calls
-translated, no system image needed); `bin/g2c-build-tests` runs the arm64 executables that way
+translated, no system image needed); `bin/g2a-build-tests` runs the arm64 executables that way
 and the amd64 ones natively, against the same expected files.
 
 ## The test programs and the tests
 
-- `test/g2c/build/hello/`: one package, `main.go`: prints `hello, world`, then each argument
+- `test/g2a/build/hello/`: one package, `main.go`: prints `hello, world`, then each argument
   (`arg N: "..."`), and exits with the number of arguments.
-- `test/g2c/build/multi/`: the module `example.com/multi` (`program.edn`), three packages: the
+- `test/g2a/build/multi/`: the module `example.com/multi` (`program.edn`), three packages: the
   main package, `greet` (strings, a `//go:embed`ded banner, a panic on request) and
   `internal/wc` (counts lines, words and bytes of an `io.Reader` with `bufio.Scanner`; a type
   with a `String` method). `main` greets each argument in a goroutine of its own
@@ -169,8 +169,8 @@ and the amd64 ones natively, against the same expected files.
 Each program's `runs/NAME.args` (arguments, one per line), `NAME.in` (standard input; absent:
 empty), `NAME.out` (expected standard output), `NAME.err` (what standard error must begin with;
 absent: empty) and `NAME.code` (expected exit code; absent: 0) define a run.
-`bin/g2c-build-tests` builds every program for both architectures into
-`.tmp/g2c-build-tests/ARCH/`, checks the executable static and of the right machine, builds it
+`bin/g2a-build-tests` builds every program for both architectures into
+`.tmp/g2a-build-tests/ARCH/`, checks the executable static and of the right machine, builds it
 again from a copy at another path (also with `--line-file`, twice) and compares the bytes, and
 checks every run.
 

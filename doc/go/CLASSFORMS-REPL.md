@@ -2,14 +2,14 @@
 
 Status: built (branch `cf-repl`, 2026-10-09/10), the user's decision of 2026-10-09: class forms
 in the Go build's REPL. The amendments CF1-CF6 (§8) were accepted on 2026-10-10 and folded into
-C2G-SPEC (§16, "Class forms at the REPL"), B1-PLAN (D6) and ORACLE.md. It reverses, for `defclass` and the code forms,
+A2G-SPEC (§16, "Class forms at the REPL"), B1-PLAN (D6) and ORACLE.md. It reverses, for `defclass` and the code forms,
 B1-PLAN.md's D6 ("a first REPL without the class forms"); `gen-class` stays out.
 
 On the JVM, `defclass` and the code forms ([SPEC §9.5](../classes/SPEC.md)) are compiled by the
 one implementation `arbace.classes` into bytecode, at the REPL as in files (SPEC §10). The Go
 build has no bytecode and no class loader. This document says how the Go build gives the class
 forms their meaning anyway: the same analysis, classes made at run time
-([C2G-SPEC §5.12](C2G-SPEC.md), `Dyn`), and an interpreter of the analyzed code.
+([A2G-SPEC §5.12](A2G-SPEC.md), `Dyn`), and an interpreter of the analyzed code.
 
 Contents: 1 Measurements · 2 Design · 3 Alternatives considered · 4 What is built ·
 5 Checks · 6 Results · 7 What remains · 8 Amendments.
@@ -54,8 +54,8 @@ node trees as on the JVM.
 ```
 
 1. **The front end is arbace.classes's own.** The analysis namespaces are embedded in the program
-   (`arbace.c2g.embed`), with four small Go-build namespace variants (`arbace/lang/go/ns/classes/`,
-   C2G-SPEC §10.3, amendment M1): `types` (the runtime's package name), `env` (a `HashMap` for
+   (`arbace.a2g.embed`), with four small Go-build namespace variants (`arbace/lang/go/ns/classes/`,
+   A2G-SPEC §10.3, amendment M1): `types` (the runtime's package name), `env` (a `HashMap` for
    reflection's cache), `analyze` (ASM's `TypeReference` and the world's generic signatures from
    `arbace.classes.go`, no source path lookup yet), `native` (the classes interpreted, below).
    ASM's `Opcodes`, which the analysis reads ~150 times, is a cut class whose constants are now
@@ -65,10 +65,10 @@ node trees as on the JVM.
    (`compile-top`, `compile-fn`, `compile-deftype`) is kept; in the Go build its
    `compile-and-load!` is `arbace.classes.interp`'s, which builds, from the node trees emit would
    compile, trees of interpreter nodes (`Compiler$CF$...`, class forms in the `Compiler` variant
-   `arbace/lang/go/ClassForms.ae`, translated by c2g like the evaluator), one per method, and
+   `arbace/lang/go/ClassForms.ae`, translated by a2g like the evaluator), one per method, and
    makes the classes.
 3. **Classes are classes made at run time.** A class extending `Object` (or another interpreted
-   class) is a `Dyn` class (C2G-SPEC §5.12): its objects are `Dyn` values, their fields `Dyn`'s
+   class) is a `Dyn` class (A2G-SPEC §5.12): its objects are `Dyn` values, their fields `Dyn`'s
    `F`, so translated code calls their methods through Go's interfaces (every interface of the
    world, by slot) and Clojure code through reflection (the member tables the natives fill, with
    the members' modifiers); interfaces of class forms are interfaces made at run time; a Clojure
@@ -82,7 +82,7 @@ node trees as on the JVM.
   `float` and `double`), `exec` (a statement) and `test` (Java's or Clojure's truth). Each node
   overrides the one of its kind; the others convert. So `int` arithmetic in a loop allocates
   nothing: `ArithJ` computes in `long` with Java's `int` operations (`unchecked-add-int` on the
-  values cast to `int`: c2g's Go has Java's wrap-around, division and shift semantics), `ArithD`
+  values cast to `int`: a2g's Go has Java's wrap-around, division and shift semantics), `ArithD`
   rounds each `float` result to `float`. About 70 node classes, one per kind of analyzed node
   (`:arith`, `:convert`, `:compare`, `:invoke`, `:new`, `:get-field`, `:switch`, `:lambda`...).
 - **Frames** hold the slots of one invocation: references in `Object[]`, the rest in `long[]`
@@ -116,12 +116,12 @@ node trees as on the JVM.
   read when the node is built). javac's accessors (`access$NNN`) are not made: the interpreter
   checks no access.
 - **Exceptions** are Java's: a `try` node is a class forms `try` (Go's panics and recovers through
-  c2g), its clauses matched by `Class.isInstance` (an interpreted exception class by its
+  a2g), its clauses matched by `Class.isInstance` (an interpreted exception class by its
   `Klass`).
 
-### 2.3 The run-time classes (Compiler$CFGo, `c2g_cf.go`)
+### 2.3 The run-time classes (Compiler$CFGo, `a2g_cf.go`)
 
-The natives of `Compiler$CFGo` (`arbace.c2g.dyncf`):
+The natives of `Compiler$CFGo` (`arbace.a2g.dyncf`):
 
 - `defineClass(name, super, interfaces, flags, kind, klass)`: a `jrt.Class` made at run time
   (`jrt.DefineDynamic`, so that a later `defclass` of the name replaces it, as SPEC §10's
@@ -148,7 +148,7 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 - **Interpret JVM bytecode.** Run emit as on the JVM and interpret the class files: complete
   fidelity (whatever emit writes runs), no second meaning of the nodes. Rejected: ASM's writer
   and reader (and emit with its `COMPUTE_FRAMES`, class hierarchy queries included) would have to
-  be translated into the program (ASM is erased from the world, C2G-SPEC §10.1, amendment E2),
+  be translated into the program (ASM is erased from the world, A2G-SPEC §10.1, amendment E2),
   `invokedynamic`'s bootstraps (`LambdaMetafactory`, `StringConcatFactory`, `ObjectMethods`,
   `SwitchBootstraps`, Clojure's reflective call sites) reimplemented, and a stack machine boxes or
   needs a typed operand stack; two levels of indirection (nodes to bytecode to execution) where
@@ -159,7 +159,7 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
   evaluated fn call, about a hundred times slower than nodes translated to Go. The builder
   (maps to node objects, once per method) is that namespace: it runs once.
 - **Translate class forms to Go at run time.** There is no Go compiler in the program (nor in the
-  box, B1b). Rejected; AOT translation of class forms in files is c2g's, not the REPL's.
+  box, B1b). Rejected; AOT translation of class forms in files is a2g's, not the REPL's.
 - **Compile to Go closures** (each node a Go `func`, as EVAL-PLAN §6 proposed for the evaluator,
   built in step 7b, per method at its first call): faster dispatch, but closures cannot be written
   in class forms; the node objects are its equivalent in class forms (an interface call per
@@ -167,7 +167,7 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 - **A carrier class per superclass of the world** (`CF$Ex extends RuntimeException` ...) instead of
   `Dyn`'s `DynSub_C`: rejected for the general case (each overridable method written by hand);
   used for Clojure fn classes only (`CF$FnObj`), whose superclass `RestFn` has one entry point.
-- **Analysis in class forms** (porting arbace.classes to the Java subset, so that c2g translates
+- **Analysis in class forms** (porting arbace.classes to the Java subset, so that a2g translates
   it): the analysis is 5,500 lines of Clojure; evaluated it costs 2.3 s once and 20 ms per class.
   Not worth a port now; step 6's image (the embedded namespaces pre-analyzed) is the remedy in
   place; AOT of namespaces to Go is not scheduled.
@@ -180,10 +180,10 @@ linked to the newest class of a name, as SPEC §10 says for the JVM.
 | `arbace/lang/go/ns/classes/interp.ae` | `arbace.classes.interp`: the builder (analyzed nodes to interpreter nodes), the classes' layouts, vtables, publication to the host, `define!` and `compile-and-load!` |
 | `arbace/lang/go/ns/classes/go.ae` | `arbace.classes.go`: ASM's `TypeReference` as the analysis computes it, the world's generic signatures |
 | `arbace/lang/go/ns/classes/*.subst.ae` | the Go build's variants of `types`, `env`, `analyze`, `native` |
-| `arbace/c2g/dyncf.ae` | the natives of `Compiler$CFGo` (`c2g_cf.go`); `arbace/classes/generics.edn` (the world's generic signatures, embedded) |
-| `arbace/c2g/embed.ae` | the analysis namespaces embedded (not emit, compiler, shape, verify, build, boot) |
-| `arbace/c2g/out.ae` | a cut class's constants are readable (§8, CF1) |
-| `arbace/c2g/dyn.ae`, `main.ae` | `DynClass.CF`; `c2g_cf.go` and `generics.edn` written |
+| `arbace/a2g/dyncf.ae` | the natives of `Compiler$CFGo` (`a2g_cf.go`); `arbace/classes/generics.edn` (the world's generic signatures, embedded) |
+| `arbace/a2g/embed.ae` | the analysis namespaces embedded (not emit, compiler, shape, verify, build, boot) |
+| `arbace/a2g/out.ae` | a cut class's constants are readable (§8, CF1) |
+| `arbace/a2g/dyn.ae`, `main.ae` | `DynClass.CF`; `a2g_cf.go` and `generics.edn` written |
 | `test/oracle/forms/defclass.ae` | the oracle's forms for `defclass` at the REPL |
 | `test/classforms/jvm_check.ae` | the interpreter on the JVM against the compiled classes (static calls) |
 
@@ -247,9 +247,9 @@ of it evaluating the namespaces); then a small class takes 10-60 ms to define.
 
 **Size** (on `cf-repl`, before SZ1-SZ4, unstripped): the static amd64 executable is 74.0 MB against
 63.1 MB for main at `b20b577` (built the same way, same day): +10.9 MB (+17%). Most of it is the
-DynSub types of the nine new superclasses (about 0.5 MB each: `c2g_dyn.go`'s forms grow from 5.1 to
+DynSub types of the nine new superclasses (about 0.5 MB each: `a2g_dyn.go`'s forms grow from 5.1 to
 9.7 MB); then the interpreter and the host (the `Compiler` variant's forms grow by 350 KB,
-`c2g_cf.go` 81 KB, and their member tables), the embedded analysis (360 KB of sources) and
+`a2g_cf.go` 81 KB, and their member tables), the embedded analysis (360 KB of sources) and
 `generics.edn` (106 KB, restricted to what an interpreted class can extend or implement; 674 KB for
 the whole world). Since SZ1-SZ4 (stripped, the `DynSub_C` types sharing one `dynCore`; JRT-NOTES.md,
 "Size: trimming the executable") the whole executable was 61.9 MB; about 63-65 MB since
@@ -257,7 +257,7 @@ java.security and java.text.
 
 ## 7. What remains
 
-- **Superclasses of the world** beyond the list (`arbace.c2g.dyn/class-supers`: `Throwable`,
+- **Superclasses of the world** beyond the list (`arbace.a2g.dyn/class-supers`: `Throwable`,
   `Exception`, `RuntimeException`, `Error`, `IllegalArgumentException`, `IllegalStateException`,
   `Enum`, `Record`, `AFn`, and the proxies' `Writer`, `Reader`, `PushbackReader`, `InputStream`,
   `OutputStream`, `APersistentMap`, `ThreadLocal`, `BufferedWriter`): a class extending another
@@ -285,25 +285,25 @@ All accepted by the user on 2026-10-10 and folded where each says (size: JRT-NOT
 trimming the executable", SZ1-SZ4):
 
 - **CF1** A cut class's constants (static final primitive or `String` fields) are readable: its
-  member table's getter returns the JVM's value instead of throwing (`arbace.c2g.out`). The class
-  forms' analysis reads ASM's `Opcodes` about 150 times. Folded: C2G-SPEC §4.1.
+  member table's getter returns the JVM's value instead of throwing (`arbace.a2g.out`). The class
+  forms' analysis reads ASM's `Opcodes` about 150 times. Folded: A2G-SPEC §4.1.
 - **CF2** The class forms compiler's analysis is embedded in the Go program (`types`, `env`,
   `parse`, `lower`, `analyze`; not the back end) with the namespace variants of §4, and loaded on
   the first class form without checking macro specs (`Compiler.classForms`' variant), as the JVM
-  loads it compiled. Folded: C2G-SPEC §10.3.
+  loads it compiled. Folded: A2G-SPEC §10.3.
 - **CF3** The class forms at the REPL are interpreted (§2): the interpreter is the `Compiler`
-  variant's `Compiler$CF`, the host `Compiler$CFGo` with c2g's natives (`c2g_cf.go`,
-  `arbace.c2g.dyncf`), the builder `arbace.classes.interp` (a Go-build namespace). This reverses
-  B1-PLAN's D6 for `defclass` and the code forms; `gen-class` stays out. Folded: C2G-SPEC §10.4,
+  variant's `Compiler$CF`, the host `Compiler$CFGo` with a2g's natives (`a2g_cf.go`,
+  `arbace.a2g.dyncf`), the builder `arbace.classes.interp` (a Go-build namespace). This reverses
+  B1-PLAN's D6 for `defclass` and the code forms; `gen-class` stays out. Folded: A2G-SPEC §10.4,
   B1-PLAN.md D6.
-- **CF4** C2G-SPEC §5.12: `DynClass` gains a field `CF` (the interpreted class), and the
+- **CF4** A2G-SPEC §5.12: `DynClass` gains a field `CF` (the interpreted class), and the
   DynSub types are made for `class-supers` too (so these classes can also be proxied); an
   interpreted class extending one has DynSub objects, with natives for allocation without
   constructor, the superclass's constructor on an allocated object, and its implementations
-  (super calls). Folded: C2G-SPEC §5.12.
-- **CF5** `c2g --program` embeds `arbace/classes/generics.edn`: the generic signatures of the
+  (super calls). Folded: A2G-SPEC §5.12.
+- **CF5** `a2g --program` embeds `arbace/classes/generics.edn`: the generic signatures of the
   world's interfaces and extendable classes, and the constructors of abstract ones, which jrt's
-  reflection does not have (javac's bridges need them). Folded: C2G-SPEC §10.3.
+  reflection does not have (javac's bridges need them). Folded: A2G-SPEC §10.3.
 - **CF6** ORACLE.md's exclusion of the class forms is lifted: `forms/defclass.ae` and
   `forms/defclass_corpus.ae` (generated) check them; `test/classforms/` holds the JVM-side check,
   the class scripts through defclass and the timings. Folded: ORACLE.md (contents, exclusions).

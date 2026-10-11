@@ -1,4 +1,4 @@
-# g2c's printer: Go forms → Go
+# g2a's printer: Go forms → Go
 
 The printer of milestone G2 ([SPEC.md](SPEC.md) §12): it reads Go forms with the Clojure reader
 (`*read-eval*` false, line numbers on) and writes Go source that gc compiles as the original
@@ -7,9 +7,9 @@ proven on hand-written forms (below) and on the converter's forms of all of std 
 `$GOROOT/test` ([CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip").
 
 ```sh
-bin/g2c-print [--layout lines|gofmt] [--no-line-directives] [--line-file] \
+bin/g2a-print [--layout lines|gofmt] [--no-line-directives] [--line-file] \
               [--src DIR [--build]] [--gofmt] FORMS.ae OUTDIR
-bin/g2c-print-tests [REGEX]
+bin/g2a-print-tests [REGEX]
 ```
 
 `FORMS.ae` is a package file (`ns`, `go/package`, `load`s, §4.1) or one file holding
@@ -17,17 +17,17 @@ bin/g2c-print-tests [REGEX]
 `OUTDIR`. `--src DIR` (the original package directory) copies `:other-files` and
 `:embed-files` (SHA-256 checked) and writes `OUTDIR/overlay.json`; `--build` then runs
 `go build -trimpath -overlay` in `DIR` under the forms' `:config` (§12.4). Both scripts run on
-Arbace's `target/stage2` through `bin/lib/tools.bash`, like `bin/j2c`; `arbace.g2c` loads from
+Arbace's `target/stage2` through `bin/lib/tools.bash`, like `bin/j2a`; `arbace.g2a` loads from
 source.
 
 ## Structure
 
 | namespace | file | role |
 |---|---|---|
-| `arbace.g2c.print` | `print.ae` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
-| `arbace.g2c.print-code` | `print_code.ae` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
-| `arbace.g2c.print-emit` | `print_emit.ae` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
-| `arbace.g2c.print-text` | `print_text.ae` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
+| `arbace.g2a.print` | `print.ae` | reading (`read-forms`, `collect` following `load`, `collect-forms` for forms in memory), files (§4.3: build lines, header directives, package doc, imports, declarations), the package build (§12.4), the CLI |
+| `arbace.g2a.print-code` | `print_code.ae` | forms → tokens: classification by head (§4.4, §13.5), types (§5), declarations (§6), statements and expressions (§7), literals (§8), directives and doc comments (§9, §10.4) |
+| `arbace.g2a.print-emit` | `print_emit.ae` | the emitter: tokens, Go's semicolon rule, token separation, indentation, the line of the cursor, placing forms on recorded lines (§10.1, §12.3), `//line` and `/*line*/` corrections |
+| `arbace.g2a.print-text` | `print_text.ae` | literal spellings (strings, byte strings, runes, exact floats, §8.1, §12.2) and a port of `text/tabwriter` (gofmt's alignment) |
 
 The printer resolves no names and needs no types: every form is classified by its head and
 position, and the metadata for consumers (`:val`, `:inst`, `:go/via`, `:tag` on expressions)
@@ -89,7 +89,7 @@ from text) and `gofmt` otherwise (forms built by a program):
     free.
   - `--line-file` starts the file with `//line FORMS.ae:1`, so that gc's positions name the
     forms file with the forms' lines (§12.3's printer option for hand-written forms).
-    The build (`bin/g2c build`, [BUILD.md](BUILD.md)) names the forms file relative to the
+    The build (`bin/g2a build`, [BUILD.md](BUILD.md)) names the forms file relative to the
     package's forms directory, which keeps
     `-trimpath` builds reproducible (amendment B3, accepted 2026-10-08, folded into SPEC
     §12.3).
@@ -102,7 +102,7 @@ from text) and `gofmt` otherwise (forms built by a program):
 
 ## Coverage
 
-Every form of the spec is printed; `test/g2c/cases/` covers each, and the test `spec-coverage`
+Every form of the spec is printed; `test/g2a/cases/` covers each, and the test `spec-coverage`
 checks that every head of §13.5, the metadata the printer reads and the `go/package` and
 `go/file` options occur in a case.
 
@@ -134,11 +134,11 @@ forms (A6 as accepted), covered by `s09_directives`.
 
 ## Tests
 
-`bin/g2c-print-tests` builds `tools/gocmp` and `test/g2c/golines` for the host into
-`.tmp/g2c-print-tests/bin/` and runs `test/g2c/print_test.ae` on Arbace. Each case
-`test/g2c/cases/NAME.ae` is printed in both layouts into `.tmp/g2c-print-tests/NAME/` and:
+`bin/g2a-print-tests` builds `tools/gocmp` and `test/g2a/golines` for the host into
+`.tmp/g2a-print-tests/bin/` and runs `test/g2a/print_test.ae` on Arbace. Each case
+`test/g2a/cases/NAME.ae` is printed in both layouts into `.tmp/g2a-print-tests/NAME/` and:
 
-- `gofmt -l`: both outputs parse; the gofmt layout is gofmt's fixed point (`;; g2c-test:
+- `gofmt -l`: both outputs parse; the gofmt layout is gofmt's fixed point (`;; g2a-test:
   nogofmt` waives it, for `s12_printer` only, A10);
 - when the original exists (`NAME.go`, the directory `NAME/`, or `original=FILE`), `gocmp`
   compares it with the printed files at the levels tree, export and code (`levels=`
@@ -239,12 +239,12 @@ wins over the printer's over the helper's; the cases are noted below.
 
 ## The round trip
 
-Closed (milestone G2, 2026-10-08): `bin/g2c roundtrip` converts std and `$GOROOT/test`, prints them
-in the lines layout and checks them with `bin/g2c-check` at the tree, export and code levels against
+Closed (milestone G2, 2026-10-08): `bin/g2a roundtrip` converts std and `$GOROOT/test`, prints them
+in the lines layout and checks them with `bin/g2a-check` at the tree, export and code levels against
 a recorded reference; std (373 packages on amd64, 372 on arm64) and the `$GOROOT/test` programs
 (1,707 and 1,702) pass every level on both architectures, and so does std with its tests apart from
 nine known differences (embedded sources). For `GOOS=linux` (B1a, 2026-10-08) std (376 and 374
-packages) and the programs (1,713 and 1,707) pass every level too (`bin/g2c roundtrip linux/amd64`,
+packages) and the programs (1,713 and 1,707) pass every level too (`bin/g2a roundtrip linux/amd64`,
 `linux/arm64`), with no change to the printer. The table, times and what it took are in
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
 

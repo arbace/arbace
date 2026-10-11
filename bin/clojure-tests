@@ -11,7 +11,7 @@
 #   --generative     run it (the default, with CLOJURE_TESTS_GO too)
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
 #   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as in
-#                    rename mode, into class forms under OUT with j2c (run CLOJURE_TESTS_RUN,
+#                    rename mode, into class forms under OUT with j2a (run CLOJURE_TESTS_RUN,
 #                    default java-fixtures): what bin/arbace-go --build-tests translates into
 #                    the Go build's test executable
 # Environment:
@@ -29,9 +29,10 @@
 #   CLOJURE_TESTS_RENAME    "arbace": the Clojure under test is Arbace's, renamed clojure.* ->
 #                           arbace.* (doc/VENDOR-NOTES.md). The suite, its test libraries, the
 #                           runner, the class and namespace names and the system properties
-#                           used here are renamed alike with arbace.j2c.rename (run on Arbace,
-#                           bin/lib/tools.bash, which needs bin/build-arbace's target/stage2),
-#                           into RUN/suite and .tmp/clojure-tests/lib-arbace/.
+#                           used here are translated alike by c2a (doc/C2A.md; bin/c2a
+#                           --in-place --keep-ext, on Arbace, bin/lib/tools.bash, which needs
+#                           bin/build-arbace's target/stage2), into RUN/suite and
+#                           .tmp/clojure-tests/lib-arbace/.
 #                           The test namespaces keep their names, so the reference applies.
 #   CLOJURE_TESTS_GO        the Go build (B1a, doc/go/EVAL-NOTES.md, "Phase 2C"): the command that
 #                           runs it, e.g. target/arbace-go/amd64/arbace or
@@ -99,10 +100,13 @@ case $rename in
   *) echo "CLOJURE_TESTS_RENAME: only arbace is known" >&2; exit 2 ;;
 esac
 . "$root/bin/lib/tools.bash"
-# arbace.j2c.rename ARGS..., on Arbace
-rename_tool() { [ -n "${ARBACE_CP:-}" ] || arbace_runtime; java -cp "$ARBACE_CP" arbace.lang.Main -m arbace.j2c.rename "$@"; }
-# Rename standard input (clojure.* -> arbace.*) in rename mode.
-rn() { if [ -n "$rename" ]; then rename_tool stdin; else cat; fi; }
+# c2a ARGS... (bin/c2a), on Arbace
+c2a() { [ -n "${ARBACE_CP:-}" ] || arbace_runtime; java -Xss16m -cp "$ARBACE_CP" arbace.lang.Main -m arbace.c2a.main "$@"; }
+# Translate a tree in place for the Clojure under test: the suite's and libraries' files keep
+# their names (.clj, .cljc, .java), as the reference results name them
+c2a_tree() { c2a -q --in-place --keep-ext "$1"; }
+# Translate standard input (clojure.* -> arbace.*) in rename mode.
+rn() { if [ -n "$rename" ]; then c2a --stdin; else cat; fi; }
 rev=98d735fab02f337cee654cb0629bddc09883a75a
 runner=$root/test/run_clojure_tests.clj
 [ -n "$rename" ] && runner=$work/run_clojure_tests.clj
@@ -242,25 +246,23 @@ if [ -n "$rename" ]; then
   cp -r "$src/test" "$suite/"
   cp -r "$src/src/script" "$suite/src/"
   find "$src" -maxdepth 1 -type f -exec cp {} "$suite/" \;   # readme.txt, read by a test
-  rename_tool tree "$suite" .clj .cljc .java
+  c2a_tree "$suite"
   # Renaming artifact: clojure.pprint is one character longer than arbace.pprint, and
   # test_pretty.clj's expected layouts align continuation lines under "[clojure.pprint :only (".
   sed -i '/\[arbace\.pprint :only/,/]/ s/^ \(  *[a-z]\)/\1/' \
     "$suite/test/clojure/test_clojure/pprint/test_pretty.clj"
-  # Arbace's proxies name their IProxy methods __{init,update,get}ArbaceFnMappings
-  # (doc/VENDOR-NOTES.md, "After vendoring"); test-proxy-method-order lists them.
-  sed -i 's/__\(init\|update\|get\)ClojureFnMappings/__\1ArbaceFnMappings/' \
-    "$suite/test/clojure/test_clojure/java_interop.clj"
+  # (test-proxy-method-order's IProxy methods, __{init,update,get}ArbaceFnMappings in Arbace,
+  # are c2a's rule :proxy-methods)
   rn < "$root/test/run_clojure_tests.clj" > "$runner"
 fi
 
-# --java-fixtures: the renamed test/java as class forms (j2c), for the Go build's test build
+# --java-fixtures: the renamed test/java as class forms (j2a), for the Go build's test build
 if [ -n "$java_fixtures" ]; then
-  step "[$run] convert the Java fixtures (test/java) into $java_fixtures with j2c"
+  step "[$run] convert the Java fixtures (test/java) into $java_fixtures with j2a"
   rm -rf "$java_fixtures"
   # javac's class path: the Clojure under test (the fixtures name arbace.lang.IFn and the
   # Java API)
-  J2C_JVM_OPTS=${J2C_JVM_OPTS:--Xmx4g} "$root/bin/j2c" -m arbace.j2c.main convert \
+  J2A_JVM_OPTS=${J2A_JVM_OPTS:--Xmx4g} "$root/bin/j2a" -m arbace.j2a.main convert \
     --javac -cp --javac "$clojure_src" "$java_fixtures" "$suite/test/java" > "$work/java-fixtures.log" 2>&1 \
     || { cat "$work/java-fixtures.log"; exit 1; }
   grep -q ' 0 failed, 0 javac errors' "$work/java-fixtures.log" || { cat "$work/java-fixtures.log"; exit 1; }
@@ -269,6 +271,7 @@ if [ -n "$java_fixtures" ]; then
 fi
 
 # 2. deps (shared by concurrent runs, as bin/gate makes them: one at a time)
+c2a_stamp=$(cat "$root"/arbace/c2a/*.ae | sha256sum | cut -c1-64)
 mkdir -p "$base/lib"
 exec 9> "$base/lib.lock"
 flock 9
@@ -282,12 +285,15 @@ while read -r coord sha; do
     rm -rf "$(lib_of "$coord")"
   fi
   lib=$(lib_of "$coord")
-  if [ -n "$rename" ] && [ ! -d "$lib" ]; then
-    step "rename $coord into $lib"
+  # translated again when c2a changed (its sources' hash, in lib-arbace/NAME.c2a)
+  if [ -n "$rename" ] && { [ ! -d "$lib" ] || [ "$(cat "$lib.c2a" 2>/dev/null)" != "$c2a_stamp" ]; }; then
+    step "translate $coord into $lib with c2a"
+    rm -rf "$lib" "$lib.tmp"
     mkdir -p "$lib.tmp"
     (cd "$lib.tmp" && jar xf "$jar")
-    rename_tool tree "$lib.tmp" .clj .cljc .java
+    c2a_tree "$lib.tmp"
     mv "$lib.tmp" "$lib"
+    echo "$c2a_stamp" > "$lib.c2a"
   fi
 done <<< "$deps"
 flock -u 9

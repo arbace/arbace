@@ -4,11 +4,12 @@ What `arbace/` holds (all `.ae`, Arbace's source extension since 2026-10-11: Clo
 class forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
 code. Two kinds of things live here:
 
-- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `j2c/`
-  (the Java to class forms converter, `arbace.j2c.*`), `g2c/` (Go to Arbace forms,
-  `arbace.g2c.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
-  `c2g/` (the class forms to Go forms translator of the Go build, `arbace.c2g.*`;
-  doc/go/C2G-SPEC.md).
+- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `c2a/` (the
+  Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `j2a/`
+  (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
+  `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
+  `a2g/` (the class forms to Go forms translator of the Go build, `arbace.a2g.*`;
+  doc/go/A2G-SPEC.md).
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.ae`), and the Java classes as class
   forms, one namespace per Java package (`lang.ae`, `asm.ae`, `java/api.ae`) with one file per
@@ -16,7 +17,7 @@ code. Two kinds of things live here:
   `arbace.lang.Main` (`lang/Main.ae`). A few files among them are Arbace's own, not derived from
   Clojure, and say so in their header (`lang/KeywordInvokeSite.ae`,
   `lang/ReflectorCallSite.ae`). `lang/go/` holds the Go build's variants of some of these
-  classes and namespaces (derived from the vendored files; read by c2g only, not by the JVM
+  classes and namespaces (derived from the vendored files; read by a2g only, not by the JVM
   build).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` this repository held until the
@@ -26,7 +27,7 @@ https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`
 the two seed fixes recorded in the journal on that branch
 ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md),
 2026-10-06). It was derived on 2026-10-07 by `bin/vendor-arbace` (on that branch; converter
-`arbace.j2c`, renaming `arbace.j2c.rename`) and is maintained by hand since.
+`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` and `arbace.c2a.rename`) and is maintained by hand since.
 
 Also vendored, renamed alike: clojure.spec, the two libraries upstream Clojure at that revision
 depends on (`pom.xml`), as `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha`

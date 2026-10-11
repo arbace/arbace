@@ -1,7 +1,7 @@
 # The oracle: differential tests against the JVM Arbace
 
 B1a builds Arbace as a static Go executable ([B1-PLAN.md](B1-PLAN.md)); its steps 3-5 (jrt,
-the c2g-translated runtime, the evaluator) are each checked against the JVM Arbace, the
+the a2g-translated runtime, the evaluator) are each checked against the JVM Arbace, the
 oracle. This document describes the oracle's corpora, their formats, the runner `bin/oracle`
 and how to extend it. It depends on nothing of the Go work: the expected results are recorded
 from `bin/arbace-j` (built by `bin/build-arbace`) and, for regex, from its JDK.
@@ -78,7 +78,7 @@ transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients)
 equality and comparison, `RT`'s collection functions and casts), `Strings` (`StringBuilder`,
 `String`, number conversions, `Compiler.munge`/`demunge`), `BigNumbers` (every operation of
 `BigInteger` and `BigDecimal` across the algorithms' thresholds, then `BigInt` and `Numbers`
-over them; C2G-NOTES.md, phase 2C).
+over them; A2G-NOTES.md, phase 2C).
 
 Regex (`regex/`): `basics`, `classes`, `unicode`, `anchors`, `quantifiers`, `groups`,
 `lookaround`, `flags`, `split_replace`, `errors` (`PatternSyntaxException` descriptions, indexes
@@ -315,14 +315,14 @@ rest of it being covered deterministically by the files named:
   transients, arrays, `PersistentQueue`'s `#object` form, regex patterns' hashes, `deftype`s
   without `hashCode`); what remains in messages and `#object[...]` is normalized (above).
 - `gen-class` (D6), and compiling files. The class forms are covered since the Go build has them at
-  the REPL (amendment CF6, accepted 2026-10-10; C2G-SPEC §16): `forms/defclass.ae` and
+  the REPL (amendment CF6, accepted 2026-10-10; A2G-SPEC §16): `forms/defclass.ae` and
   `forms/defclass_corpus.ae`; `test/classforms/class_scripts.ae` runs a class script on classes
   defined at the REPL from the runtime's class forms (Murmur3). `proxy` is covered (amendment X4,
-  accepted 2026-10-09; C2G-SPEC §16): the Go build has it since the user's decision reversing D6 for
-  it (C2G-SPEC §10.4), and `forms/types.ae` checks it (proxies of `Object`, of interfaces, of
+  accepted 2026-10-09; A2G-SPEC §16): the Go build has it since the user's decision reversing D6 for
+  it (A2G-SPEC §10.4), and `forms/types.ae` checks it (proxies of `Object`, of interfaces, of
   `Writer`, `PushbackReader`, `InputStream` and `OutputStream`, `proxy-super`, `update-proxy`,
   `bean`, pprint's writers). The harvest takes the forms naming `proxy` too (amendment Y4, accepted
-  2026-10-09; C2G-SPEC §16). Before, `harvest.ae`'s `excluded` and `unsafe` left them out, since D6
+  2026-10-09; A2G-SPEC §16). Before, `harvest.ae`'s `excluded` and `unsafe` left them out, since D6
   cut `proxy`. The suite's proxy tests are in `java_interop.clj` (its `proxy` directory only defines
   the AOT-compiled classes they use), a namespace left out whole, of which the harvest keeps the
   assertions naming `proxy`, `proxy-super`, `update-proxy`, `get-proxy-class`, `construct-proxy`,
@@ -352,9 +352,9 @@ rest of it being covered deterministically by the files named:
   `NullPointerException` messages are compared by class only (V11, above).
 - Class names recorded for values (`:class`, `:type`) are the JVM's (`java.lang.Long`,
   `arbace.lang.PersistentVector`, `user.R` for records, `user$evalN$fn__N` for fns): `class`
-  in the Go build is expected to answer the same names for jrt's and c2g's classes.
+  in the Go build is expected to answer the same names for jrt's and a2g's classes.
 - Class scripts record the runtime types of results, among them anonymous classes
-  (`arbace.lang.PersistentVector$2`, an iterator); c2g's names for them should match.
+  (`arbace.lang.PersistentVector$2`, an iterator); a2g's names for them should match.
 - Comparison is of the printed records (but for helpful `NullPointerException` messages,
   above), so `-0.0` differs from `0.0` and `##NaN` matches itself.
 - The format cannot express, in class scripts: nested calls as arguments (bind them first),

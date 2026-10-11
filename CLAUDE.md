@@ -18,7 +18,7 @@ Direction:
 - Now: the `.ae` rename, the Arbace dialect's tools (c2a, j2a, g2a), Arbace's own version, then
   the box: Arbace built with TamaGo, as a guest of go-whim's monitor (doc/AGENDA.md).
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
-  usable at the source level through j2c. The language is Clojure extended with an idiomatic
+  usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
   self-sustaining REPL inside a virtual sandbox, written in Arbace all the way down to the bare
   metal ISA, in the way of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host),
@@ -39,7 +39,7 @@ Prior art:
   `arbace-for-java-26-v1`, pinned by `seed/arbace-seed.jar.sha256`. `bin/seed --check` checks
   the hash; `bin/seed --verify` rebuilds it from the tag. It replaced the frozen reference tree
   `clojure/` (upstream Clojure and ASM), which remains on the branch `arbace-for-java-26`. The
-  tools take what they need of that tree as data (j2c's corpus, the baseline of Clojure's suite)
+  tools take what they need of that tree as data (j2a's corpus, the baseline of Clojure's suite)
   from the tag, extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline, and checks the result against `test/baseline-results.edn` (Arbace's:
@@ -63,11 +63,14 @@ Prior art:
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
-  - `arbace/j2c/`: the Java → class forms converter.
-  - `arbace/g2c/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
-    `tools/gocmp`; `bin/g2c`).
-  - `arbace/c2g/`: the class forms → Go forms translator (spec `doc/go/C2G-SPEC.md`; `bin/c2g`).
-- The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. c2g translates
+  - `arbace/c2a/`: the Clojure → Arbace translator (`doc/C2A.md`; `bin/c2a`, `bin/c2a-check`):
+    the names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the
+    dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
+  - `arbace/j2a/`: the Java → class forms converter.
+  - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
+    `tools/gocmp`; `bin/g2a`).
+  - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`).
+- The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in
   `arbace/lang/go/`, and jrt, the Java runtime on Go (`go/arbace/jrt`, hand-written Go forms;
   `overlay/jdk/`, its own Java and variants of JDK classes; the jdk26u sources converted by
@@ -80,16 +83,16 @@ Prior art:
   executable cached in `.tmp/arbace-go-gate`, keyed by a hash of what it is built from
   (`arbace/`, `go/`, `overlay/`, the build's scripts, the seed, the toolchains): seconds when
   they are unchanged, else it is built again beside the suite (`bin/jrt-convert`'s conversion,
-  c2g, the Go build, the image: the gate then takes about 7 minutes).
-  `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2c-check --suite`, the
-  g2c round trip on amd64 for tamago and linux (`bin/g2c roundtrip amd64`, `linux/amd64`) and
+  a2g, the Go build, the image: the gate then takes about 7 minutes).
+  `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2a-check --suite`, the
+  g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`) and
   the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
   Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
-  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2c and the
+  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`); g2a and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest): run it when
-  the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
+  the class forms compiler, j2a, g2a, a2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
   cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
 
 ## Records
@@ -110,7 +113,9 @@ Prior art:
 
 - Data and source formats target the Clojure reader (`read`), not strict EDN; the two differ
   slightly, and where in doubt the Clojure reader wins.
-- The tools (j2c, the class forms checks, the suite runner, the bench driver) run on Arbace's
+- The translators name Arbace (`a`) as their target or source: c2a, j2a, g2a, a2g (until
+  2026-10-11 j2c, g2c, c2g, as the frozen branches and dated records name them).
+- The tools (c2a, j2a, the class forms checks, the suite runner, the bench driver) run on Arbace's
   `target/stage2` plus the checkout (`bin/lib/tools.bash`), so build first.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.
