@@ -1,0 +1,279 @@
+(in-ns 'go.arbace.box.hv) (go/file "kvm_linux_arm64.go" :imports [
+
+    ^{:line 3} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "The arm64 half of the KVM backend: every register through\nKVM_GET/SET_ONE_REG, Apple's system-register encodings ORed into KVM's\nsysreg id (the same packing), the four that KVM keeps among the core\nregisters (SP_EL0, SP_EL1, ELR_EL1, SPSR_EL1) mapped there.\n\nThe framework leaves PC on a store that exits and the monitor advances it;\nKVM advances it itself, when the vCPU next runs.  So while an MMIO exit is\npending, PC reads as the store's address, and a PC set is written 4 short\nof where it is to land (nothing written when it is the store's next\ninstruction, the common case); a PC not set is put back on the store, so\nthat it is made again, as on the framework.\n"
+  ^{:line 17} [^{:val 1074835115} kvmGetOneReg 0x4010aeab]
+  ^{:line 18} [^{:val 1074835116} kvmSetOneReg 0x4010aeac]
+  ^{:line 19} [^{:val 1075883694} kvmArmVCPUInit 0x4020aeae]
+  ^{:line 20} [^{:val 2149625519} kvmArmPreferredTgt 0x8020aeaf]
+  ^{:line 21} [^{:val 6931039826524241920} kvmRegCore64 0x6030000000100000] ; KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE
+  ^{:line 22} [^{:val 6926536226896871424} kvmRegCore32 0x6020000000100000] ; the same, 32 bits
+  ^{:line 23} [^{:val 6931039826524438528} kvmRegSys 0x6030000000130000] ; KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM64_SYSREG
+  ^{:line 24} [^{:val 248} coreSP 248] ; offsetof(struct kvm_regs, regs.sp): SP_EL0
+  ^{:line 25} [^{:val 256} corePC 256]
+  ^{:line 26} [^{:val 264} corePSTATE 264]
+  ^{:line 27} [^{:val 272} coreSPEL1 272]
+  ^{:line 28} [^{:val 280} coreELREL1 280]
+  ^{:line 29} [^{:val 288} coreSPSR 288] ; spsr[KVM_SPSR_EL1]
+  ^{:line 30} [^{:val 848} coreFPSR 848] ; fp_regs.fpsr
+  ^{:line 31} [^{:val 852} coreFPCR 852]
+  ^{:line 32} [^{:val 0} kvmSMCCCFilterAttr 0] ; KVM_ARM_VM_SMCCC_FILTER
+  ^{:line 33} [^{:val 0} kvmSMCCCCtrlGroup 0] ; KVM_ARM_VM_SMCCC_CTRL
+  ^{:line 34} [^{:val 2} kvmSMCCCFilterFwd 2] ; KVM_SMCCC_FILTER_FWD_TO_USER
+  ^{:line 35} [^{:val 1} kvmHypercallExitSMC (<< 1 0)]
+  ^{:line 36} [^{:val 255} kvmVMTypeIPASizeMask 0xff])
+
+
+(go/type vmISA (struct))
+
+(go/type vcpuISA (struct
+    ^{:line 42 :tag bool} mmio ; an MMIO exit is pending completion
+    ^{:line 43 :tag uint64} faultPC ; the store's address, when known
+    ^{:line 44 :tag bool} pcKnown
+    ^{:line 45 :tag bool} pcSet ; the monitor set PC while the MMIO was pending
+    ^{:line 46 :tag uint64} newPC
+    ^{:line 47 :tag uint64} x0)) ; X0 as read at the exit
+
+
+^{:go/end 50} (go/func vmType ^uintptr [^uint32 ipaBits] (conv uintptr (bit-and ipaBits kvmVMTypeIPASizeMask)))
+
+^{:go/end 52} (go/func vmInit ^error [] nil)
+
+(go/type kvmVCPUInit (struct
+    ^{:line 55 :tag uint32} target
+    ^{:line 56 :tag (array 7 uint32)} features))
+
+
+^{:go/end 68} (go/func vcpuInit ^error [^{:tag (* vcpu)} c]
+  ^{:go/breaks [4]} (let [^kvmVCPUInit init (zero kvmVCPUInit)]
+    (when [(values _ err) (ioctlPtr (.-fd vm) kvmArmPreferredTgt (conv unsafe/Pointer (addr init)))] (!= err nil)
+      (return (fail Unsupported "KVM_ARM_PREFERRED_TARGET" err)))
+
+    (when [(values _ err) (ioctlPtr (.-fd c) kvmArmVCPUInit (conv unsafe/Pointer (addr init)))] (!= err nil)
+      (return (fail Error "KVM_ARM_VCPU_INIT" err)))
+
+    nil))
+
+
+(go/type kvmOneReg (struct
+    ^{:line 71 :tag uint64} id ^uint64 addr))
+
+
+^{:go/end 81} (go/method getOne [^{:tag (* vcpu)} c ^uint64 id] :results [uint64 error]
+  (let [^uint64 v (zero uint64)
+      ^{:line 76} r (lit kvmOneReg :id id)]
+    (when [(values _ err) (ioctlAt (.-fd c) kvmGetOneReg (conv unsafe/Pointer (addr r)) (addr (.-addr r)) (conv unsafe/Pointer (addr v)))] (!= err nil)
+      (return 0 (fail BadArgument "KVM_GET_ONE_REG" err)))
+
+    (return v nil)))
+
+
+^{:go/end 89} (go/method setOne ^error [^{:tag (* vcpu)} c ^uint64 id ^uint64 v]
+  ^{:go/breaks [3]} (let [r (lit kvmOneReg :id id)]
+    (when [(values _ err) (ioctlAt (.-fd c) kvmSetOneReg (conv unsafe/Pointer (addr r)) (addr (.-addr r)) (conv unsafe/Pointer (addr v)))] (!= err nil)
+      (return (fail BadArgument "KVM_SET_ONE_REG" err)))
+
+    nil))
+
+
+^{:go/end 91} (go/func core ^uint64 [^uint64 off] (bit-or kvmRegCore64 (/ off 4)))
+
+
+^{:go/end 108} (go/func regID "regID is KVM's id for r.\n" [^Reg r] :results [uint64 bool]
+  (switch
+    (case [(<= r RegX30)]
+      (return (core (* (conv uint64 r) 8)) true))
+    (case [(== r RegPC)]
+      (return (core corePC) true))
+    (case [(== r RegCPSR)]
+      (return (core corePSTATE) true))
+    (case [(== r RegFPSR)]
+      (return (bit-or kvmRegCore32 (/ coreFPSR 4)) true))
+    (case [(== r RegFPCR)]
+      (return (bit-or kvmRegCore32 (/ coreFPCR 4)) true)))
+
+  (return 0 false))
+
+
+
+
+^{:go/end 124} (go/func sysRegID "sysRegID is KVM's id for r: the core registers' for the four it keeps\nthere, the encoding in KVM's sysreg space otherwise.\n" ^uint64 [^SysReg r]
+  (switch r
+    (case [SysRegSPEL0]
+      (return (core coreSP)))
+    (case [SysRegSPEL1]
+      (return (core coreSPEL1)))
+    (case [SysRegELREL1]
+      (return (core coreELREL1)))
+    (case [SysRegSPSREL1]
+      (return (core coreSPSR))))
+
+  (bit-or kvmRegSys (conv uint64 r)))
+
+
+^{:go/end 135} (go/method storePC [^{:tag (* vcpu)} c] :results [uint64 error]
+  (when (not (.-pcKnown (.-isa c)))
+    (let [(values pc err) (.getOne c (core corePC))]
+      (when (!= err nil)
+        (return 0 err))
+
+      (set! (values (.-faultPC (.-isa c)) (.-pcKnown (.-isa c))) (values pc true))))
+
+  (return (.-faultPC (.-isa c)) nil))
+
+
+^{:go/end 157} (go/func beforeRun ^error [^{:tag (* vcpu)} c]
+  (when (not (.-mmio (.-isa c)))
+    (return nil))
+
+  (set! (.-mmio (.-isa c)) false)
+  (when (.-pcSet (.-isa c))
+    (let [(values pc err) (.storePC c)]
+      (when (!= err nil)
+        (return err))
+
+      (when (== (.-newPC (.-isa c)) (+ pc 4))
+        (return nil))
+
+      (return (.setOne c (core corePC) (- (.-newPC (.-isa c)) 4)))))
+
+  (let [(values pc err) (.storePC c)]
+    (when (!= err nil)
+      (return err))
+
+    (.setOne c (core corePC) (- pc 4))))
+
+
+^{:go/end 161} (go/func afterRun [^{:tag (* vcpu)} c ^bool _]
+  (set! (.-isa c) (lit vcpuISA)))
+
+
+
+
+
+
+^{:go/end 180} (go/func mmioExit "mmioExit is a store's syndrome.  KVM does not say which register the\nstore read; the guest's ABI stores from X0, which is read and checked\nagainst the value KVM reports: SRT 0 when it holds it, no valid\ninstruction syndrome when not.\n" ^Syndrome [^{:tag (* vcpu)} c ^int n ^bool write ^uint64 data]
+  (set! (.-mmio (.-isa c)) true)
+  (let [s (DataAbort n 0 write)
+      (values x0 err) (.getOne c (core 0))
+      ^{:line 171} mask (bit-not (conv uint64 0))]
+    (when (< n 8)
+      (set! mask (- ^uint64 (<< 1 (* 8 n)) 1)))
+
+    (when (or (!= err nil) (!= (bit-and x0 mask) data))
+      (return (bit-and-not s (<< 1 24))))
+
+    (set! (.-x0 (.-isa c)) x0)
+    ^{:line 179} s))
+
+
+
+
+^{:go/breaks [8] :go/end 192} (go/func isaExit "isaExit reports an HVC that KVM forwarded (KVM_ARM_VM_SMCCC_FILTER) as the\nframework does: an exception exit with EC 0x16, PC past the HVC.\n" ^bool [^{:tag (* vcpu)} c ^uint32 reason]
+  (when (or (!= reason kvmExitHypercall) (!= (bit-and (.u64 c kvmHypercallFlags) kvmHypercallExitSMC) 0))
+    (return false))
+
+  (set! (.-Reason (.-exit c)) ExitReasonException)
+  (set! (.-Syndrome (.-Exception (.-exit c))) (bit-or (<< (conv uint64 ECHVC64) 26) (<< 1 25)))
+  (set! (.-PhysicalAddress (.-Exception (.-exit c))) (conv IPA (.u64 c kvmHypercallNr)))
+  true)
+
+
+
+^{:go/end 216} (go/func VCPUGetReg "VCPUGetReg is hv_vcpu_get_reg.\n" [^VCPU v ^Reg r] :results [uint64 error]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (when (.-mmio (.-isa c))
+      (switch r
+        (case [RegPC]
+          (when (.-pcSet (.-isa c))
+            (return (.-newPC (.-isa c)) nil))
+
+          (return (.storePC c)))
+        (case [RegX0]
+          (return (.-x0 (.-isa c)) nil))))
+
+
+    (let [(values id ok) (regID r)]
+      (when (not ok)
+        (return 0 BadArgument))
+
+      (.getOne c id))))
+
+
+
+^{:go/end 236} (go/func VCPUSetReg "VCPUSetReg is hv_vcpu_set_reg.\n" ^error [^VCPU v ^Reg r ^uint64 val]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return err))
+
+    (when (and (.-mmio (.-isa c)) (== r RegPC))
+      (set! (values (.-pcSet (.-isa c)) (.-newPC (.-isa c))) (values true val))
+      (return nil))
+
+    (let [(values id ok) (regID r)]
+      (when (not ok)
+        (return BadArgument))
+
+      (when (and (.-mmio (.-isa c)) (== r RegX0))
+        (set! (.-x0 (.-isa c)) val))
+
+      (.setOne c id val))))
+
+
+
+^{:go/end 245} (go/func VCPUGetSysReg "VCPUGetSysReg is hv_vcpu_get_sys_reg.\n" [^VCPU v ^SysReg r] :results [uint64 error]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.getOne c (sysRegID r))))
+
+
+
+^{:go/end 254} (go/func VCPUSetSysReg "VCPUSetSysReg is hv_vcpu_set_sys_reg.\n" ^error [^VCPU v ^SysReg r ^uint64 val]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return err))
+
+    (.setOne c (sysRegID r) val)))
+
+
+(go/type kvmDeviceAttr (struct
+    ^{:line 257 :tag uint32} flags
+    ^{:line 258 :tag uint32} group
+    ^{:line 259 :tag uint64} attr
+    ^{:line 260 :tag uint64} addr))
+
+
+(go/type kvmSMCCCFilter (struct
+    ^{:line 264 :tag uint32} base ^uint32 nr
+    ^{:line 265 :tag uint8} action
+    ^{:line 266 :tag (array 15 uint8)} _))
+
+
+
+
+
+
+^{:go/end 280} (go/func ForwardHVC "ForwardHVC has KVM hand the function IDs base..base+n-1 of an HVC or SMC\nto the monitor (KVM_ARM_VM_SMCCC_FILTER, Linux 6.4 on), reported as the\nframework reports an HVC.  Not the framework's: there every HVC exits.\nCalled after VMCreate, before the first vCPU runs.\n" ^error [^uint32 base ^uint32 n]
+  ^{:go/breaks [3]} (let [f (lit kvmSMCCCFilter :base base :nr n :action kvmSMCCCFilterFwd)
+      ^{:line 275} a (lit kvmDeviceAttr :group kvmSMCCCCtrlGroup :attr kvmSMCCCFilterAttr)]
+    (when [(values _ err) (ioctlAt (.-fd vm) kvmSetDeviceAttr (conv unsafe/Pointer (addr a)) (addr (.-addr a)) (conv unsafe/Pointer (addr f)))] (!= err nil)
+      (return (fail Unsupported "KVM_ARM_VM_SMCCC_FILTER" err)))
+
+    nil))

@@ -1,0 +1,111 @@
+(in-ns 'go.arbace.box.board) (go/file "smp.go" :imports [
+
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [runtime "runtime"]
+    ^{:line 6} [goos "runtime/goos"]
+    ^{:line 7} [atomic "sync/atomic"]
+    ^{:line 8} [unsafe "unsafe"]
+
+    ^{:line 10} [abi "arbace/box/abi"]])
+
+
+;; SMP (doc/GUEST.md, *SMP*): TamaGo's runtime runs an M on each CPU it is
+;; given by goos.Task, never drops one, and wakes a halted one by
+;; goos.Wake.  Its own boards answer those with an IPI and HLT; here there
+;; are no interrupts, and the monitor answers them -- abi.CPUStart starts a
+;; vCPU it created idle, abi.CPUPark stops this one until an abi.CPUWake or
+;; the monitor lets it look again, abi.CPUSelf says which this is.
+
+
+
+(go/const ^{:val 20000 :doc "spinNs is how long an idle vCPU spins before it parks: a goroutine made\nrunnable meanwhile is seen without an exit.\n"} spinNs 20000)
+
+
+(go/const ^{:val 200000 :doc "stopWaitNs is the longest idle wait taken for a stop of the world's.\n"} stopWaitNs 200000)
+
+
+
+
+
+
+(go/directive "//lint:ignore U1000 the assembly's")
+(go/var ^{:tag (array abi/MaxCPUs (array 2 uint64)) :doc "tls is each AP's thread-local slot, by its number: the runtime's g, at\nFS's base less 8 on amd64 (the ELF's TLS, as the runtime's settls lays\nit; whim_apentry sets FS); arm64 keeps g in a register.  The boot\nvCPU's is the runtime's own, m0's.\n"} tls)
+
+
+(go/var ^{:tag uint64 :doc "started counts the APs CPUStart has started.\n"} started)
+
+
+
+
+(go/directive "//lint:ignore U1000 the assembly's")
+(go/var ^{:tag uintptr :doc "apEntry is whim_apentry's address: kept by the linker, as the monitor\nstarts an AP there (its ELF symbol).\n"} apEntry)
+
+^{:go/end 52} (go/func init []
+  (when (<= ncpu 1)
+    (return))
+
+  (set! goos/ProcID procID)
+  (set! goos/Task task)
+  (set! goos/Wake wake)
+  (runtime/GOMAXPROCS (conv int ncpu)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 71} (go/func ^:go/nosplit task "task is goos.Task: an M started on the next idle vCPU, on its g0's own\nstack (as Linux's clone is given g0's stack, which TamaGo's runtime has\nallocated, 16 KiB), so that g0's bounds are the stack's; sp, the top of\nTamaGo's own 8 MiB for it, is unused, and the monitor takes its pages\nback.  The runtime asks once for each P past the first, so for each AP\nonce.\n" [^unsafe/Pointer sp ^unsafe/Pointer _ ^unsafe/Pointer gp ^unsafe/Pointer fn]
+  (let [id (atomic/AddUint64 (addr started) 1)]
+    (when (>= id ncpu)
+      (throw "task: no idle vCPU"))
+
+    (let [hi @(conv (* uintptr) (unsafe/Add gp 8))] ; g.stack.hi
+      (when (!= (.-Ret (Call abi/CPUStart (conv int64 id) (conv int64 hi) (conv int64 (conv uintptr gp)) (conv int64 (conv uintptr fn)) (conv int64 (conv uintptr sp)))) 0)
+        (throw "task: CPUStart refused")))))
+
+
+
+
+^{:go/end 74} (go/func procID "procID is goos.ProcID: which vCPU this is, asked once per M.\n" ^uint64 [] (conv uint64 (.-Ret (Call abi/CPUSelf 0 0 0 0 0))))
+
+
+
+
+^{:go/end 79} (go/func ^:go/nosplit wake "wake is goos.Wake: the M on vCPU procid parked in semasleep is let go.\n" [^uint64 procid] (Call abi/CPUWake (conv int64 procid) 0 0 0 0))
+
+
+
+
+^{:go/end 108} (go/func idleSMP "idleSMP is goos.Idle on several vCPUs: a spin of spinNs, then a park\nuntil the deadline, a wake, or the monitor's limit (vmm/smp.go).  The\nscheduler calls it again while it finds nothing.\n" [^int64 until]
+  (let [now (nanotime)
+      ^{:line 86} end (+ now spinNs)
+      ^{:line 87} limited (and (> until 0) (!= until math/MaxInt64))]
+    (when (and limited (<= (- until now) stopWaitNs))
+      ;; A wait this short is a stop of the world's (stopTheWorldWithSema
+      ;; and forEachP wait 100 µs at a time): it waits for every idle
+      ;; vCPU to look again, which TamaGo never asks one to do, so the
+      ;; parked are woken.  A timer this near wakes them for nothing.
+      (Call abi/CPUWake -1 0 0 0 0))
+
+    (when (and limited (< until end))
+      (set! end until))
+
+    (while (< (nanotime) end)
+      (pause))
+
+    (let [ns (conv int64 -1)]
+      (when limited
+        (when [(set! ns (- until (nanotime)))] (<= ns 0)
+          (return)))
+
+
+      (Call abi/CPUPark ns 0 0 0 0))))
+
+
+
+(go/func ^:extern ^{:go/linkname "throw runtime.throw"} throw [string])

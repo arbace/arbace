@@ -1,0 +1,288 @@
+(in-ns 'go.arbace.box.hv) (go/file "kvm_linux_amd64.go" :imports [
+
+
+    ^{:line 4} [syscall "syscall"]
+    ^{:line 5} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+(go/const "The amd64 half of the KVM backend.  The general registers travel in\nkvm_run's synced area (KVM_CAP_SYNC_REGS): copied out by KVM at every exit\nand in when changed, so reading RAX or RIP after an exit costs no system\ncall.  struct kvm_sregs is fetched when first asked for after a run, and\nset before the next one when changed.\n"
+  ^{:line 14} [^{:val 2156965505} kvmGetRegs 0x8090ae81]
+  ^{:line 15} [^{:val 2167975555} kvmGetSregs 0x8138ae83]
+  ^{:line 16} [^{:val 1094233732} kvmSetSregs 0x4138ae84]
+  ^{:line 17} [^{:val 3221794309} kvmGetSupportedCPU 0xc008ae05]
+  ^{:line 18} [^{:val 1074310800} kvmSetCPUID2 0x4008ae90]
+  ^{:line 19} [^{:val 44615} kvmSetTSSAddr 0xae47]
+  ^{:line 20} [^{:val 1} kvmSyncX86Regs 1]
+  ^{:line 21} [^{:val 256} kvmCPUIDEntries 256]
+  ^{:line 22} [^{:val 4294692864} tssAddr 0xfffbd000] ; three pages under 4 GiB VMX wants for itself
+  ^{:line 23} [^{:val 18} nRegs 18]
+  ^{:line 24} [^{:val 144} sizeofKvmRegs (* nRegs 8)]
+  ^{:line 25} [^{:val 40} sizeofKvmCpuidEntry 40])
+
+
+
+
+
+
+(go/const ^{:val 63 :doc "ECPortIO is not an Arm exception class: it is the class this backend\ngives an I/O-port exit (`out` on amd64), whose port is the exit's\nPhysicalAddress and whose value RAX holds (SRT 0).  KVM completes the\ninstruction when the vCPU runs again.\n"} ECPortIO 0x3f)
+
+(go/type vmISA (struct))
+
+(go/type kvmSegment (struct
+    ^{:line 37 :tag uint64} base
+    ^{:line 38 :tag uint32} limit
+    ^{:line 39 :tag uint16} selector
+    ^{:line 40 :tag uint8} typ ^uint8 present ^uint8 dpl ^uint8 db ^uint8 s ^uint8 l ^uint8 g ^uint8 avl ^uint8 un
+    ^{:line 41 :tag uint8} _))
+
+
+(go/type kvmDtable (struct
+    ^{:line 45 :tag uint64} base
+    ^{:line 46 :tag uint16} limit
+    ^{:line 47 :tag (array 3 uint16)} _))
+
+
+(go/type kvmSregs (struct
+    ^{:line 51 :tag (array 8 kvmSegment)} seg ; cs ds es fs gs ss tr ldt
+    ^{:line 52 :tag kvmDtable} gdt ^kvmDtable idt
+    ^{:line 53 :tag uint64} cr0 ^uint64 cr2 ^uint64 cr3 ^uint64 cr4 ^uint64 cr8 ^uint64 efer ^uint64 _
+    ^{:line 54 :tag (array 4 uint64)} _))
+
+
+(go/type vcpuISA (struct
+    ^{:line 58 :tag (array nRegs uint64)} regs
+    ^{:line 59 :tag bool} regsDirty
+    ^{:line 60 :tag kvmSregs} sregs
+    ^{:line 61 :tag bool} sregsValid ^bool sregsDirt))
+
+
+^{:go/end 64} (go/func vmType ^uintptr [uint32] 0)
+
+^{:go/breaks [4] :go/end 71} (go/func vmInit ^error []
+  (when [(values _ err) (ioctl (.-fd vm) kvmSetTSSAddr tssAddr)] (!= err nil)
+    (return (fail Error "KVM_SET_TSS_ADDR" err)))
+
+  nil)
+
+
+^{:go/end 92} (go/func vcpuInit ^error [^{:tag (* vcpu)} c]
+  (when [(values caps _) (ioctl (.-kvm vm) kvmCheckExtension kvmCapSyncRegs)] (== (bit-and caps kvmSyncX86Regs) 0)
+    (return (fail Unsupported "KVM_CAP_SYNC_REGS" syscall/ENOSYS)))
+
+  ;; the host's CPUID, as KVM supports it: without it the guest has no NX,
+  ;; and EFER.NXE is refused
+  ^{:go/breaks [7]} (let [buf (make (slice byte) (+ 8 (* kvmCPUIDEntries sizeofKvmCpuidEntry)))]
+    (set! @(conv (* uint32) (conv unsafe/Pointer (addr (aget buf 0)))) kvmCPUIDEntries)
+    (when [(values _ err) (ioctlPtr (.-kvm vm) kvmGetSupportedCPU (conv unsafe/Pointer (addr (aget buf 0))))] (!= err nil)
+      (return (fail Error "KVM_GET_SUPPORTED_CPUID" err)))
+
+    (when [(values _ err) (ioctlPtr (.-fd c) kvmSetCPUID2 (conv unsafe/Pointer (addr (aget buf 0))))] (!= err nil)
+      (return (fail Error "KVM_SET_CPUID2" err)))
+
+    (when [(values _ err) (ioctlPtr (.-fd c) kvmGetRegs (conv unsafe/Pointer (addr (aget (.-regs (.-isa c)) 0))))] (!= err nil)
+      (return (fail Error "KVM_GET_REGS" err)))
+
+    (.put64 c kvmRunValidRegs kvmSyncX86Regs)
+    nil))
+
+
+^{:go/breaks [5] :go/end 107} (go/func beforeRun ^error [^{:tag (* vcpu)} c]
+  (when (.-sregsDirt (.-isa c))
+    (when [(values _ err) (ioctlPtr (.-fd c) kvmSetSregs (conv unsafe/Pointer (addr (.-sregs (.-isa c)))))] (!= err nil)
+      (return (fail IllegalGuest "KVM_SET_SREGS" err)))
+
+    (set! (.-sregsDirt (.-isa c)) false))
+
+  (when (.-regsDirty (.-isa c))
+    (copy (subslice (.-run c) kvmRunSyncRegs (+ kvmRunSyncRegs sizeofKvmRegs)) (unsafe/Slice (conv (* byte) (conv unsafe/Pointer (addr (aget (.-regs (.-isa c)) 0)))) sizeofKvmRegs))
+    (.put64 c kvmRunDirtyRegs kvmSyncX86Regs)
+    (set! (.-regsDirty (.-isa c)) false))
+
+  nil)
+
+
+^{:go/end 113} (go/func afterRun [^{:tag (* vcpu)} c ^bool _]
+  (.put64 c kvmRunDirtyRegs 0)
+  (copy (unsafe/Slice (conv (* byte) (conv unsafe/Pointer (addr (aget (.-regs (.-isa c)) 0)))) sizeofKvmRegs) (subslice (.-run c) kvmRunSyncRegs (+ kvmRunSyncRegs sizeofKvmRegs)))
+  (set! (.-sregsValid (.-isa c)) false))
+
+
+
+
+
+^{:go/end 128} (go/func mmioExit "mmioExit is a store's syndrome: SRT 0, RAX, when RAX holds the value\nstored (the guest's ABI); without a valid instruction syndrome when not.\nRIP is past the store already.\n" ^Syndrome [^{:tag (* vcpu)} c ^int n ^bool write ^uint64 data]
+  (let [s (DataAbort n 0 write)
+      ^{:line 120} mask (bit-not (conv uint64 0))]
+    (when (< n 8)
+      (set! mask (- ^uint64 (<< 1 (* 8 n)) 1)))
+
+    (when (!= (bit-and (aget (.-regs (.-isa c)) RegRAX) mask) data)
+      (set! s bit-and-not (<< 1 24)))
+
+    ^{:line 127} s))
+
+
+
+^{:go/end 142} (go/func isaExit "isaExit reports an `out` to a port as an ECPortIO exception exit.\n" ^bool [^{:tag (* vcpu)} c ^uint32 reason]
+  (when (or (!= reason kvmExitIO) (!= (aget (.-run c) kvmIODirection) 1))
+    (return false))
+
+  ^{:go/breaks [6]} (let [n (conv int (aget (.-run c) kvmIOSize))
+      ^{:line 136} s (DataAbort n 0 true)]
+    (set! s (bit-or (bit-and-not s (<< 0x3f 26)) (<< ECPortIO 26)))
+    (set! (.-Reason (.-exit c)) ExitReasonException)
+    (set! (.-Syndrome (.-Exception (.-exit c))) (conv uint64 s))
+    (set! (.-PhysicalAddress (.-Exception (.-exit c))) (conv IPA (.u16 c kvmIOPort)))
+    true))
+
+
+
+^{:go/end 154} (go/func VCPUGetReg "VCPUGetReg is hv_vcpu_get_reg.\n" [^VCPU v ^Reg r] :results [uint64 error]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (when (>= r nRegs)
+      (return 0 BadArgument))
+
+    (return (aget (.-regs (.-isa c)) r) nil)))
+
+
+
+^{:go/end 168} (go/func VCPUSetReg "VCPUSetReg is hv_vcpu_set_reg.\n" ^error [^VCPU v ^Reg r ^uint64 val]
+  ^{:go/breaks [6]} (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return err))
+
+    (when (>= r nRegs)
+      (return BadArgument))
+
+    (aset (.-regs (.-isa c)) r val)
+    (set! (.-regsDirty (.-isa c)) true)
+    nil))
+
+
+^{:go/end 178} (go/method sregs [^{:tag (* vcpu)} c] :results [(* kvmSregs) error]
+  (when (not (.-sregsValid (.-isa c)))
+    (when [(values _ err) (ioctlPtr (.-fd c) kvmGetSregs (conv unsafe/Pointer (addr (.-sregs (.-isa c)))))] (!= err nil)
+      (return nil (fail Error "KVM_GET_SREGS" err)))
+
+    (set! (.-sregsValid (.-isa c)) true))
+
+  (return (addr (.-sregs (.-isa c))) nil))
+
+
+^{:go/end 184} (go/method ar ^uint64 [^{:tag (* kvmSegment)} s]
+  (let [v (bit-or (conv uint64 (bit-and (.-typ s) 15)) (<< (conv uint64 (bit-and (.-s s) 1)) 4) (<< (conv uint64 (bit-and (.-dpl s) 3)) 5) (<< (conv uint64 (bit-and (.-present s) 1)) 7)
+        (<< (conv uint64 (bit-and (.-avl s) 1)) 12) (<< (conv uint64 (bit-and (.-l s) 1)) 13) (<< (conv uint64 (bit-and (.-db s) 1)) 14) (<< (conv uint64 (bit-and (.-g s) 1)) 15) (<< (conv uint64 (bit-and (.-un s) 1)) 16))]
+    ^{:line 183} v))
+
+
+^{:go/end 189} (go/method setAR [^{:tag (* kvmSegment)} s ^uint64 v]
+  (set! (values (.-typ s) (.-s s) (.-dpl s) (.-present s)) (values (conv uint8 (bit-and v 15)) (conv uint8 (bit-and (>> v 4) 1)) (conv uint8 (bit-and (>> v 5) 3)) (conv uint8 (bit-and (>> v 7) 1))))
+  (set! (values (.-avl s) (.-l s) (.-db s) (.-g s) (.-un s)) (values (conv uint8 (bit-and (>> v 12) 1)) (conv uint8 (bit-and (>> v 13) 1)) (conv uint8 (bit-and (>> v 14) 1)) (conv uint8 (bit-and (>> v 15) 1)) (conv uint8 (bit-and (>> v 16) 1)))))
+
+
+
+^{:go/end 251} (go/func sysReg "sysReg is where r lives in struct kvm_sregs.\n" [^{:tag (* kvmSregs)} s ^SysReg r ^bool set ^uint64 val] :results [uint64 bool]
+  (when (and (>= r segFirst) (< r (+ segFirst (* 8 4))))
+    (let [seg (addr (aget (.-seg s) (/ (- r segFirst) 4)))]
+      (switch (% (- r segFirst) 4)
+        (case [segSelector]
+          (when set
+            (set! (.-selector seg) (conv uint16 val)))
+
+          (return (conv uint64 (.-selector seg)) true))
+        (case [segBase]
+          (when set
+            (set! (.-base seg) val))
+
+          (return (.-base seg) true))
+        (case [segLimit]
+          (when set
+            (set! (.-limit seg) (conv uint32 val)))
+
+          (return (conv uint64 (.-limit seg)) true))
+        (default
+          (when set
+            (.setAR seg val))
+
+          (return (.ar seg) true)))))
+
+
+  (let [^{:tag (* uint64)} p (zero (* uint64))]
+    (switch r
+      (case [SysRegCR0]
+        (set! p (addr (.-cr0 s))))
+      (case [SysRegCR2]
+        (set! p (addr (.-cr2 s))))
+      (case [SysRegCR3]
+        (set! p (addr (.-cr3 s))))
+      (case [SysRegCR4]
+        (set! p (addr (.-cr4 s))))
+      (case [SysRegEFER]
+        (set! p (addr (.-efer s))))
+      (case [SysRegGDTRBase]
+        (set! p (addr (.-base (.-gdt s)))))
+      (case [SysRegIDTRBase]
+        (set! p (addr (.-base (.-idt s)))))
+      (case [SysRegGDTRLimit]
+        (when set
+          (set! (.-limit (.-gdt s)) (conv uint16 val)))
+
+        (return (conv uint64 (.-limit (.-gdt s))) true))
+      (case [SysRegIDTRLimit]
+        (when set
+          (set! (.-limit (.-idt s)) (conv uint16 val)))
+
+        (return (conv uint64 (.-limit (.-idt s))) true))
+      (default
+        (return 0 false)))
+
+    (when set
+      (set! @p val))
+
+    (return @p true)))
+
+
+
+^{:go/end 268} (go/func VCPUGetSysReg "VCPUGetSysReg is hv_vcpu_get_sys_reg.\n" [^VCPU v ^SysReg r] :results [uint64 error]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (let [(values s ^:assign err) (.sregs c)]
+      (when (!= err nil)
+        (return 0 err))
+
+      (let [(values val ok) (sysReg s r false 0)]
+        (when (not ok)
+          (return 0 BadArgument))
+
+        (return val nil)))))
+
+
+
+^{:go/end 285} (go/func VCPUSetSysReg "VCPUSetSysReg is hv_vcpu_set_sys_reg.\n" ^error [^VCPU v ^SysReg r ^uint64 val]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return err))
+
+    ^{:go/breaks [5]} (let [(values s ^:assign err) (.sregs c)]
+      (when (!= err nil)
+        (return err))
+
+      (when [(values _ ok) (sysReg s r true val)] (not ok)
+        (return BadArgument))
+
+      (set! (.-sregsDirt (.-isa c)) true)
+      nil)))
+
+
+^{:go/end 289} (go/method put64 [^{:tag (* vcpu)} c ^int off ^uint64 v]
+  (set! @(conv (* uint64) (conv unsafe/Pointer (addr (aget (.-run c) off)))) v))

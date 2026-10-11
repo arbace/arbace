@@ -1,0 +1,182 @@
+;; Package hv is a virtual machine as Apple's Hypervisor.framework shapes one
+;; (its arm64 C API, <Hypervisor/Hypervisor.h>), one Go function for each C
+;; function used, in the same order of arguments, with the same names for
+;; registers, system registers and exits:
+;;
+;;	hv_vm_create(config)                 VMCreate(config)
+;;	hv_vm_destroy()                      VMDestroy()
+;;	hv_vm_map(addr, ipa, size, flags)    VMMap(mem, ipa, flags)
+;;	hv_vm_unmap(ipa, size)               VMUnmap(ipa, size)
+;;	hv_vcpu_create(&vcpu, &exit, config) VCPUCreate() (vcpu, exit, err)
+;;	hv_vcpu_destroy(vcpu)                VCPUDestroy(vcpu)
+;;	hv_vcpu_run(vcpu)                    VCPURun(vcpu)
+;;	hv_vcpus_exit(vcpus, count)          VCPUsExit(vcpus...)
+;;	hv_vcpu_get_reg / set_reg            VCPUGetReg / VCPUSetReg
+;;	hv_vcpu_get_sys_reg / set_sys_reg    VCPUGetSysReg / VCPUSetSysReg
+;;
+;; As in the framework there is one virtual machine per process, a vCPU is
+;; created, run and destroyed on one thread (the caller locks it:
+;; runtime.LockOSThread), and VCPURun returns with the exit record VCPUCreate
+;; handed out filled in -- hv_vcpu_exit_t's reason and, for an exception, its
+;; syndrome (ESR_EL2) and the faulting virtual and physical addresses.
+;;
+;; The Linux backend (kvm_linux*.go) is KVM through raw ioctl, no cgo.  It
+;; reports what the framework would: an MMIO store as an exception exit with a
+;; data-abort syndrome (ESR's EC 0x24, ISV set, SRT, SAS and WnR filled), the
+;; physical address in Exception.PhysicalAddress -- so a monitor decodes the
+;; framework's form on every target.  On arm64 the program counter after such
+;; an exit is the faulting store's, as the framework leaves it, and the
+;; monitor advances it.  The macOS backend is hvf_darwin.go, the framework
+;; bound by purego with no cgo, built for darwin/arm64 here and run only on
+;; the Mac (doc/GUEST.md, *Running on the Mac*).
+;;
+;; amd64 sits behind the same shape with x86 names (regs_amd64.go): RAX..R15,
+;; RIP and RFLAGS as registers; CR0, CR3, CR4, EFER, the descriptor tables and
+;; each segment's selector, base, limit and access rights (VMX's encoding) as
+;; system registers.  Apple's x86 API is not the model.  On amd64 a store's
+;; exit leaves RIP past the store, since KVM has completed it.
+(in-ns 'go.arbace.box.hv) (go/file "hv.go" :doc "Package hv is a virtual machine as Apple's Hypervisor.framework shapes one\n(its arm64 C API, <Hypervisor/Hypervisor.h>), one Go function for each C\nfunction used, in the same order of arguments, with the same names for\nregisters, system registers and exits:\n\n\thv_vm_create(config)                 VMCreate(config)\n\thv_vm_destroy()                      VMDestroy()\n\thv_vm_map(addr, ipa, size, flags)    VMMap(mem, ipa, flags)\n\thv_vm_unmap(ipa, size)               VMUnmap(ipa, size)\n\thv_vcpu_create(&vcpu, &exit, config) VCPUCreate() (vcpu, exit, err)\n\thv_vcpu_destroy(vcpu)                VCPUDestroy(vcpu)\n\thv_vcpu_run(vcpu)                    VCPURun(vcpu)\n\thv_vcpus_exit(vcpus, count)          VCPUsExit(vcpus...)\n\thv_vcpu_get_reg / set_reg            VCPUGetReg / VCPUSetReg\n\thv_vcpu_get_sys_reg / set_sys_reg    VCPUGetSysReg / VCPUSetSysReg\n\nAs in the framework there is one virtual machine per process, a vCPU is\ncreated, run and destroyed on one thread (the caller locks it:\nruntime.LockOSThread), and VCPURun returns with the exit record VCPUCreate\nhanded out filled in -- hv_vcpu_exit_t's reason and, for an exception, its\nsyndrome (ESR_EL2) and the faulting virtual and physical addresses.\n\nThe Linux backend (kvm_linux*.go) is KVM through raw ioctl, no cgo.  It\nreports what the framework would: an MMIO store as an exception exit with a\ndata-abort syndrome (ESR's EC 0x24, ISV set, SRT, SAS and WnR filled), the\nphysical address in Exception.PhysicalAddress -- so a monitor decodes the\nframework's form on every target.  On arm64 the program counter after such\nan exit is the faulting store's, as the framework leaves it, and the\nmonitor advances it.  The macOS backend is hvf_darwin.go, the framework\nbound by purego with no cgo, built for darwin/arm64 here and run only on\nthe Mac (doc/GUEST.md, *Running on the Mac*).\n\namd64 sits behind the same shape with x86 names (regs_amd64.go): RAX..R15,\nRIP and RFLAGS as registers; CR0, CR3, CR4, EFER, the descriptor tables and\neach segment's selector, base, limit and access rights (VMX's encoding) as\nsystem registers.  Apple's x86 API is not the model.  On amd64 a store's\nexit leaves RIP past the store, since KVM has completed it.\n" :imports [
+
+    ^{:line 40} [fmt "fmt"]])
+
+
+
+(go/type Return "Return is hv_return_t.  A function here returns nil for HV_SUCCESS and a\nReturn otherwise.\n" uint32)
+
+
+(go/const "The hv_return_t values (Hypervisor/hv_error.h).\n"
+  ^{:line 48} [^{:tag Return :val 0} Success 0]
+  ^{:line 49} [^{:tag Return :val 4209590273} Error 0xfae94001]
+  ^{:line 50} [^{:tag Return :val 4209590274} Busy 0xfae94002]
+  ^{:line 51} [^{:tag Return :val 4209590275} BadArgument 0xfae94003]
+  ^{:line 52} [^{:tag Return :val 4209590276} IllegalGuest 0xfae94004]
+  ^{:line 53} [^{:tag Return :val 4209590277} NoResources 0xfae94005]
+  ^{:line 54} [^{:tag Return :val 4209590278} NoDevice 0xfae94006]
+  ^{:line 55} [^{:tag Return :val 4209590279} Denied 0xfae94007]
+  ^{:line 56} [^{:tag Return :val 4209590287} Unsupported 0xfae9400f])
+
+
+^{:go/end 79} (go/method Error ^string [^Return r]
+  (switch r
+    (case [Error]
+      (return "HV_ERROR"))
+    (case [Busy]
+      (return "HV_BUSY"))
+    (case [BadArgument]
+      (return "HV_BAD_ARGUMENT"))
+    (case [IllegalGuest]
+      (return "HV_ILLEGAL_GUEST_STATE"))
+    (case [NoResources]
+      (return "HV_NO_RESOURCES"))
+    (case [NoDevice]
+      (return "HV_NO_DEVICE"))
+    (case [Denied]
+      (return "HV_DENIED"))
+    (case [Unsupported]
+      (return "HV_UNSUPPORTED")))
+
+  (fmt/Sprintf "hv_return_t %#x" (conv uint32 r)))
+
+
+
+(go/type IPA "IPA is hv_ipa_t, a guest-physical address.\n" uint64)
+
+
+(go/type MemoryFlags "MemoryFlags is hv_memory_flags_t.\n" uint64)
+
+
+(go/const "HV_MEMORY_READ, _WRITE, _EXEC.\n"
+  ^{:line 89} [^{:tag MemoryFlags :val 1} MemoryRead (<< 1 0)]
+  ^{:line 90} [^{:tag MemoryFlags :val 2} MemoryWrite (<< 1 1)]
+  ^{:line 91} [^{:tag MemoryFlags :val 4} MemoryExec (<< 1 2)])
+
+
+
+
+(go/type VMConfig "VMConfig is hv_vm_config_t: nil for the defaults.  IPASize is\nhv_vm_config_set_ipa_size's bits (0: the default, 36 on the framework).\n" (struct
+    ^{:line 97 :tag uint32} IPASize))
+
+
+
+(go/type VCPU "VCPU is hv_vcpu_t.\n" uint64)
+
+
+(go/type ExitReason "ExitReason is hv_exit_reason_t.\n" uint32)
+
+
+(go/const "The hv_exit_reason_t values.\n"
+  ^{:line 108} [^{:tag ExitReason :val 0} ExitReasonCanceled 0]
+  ^{:line 109} [^{:tag ExitReason :val 1} ExitReasonException 1]
+  ^{:line 110} [^{:tag ExitReason :val 2} ExitReasonVTimerActivated 2]
+  ^{:line 111} [^{:tag ExitReason :val 3} ExitReasonUnknown 3])
+
+
+^{:go/breaks [4] :go/end 124} (go/method String ^string [^ExitReason r]
+  (switch r
+    (case [ExitReasonCanceled]
+      (return "HV_EXIT_REASON_CANCELED"))
+    (case [ExitReasonException]
+      (return "HV_EXIT_REASON_EXCEPTION"))
+    (case [ExitReasonVTimerActivated]
+      (return "HV_EXIT_REASON_VTIMER_ACTIVATED")))
+
+  "HV_EXIT_REASON_UNKNOWN")
+
+
+
+(go/type VCPUExitException "VCPUExitException is hv_vcpu_exit_exception_t.\n" (struct
+    ^{:line 128 :tag uint64} Syndrome ; ESR_EL2 as the exception set it
+    ^{:line 129 :tag uint64} VirtualAddress ; FAR_EL2 (0 where the backend has none)
+    ^{:line 130 :tag IPA} PhysicalAddress)) ; HPFAR_EL2's, the faulting IPA
+
+
+
+
+
+(go/type VCPUExit "VCPUExit is hv_vcpu_exit_t.  Detail is not the framework's: a backend's\nown account of an exit it reports as Unknown (KVM's exit reason and what\nit said), for a diagnostic.\n" (struct
+    ^{:line 137 :tag ExitReason} Reason
+    ^{:line 138 :tag VCPUExitException} Exception
+    ^{:line 139 :tag string} Detail))
+
+
+
+(go/const "The ESR_EL2 fields a monitor decodes (Arm ARM D23.2.41), for a data abort.\n"
+  ^{:line 144} [^{:val 36} ECDataAbortLower 0x24] ; EC: a data abort from a lower exception level
+  ^{:line 145} [^{:val 22} ECHVC64 0x16]) ; EC: HVC from AArch64
+
+
+
+(go/type Syndrome "Syndrome is an ESR_EL2 value, decoded.\n" uint64)
+
+
+^{:go/end 152} (go/method EC "EC is the exception class, ESR[31:26].\n" ^uint32 [^Syndrome s] (bit-and (conv uint32 (>> s 26)) 0x3f))
+
+
+^{:go/end 155} (go/method IL "IL is whether the trapped instruction was 32 bits, ESR[25].\n" ^bool [^Syndrome s] (!= (bit-and (>> s 25) 1) 0))
+
+
+
+^{:go/end 159} (go/method ISV "ISV is whether a data abort's instruction syndrome (SAS, SRT, WnR) is valid,\nISS[24].\n" ^bool [^Syndrome s] (!= (bit-and (>> s 24) 1) 0))
+
+
+^{:go/end 162} (go/method SAS "SAS is the access size, 1 << SAS bytes, ISS[23:22].\n" ^uint32 [^Syndrome s] (bit-and (conv uint32 (>> s 22)) 3))
+
+
+^{:go/end 165} (go/method SRT "SRT is the register the store read or the load wrote, ISS[20:16].\n" ^uint32 [^Syndrome s] (bit-and (conv uint32 (>> s 16)) 0x1f))
+
+
+^{:go/end 168} (go/method WnR "WnR is whether the access was a write, ISS[6].\n" ^bool [^Syndrome s] (!= (bit-and (>> s 6) 1) 0))
+
+
+
+
+^{:go/end 183} (go/func DataAbort "DataAbort is the syndrome of a data abort from a lower level with a valid\ninstruction syndrome: what the framework reports for a store to an\nunmapped IPA, and what the KVM backend makes of an MMIO exit.\n" ^Syndrome [^int size ^uint32 srt ^bool write]
+  (let [sas (conv uint64 0)]
+    (while (< ^int (<< 1 sas) size)
+      (inc! sas))
+
+    (let [s (bit-or (<< (conv uint64 ECDataAbortLower) 26) (<< 1 25) (<< 1 24) (<< sas 22) (<< (conv uint64 (bit-and srt 0x1f)) 16))]
+      (when write
+        (set! s bit-or (<< 1 6)))
+
+      (conv Syndrome s))))

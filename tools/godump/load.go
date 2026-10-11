@@ -224,7 +224,9 @@ func packageJobs(c *config, args []string) ([]*job, *exportMap, error) {
 		}
 		lang := pinnedLang
 		if p.Module != nil && p.Module.GoVersion != "" {
-			lang = "go" + p.Module.GoVersion
+			// the go line names a release (1.27.1), its language version is the
+			// release's language (go1.27), as the go command gives gc's -lang
+			lang = version.Lang("go" + p.Module.GoVersion)
 		}
 		j := &job{key: p.ImportPath, path: p.ImportPath, dir: p.Dir, pkg: p, lang: lang, importMap: p.ImportMap, listErr: p.Error}
 		j.files = append(append(j.files, p.GoFiles...), p.CgoFiles...)

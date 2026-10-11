@@ -1,0 +1,734 @@
+;; Package vmm is the monitor that runs whim's core as a virtual machine's
+;; only code (doc/GUEST.md): the guest image loaded into one slot of RAM, the
+;; vCPU put directly into the mode the core runs in, and an exit loop that
+;; answers each hypercall -- a store to the doorbell, decoded in
+;; Hypervisor.framework's form (package hv) -- by calling the same
+;; editor.Host the Go editor runs on.
+(in-ns 'go.arbace.box.vmm) (go/file "vmm.go" :doc "Package vmm is the monitor that runs whim's core as a virtual machine's\nonly code (doc/GUEST.md): the guest image loaded into one slot of RAM, the\nvCPU put directly into the mode the core runs in, and an exit loop that\nanswers each hypercall -- a store to the doorbell, decoded in\nHypervisor.framework's form (package hv) -- by calling the same\neditor.Host the Go editor runs on.\n" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [elf "debug/elf"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [io "io"]
+    ^{:line 17} [os "os"]
+    ^{:line 18} [sync "sync"]
+    ^{:line 19} [atomic "sync/atomic"]
+    ^{:line 20} [syscall "syscall"]
+    ^{:line 21} [time "time"]
+
+    ^{:line 23} [editor "github.com/arbace/go-whim/editor"]
+    ^{:line 24} [hv "arbace/box/hv"]])
+
+
+
+
+
+(go/const "The hypercalls: the 17 host functions in doc/GUEST.md's order, and the\nruntime's report of a fault.  13 and 14, host_alloc and host_free, are\nanswered in the guest and never made.\n"
+  ^{:line 31} [^{:val 1} callHostInit (+ iota 1)]
+  ^{:line 32} [^{:val 2} callGetWinsize]
+  ^{:line 33} [^{:val 3} callTermStart]
+  ^{:line 34} [^{:val 4} callTermStop]
+  ^{:line 35} [^{:val 5} callTTYKeys]
+  ^{:line 36} [^{:val 6} callNowMs]
+  ^{:line 37} [^{:val 7} callDelay]
+  ^{:line 38} [^{:val 8} callWaitForInput]
+  ^{:line 39} [^{:val 9} callReadInput]
+  ^{:line 40} [^{:val 10} callSuspend]
+  ^{:line 41} [^{:val 11} callExit]
+  ^{:line 42} [^{:val 12} callMessage]
+  ^{:line 43} [^{:val 13} callAlloc]
+  ^{:line 44} [^{:val 14} callFree]
+  ^{:line 45} [^{:val 15} callWrite]
+  ^{:line 46} [^{:val 16} callTime]
+  ^{:line 47} [^{:val 17} callRaise]
+  ^{:line 48} [^{:val 18} callFault]
+  ^{:line 49} [^{:val 19} callRandom] ; a Go guest's (vmm/tamago.go)
+  ^{:line 50} [^{:val 20} callWaitRead] ; a wait and, when there is input, a read (guest/abi's WaitRead)
+  ^{:line 51} [^{:val 21} callCPUStart] ; a Go guest's on several vCPUs (vmm/smp.go)
+  ^{:line 52} [^{:val 22} callCPUPark]
+  ^{:line 53} [^{:val 23} callCPUWake]
+  ^{:line 54} [^{:val 24} callCPUSelf]
+  ^{:line 55} [^{:val 25} callBlobPut] ; the store's (vmm/store.go)
+  ^{:line 56} [^{:val 26} callBlobSize]
+  ^{:line 57} [^{:val 27} callBlobGet]
+  ^{:line 58} [^{:val 28} callRefGet]
+  ^{:line 59} [^{:val 29} callRefSet]
+  ^{:line 60} [^{:val 30} nCalls])
+
+
+(go/var callNames ^{:go/breaks [8 17 27]} (lit (array nCalls string) "" "host_init" "get_winsize" "term_start" "term_stop" "tty_keys"
+    "now_ms" "delay" "wait_for_input" "read_input" "suspend" "exit" "message" "alloc" "free"
+    "write" "time" "raise" "fault" "random" "wait_read" "cpu_start" "cpu_park" "cpu_wake" "cpu_self"
+    "blob_put" "blob_size" "blob_get" "ref_get" "ref_set"))
+
+
+(go/const "The call block, as guest/rt.c lays it out: nr, a[5], ret, event.\n"
+  ^{:line 70} [^{:val 0} cbNr 0]
+  ^{:line 71} [^{:val 8} cbArgs 8]
+  ^{:line 72} [^{:val 48} cbRet 48]
+  ^{:line 73} [^{:val 56} cbEvent 56]
+  ^{:line 74} [^{:val 64} cbSize 64])
+
+
+
+
+(go/type Config "Config is a run: the guest's ELF image, the host it asks, its command\nline, and the monitor's own options.\n" (struct
+    ^{:line 80 :tag (slice byte)} Image
+    ^{:line 81 :tag editor/Host} Host
+    ^{:line 82 :tag (slice string)} Args
+
+
+    ^{:line 85 :tag Store :doc "Store, when not nil, answers the store's calls (guest/abi's BlobPut\nand the rest; vmm/store.go): the box's data, on the host.\n"} Store
+
+
+    ^{:line 88 :tag time/Duration :doc "Watchdog, when not zero, ends a guest that runs that long without a\nhypercall.\n"} Watchdog
+
+    ^{:line 90 :tag io/Writer :doc "Stats, when not nil, is written the run's counts when it ends.\n"} Stats
+
+
+    ^{:line 93 :tag (func [] [error]) :doc "Seccomp, when set, is called on the vCPU's thread once the VM is\nbuilt and before the guest first runs: the filter goes on there.\n"} Seccomp
+
+
+
+    ^{:line 97 :tag int :doc "CPUs is a Go guest's vCPUs (doc/GUEST.md, *SMP*), 1 to MaxCPUs: 0\nor 1 is one, the boot vCPU alone, as before there were more.  A C\nguest has one whatever this says.\n"} CPUs
+
+
+    ^{:line 100 :tag time/Duration :doc "Park is the longest a parked vCPU waits while another runs the\nguest (vmm/smp.go): 0 is DefaultPark.\n"} Park))
+
+
+
+(go/const ^{:val 32 :doc "MaxCPUs is the most vCPUs a guest is given (guest/abi's).\n"} MaxCPUs maxCPUs)
+
+
+(go/type Stats "Stats is what a run counted, over its vCPUs.\n" (struct
+    ^{:line 108 :tag (array nCalls uint64)} Calls
+    ^{:line 109 :tag uint64} Exits ; VCPURun's returns
+    ^{:line 110 :tag uint64} Runs ; KVM_RUN calls (the backend's)
+    ^{:line 111 :tag uint64} Spurious ; of those, interrupted by a signal and run again
+    ^{:line 112 :tag time/Duration} Guest
+    ^{:line 113 :tag time/Duration} Longest ; the longest run between two exits
+    ^{:line 114 :tag time/Duration} Host)) ; answering calls, a park's wait not counted
+
+
+
+
+(go/type deadly "deadly is the panic the host's deathtrap callback unwinds with: a deadly\nsignal, carried back to the guest in the call's event.\n" int32)
+
+
+
+(go/type Fault "Fault is a run's end by a fault the guest took, or an exit the monitor\ncannot answer: what the C editor would have died of a signal for.\n" (struct ^string Msg))
+
+^{:go/end 125} (go/method Error ^string [^{:tag (* Fault)} f] (.-Msg f))
+
+
+
+
+
+
+^{:go/end 147} (go/func Run "Run runs the guest in cfg and returns its exit code: the boot vCPU on\nthe calling goroutine, which it locks to its thread, and each other a\ngoroutine of its own on a thread of its own.  A Host whose Exit does not\nreturn (the terminal's) ends the process there; one that panics with\neditor.Exit has its code returned, as editor.Main does.\n" [^Config cfg] :results [^int code ^error err]
+  (let [(values m ^:assign err) (newMachine cfg)]
+    (when (!= err nil)
+      (return 1 err))
+
+    (defer (.close m))
+    (let [r (.run m)]
+      (when (!= (.-panic r) nil)
+        (let [(values c ok) (assert editor/Exit (.-panic r))]
+          (when (not ok)
+            (panic (.-panic r)))
+
+          (return (conv int c) nil)))
+
+      (return (.-code r) (.-err r)))))
+
+
+(go/type machine (struct
+    ^{:line 150 :tag Config} cfg
+    ^{:line 151 :tag (slice byte)} mem
+    ^{:line 152 :tag (* layout)} l
+    ^{:line 153 :tag (slice (* vcpu))} cpus
+
+    ^{:line 155 :tag (array nCalls atomic/Uint64) :doc "calls counts each call, from every vCPU\n"} calls
+
+
+    ^{:line 158 :tag (chan (struct)) :doc "host is the Host's lock: one call at a time, as the C core makes\nthem (vmm/smp.go)\n"} host
+    ^{:line 159 :tag smp} smp
+
+    ^{:line 161 :tag (chan (struct)) :doc "quit is closed when the run ends: every vCPU leaves its loop\n"} quit
+    ^{:line 162 :tag sync/Once} quitOnce
+    ^{:line 163 :tag result} end
+    ^{:line 164 :tag sync/Once} endOnce
+    ^{:line 165 :tag atomic/Bool} killed))
+
+
+
+(go/type vcpu "vcpu is one of the machine's vCPUs and its exit loop's own counts.\n" (struct
+    ^{:line 170 :tag (* machine)} m
+    ^{:line 171 :tag int} id
+    ^{:line 172 :tag hv/VCPU} v
+    ^{:line 173 :tag (* hv/VCPUExit)} exit
+
+    ^{:line 175 :tag uint64 :doc "the loop's counts, written by its goroutine alone\n"} exits ^{:tag uint64 :doc "the loop's counts, written by its goroutine alone\n"} runs ^{:tag uint64 :doc "the loop's counts, written by its goroutine alone\n"} spurious
+    ^{:line 176 :tag time/Duration} guest ^time/Duration longest ^time/Duration host ^time/Duration parked ; parked: of host, in CPUPark
+
+
+    ^{:line 179 :tag atomic/Int64 :doc "the watchdog's: when it last made a call (ns), and whether it is in\none or parked\n"} lastCall
+    ^{:line 180 :tag atomic/Bool} inHost
+
+    ^{:line 182 :tag (chan (array 5 int64)) :doc "an AP's: its CPUStart, whether it has had one, its park\n"} start
+    ^{:line 183 :tag atomic/Bool} started
+    ^{:line 184 :tag park} park
+
+
+    ^{:line 187 :tag (chan (struct)) :doc "loopDone is closed when its loop has ended, done when its goroutine\nhas (its vCPU destroyed)\n"} loopDone
+    ^{:line 188 :tag (chan (struct))} done))
+
+
+
+
+(go/type result "result is how a run ended: an exit code, an error, or a panic the Host\nmade, carried to Run's goroutine.\n" (struct
+    ^{:line 194 :tag int} code
+    ^{:line 195 :tag error} err
+    ^{:line 196 :tag any} panic))
+
+
+
+(go/var ^{:doc "errStopped is a loop's end because another vCPU's ended the run.\n"} errStopped (errors/New "stopped"))
+
+^{:go/end 271} (go/func newMachine [^Config cfg] :results [(* machine) error]
+  (let [(values f err) (elf/NewFile (bytes/NewReader (.-Image cfg)))]
+    (when (!= err nil)
+      (return nil (fmt/Errorf "the guest image: %w" err)))
+
+    (let [(values im ^:assign err) (loadImage f elfMachine)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [n (min (max (.-CPUs cfg) 1) maxCPUs)]
+        (when (and (not (isTamaGo f)) (== (.-apEntry im) 0))
+          (set! n 1)) ; the C guest: one vCPU, the core's loop on it
+
+        (when (and (> n 1) (== (.-apEntry im) 0))
+          (return nil (fmt/Errorf "the guest image has no whim_apentry: it runs on one vCPU, not %d" n)))
+
+        (let [m (addr (lit machine :cfg cfg :l (layoutFor f im n) :host (make (chan (struct)) 1) :quit (make (chan (struct)))))]
+          (set! (.-limit (.-smp m)) (^{:inst [time/Duration]} cmp/Or (.-Park cfg) DefaultPark))
+          (set! (values (.-mem m) err) (syscall/Mmap -1 0 (conv int (.-size (.-l m))) (bit-or syscall/PROT_READ syscall/PROT_WRITE)
+              (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON syscall/MAP_NORESERVE)))
+          (when (!= err nil)
+            (return nil (fmt/Errorf "the guest's %d MiB: %w" (>> (.-size (.-l m)) 20) err)))
+
+          (when [err (.load im (.-mem m))] (!= err nil)
+            (.close m)
+            (return nil err))
+
+          (when [err (.writeArgs (.-l m) (.-mem m) (.-Args cfg))] (!= err nil)
+            (.close m)
+            (return nil err))
+
+          (hv/LockThread)
+          (when [err (hv/VMCreate nil)] (!= err nil)
+            (.close m)
+            (return nil err))
+
+          (vmSetup)
+          (when [err (hv/VMMap (.-mem m) 0 (bit-or hv/MemoryRead hv/MemoryWrite hv/MemoryExec))] (!= err nil)
+            (hv/VMDestroy)
+            (.close m)
+            (return nil err))
+
+          (let [boot (.newVCPU m 0)]
+            (set! (values (.-v boot) (.-exit boot) err) (hv/VCPUCreate))
+            (when (!= err nil)
+              (hv/VMDestroy)
+              (.close m)
+              (return nil err))
+
+            (set! (.-cpus m) (lit (slice (* vcpu)) boot))
+            (when [err (boot0 (.-v boot) (.-mem m) (.-l m))] (!= err nil)
+              (.destroy m)
+              (return nil err))
+
+            ;; The other vCPUs, each created on a thread of its own and kept there
+            ;; (hv_vcpu_create's rule), all before the guest runs: the filter
+            ;; (Seccomp) goes on with them all there, and allows no KVM_CREATE_VCPU.
+            (for [i 1] (< i n) (inc! i)
+              (let [c (.newVCPU m i)
+                  ^{:line 261} ready (make (chan error))]
+                (go (.ap c ready))
+                (when [err (<! ready)] (!= err nil)
+                  (<! (.-done c))
+                  (.destroy m)
+                  (return nil err))
+
+                (set! (.-cpus m) (append (.-cpus m) c))))
+
+            (return m nil)))))))
+
+
+^{:go/end 280} (go/method newVCPU ^{:tag (* vcpu)} [^{:tag (* machine)} m ^int i]
+  (let [c (addr (lit vcpu :m m :id i :loopDone (make (chan (struct))) :done (make (chan (struct)))))]
+    (.init (.-p (.-park c)))
+    (when (> i 0)
+      (set! (.-start c) (make (chan (array 5 int64)) 1)))
+
+    ^{:line 279} c))
+
+
+
+^{:go/end 283} (go/func boot0 "boot0 sets the boot vCPU up for the image.\n" ^error [^hv/VCPU v ^{:tag (slice byte)} mem ^{:tag (* layout)} l] (boot v mem l))
+
+
+
+^{:go/end 295} (go/method destroy "destroy ends the machine: the other vCPUs told to quit and waited for\n(each destroys its own, on its own thread), the boot vCPU, the VM.\n" [^{:tag (* machine)} m]
+  (.halt m)
+  (range [_ c (subslice (.-cpus m) 1)]
+    (<! (.-done c)))
+
+  (hv/VCPUDestroy (.-v (aget (.-cpus m) 0)))
+  (hv/VMDestroy)
+  (.close m))
+
+
+^{:go/end 302} (go/method close [^{:tag (* machine)} m]
+  (when (!= (.-mem m) nil)
+    (syscall/Munmap (.-mem m))
+    (set! (.-mem m) nil)))
+
+
+
+
+
+
+^{:go/end 315} (go/method halt "halt ends the run for every vCPU: those waiting to start, parked or\nwaiting for the Host leave at once, and those in the guest are made to\nexit (hv_vcpus_exit).\n" [^{:tag (* machine)} m]
+  (.Do (.-quitOnce m) ^{:go/end 314} (fn []
+      (close (.-quit m))
+      (range [_ c (.-cpus m)]
+        (.wake c) ; a park ends, and sees quit
+        (hv/VCPUsExit (.-v c))))))
+
+
+
+
+
+^{:go/end 321} (go/method finish "finish records how the run ended, the first end only, and halts it.\n" [^{:tag (* machine)} m ^result r]
+  (.Do (.-endOnce m) ^{:go/end 319} (fn [] (set! (.-end m) r)))
+  (.halt m))
+
+
+
+
+^{:go/end 344} (go/method run "run runs the boot vCPU's loop on this goroutine, until the run ends, and\ntears the machine down.\n" ^result [^{:tag (* machine)} m]
+  (defer (.destroy m))
+  (when (!= (.-Seccomp (.-cfg m)) nil)
+    (when [err ((.-Seccomp (.-cfg m)))] (!= err nil)
+      (return (lit result :code 1 :err (fmt/Errorf "seccomp: %w" err)))))
+
+
+  (let [stop (make (chan (struct)))]
+    (defer (close stop))
+    (when (> (.-Watchdog (.-cfg m)) 0)
+      (go (.watchdog m stop)))
+
+    (set! (.-running (.-smp m)) 1)
+    (.serve (aget (.-cpus m) 0))
+    (close (.-loopDone (aget (.-cpus m) 0)))
+    (range [_ c (subslice (.-cpus m) 1)]
+      (<! (.-loopDone c)))
+
+    (.-end m)))
+
+
+
+
+^{:go/end 374} (go/method ap "ap is an AP's goroutine: its vCPU created and set up on this thread,\nthen its start waited for and its loop run, until the run ends.\n" [^{:tag (* vcpu)} c ^{:tag (chan :send error)} ready]
+  (defer (close (.-done c)))
+  (hv/LockThread) ; never unlocked: the thread ends with the goroutine
+  (let [^error err (zero error)]
+    (set! (values (.-v c) (.-exit c) err) (hv/VCPUCreate))
+    (when (!= err nil)
+      (close (.-loopDone c))
+      (>! ready err)
+      (return))
+
+    (defer (hv/VCPUDestroy (.-v c)))
+    (defer (close (.-loopDone c)))
+    (when [err (setupAP (.-v c) (.-l (.-m c)) (.-id c))] (!= err nil)
+      (>! ready err)
+      (return))
+
+    (>! ready nil)
+    (select
+      (case [a (<! (.-start c))]
+        (when [err (startAP (.-v c) (.-l (.-m c)) a)] (!= err nil)
+          (.finish (.-m c) (lit result :code 1 :err err))
+          (return))
+
+        (.serve c))
+      (case (<! (.-quit (.-m c)))))))
+
+
+
+
+
+^{:go/end 389} (go/method serve "serve runs the vCPU's loop and ends the run with its end: an exit, a\nfault, an error, or a Host's panic.\n" [^{:tag (* vcpu)} c]
+  (defer (^{:go/end 379} (fn [] (set! (values (.-runs c) (.-spurious c)) (hv/Stats (.-v c))))))
+  (defer (^{:go/end 384} (fn []
+        (when [r (recover)] (!= r nil)
+          (.finish (.-m c) (lit result :code 1 :panic r))))))
+
+
+  (let [(values code err) (.loop c)]
+    (when (!= err errStopped)
+      (.finish (.-m c) (lit result :code code :err err)))))
+
+
+
+
+^{:go/end 422} (go/method loop "loop runs the vCPU until the guest exits, answering its calls.\n" [^{:tag (* vcpu)} c] :results [int error]
+  (let [m (.-m c)]
+    (.Store (.-lastCall c) (.UnixNano (time/Now)))
+    (while true
+      (let [t0 (time/Now)]
+        (when [err (hv/VCPURun (.-v c))] (!= err nil)
+          (return 1 err))
+
+        (let [t1 (time/Now)]
+          (set! (.-guest c) + (.Sub t1 t0))
+          (set! (.-longest c) (max (.-longest c) (.Sub t1 t0)))
+          (inc! (.-exits c))
+          (switch (.-Reason (.-exit c))
+            (case [hv/ExitReasonException]
+              (let [(values code done err) (.exception c)]
+                (set! (.-host c) + (time/Since t1))
+                (when (or done (!= err nil))
+                  (return code err))))
+
+            (case [hv/ExitReasonCanceled]
+              (when (.Load (.-killed m))
+                (return 1 (.fault m (fmt/Sprintf "the guest ran %s without a hypercall: ended by the watchdog" (.-Watchdog (.-cfg m))))))
+
+              (when (.stopped m)
+                (return 1 errStopped)))
+
+            (default
+              (return 1 (.fault m (fmt/Sprintf "the guest stopped: %s %s" (.-Reason (.-exit c)) (.-Detail (.-exit c))))))))))))
+
+
+
+
+
+^{:go/end 432} (go/method stopped "stopped is whether the run has ended.\n" ^bool [^{:tag (* machine)} m]
+  (select
+    (case (<! (.-quit m))
+      (return true))
+    (default
+      (return false))))
+
+
+
+
+^{:go/end 467} (go/method exception "exception answers an exception exit: a store to the doorbell is a call.\n" [^{:tag (* vcpu)} c] :results [int bool error]
+  (let [m (.-m c)
+      ^{:line 437} e (.-Exception (.-exit c))
+      ^{:line 438} s (conv hv/Syndrome (.-Syndrome e))
+      ^{:line 439} addr (conv uint64 (.-PhysicalAddress e))
+      (values reg alt) (altCall (.-v c) s addr)]
+    (when (not alt)
+      (when (or (!= (.EC s) hv/ECDataAbortLower) (!= addr Doorbell) (not (.ISV s)) (not (.WnR s)))
+        (return 1 false (.fault m (fmt/Sprintf "the guest touched %#x with no memory there (syndrome %#x, pc %#x)" addr (.-Syndrome e) (pc (.-v c))))))
+
+      (let [^bool ok (zero bool)]
+        (when [(set! (values reg ok) (hv/RegForSRT (.SRT s)))] (not ok)
+          (return 1 false (.fault m (fmt/Sprintf "a doorbell store from register %d" (.SRT s)))))))
+
+
+    (let [(values cb err) (hv/VCPUGetReg (.-v c) reg)]
+      (when (!= err nil)
+        (return 1 false err))
+
+      (when [err (advance (.-v c) s)] (!= err nil)
+        (return 1 false err))
+
+      (when (or (!= (% cb cbSize) 0) (< cb imageBase) (> (+ cb cbSize) (.-size (.-l m))))
+        (return 1 false (.fault m (fmt/Sprintf "a call block at %#x, outside the guest's memory" cb))))
+
+      (.Store (.-lastCall c) (.UnixNano (time/Now)))
+      (.Store (.-inHost c) true)
+      (defer (^{:go/end 465} (fn []
+            (.Store (.-lastCall c) (.UnixNano (time/Now)))
+            (.Store (.-inHost c) false))))
+
+      (.call c (subslice (.-mem m) cb (+ cb cbSize))))))
+
+
+
+
+^{:go/end 473} (go/method fault "fault is the end of a guest that did what it must not: the diagnostic,\nthen the C editor's death of a SIGSEGV for the process.\n" ^error [^{:tag (* machine)} m ^string msg]
+  (addr (lit Fault (+ "whim-guest: " msg))))
+
+
+
+
+^{:go/end 482} (go/method guest "guest is a slice of guest memory a call names, or false when it is not\nall in the slot.\n" [^{:tag (* machine)} m ^int64 gpa ^int64 n] :results [(slice byte) bool]
+  (when (or (< n 0) (< gpa 0) (> (conv uint64 gpa) (.-size (.-l m))) (> (conv uint64 n) (- (.-size (.-l m)) (conv uint64 gpa))))
+    (return nil false))
+
+  (return (subslice (.-mem m) gpa (+ gpa n)) true))
+
+
+^{:go/breaks [4] :go/end 489} (go/func b2i ^int64 [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+
+
+^{:go/end 614} (go/method call "call answers the call in block cb: the vCPUs' own (vmm/smp.go) at\nonce, a Host's on m.cfg.Host, one at a time.\n" [^{:tag (* vcpu)} c ^{:tag (slice byte)} cb] :results [^int code ^bool done ^error err]
+  (let [m (.-m c)
+      ^{:line 495} le binary/LittleEndian
+      ^{:line 496} nr (.Uint64 le (subslice cb cbNr))
+      ^{:line 497 :tag (array 5 int64)} a (zero (array 5 int64))]
+    (range [i a]
+      (aset a i (conv int64 (.Uint64 le (subslice cb (+ cbArgs (* 8 i)))))))
+
+    (when (or (== nr 0) (>= nr nCalls) (== nr callAlloc) (== nr callFree))
+      (return 1 false (.fault m (fmt/Sprintf "an unknown call %d" nr))))
+
+    (.Add (aget (.-calls m) nr) 1)
+    (let [ret (conv int64 0)]
+      (switch nr
+        (case [callCPUStart callCPUPark callCPUWake callCPUSelf]
+          (set! (values ret err) (.smpCall c nr a))
+          (when (!= err nil)
+            (return 1 false err))
+
+          (.PutUint64 le (subslice cb cbRet) (conv uint64 ret))
+          (return 0 false nil))
+        (case [callFault]
+          (return 1 false (.fault m (describeFault a))))
+        (case [callBlobPut callBlobSize callBlobGet callRefGet callRefSet]
+          (set! (values ret err) (.storeCall m nr a))
+          (when (!= err nil)
+            (return 1 false err))
+
+          (.PutUint64 le (subslice cb cbRet) (conv uint64 ret))
+          (return 0 false nil)))
+
+      (when (not (.lockHost c))
+        (return 1 false errStopped))
+
+      (defer (.unlockHost c))
+      (let [h (.-Host (.-cfg m))]
+        (defer (^{:go/end 537} (fn []
+              (when [r (recover)] (!= r nil)
+                (let [(values sig ok) (assert deadly r)]
+                  (when (not ok)
+                    (panic r))
+
+                  (.PutUint64 le (subslice cb cbEvent) (conv uint64 sig)))))))
+
+
+        (switch nr
+          (case [callHostInit]
+            (.Init h ^{:go/end 540} (fn [^int32 sig] (panic (conv deadly sig)))))
+          (case [callGetWinsize]
+            (let [(values r c ok) (.WinSize h)]
+              (set! (values ret (aget a 0) (aget a 1)) (values (b2i ok) (conv int64 r) (conv int64 c)))))
+          (case [callTermStart]
+            (.TermStart h))
+          (case [callTermStop]
+            (.TermStop h))
+          (case [callTTYKeys]
+            (let [(values e i icrnl onlcr ok) (.TTYKeys h (conv int32 (aget a 0)))]
+              (set! (values ret (aget a 0) (aget a 1) (aget a 2) (aget a 3)) (values (b2i ok) (conv int64 e) (conv int64 i) (b2i icrnl) (b2i onlcr)))))
+          (case [callNowMs]
+            (set! ret (.NowMs h)))
+          (case [callDelay]
+            (.Delay h (aget a 0) (!= (aget a 1) 0)))
+          (case [callWaitForInput]
+            (set! ret (b2i (.WaitForInput h (aget a 0)))))
+          (case [callReadInput]
+            (let [(values buf ok) (.guest m (aget a 0) (max (conv int64 (conv int32 (aget a 1))) 0))]
+              (when (not ok)
+                (return 1 false (.fault m (fmt/Sprintf "read_input into %#x+%d, outside the guest's memory" (aget a 0) (aget a 1)))))
+
+              (set! ret (conv int64 (.ReadInput h buf)))
+              (when (< (conv int32 (aget a 1)) 0)
+                (set! ret -1))))
+
+          (case [callWaitRead]
+            ;; The wait, and the read the core makes after it, in one exit: the
+            ;; read into the guest runtime's buffer, which serves the core's
+            ;; read_input from it.  A deadly signal in either unwinds before a
+            ;; byte is read (both deliver before they touch stdin), and the guest
+            ;; makes the call again, as it makes a wait again.
+            (let [(values buf ok) (.guest m (aget a 1) (aget a 2))]
+              (when (or (not ok) (<= (aget a 2) 0))
+                (return 1 false (.fault m (fmt/Sprintf "wait_read into %#x+%d, outside the guest's memory" (aget a 1) (aget a 2)))))
+
+              (when [(set! ret (b2i (.WaitForInput h (aget a 0))))] (!= ret 0)
+                (aset a 0 (conv int64 (.ReadInput h buf))))))
+
+          (case [callSuspend]
+            (.Suspend h))
+          (case [callExit]
+            (.stopOthers c)
+            (.report m c)
+            (.Exit h (conv int32 (aget a 0)))
+            (return (conv int (conv int32 (aget a 0))) true nil))
+          (case [callMessage]
+            (let [(values msg ok) (.guest m (aget a 0) (aget a 1))]
+              (when (not ok)
+                (return 1 false (.fault m (fmt/Sprintf "message from %#x+%d, outside the guest's memory" (aget a 0) (aget a 1)))))
+
+              (.Message h msg (!= (aget a 2) 0))))
+          (case [callWrite]
+            (let [(values p ok) (.guest m (aget a 0) (aget a 1))]
+              (when (not ok)
+                (return 1 false (.fault m (fmt/Sprintf "write from %#x+%d, outside the guest's memory" (aget a 0) (aget a 1)))))
+
+              (set! ret (conv int64 (.Write h p)))))
+          (case [callTime]
+            (set! ret (.Time h)))
+          (case [callRaise]
+            (.Raise h (conv int32 (aget a 0))))
+          (case [callRandom]
+            (let [(values buf ok) (.guest m (aget a 0) (aget a 1))]
+              (when (not ok)
+                (return 1 false (.fault m (fmt/Sprintf "random into %#x+%d, outside the guest's memory" (aget a 0) (aget a 1)))))
+
+              (set! ret (random buf)))))
+
+        (.PutUint64 le (subslice cb cbRet) (conv uint64 ret))
+        (range [i a]
+          (.PutUint64 le (subslice cb (+ cbArgs (* 8 i))) (conv uint64 (aget a i))))
+
+        (return 0 false nil)))))
+
+
+
+
+^{:go/end 654} (go/method report "report writes the stats, when asked for: every vCPU's, summed, once\nthe others have stopped.\n" [^{:tag (* machine)} m ^{:tag (* vcpu)} self]
+  (when (== (.-Stats (.-cfg m)) nil)
+    (return))
+
+  (let [^Stats st (zero Stats)
+      ^{:line 623 :tag time/Duration} parked (zero time/Duration)]
+    (range [_ c (.-cpus m)]
+      (let [(values runs spurious) (values (.-runs c) (.-spurious c))]
+        (when (== c self)
+          (set! (values runs spurious) (hv/Stats (.-v c))))
+
+        (set! (.-Exits st) + (.-exits c))
+        (set! (.-Runs st) + runs)
+        (set! (.-Spurious st) + spurious)
+        (set! (.-Guest st) + (.-guest c))
+        (set! (.-Longest st) (max (.-Longest st) (.-longest c)))
+        (set! (.-Host st) + (- (.-host c) (.-parked c)))
+        (set! parked + (.-parked c))))
+
+    (range [nr (.-Calls st)]
+      (aset (.-Calls st) nr (.Load (aget (.-calls m) nr))))
+
+    (let [s (addr st)
+        ^{:line 641 :tag uint64} calls (zero uint64)]
+      (fmt/Fprintf (.-Stats (.-cfg m)) "exits %d runs %d spurious %d guest %dus host %dus longest %dus\n"
+        (.-Exits s) (.-Runs s) (.-Spurious s) (.Microseconds (.-Guest s)) (.Microseconds (.-Host s)) (.Microseconds (.-Longest s)))
+      (when (> (len (.-cpus m)) 1)
+        (fmt/Fprintf (.-Stats (.-cfg m)) "cpus %d started %d parked %dus\n" (len (.-cpus m)) (.startedCPUs m) (.Microseconds parked)))
+
+      (range [nr n (.-Calls s)]
+        (when (> n 0)
+          (set! calls + n)
+          (fmt/Fprintf (.-Stats (.-cfg m)) "call %s %d\n" (aget callNames nr) n)))
+
+
+      (fmt/Fprintf (.-Stats (.-cfg m)) "calls %d\n" calls))))
+
+
+
+
+
+^{:go/end 683} (go/method watchdog "watchdog ends a guest one of whose vCPUs has run Watchdog without a\ncall: every vCPU is made to exit (hv_vcpus_exit), and the loops see it\nwas killed.  A vCPU in a call or parked is not running the guest.\n" [^{:tag (* machine)} m ^{:tag (chan :recv (struct))} stop]
+  (let [t (time/NewTicker (/ (.-Watchdog (.-cfg m)) 4))]
+    (defer (.Stop t))
+    (while true
+      (select
+        (case (<! stop)
+          (return))
+        (case (<! (.-C t))
+          (range [_ c (.-cpus m)]
+            (when (and (> (.-id c) 0) (not (.Load (.-started c))))
+              (continue))
+
+            (when (.Load (.-inHost c))
+              (.Store (.-lastCall c) (.UnixNano (time/Now)))
+              (continue))
+
+            (when (> (time/Since (time/Unix 0 (.Load (.-lastCall c)))) (.-Watchdog (.-cfg m)))
+              (.Store (.-killed m) true)
+              (.halt m)
+              (return))))))))
+
+
+
+
+
+
+
+(go/var ^{:doc "ErrNoImage is what the launcher says when it carries no guest.\n"} ErrNoImage (errors/New "whim-guest: no guest image: none appended to this program, no WHIM_GUEST_IMAGE, no program.elf beside it (go tool whim guest builds one)"))
+
+
+
+(go/const ^{:val "WHIMGST1" :doc "The image is appended to the launcher: the ELF, then its length and a\nmagic word.\n"} trailerMagic "WHIMGST1")
+
+
+^{:go/end 722} (go/func Appended "Appended is the guest image appended to the program at path, if any.\n" [^string path] :results [(slice byte) error]
+  (let [(values f err) (os/Open path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close f))
+    (let [(values st ^:assign err) (.Stat f)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [^{:tag (array 16 byte)} tr (zero (array 16 byte))]
+        (when (< (.Size st) 16)
+          (return nil ErrNoImage))
+
+        (when [(values _ err) (.ReadAt f (subslice tr) (- (.Size st) 16))] (!= err nil)
+          (return nil err))
+
+        (when (!= (conv string (subslice tr 8)) trailerMagic)
+          (return nil ErrNoImage))
+
+        (let [n (conv int64 (.Uint64 binary/LittleEndian (subslice tr _ 8)))]
+          (when (or (<= n 0) (> n (- (.Size st) 16)))
+            (return nil ErrNoImage))
+
+          (let [img (make (slice byte) n)]
+            (when [(values _ err) (.ReadAt f img (- (.Size st) 16 n))] (!= err nil)
+              (return nil err))
+
+            (return img nil)))))))
+
+
+
+^{:go/end 731} (go/func Append "Append is a launcher carrying img: the program's bytes, img, the trailer.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} prog ^{:tag (slice byte)} img]
+  (let [out (append (append (lit (slice byte)) (spread prog)) (spread img))
+      ^{:line 727 :tag (array 16 byte)} tr (zero (array 16 byte))]
+    (.PutUint64 binary/LittleEndian (subslice tr _ 8) (conv uint64 (len img)))
+    (copy (subslice tr 8) trailerMagic)
+    (append out (spread (subslice tr)))))
+
+
+^{:go/end 735} (go/func describeFault ^string [^{:tag (array 5 int64)} a]
+  (fmt/Sprintf "the guest took exception %d (code %#x) at pc %#x, address %#x" (aget a 0) (aget a 1) (conv uint64 (aget a 2)) (conv uint64 (aget a 3))))

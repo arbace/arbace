@@ -1,0 +1,104 @@
+(in-ns 'go.arbace.box.vmm) (go/file "tamago.go" :imports [
+
+
+    ^{:line 4} [rand "crypto/rand"]
+    ^{:line 5} [elf "debug/elf"]
+    ^{:line 6} [fmt "fmt"]
+
+    ^{:line 8} [hv "arbace/box/hv"]])
+
+
+;; A second guest (doc/GUEST.md, *A second guest*): the Go editor built with
+;; TamaGo, GOOS=tamago, on a board of our own (guest/tamago/board).  The
+;; monitor tells its image from the C guest's by the runtime's own symbol,
+;; and lays its memory out as a Go runtime wants it: no separate stack and
+;; heap, but one span the runtime manages itself -- its heap grows up from
+;; the image's end (sbrk), its first stack sits under the top -- and the
+;; exception vectors' stack above that.  Every other part is the C guest's:
+;; the identity map, the system tables, the doorbell, the exit loop and
+;; the calls.
+
+
+
+
+
+(go/const ^{:val 3221225472 :doc "GoRAMBytes is a Go guest's RAM from its image to the top: the Go\neditor's 1 GiB arena is its own accounting (editor/host.go), and the\ncollector wants room beside the live heap.  Committed as touched; under\nthe doorbell.\n"} GoRAMBytes (<< 3 30))
+
+
+
+(go/const ^{:val "runtime/goos.RamStart" :doc "tamagoSymbol is how a TamaGo image is known: the variable its board sets\nbefore the runtime starts.\n"} tamagoSymbol "runtime/goos.RamStart")
+
+^{:go/end 42} (go/func isTamaGo ^bool [^{:tag (* elf/File)} f]
+  ^{:go/breaks [4]} (let [(values syms err) (.Symbols f)]
+    (when (!= err nil)
+      (return false))
+
+    (range [_ s syms]
+      (when (== (.-Name s) tamagoSymbol)
+        (return true)))
+
+
+    false))
+
+
+
+
+^{:go/end 51} (go/func layoutFor "layoutFor is the slot's layout for the image: the C guest's (plan), one\nvCPU, or a Go guest's (planGo) on cpus.\n" ^{:tag (* layout)} [^{:tag (* elf/File)} f ^{:tag (* image)} im ^int cpus]
+  (when (isTamaGo f)
+    (return (planGo im cpus)))
+
+  (plan im cpus))
+
+
+
+
+
+^{:go/end 82} (go/func planGo "planGo lays a Go guest's slot out: the image, then one span read-write\nto GoRAMBytes above the image's base, its top FaultStackBytes for each\nvCPU the vectors' stacks (IST1) and below them the runtime's first stack.\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus]
+  (let [l (addr (lit layout :entry (.-entry im) :vectors (.-vectors im) :goGuest true :cpus cpus :apEntry (.-apEntry im)))]
+    (set! (.-spans l) (append (.-spans l) (lit span sysBase argsEnd (bit-or pRead pWrite))))
+    (let [base (conv uint64 Doorbell)]
+      (range [_ p (.-loads im)]
+        (let [^perm pm (zero perm)]
+          (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_R) 0)
+            (set! pm bit-or pRead))
+
+          (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_W) 0)
+            (set! pm bit-or pWrite))
+
+          (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_X) 0)
+            (set! pm bit-or pExec))
+
+          (set! (.-spans l) (append (.-spans l) (lit span ^{:go/via [ProgHeader]} (.-Vaddr p) (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)) page) pm)))
+          (set! base (min base ^{:go/via [ProgHeader]} (.-Vaddr p)))))
+
+      (set! (.-ramStart l) base)
+      (set! (.-heap l) (roundUp (.-end im) page))
+      (set! (.-size l) (+ base GoRAMBytes))
+      (set! (.-faultTop l) (.-size l))
+      (set! (.-stackTop l) (- (.-size l) (* (conv uint64 cpus) FaultStackBytes)))
+      (set! (.-spans l) (append (.-spans l) (lit span (.-heap l) (.-size l) (bit-or pRead pWrite))))
+      (set! (.-spans l) (append (.-spans l) (lit span Doorbell (+ Doorbell page) (bit-or pWrite pDevice))))
+      ^{:line 81} l)))
+
+
+
+
+^{:go/breaks [7] :go/end 97} (go/func boot "boot sets the vCPU up for the image: the C guest's state (setup), and a\nGo guest's registers besides (abi's entry state).\n" ^error [^hv/VCPU v ^{:tag (slice byte)} mem ^{:tag (* layout)} l]
+  (when (> (.-size l) Doorbell)
+    (return (fmt/Errorf "the guest's %d MiB reach the doorbell at %#x" (>> (.-size l) 20) Doorbell)))
+
+  (when [err (setup v mem l)] (!= err nil)
+    (return err))
+
+  (when (.-goGuest l)
+    (return (setupGo v l)))
+
+  nil)
+
+
+
+^{:go/end 105} (go/func random "random answers abi.Random: buf filled from the host's generator.\n" ^int64 [^{:tag (slice byte)} buf]
+  (when [(values _ err) (rand/Read buf)] (!= err nil)
+    (return -1))
+
+  (conv int64 (len buf)))

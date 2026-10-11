@@ -1,0 +1,266 @@
+(in-ns 'go.arbace.box.vmm) (go/file "store.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [sha256 "crypto/sha256"]
+    ^{:line 6} [hex "encoding/hex"]
+    ^{:line 7} [errors "errors"]
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [filepath "path/filepath"]
+    ^{:line 11} [sync "sync"]])
+
+
+;; THE STORE (doc/LISP-SANDBOX.md, *The store*): the box's data, kept on the
+;; host by the monitor, so that what a guest reads and writes is no file of
+;; the host's but blobs and refs.  A blob is immutable, named by its
+;; SHA-256; a ref is a name pointing at a blob, the only state that
+;; changes, by compare-and-set when a guest asks.  The guest's calls
+;; (guest/abi's BlobPut, BlobSize, BlobGet, RefGet, RefSet) are the
+;; monitor's, not the Host's.
+
+
+(go/type Store "A Store keeps blobs and refs.  Its methods are called from any vCPU.\n" (interface
+    (Put [^{:tag (slice byte)} data] :results [(array 32 byte) error])
+    (Size [^{:tag (array 32 byte)} h] :results [int64 bool])
+    (Get [^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool])
+    (Ref [^string name] :results [(array 32 byte) bool])
+
+
+    (^{:doc "SetRef points name at h; when old is not nil, only if the ref is old\nnow (all zero: if it does not exist), else ErrConflict.\n"} SetRef ^error [^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old])))
+
+
+
+
+
+(go/var ^{:tag error :doc "ErrConflict is a ref's compare-and-set that failed.  It says Conflict(),\nwhich is how a store's user that cannot import vmm (guest/joker/box)\ntells it from other errors.\n"} ErrConflict (lit conflict))
+
+(go/type conflict (struct))
+
+^{:go/end 40} (go/method Error ^string [conflict] "the ref is not what the guest said it was")
+^{:go/end 41} (go/method Conflict ^bool [conflict] true)
+
+
+
+^{:go/breaks [6] :go/end 56} (go/func RefName "RefName says a ref's name is one the store takes: 1 to 64 of\n[A-Za-z0-9._-], not beginning with a dot.\n" ^bool [^string name]
+  (when (or (< (len name) 1) (> (len name) 64) (== (aget name 0) \.))
+    (return false))
+
+  (for [i 0] (< i (len name)) (inc! i)
+    (let [c (aget name i)]
+      (when (not (or (and (>= c \a) (<= c \z)) (and (>= c \A) (<= c \Z)) (and (>= c \0) (<= c \9)) (== c \.) (== c \_) (== c \-)))
+        (return false))))
+
+
+  true)
+
+
+
+
+
+
+
+
+
+
+(go/type DirStore "A DirStore keeps the store in a directory of the host's: blobs/HASH,\nrefs/NAME (the hash in hex).  It makes only the system calls the\nmonitor's filter allows a running guest (openat, read, write, fstat,\nclose): a blob is written to its own name, created exclusively, and\nheld to its hash when first read -- one a write left short (the guest\nended, the disk filled) is refused, not served; a ref, 65 bytes, is\nwritten in one write.  Blobs read are kept, verified, while the monitor\nruns: a graph's EDN is read in many BlobGets.\n" (struct
+    ^{:line 67 :tag string} dir
+    ^{:line 68 :tag sync/Mutex} mu
+    ^{:line 69 :tag (map (array 32 byte) (slice byte))} cache)) ; blobs read and found whole
+
+
+
+
+^{:go/end 81} (go/func OpenDirStore "OpenDirStore is the store in dir, its directories made when missing --\nbefore the monitor's system-call filter, which allows no mkdir.\n" [^string dir] :results [(* DirStore) error]
+  (range [_ d (lit (slice string) "blobs" "refs")]
+    (when [err (os/MkdirAll (filepath/Join dir d) 0755)] (!= err nil)
+      (return nil (fmt/Errorf "the store: %w" err))))
+
+
+  (return (addr (lit DirStore :dir dir :cache (lit (map (array 32 byte) (slice byte))))) nil))
+
+
+^{:go/end 85} (go/method blob ^string [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h]
+  (filepath/Join (.-dir s) "blobs" (hex/EncodeToString (subslice h))))
+
+
+^{:go/end 101} (go/method Put [^{:tag (* DirStore)} s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (let [h (sha256/Sum256 data)]
+    (when [(values _ ok) (.load s h)] ok
+      (return h nil)) ; content-addressed: there already, and whole
+
+    (let [(values f err) (os/OpenFile (.blob s h) (bit-or os/O_WRONLY os/O_CREATE os/O_EXCL) 0644)]
+      (when (!= err nil)
+        (return h err)) ; a short one from before is there: refused until removed by hand
+
+      (set! (values _ err) (.Write f data))
+      (when [cerr (.Close f)] (== err nil)
+        (set! err cerr))
+
+      (return h err))))
+
+
+
+^{:go/end 116} (go/method load "load is blob h, read once and held to its hash.\n" [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when [(values b ok) (aget (.-cache s) h)] ok
+    (return b true))
+
+  (let [(values b err) (os/ReadFile (.blob s h))]
+    (when (or (!= err nil) (!= (sha256/Sum256 b) h))
+      (return nil false))
+
+    (aset (.-cache s) h b)
+    (return b true)))
+
+
+^{:go/end 121} (go/method Size [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h] :results [int64 bool]
+  (let [(values b ok) (.load s h)]
+    (return (conv int64 (len b)) ok)))
+
+
+^{:go/end 132} (go/method Get [^{:tag (* DirStore)} s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
+  (let [(values b ok) (.load s h)]
+    (when (or (not ok) (< off 0))
+      (return 0 false))
+
+    (when (>= off (conv int64 (len b)))
+      (return 0 true))
+
+    (return (copy p (subslice b off)) true)))
+
+
+^{:go/end 145} (go/method Ref [^{:tag (* DirStore)} s ^string name] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
+    (when (not (RefName name))
+      (return h false))
+
+    (let [(values b err) (os/ReadFile (filepath/Join (.-dir s) "refs" name))]
+      (when (!= err nil)
+        (return h false))
+
+      (let [(values n ^:assign err) (hex/Decode (subslice h) (bytes/TrimSpace b))]
+        (return h (and (== err nil) (== n 32)))))))
+
+
+(go/var ^sync/Mutex refMu) ; refs' compare-and-set, across stores of one process
+
+^{:go/end 165} (go/method SetRef ^error [^{:tag (* DirStore)} s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
+  (when (not (RefName name))
+    (return (fmt/Errorf "ref %q: not a name the store takes" name)))
+
+  (when [(values _ ok) (.load s h)] (not ok)
+    (return (fmt/Errorf "ref %s: no blob %x" name (subslice h _ 4))))
+
+  (.Lock refMu)
+  (defer (.Unlock refMu))
+  (when (!= old nil)
+    (let [(values cur ok) (.Ref s name)]
+      (when (or (!= ok (!= @old (lit (array 32 byte)))) (and ok (!= cur @old)))
+        (return ErrConflict))))
+
+
+  (os/WriteFile (filepath/Join (.-dir s) "refs" name) (conv (slice byte) (+ (hex/EncodeToString (subslice h)) "\n")) 0644))
+
+
+
+^{:go/end 267} (go/method storeCall "storeCall answers a store's call; -1 when the machine has no store.\n" [^{:tag (* machine)} m ^uint64 nr ^{:tag (array 5 int64)} a] :results [int64 error]
+  (let [st (.-Store (.-cfg m))]
+    (when (== st nil)
+      (return -1 nil))
+
+    (let [at ^{:go/end 179} (fn [^int64 addr ^int64 n ^string what] :results [(slice byte) error]
+          (let [(values p ok) (.guest m addr n)]
+            (when (not ok)
+              (return nil (.fault m (fmt/Sprintf "a store's %s at %#x+%d, outside the guest's memory" what addr n))))
+
+            (return p nil)))
+
+        ^{:line 180} hashAt ^{:go/end 186} (fn [^int64 addr] :results [(array 32 byte) (slice byte) error]
+          (let [(values p err) (at addr 32 "hash")]
+            (when (!= err nil)
+              (return (lit (array 32 byte)) nil err))
+
+            (return (conv (array 32 byte) p) p nil)))]
+
+      (switch nr
+        (case [callBlobPut]
+          (let [(values data err) (at (aget a 0) (aget a 1) "blob")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (let [(values _ out ^:assign err) (hashAt (aget a 2))]
+              (when (!= err nil)
+                (return 0 err))
+
+              (let [(values h perr) (.Put st data)]
+                (when (!= perr nil)
+                  (return -1 nil))
+
+                (copy out (subslice h))
+                (return 0 nil)))))
+        (case [callBlobSize]
+          (let [(values h _ err) (hashAt (aget a 0))]
+            (when (!= err nil)
+              (return 0 err))
+
+            (when [(values n ok) (.Size st h)] ok
+              (return n nil))
+
+            (return -1 nil)))
+        (case [callBlobGet]
+          (let [(values h _ err) (hashAt (aget a 0))]
+            (when (!= err nil)
+              (return 0 err))
+
+            (let [(values buf ^:assign err) (at (aget a 1) (aget a 2) "buffer")]
+              (when (!= err nil)
+                (return 0 err))
+
+              (when [(values n ok) (.Get st h (aget a 3) buf)] ok
+                (return (conv int64 n) nil))
+
+              (return -1 nil))))
+        (case [callRefGet]
+          (let [(values name err) (at (aget a 0) (aget a 1) "ref's name")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (let [(values _ out ^:assign err) (hashAt (aget a 2))]
+              (when (!= err nil)
+                (return 0 err))
+
+              (let [(values h ok) (.Ref st (conv string name))]
+                (when (not ok)
+                  (return -1 nil))
+
+                (copy out (subslice h))
+                (return 0 nil)))))
+        (case [callRefSet]
+          (let [(values name err) (at (aget a 0) (aget a 1) "ref's name")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (let [(values h _ ^:assign err) (hashAt (aget a 2))]
+              (when (!= err nil)
+                (return 0 err))
+
+              (let [^{:tag (* (array 32 byte))} old (zero (* (array 32 byte)))]
+                (when (!= (aget a 3) 0)
+                  (let [(values o _ err) (hashAt (aget a 3))]
+                    (when (!= err nil)
+                      (return 0 err))
+
+                    (set! old (addr o))))
+
+                (switch [err (.SetRef st (conv string name) h old)]
+                  (case [(== err nil)]
+                    (return 0 nil))
+                  (case [(errors/Is err ErrConflict)]
+                    (return -2 nil))
+                  (default
+                    (return -1 nil))))))))
+
+
+      (return -1 nil))))

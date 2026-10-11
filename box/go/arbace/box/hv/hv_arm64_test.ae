@@ -1,0 +1,204 @@
+(in-ns 'go.arbace.box.hv) (go/file "hv_arm64_test.go" :imports [
+
+
+    ^{:line 4} [binary "encoding/binary"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [runtime "runtime"]
+    ^{:line 8} [sync "sync"]
+    ^{:line 9} [syscall "syscall"]
+    ^{:line 10} [testing "testing"]
+    ^{:line 11} [time "time"]])
+
+
+
+
+
+
+
+^{:go/end 59} (go/func newTinyGuest "newTinyGuest is a VM of 64 KiB with code at 0x1000, run at EL1 with the\nMMU off: the smallest guest that makes the exits the monitor decodes.\nOn the Mac it runs on Hypervisor.framework: the test binary signed with\nthe hypervisor entitlement (guest/mac/mac.sh hv), the first thing to run\nthere; 64 KiB is four of its 16 KiB pages.\n" [^{:tag (* testing/T)} t ^{:tag (slice uint32)} code] :results [VCPU (* VCPUExit)]
+  ^{:go/via [common]} (.Helper t)
+  (when [(values _ err) (os/Stat "/dev/kvm")] (and (!= err nil) (== runtime/GOOS "linux"))
+    ^{:go/via [common]} (.Skip t "no /dev/kvm"))
+
+  (runtime/LockOSThread)
+  ^{:go/via [common]} (.Cleanup t runtime/UnlockOSThread)
+  (when [err (VMCreate nil)] (!= err nil)
+    ^{:go/via [common]} (.Fatal t err))
+
+  (let [(values mem err) (syscall/Mmap -1 0 0x10000 (bit-or syscall/PROT_READ syscall/PROT_WRITE) (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (range [i w code]
+      (.PutUint32 binary/LittleEndian (subslice mem (+ 0x1000 (* 4 i))) w))
+
+    (when [err (VMMap mem 0 (bit-or MemoryRead MemoryWrite MemoryExec))] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [(values v exit ^:assign err) (VCPUCreate)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      ^{:go/via [common]} (.Cleanup t ^{:go/end 51} (fn []
+          (when [err (VCPUDestroy v)] (!= err nil)
+            ^{:go/via [common]} (.Error t err))
+
+          (when [err (VMDestroy)] (!= err nil)
+            ^{:go/via [common]} (.Error t err))
+
+          (syscall/Munmap mem)))
+
+      (when [err (VCPUSetReg v RegCPSR 0x3c5)] (!= err nil) ; EL1h, DAIF masked
+        ^{:go/via [common]} (.Fatal t err))
+
+      (when [err (VCPUSetReg v RegPC 0x1000)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (return v exit))))
+
+
+
+
+
+^{:go/end 109} (go/func TestDoorbellARM64 "TestDoorbellARM64: a store where no memory is exits as the framework's\ndata abort, PC on the store; the monitor advances PC as it must on the\nframework, and the next store exits in its turn.\n" [^{:tag (* testing/T)} t]
+  (let [(values v exit) (newTinyGuest t ^{:go/breaks [2 3 4 5 6 7]} (lit (slice uint32)
+          0xd28acf00 ; movz x0, #0x5678
+          0xf2a24680 ; movk x0, #0x1234, lsl #16
+          0xd2a00021 ; movz x1, #0x10000
+          0xf9000020 ; str x0, [x1]
+          0xf9000420 ; str x0, [x1, #8]
+          0x14000000))] ; b .
+
+    (range [i want (lit (slice IPA) 0x10000 0x10008)]
+      (when [err (VCPURun v)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (let [s (conv Syndrome (.-Syndrome (.-Exception exit)))]
+        (when (or (!= (.-Reason exit) ExitReasonException) (!= (.EC s) ECDataAbortLower) (not (.ISV s)) (not (.WnR s)) (!= (.SAS s) 3))
+          ^{:go/via [common]} (.Fatalf t "store %d: exit %v syndrome %#x, not an 8-byte data abort" i (.-Reason exit) (.-Syndrome (.-Exception exit))))
+
+        (when (!= (.-PhysicalAddress (.-Exception exit)) want)
+          ^{:go/via [common]} (.Fatalf t "store %d at %#x, not %#x" i (.-PhysicalAddress (.-Exception exit)) want))
+
+        (let [(values r _) (RegForSRT (.SRT s))]
+          (when [(values val _) (VCPUGetReg v r)] (!= val 0x12345678)
+            ^{:go/via [common]} (.Fatalf t "store %d: the register holds %#x" i val))
+
+          (let [(values pc _) (VCPUGetReg v RegPC)]
+            (when (!= pc (+ 0x100c (* 4 (conv uint64 i))))
+              ^{:go/via [common]} (.Fatalf t "store %d: PC %#x, not on the store" i pc))
+
+            (when [err (VCPUSetReg v RegPC (+ pc 4))] (!= err nil)
+              ^{:go/via [common]} (.Fatal t err))))))
+
+
+    (go (^{:go/end 99} (fn []
+          (time/Sleep (* 200 time/Millisecond))
+          (VCPUsExit v))))
+
+    (when [err (VCPURun v)] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when (!= (.-Reason exit) ExitReasonCanceled)
+      ^{:go/via [common]} (.Fatalf t "exit %v, not canceled" (.-Reason exit)))
+
+    (when [(values pc _) (VCPUGetReg v RegPC)] (!= pc 0x1014)
+      ^{:go/via [common]} (.Fatalf t "PC %#x, not on the spin" pc))))
+
+
+
+
+
+^{:go/end 123} (go/func TestStoreAgainARM64 "TestStoreAgainARM64: a store whose exit the monitor does not advance is\nmade again, as on the framework.\n" [^{:tag (* testing/T)} t]
+  (let [(values v exit) (newTinyGuest t (lit (slice uint32) 0xd2a00021 0xf9000020 0x14000000))] ; x1 = 0x10000; str x0, [x1]; b .
+    (range [2]
+      (when [err (VCPURun v)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (when (or (!= (.-Reason exit) ExitReasonException) (!= (.-PhysicalAddress (.-Exception exit)) 0x10000))
+        ^{:go/via [common]} (.Fatalf t "exit %v at %#x" (.-Reason exit) (.-PhysicalAddress (.-Exception exit)))))))
+
+
+
+
+
+
+^{:go/end 137} (go/func TestSysRegsARM64 "TestSysRegsARM64: Apple's encodings reach KVM's registers, the four KVM\nkeeps among the core ones included.\n" [^{:tag (* testing/T)} t]
+  (let [(values v _) (newTinyGuest t (lit (slice uint32) 0x14000000))]
+    (range [_ r (lit (slice SysReg) SysRegTTBR0EL1 SysRegMAIREL1 SysRegVBAREL1 SysRegSPEL0 SysRegSPEL1 SysRegELREL1)]
+      (when [err (VCPUSetSysReg v r 0x8000)] (!= err nil)
+        ^{:go/via [common]} (.Fatalf t "%#x: %v" r err))
+
+      (when [(values val err) (VCPUGetSysReg v r)] (or (!= err nil) (!= val 0x8000))
+        ^{:go/via [common]} (.Fatalf t "%#x: %#x %v" r val err)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 206} (go/func TestCounterVCPUsARM64 "TestCounterVCPUsARM64: two vCPUs of one VM read one virtual counter.  The\nsecond is created 100 ms after the first, on a thread of its own, and\neach reads CNTVCT_EL0 once it runs, the first first: the second's\nreading is not the smaller, as it would be were each vCPU's counter its\nown from its creation (the framework's vTimer offset is per vCPU, and\nVCPUCreate sets it to the VM's first's; KVM keeps one for the VM).  A Go\nguest on several vCPUs takes their counters for one clock.\n" [^{:tag (* testing/T)} t]
+  (let [code ^{:go/breaks [2 3 4 5]} (lit (slice uint32)
+        0xd53be040 ; mrs x0, cntvct_el0
+        0xd2a00021 ; movz x1, #0x10000
+        0xf9000020 ; str x0, [x1]
+        0x14000000) ; b .
+
+      (values v exit) (newTinyGuest t code)
+      ^{:line 154} read ^{:go/end 162} (fn [^VCPU v ^{:tag (* VCPUExit)} exit] :results [uint64 error]
+        (when [err (VCPURun v)] (!= err nil)
+          (return 0 err))
+
+        (when (or (!= (.-Reason exit) ExitReasonException) (!= (.-PhysicalAddress (.-Exception exit)) 0x10000))
+          (return 0 (fmt/Errorf "exit %v at %#x" (.-Reason exit) (.-PhysicalAddress (.-Exception exit)))))
+
+        (VCPUGetReg v RegX0))]
+
+    (time/Sleep (* 100 time/Millisecond))
+    ;; The second vCPU, on its own thread for its life: created, then run
+    ;; when told, then destroyed there, before the VM (the cleanup).
+    (let-type [reading (struct
+          ^{:line 167 :tag uint64} val
+          ^{:line 168 :tag error} err)]
+
+      (let [(values run got done) (values (make (chan (struct))) (make (chan reading) 1) (make (chan (struct))))
+          ^{:line 171 :tag sync/Once} once (zero sync/Once)
+          ^{:line 172} start ^{:go/end 172} (fn [] (.Do once ^{:go/end 172} (fn [] (close run))))
+          ^{:line 173} created (make (chan error))]
+        (go (^{:go/end 189} (fn []
+              (defer (close done))
+              (runtime/LockOSThread)
+              (defer (runtime/UnlockOSThread))
+              (let [(values w wexit err) (VCPUCreate)]
+                (>! created err)
+                (when (!= err nil)
+                  (return))
+
+                (defer (VCPUDestroy w))
+                (VCPUSetReg w RegCPSR 0x3c5)
+                (VCPUSetReg w RegPC 0x1000)
+                (<! run)
+                (let [(values val ^:assign err) (read w wexit)]
+                  (>! got (lit reading val err)))))))
+
+        (when [err (<! created)] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        ^{:go/via [common]} (.Cleanup t ^{:go/end 193} (fn [] (start) (<! done)))
+        (let [(values first err) (read v exit)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          (start)
+          (let [second (<! got)]
+            (when (!= (.-err second) nil)
+              ^{:go/via [common]} (.Fatal t (.-err second)))
+
+            (when (< (.-val second) first)
+              ^{:go/via [common]} (.Fatalf t "the second vCPU's counter %d is behind the first's %d: not one clock" (.-val second) first))))))))

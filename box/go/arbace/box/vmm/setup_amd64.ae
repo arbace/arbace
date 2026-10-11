@@ -1,0 +1,185 @@
+(in-ns 'go.arbace.box.vmm) (go/file "setup_amd64.go" :imports [
+
+
+    ^{:line 4} [elf "debug/elf"]
+    ^{:line 5} [binary "encoding/binary"]
+
+    ^{:line 7} [hv "arbace/box/hv"]])
+
+
+
+
+
+
+
+
+(go/const "The amd64 guest starts in 64-bit ring 0 at its first instruction: no\nfirmware, no real mode.  The monitor writes a GDT (a 64-bit code segment,\na data segment and the TSS), the TSS (IST1 the fault stack), an IDT of 32\ninterrupt gates into whim_vectors, and 4-level identity page tables; then\nsets the control registers, EFER and the segments as a CPU would hold\nthem after loading that GDT.\n"
+  ^{:line 17} [^{:val 62} elfMachine elf/EM_X86_64]
+  ^{:line 18} [^{:val 4096} gdtAddr sysBase]
+  ^{:line 19} [^{:val 8192} tssAddr (+ sysBase 0x1000)]
+  ^{:line 20} [^{:val 12288} idtAddr (+ sysBase 0x2000)]
+  ^{:line 21} [^{:val 8} selCode 0x08]
+  ^{:line 22} [^{:val 16} selData 0x10]
+  ^{:line 23} [^{:val 24} selTSS 0x18]
+  ^{:line 24} [^{:val 32} nVectors 32]
+  ^{:line 25} [^{:val 16} vectorSize 16]
+
+  ^{:line 27} [(values ^{:val 1} cr0PE ^{:val 2} cr0MP ^{:val 16} cr0ET ^{:val 32} cr0NE ^{:val 65536} cr0WP ^{:val 2147483648} cr0PG) (values (<< 1 0) (<< 1 1) (<< 1 4) (<< 1 5) (<< 1 16) (<< 1 31))]
+  ^{:line 28} [^{:val 32} cr4PAE (<< 1 5)]
+  ^{:line 29} [(values ^{:val 256} eferLME ^{:val 1024} eferLMA ^{:val 2048} eferNXE) (values (<< 1 8) (<< 1 10) (<< 1 11))]
+
+  ^{:line 31} [(values ^{:val 1} ptP ^{:val 2} ptRW ^{:val 128} ptPS) (values (<< 1 0) (<< 1 1) (<< 1 7))]
+  ^{:line 32} [^{:val 9223372036854775808N} ptNX (<< 1 63)])
+
+
+(go/var pageFormat ^{:go/breaks [2 4 6]} (lit ptFormat
+    :levels 4
+    :table ^{:go/end 37} (fn ^uint64 [^uint64 pa] (bit-or pa ptP ptRW))
+    :leaf ^{:go/end 50} (fn ^uint64 [^uint64 pa ^perm p ^bool big]
+      (let [e (bit-or pa ptP)]
+        (when (!= (bit-and p pWrite) 0)
+          (set! e bit-or ptRW))
+
+        (when (== (bit-and p pExec) 0)
+          (set! e bit-or ptNX))
+
+        (when big
+          (set! e bit-or ptPS))
+
+        ^{:line 49} e))))
+
+
+
+
+
+(go/const ^{:val 128 :doc "tssStride is the distance between two vCPUs' TSSs (doc/GUEST.md,\n*SMP*): each its own IST1, the fault stack of its own.\n"} tssStride 0x80)
+
+
+^{:go/end 101} (go/func setup "setup writes the system tables and sets the vCPU's registers.\n" ^error [^hv/VCPU v ^{:tag (slice byte)} mem ^{:tag (* layout)} l]
+  (let [le binary/LittleEndian]
+    (.PutUint64 le (subslice mem (+ gdtAddr 0x00)) 0)
+    (.PutUint64 le (subslice mem (+ gdtAddr selCode)) 0x00af9b000000ffff) ; P, DPL 0, code exec/read, L, G
+    (.PutUint64 le (subslice mem (+ gdtAddr selData)) 0x00cf93000000ffff) ; P, DPL 0, data read/write, D/B, G
+    (let [tss (conv uint64 tssAddr)]
+      (.PutUint64 le (subslice mem (+ gdtAddr selTSS)) (bit-or tssLimit (<< (bit-and tss 0xffffff) 16) (<< 0x8b 40) (<< (bit-and (>> tss 24) 0xff) 56)))
+      (.PutUint64 le (subslice mem (+ gdtAddr selTSS 8)) (>> tss 32))
+      (range [i (max (.-cpus l) 1)]
+        (let [t (+ tssAddr (* (conv uint64 i) tssStride))]
+          (.PutUint64 le (subslice mem (+ t 0x24)) (.faultTopOf l i)) ; IST1
+          (.PutUint16 le (subslice mem (+ t 0x66)) (+ tssLimit 1)))) ; no I/O bitmap
+
+      (range [i nVectors]
+        (let [h (+ (.-vectors l) (* (conv uint64 i) vectorSize))
+            ^{:line 73} e (+ idtAddr (* (conv uint64 i) 16))]
+          (.PutUint64 le (subslice mem e) (bit-or (bit-and h 0xffff) (<< selCode 16) (<< 1 32) (<< 0x8e 40) (<< (bit-and (>> h 16) 0xffff) 48))) ; IST1, interrupt gate, P
+          (.PutUint64 le (subslice mem (+ e 8)) (>> h 32))))
+
+      (let [(values root err) (.buildTables l mem pageFormat)]
+        (when (!= err nil)
+          (return err))
+
+        (when [err (setupSys v l root 0)] (!= err nil)
+          (return err))
+
+        ^{:go/breaks [3]} (let [regs (lit (slice (struct
+                  ^{:line 85 :tag hv/Reg} r
+                  ^{:line 86 :tag uint64} val))
+
+              (lit _ hv/RegRIP (.-entry l))
+              (lit _ hv/RegRSP (.-stackTop l))
+              (lit _ hv/RegRFLAGS 0x2)
+              (lit _ hv/RegRDI (.-argc l))
+              (lit _ hv/RegRSI (.-argv l))
+              (lit _ hv/RegRDX (.-heap l)))]
+
+          (range [_ r regs]
+            (when [err (hv/VCPUSetReg v (.-r r) (.-val r))] (!= err nil)
+              (return err)))
+
+
+          nil)))))
+
+
+(go/const ^{:val 103} tssLimit 0x67)
+
+
+
+
+^{:go/end 150} (go/func setupSys "setupSys sets vCPU i's system registers: every vCPU's the same but TR,\nwhich names its own TSS (the descriptor is the GDT's one, loaded by the\nmonitor and never by the guest, so its busy bit says nothing).\n" ^error [^hv/VCPU v ^{:tag (* layout)} l ^uint64 root ^int i]
+  ^{:go/breaks [4]} (let [sys (lit (slice (struct
+            ^{:line 110 :tag hv/SysReg} r
+            ^{:line 111 :tag uint64} val))
+
+        (lit _ hv/SysRegCR0 (bit-or cr0PE cr0MP cr0ET cr0NE cr0WP cr0PG))
+        (lit _ hv/SysRegCR3 root)
+        (lit _ hv/SysRegCR4 cr4PAE)
+        (lit _ hv/SysRegEFER (bit-or eferLME eferLMA eferNXE))
+        (lit _ hv/SysRegGDTRBase gdtAddr)
+        (lit _ hv/SysRegGDTRLimit (- (+ selTSS 16) 1))
+        (lit _ hv/SysRegIDTRBase idtAddr)
+        (lit _ hv/SysRegIDTRLimit (- (* nVectors 16) 1))
+        (lit _ (.Selector hv/SegTR) selTSS)
+        (lit _ (.Base hv/SegTR) (+ tssAddr (* (conv uint64 i) tssStride)))
+        (lit _ (.Limit hv/SegTR) tssLimit)
+        (lit _ (.AR hv/SegTR) 0x8b))
+
+      ^{:line 126} segs (lit (slice (struct
+            ^{:line 127 :tag hv/Segment} s
+            ^{:line 128 :tag uint64} sel
+            ^{:line 129 :tag uint64} ar))
+
+        (lit _ hv/SegCS selCode 0xa09b)
+        (lit _ hv/SegDS selData 0xc093)
+        (lit _ hv/SegES selData 0xc093)
+        (lit _ hv/SegFS selData 0xc093)
+        (lit _ hv/SegGS selData 0xc093)
+        (lit _ hv/SegSS selData 0xc093))]
+
+    (range [_ s segs]
+      (set! sys (append sys (spread (lit (slice (struct
+                  ^{:line 140 :tag hv/SysReg} r
+                  ^{:line 141 :tag uint64} val))
+              (lit _ (.Selector (.-s s)) (.-sel s)) (lit _ (.Base (.-s s)) 0) (lit _ (.Limit (.-s s)) 0xffffffff) (lit _ (.AR (.-s s)) (.-ar s)))))))
+
+    (range [_ s sys]
+      (when [err (hv/VCPUSetSysReg v (.-r s) (.-val s))] (!= err nil)
+        (return err)))
+
+
+    nil))
+
+
+
+
+^{:go/end 154} (go/func setupAP "setupAP is vCPU i's state until it starts: the boot vCPU's system\nregisters, its own TSS.\n" ^error [^hv/VCPU v ^{:tag (* layout)} l ^int i] (setupSys v l (.-root l) i))
+
+
+
+
+^{:go/breaks [5] :go/end 176} (go/func startAP "startAP points vCPU v at the image's whim_apentry for abi.CPUStart: a[1]\nthe stack, a[2] the M's g0 in RDI, a[3] the function in RSI, its number\na[0] in RDX.\n" ^error [^hv/VCPU v ^{:tag (* layout)} l ^{:tag (array 5 int64)} a]
+  (range [_ r (lit (slice (struct
+            ^{:line 161 :tag hv/Reg} r
+            ^{:line 162 :tag uint64} val))
+
+        (lit _ hv/RegRIP (.-apEntry l))
+        (lit _ hv/RegRSP (conv uint64 (aget a 1)))
+        (lit _ hv/RegRFLAGS 0x2)
+        (lit _ hv/RegRDI (conv uint64 (aget a 2)))
+        (lit _ hv/RegRSI (conv uint64 (aget a 3)))
+        (lit _ hv/RegRDX (conv uint64 (aget a 0))))]
+
+    (when [err (hv/VCPUSetReg v (.-r r) (.-val r))] (!= err nil)
+      (return err)))
+
+
+  nil)
+
+
+
+
+^{:go/end 180} (go/func advance "advance is what the monitor does to the vCPU after a doorbell's exit:\nnothing on amd64, where KVM has completed the store and RIP is past it.\n" ^error [hv/VCPU hv/Syndrome] nil)
+
+
+^{:go/end 186} (go/func pc "pc is the vCPU's instruction pointer, for a diagnostic.\n" ^uint64 [^hv/VCPU v]
+  (let [(values r _) (hv/VCPUGetReg v hv/RegRIP)]
+    ^{:line 185} r))

@@ -1,0 +1,88 @@
+(in-ns 'go.arbace.box.vmm) (go/file "seccomp_linux.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [syscall "syscall"]
+    ^{:line 7} [unsafe "unsafe"]])
+
+
+;; The monitor's system-call filter (doc/GUEST.md, *The VMM*): once the VM
+;; is built, every thread of the process -- the Go runtime's too, and those
+;; it starts later, which inherit it -- may make only the calls the runtime,
+;; the terminal host and KVM_RUN need, and of ioctl only KVM_RUN and the
+;; terminal's three requests.  Anything else kills the process (SIGSYS).
+;; The guest has no system calls of its own to filter: its calls are the
+;; 15 the exit loop answers.
+;;
+;; The list was found by running both suites under the filter in log mode
+;; (WHIM_GUEST_SECCOMP=log: allowed, and logged by the kernel's audit) and
+;; reading what it logged; then held to them in kill mode.
+
+(go/const
+  ^{:line 23} [^{:val 1} seccompSetModeFilter 1]
+  ^{:line 24} [^{:val 1} seccompFlagTSYNC 1]
+  ^{:line 25} [^{:val 2147483648} seccompRetKillProcess 0x80000000]
+  ^{:line 26} [^{:val 2147221504} seccompRetLog 0x7ffc0000]
+  ^{:line 27} [^{:val 2147418112} seccompRetAllow 0x7fff0000]
+  ^{:line 28} [^{:val 38} prSetNoNewPrivs 38]
+
+  ^{:line 30} [^{:val 32} bpfLdWAbs 0x20] ; BPF_LD | BPF_W | BPF_ABS
+  ^{:line 31} [^{:val 21} bpfJeqK 0x15] ; BPF_JMP | BPF_JEQ | BPF_K
+  ^{:line 32} [^{:val 6} bpfRetK 0x06] ; BPF_RET | BPF_K
+
+  ^{:line 34} [^{:val 0} offNr 0] ; offsetof(struct seccomp_data, nr)
+  ^{:line 35} [^{:val 4} offArch 4] ; .arch
+  ^{:line 36} [^{:val 24} offArg1 24]) ; .args[1], its low word (little-endian)
+
+
+
+
+(go/var ^{:doc "the ioctl requests allowed: KVM_RUN, the terminal's, and the ISA's\nregister access in the exit loop (kvmIoctls)\n"} ioctlAllowed (append (lit (slice uint32) 0xae80 0x5401 0x5402 0x5413) (spread kvmIoctls))) ; /* TCGETS */ ; /* TCSETS */ ; /* TIOCGWINSZ */
+
+(go/type sockFilter (struct
+    ^{:line 44 :tag uint16} code
+    ^{:line 45 :tag uint8} jt ^uint8 jf
+    ^{:line 46 :tag uint32} k))
+
+
+(go/type sockFprog (struct
+    ^{:line 50 :tag uint16} len
+    ^{:line 51 :tag (* sockFilter)} filter))
+
+
+
+
+^{:go/end 71} (go/func filter "filter is the program: the arch checked, each allowed call let through,\nioctl by its request, everything else deny.\n" ^{:tag (slice sockFilter)} [^uint32 deny]
+  (let [p (lit (slice sockFilter)
+        (lit _ bpfLdWAbs 0 0 offArch)
+        (lit _ bpfJeqK 1 0 auditArch)
+        (lit _ bpfRetK 0 0 seccompRetKillProcess)
+        (lit _ bpfLdWAbs 0 0 offNr))]
+
+    (range [_ nr allowed]
+      (set! p (append p (lit sockFilter bpfJeqK 0 1 nr) (lit sockFilter bpfRetK 0 0 seccompRetAllow))))
+
+    (set! p (append p (lit sockFilter bpfJeqK 0 (conv uint8 (+ (* 2 (len ioctlAllowed)) 1)) sysIoctl) (lit sockFilter bpfLdWAbs 0 0 offArg1)))
+    (range [_ req ioctlAllowed]
+      (set! p (append p (lit sockFilter bpfJeqK 0 1 req) (lit sockFilter bpfRetK 0 0 seccompRetAllow))))
+
+    (append p (lit sockFilter bpfRetK 0 0 deny))))
+
+
+
+
+^{:go/end 89} (go/func Seccomp "Seccomp puts the filter on every thread of the process.\nWHIM_GUEST_SECCOMP=log logs what it would have denied instead.\n" ^error []
+  (let [deny (conv uint32 seccompRetKillProcess)]
+    (when (== (os/Getenv "WHIM_GUEST_SECCOMP") "log")
+      (set! deny seccompRetLog))
+
+    ^{:go/breaks [4]} (let [p (filter deny)
+        ^{:line 81} prog (lit sockFprog (conv uint16 (len p)) (addr (aget p 0)))]
+      (when [(values _ _ e) (syscall/RawSyscall6 syscall/SYS_PRCTL prSetNoNewPrivs 1 0 0 0 0)] (!= e 0)
+        (return (fmt/Errorf "PR_SET_NO_NEW_PRIVS: %w" e)))
+
+      (when [(values _ _ e) (syscall/RawSyscall sysSeccomp seccompSetModeFilter seccompFlagTSYNC (conv uintptr (conv unsafe/Pointer (addr prog))))] (!= e 0)
+        (return (fmt/Errorf "seccomp: %w" e)))
+
+      nil)))

@@ -1,0 +1,120 @@
+
+
+;; Package libsys is the few signal functions of macOS's libSystem that
+;; package syscall does not offer and a raw system call cannot replace:
+;; sigaction (the kernel's form takes the trampoline libc supplies, and the Go
+;; runtime installs its handlers through libc), pthread_sigmask, sigpending
+;; and pthread_kill -- bound by purego, no cgo, as hv binds
+;; Hypervisor.framework.  The terminal host's Suspend and the monitor's Die
+;; use them for what rt_sigaction, rt_sigprocmask, rt_sigpending and tgkill
+;; do on Linux.  NOT RUN here: written against <signal.h>, built for darwin
+;; as a compile check.
+(in-ns 'go.arbace.box.libsys) (go/file "libsys.go" :build ["//go:build darwin"] :doc "Package libsys is the few signal functions of macOS's libSystem that\npackage syscall does not offer and a raw system call cannot replace:\nsigaction (the kernel's form takes the trampoline libc supplies, and the Go\nruntime installs its handlers through libc), pthread_sigmask, sigpending\nand pthread_kill -- bound by purego, no cgo, as hv binds\nHypervisor.framework.  The terminal host's Suspend and the monitor's Die\nuse them for what rt_sigaction, rt_sigprocmask, rt_sigpending and tgkill\ndo on Linux.  NOT RUN here: written against <signal.h>, built for darwin\nas a compile check.\n" :imports [
+
+
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [sync "sync"]
+    ^{:line 17} [syscall "syscall"]
+
+    ^{:line 19} [purego "github.com/ebitengine/purego"]])
+
+
+(go/const ^{:val "/usr/lib/libSystem.B.dylib"} lib "/usr/lib/libSystem.B.dylib")
+
+
+
+(go/type Sigaction "Sigaction is macOS's struct sigaction: the handler (SIG_DFL 0, SIG_IGN 1,\nor a function), sa_mask (sigset_t, 32 bits) and sa_flags.\n" (struct
+    ^{:line 27 :tag uintptr} Handler
+    ^{:line 28 :tag uint32} Mask
+    ^{:line 29 :tag int32} Flags))
+
+
+
+(go/const "SIG_DFL, and pthread_sigmask's hows: macOS's values, not Linux's.\n"
+  ^{:line 34} [^{:val 0} SigDfl 0]
+  ^{:line 35} [^{:val 1} SigBlock 1]
+  ^{:line 36} [^{:val 2} SigUnblock 2]
+  ^{:line 37} [^{:val 3} SigSetmask 3])
+
+
+
+^{:go/end 41} (go/func Bit "Bit is sig's bit in a sigset_t.\n" ^uint32 [^syscall/Signal sig] ^uint32 (<< 1 (- (conv uint sig) 1)))
+
+(go/var
+  ^{:line 44} [^{:tag (func [^int32 sig ^{:tag (* Sigaction)} act ^{:tag (* Sigaction)} old] [int32])} sigaction]
+  ^{:line 45} [^{:tag (func [^int32 how ^{:tag (* uint32)} set ^{:tag (* uint32)} old] [int32])} pthreadSigmask]
+  ^{:line 46} [^{:tag (func [^{:tag (* uint32)} set] [int32])} sigpending]
+  ^{:line 47} [^{:tag (func [] [uintptr])} pthreadSelf]
+  ^{:line 48} [^{:tag (func [^uintptr t ^int32 sig] [int32])} pthreadKill]
+
+  ^{:line 50} [^sync/Once bind]
+  ^{:line 51} [^error bindErr])
+
+
+
+^{:go/end 73} (go/func Load "Load binds the functions; every other function here calls it.\n" ^error []
+  (.Do bind ^{:go/end 71} (fn []
+      (let [(values h err) (purego/Dlopen lib (bit-or purego/RTLD_NOW purego/RTLD_GLOBAL))]
+        (when (!= err nil)
+          (set! bindErr (fmt/Errorf "libsys: %s: %v" lib err))
+          (return))
+
+        (range [name fn (lit (map string any)
+              ^{:line 63} ["sigaction" (addr sigaction)]
+              ^{:line 64} ["pthread_sigmask" (addr pthreadSigmask)]
+              ^{:line 65} ["sigpending" (addr sigpending)]
+              ^{:line 66} ["pthread_self" (addr pthreadSelf)]
+              ^{:line 67} ["pthread_kill" (addr pthreadKill)])]
+
+          (purego/RegisterLibFunc fn h name)))))
+
+
+  ^{:line 72} bindErr)
+
+
+
+^{:go/end 85} (go/func Action "Action sets sig's action to act (when not nil) and returns the one before.\n" [^syscall/Signal sig ^{:tag (* Sigaction)} act] :results [Sigaction error]
+  (let [^Sigaction old (zero Sigaction)]
+    (when [err (Load)] (!= err nil)
+      (return old err))
+
+    (when (!= (sigaction (conv int32 sig) act (addr old)) 0)
+      (return old (fmt/Errorf "sigaction(%d) failed" sig)))
+
+    (return old nil)))
+
+
+
+
+^{:go/end 98} (go/func ThreadMask "ThreadMask is pthread_sigmask(how, set) on the calling thread (the caller\nlocks it), returning the mask before.\n" [^int how ^uint32 set] :results [uint32 error]
+  (let [^uint32 old (zero uint32)]
+    (when [err (Load)] (!= err nil)
+      (return 0 err))
+
+    (when [e (pthreadSigmask (conv int32 how) (addr set) (addr old))] (!= e 0)
+      (return 0 (conv syscall/Errno e)))
+
+    (return old nil)))
+
+
+
+^{:go/end 110} (go/func Pending "Pending is sigpending: the signals pending for the calling thread.\n" [] :results [uint32 error]
+  (let [^uint32 set (zero uint32)]
+    (when [err (Load)] (!= err nil)
+      (return 0 err))
+
+    (when (!= (sigpending (addr set)) 0)
+      (return 0 (fmt/Errorf "sigpending failed")))
+
+    (return set nil)))
+
+
+
+^{:go/breaks [6] :go/end 121} (go/func RaiseThread "RaiseThread sends sig to the calling thread: pthread_kill(pthread_self()).\n" ^error [^syscall/Signal sig]
+  (when [err (Load)] (!= err nil)
+    (return err))
+
+  (when [e (pthreadKill (pthreadSelf) (conv int32 sig))] (!= e 0)
+    (return (conv syscall/Errno e)))
+
+  nil)

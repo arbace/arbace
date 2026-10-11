@@ -1,0 +1,73 @@
+(in-ns 'go.arbace.box.vmm) (go/file "store_test.go" :imports [
+
+
+    ^{:line 4} [sha256 "crypto/sha256"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [filepath "path/filepath"]
+    ^{:line 7} [testing "testing"]])
+
+
+
+
+
+^{:go/end 75} (go/func TestDirStore "TestDirStore: blobs by their hash, read back from any offset; a short\nblob (a write cut off) refused; refs set, read and compared-and-set; a\nname the store does not take refused.\n" [^{:tag (* testing/T)} t]
+  (let [dir ^{:go/via [common]} (.TempDir t)
+      (values s err) (OpenDirStore dir)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [data (conv (slice byte) "(defn f [x] x)")
+        (values h ^:assign err) (.Put s data)]
+      (when (or (!= err nil) (!= h (sha256/Sum256 data)))
+        ^{:go/via [common]} (.Fatalf t "put: %x %v" h err))
+
+      (when [(values h2 err) (.Put s data)] (or (!= err nil) (!= h2 h))
+        ^{:go/via [common]} (.Fatalf t "put again: %v" err))
+
+      (when [(values n ok) (.Size s h)] (or (not ok) (!= n (conv int64 (len data))))
+        ^{:go/via [common]} (.Fatalf t "size: %d %v" n ok))
+
+      (let [buf (make (slice byte) 4)]
+        (when [(values n ok) (.Get s h 6 buf)] (or (not ok) (!= (conv string (subslice buf _ n)) "f [x"))
+          ^{:go/via [common]} (.Fatalf t "get at 6: %q %v" (subslice buf _ n) ok))
+
+        (when [(values n ok) (.Get s h 100 buf)] (or (not ok) (!= n 0))
+          ^{:go/via [common]} (.Fatalf t "get past the end: %d %v" n ok))
+
+        ;; a blob whose file is short: refused, not served
+        (let [short (conv (slice byte) "a blob cut off")
+            ^{:line 39} hs (sha256/Sum256 short)]
+          (when [err (os/WriteFile (.blob s hs) (subslice short _ 5) 0644)] (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          (when [(values _ ok) (.Size s hs)] ok
+            ^{:go/via [common]} (.Fatal t "a short blob served"))
+
+          ;; refs
+          (when [(values _ ok) (.Ref s "graph")] ok
+            ^{:go/via [common]} (.Fatal t "a ref before any is set"))
+
+          (let [^{:tag (array 32 byte)} none (zero (array 32 byte))]
+            (when [err (.SetRef s "graph" h (addr none))] (!= err nil)
+              ^{:go/via [common]} (.Fatalf t "set ref, none before: %v" err))
+
+            (when [(values got ok) (.Ref s "graph")] (or (not ok) (!= got h))
+              ^{:go/via [common]} (.Fatal t "ref read back"))
+
+            (let [(values h3 _) (.Put s (conv (slice byte) "another"))]
+              (when [err (.SetRef s "graph" h3 (addr none))] (!= err ErrConflict)
+                ^{:go/via [common]} (.Fatalf t "set ref over one, none expected: %v" err))
+
+              (when [err (.SetRef s "graph" h3 (addr h))] (!= err nil)
+                ^{:go/via [common]} (.Fatalf t "compare and set: %v" err))
+
+              (range [_ bad (lit (slice string) "" ".hidden" "a/b" "../x" (conv string (make (slice byte) 65)))]
+                (when [err (.SetRef s bad h nil)] (== err nil)
+                  ^{:go/via [common]} (.Fatalf t "ref name %q taken" bad)))
+
+
+              (when [err (.SetRef s "x" (sha256/Sum256 (conv (slice byte) "absent")) nil)] (== err nil)
+                ^{:go/via [common]} (.Fatal t "a ref to a blob the store has not"))
+
+              (when [(values _ err) (os/Stat (filepath/Join dir "refs" "graph"))] (!= err nil)
+                ^{:go/via [common]} (.Fatal t err)))))))))

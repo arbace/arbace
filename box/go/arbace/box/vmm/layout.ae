@@ -1,0 +1,285 @@
+(in-ns 'go.arbace.box.vmm) (go/file "layout.go" :imports [
+
+
+    ^{:line 4} [elf "debug/elf"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [fmt "fmt"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const "The guest's memory, one slot from guest-physical 0, identity-mapped by\npage tables the monitor writes before the first run (doc/GUEST.md,\n*Memory*):\n\n\t0x0000             not mapped: a null pointer faults\n\t0x1000 .. 0x4000   the ISA's system tables (amd64: GDT, TSS, IDT)\n\t0x4000 .. 0x10000  the command line: argv's pointers and strings\n\t0x10000 .. 2 MiB   the page tables\n\t2 MiB ..           the image: text read-only and executable, read-only\n\t                   data, data and bss, each with its own permissions\n\tthen, 2 MiB on     a guard page, the stack (StackBytes), the fault stack\n\tthen, 2 MiB on     the heap: 1 GiB, the C host's arena, committed as used\n\tDoorbell           no memory: a store here exits to the monitor\n"
+  ^{:line 23} [^{:val 4096} sysBase 0x1000]
+  ^{:line 24} [^{:val 16384} argsBase 0x4000]
+  ^{:line 25} [^{:val 65536} argsEnd 0x10000]
+  ^{:line 26} [^{:val 65536} tablesBase 0x10000]
+  ^{:line 27} [^{:val 2097152} tablesEnd 0x200000]
+  ^{:line 28} [^{:val 2097152} imageBase 0x200000]
+  ^{:line 29} [^{:val 4096} page 0x1000]
+  ^{:line 30} [^{:val 2097152} block 0x200000] ; 2 MiB: a leaf one level above the pages
+
+
+  ^{:line 33} [^{:val 4026531840 :doc "Doorbell is the hypercall's address: the guest stores its call\nblock's address here.\n"} Doorbell 0xf0000000]
+
+
+  ^{:line 36} [^{:val 67108864 :doc "StackBytes is the guest's stack; FaultStackBytes the stack its\nexception vectors run on.\n"} StackBytes (<< 64 20)]
+  ^{:line 37} [^{:val 65536} FaultStackBytes (<< 64 10)]
+
+  ^{:line 39} [^{:val 1073741824 :doc "HeapBytes is the guest's heap: the C host's arena, 1 GiB.\n"} HeapBytes (<< 1 30)])
+
+
+
+(go/type perm "perm is what a guest page may be used for.\n" uint8)
+
+(go/const
+  ^{:line 46} [^{:tag perm :val 1} pRead (<< 1 iota)]
+  ^{:line 47} [^{:val 2} pWrite]
+  ^{:line 48} [^{:val 4} pExec]
+  ^{:line 49} [^{:val 8} pDevice]) ; the doorbell: no memory, device attributes
+
+
+
+(go/type span "span is a range of guest addresses with one permission.\n" (struct
+    ^{:line 54 :tag uint64} lo ^uint64 hi
+    ^{:line 55 :tag perm} p))
+
+
+
+(go/type layout "layout is where everything is, computed from the image.\n" (struct
+    ^{:line 60 :tag uint64} entry ^uint64 vectors
+    ^{:line 61 :tag (slice span)} spans ; sorted, disjoint
+    ^{:line 62 :tag uint64} stackTop
+    ^{:line 63 :tag uint64} faultTop
+    ^{:line 64 :tag uint64} heap
+    ^{:line 65 :tag uint64} size ; the slot's
+    ^{:line 66 :tag uint64} argc ^uint64 argv
+    ^{:line 67 :tag uint64} tablesUsed ^uint64 root
+
+
+    ^{:line 70 :tag bool :doc "a Go guest's (vmm/tamago.go): its RAM starts at its image; its\nvCPUs, and where one CPUStart starts enters (whim_apentry)\n"} goGuest
+    ^{:line 71 :tag uint64} ramStart
+    ^{:line 72 :tag int} cpus
+    ^{:line 73 :tag uint64} apEntry))
+
+
+
+
+^{:go/end 78} (go/method faultTopOf "faultTopOf is the top of vCPU i's fault stack: the boot vCPU's at\nfaultTop, each other's FaultStackBytes under the one before.\n" ^uint64 [^{:tag (* layout)} l ^int i] (- (.-faultTop l) (* (conv uint64 i) FaultStackBytes)))
+
+^{:go/end 80} (go/func roundUp ^uint64 [^uint64 v ^uint64 a] (bit-and-not (- (+ v a) 1) (- a 1)))
+
+
+
+(go/type image "image is a guest ELF's loadable segments and the two symbols the monitor\nneeds: the entry and the exception vectors.\n" (struct
+    ^{:line 85 :tag (* elf/File)} f
+    ^{:line 86 :tag (slice (* elf/Prog))} loads
+    ^{:line 87 :tag uint64} entry
+    ^{:line 88 :tag uint64} vectors
+    ^{:line 89 :tag uint64} apEntry ; whim_apentry, a Go guest's when it has one
+    ^{:line 90 :tag uint64} end))
+
+
+^{:go/end 127} (go/func loadImage [^{:tag (* elf/File)} f ^elf/Machine machine] :results [(* image) error]
+  (when (or (!= ^{:go/via [FileHeader]} (.-Class f) elf/ELFCLASS64) (!= ^{:go/via [FileHeader]} (.-Machine f) machine))
+    (return nil (fmt/Errorf "the guest image is %v %v, not a 64-bit %v" ^{:go/via [FileHeader]} (.-Class f) ^{:go/via [FileHeader]} (.-Machine f) machine)))
+
+  (let [im (addr (lit image :f f :entry ^{:go/via [FileHeader]} (.-Entry f)))]
+    (range [_ p (.-Progs f)]
+      (when (or (!= ^{:go/via [ProgHeader]} (.-Type p) elf/PT_LOAD) (== ^{:go/via [ProgHeader]} (.-Memsz p) 0))
+        (continue))
+
+      (when (or (< ^{:go/via [ProgHeader]} (.-Vaddr p) imageBase) (!= (% ^{:go/via [ProgHeader]} (.-Vaddr p) page) 0) (!= ^{:go/via [ProgHeader]} (.-Paddr p) ^{:go/via [ProgHeader]} (.-Vaddr p)))
+        (return nil (fmt/Errorf "the guest image's segment at %#x is not page-aligned at or above %#x" ^{:go/via [ProgHeader]} (.-Vaddr p) imageBase)))
+
+      (set! (.-loads im) (append (.-loads im) p))
+      (set! (.-end im) (max (.-end im) (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)))))
+
+    (when (== (len (.-loads im)) 0)
+      (return nil (fmt/Errorf "the guest image has nothing to load")))
+
+    (let [(values syms err) (.Symbols f)]
+      (when (!= err nil)
+        (return nil (fmt/Errorf "the guest image's symbols: %w" err)))
+
+      (range [_ s syms]
+        (switch (.-Name s)
+          (case ["whim_vectors"]
+            (set! (.-vectors im) (.-Value s)))
+          (case ["whim_apentry"]
+            (set! (.-apEntry im) (.-Value s)))))
+
+
+      (when (== (.-vectors im) 0)
+        (return nil (fmt/Errorf "the guest image has no whim_vectors")))
+
+      (return im nil))))
+
+
+
+
+
+^{:go/end 158} (go/func plan "plan lays the slot out around the image, for cpus vCPUs: the stack, and\nabove it a fault stack for each vCPU (IST1) -- a guest on several has\nwhim_apentry, where CPUStart starts the others.\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus]
+  (let [l (addr (lit layout :entry (.-entry im) :vectors (.-vectors im) :cpus cpus :apEntry (.-apEntry im)))]
+    (set! (.-spans l) (append (.-spans l) (lit span sysBase argsEnd (bit-or pRead pWrite))))
+    (range [_ p (.-loads im)]
+      (let [^perm pm (zero perm)]
+        (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_R) 0)
+          (set! pm bit-or pRead))
+
+        (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_W) 0)
+          (set! pm bit-or pWrite))
+
+        (when (!= (bit-and ^{:go/via [ProgHeader]} (.-Flags p) elf/PF_X) 0)
+          (set! pm bit-or pExec))
+
+        (set! (.-spans l) (append (.-spans l) (lit span ^{:go/via [ProgHeader]} (.-Vaddr p) (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)) page) pm)))))
+
+    (let [guard (roundUp (.-end im) block)
+        ^{:line 149} stackLo (+ guard page)]
+      (set! (.-stackTop l) (+ stackLo StackBytes))
+      (set! (.-faultTop l) (+ (.-stackTop l) (* (conv uint64 cpus) FaultStackBytes)))
+      (set! (.-spans l) (append (.-spans l) (lit span stackLo (.-faultTop l) (bit-or pRead pWrite))))
+      (set! (.-heap l) (roundUp (.-faultTop l) block))
+      (set! (.-size l) (+ (.-heap l) HeapBytes))
+      (set! (.-spans l) (append (.-spans l) (lit span (.-heap l) (.-size l) (bit-or pRead pWrite))))
+      (set! (.-spans l) (append (.-spans l) (lit span Doorbell (+ Doorbell page) (bit-or pWrite pDevice))))
+      ^{:line 157} l)))
+
+
+
+^{:go/breaks [5] :go/end 168} (go/method permAt "permAt is the permission of the page at va: zero where nothing is mapped.\n" ^perm [^{:tag (* layout)} l ^uint64 va]
+  (range [_ s (.-spans l)]
+    (when (and (>= va (.-lo s)) (< va (.-hi s)))
+      (return (.-p s))))
+
+
+  0)
+
+
+
+^{:go/breaks [5] :go/end 181} (go/method load "load copies the image's segments into mem; bss is already zero.\n" ^error [^{:tag (* image)} im ^{:tag (slice byte)} mem]
+  (range [_ p (.-loads im)]
+    (when (== ^{:go/via [ProgHeader]} (.-Filesz p) 0)
+      (continue))
+
+    (when [(values _ err) ^{:go/via [ReaderAt]} (.ReadAt p (subslice mem ^{:go/via [ProgHeader]} (.-Vaddr p) (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Filesz p))) 0)] (!= err nil)
+      (return (fmt/Errorf "the guest image's segment at %#x: %w" ^{:go/via [ProgHeader]} (.-Vaddr p) err))))
+
+
+  nil)
+
+
+
+
+^{:go/end 200} (go/method writeArgs "writeArgs puts argv into the command-line area: the pointers, then the\nstrings, every pointer guest-physical.\n" ^error [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^{:tag (slice string)} args]
+  ^{:go/breaks [5]} (let [ptrs (conv uint64 argsBase)
+      ^{:line 187} strs (+ ptrs (* (conv uint64 (+ (len args) 1)) 8))]
+    (range [i a args]
+      (when (> (+ strs (conv uint64 (len a)) 1) argsEnd)
+        (return (fmt/Errorf "the command line is longer than the guest's %d bytes for it" (- argsEnd argsBase))))
+
+      (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 i) 8))) strs)
+      (copy (subslice mem strs) a)
+      (aset mem (+ strs (conv uint64 (len a))) 0)
+      (set! strs + (+ (conv uint64 (len a)) 1)))
+
+    (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 (len args)) 8))) 0)
+    (set! (values (.-argc l) (.-argv l)) (values (conv uint64 (len args)) ptrs))
+    nil))
+
+
+
+
+(go/type ptFormat "ptFormat is how an ISA writes its page-table entries, for 4 KiB pages\nwith 2 MiB leaves one level up.\n" (struct
+    ^{:line 205 :tag int} levels ; tables from the root to the pages: 4 on amd64, 3 on arm64 (a 32-bit space)
+    ^{:line 206 :tag (func [^uint64 pa] [uint64])} table
+    ^{:line 207 :tag (func [^uint64 pa ^perm p ^bool big] [uint64])} leaf))
+
+
+
+
+
+^{:go/end 286} (go/method buildTables "buildTables writes the identity map of l's spans into mem's table area,\n2 MiB leaves where a block is one permission, pages where it is not, and\nreturns the root's address.\n" [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^ptFormat f] :results [uint64 error]
+  (let [next (conv uint64 tablesBase)
+      ^{:line 215} alloc ^{:go/end 222} (fn [] :results [uint64 error]
+        (when (>= next tablesEnd)
+          (return 0 (fmt/Errorf "the page tables need more than %d KiB" (>> (- tablesEnd tablesBase) 10))))
+
+        (let [t next]
+          (set! next + page)
+          (return t nil)))
+
+      (values root err) (alloc)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (let [shift ^{:go/end 227} (fn ^uint [^int level] (conv uint (+ 12 (* 9 (- (.-levels f) 1 level)))))
+        ;; walk to the table that holds 2 MiB entries for va (level levels-2)
+        ^{:line 229} walk ^{:go/end 245} (fn [^uint64 va] :results [uint64 error]
+          (let [t root]
+            (for [lv 0] (< lv (- (.-levels f) 2)) (inc! lv)
+              (let [ix (bit-and (>> va (shift lv)) 511)
+                  ^{:line 233} e (.Uint64 binary/LittleEndian (subslice mem (+ t (* ix 8))))]
+                (when (== e 0)
+                  (let [(values n err) (alloc)]
+                    (when (!= err nil)
+                      (return 0 err))
+
+                    (set! e ((.-table f) n))
+                    (.PutUint64 binary/LittleEndian (subslice mem (+ t (* ix 8))) e)))
+
+                (set! t (bit-and e 0x0000fffffffff000))))
+
+            (return t nil)))
+
+        ^{:line 246} seen (lit (map uint64 bool))]
+      (range [_ s (.-spans l)]
+        (for [b (bit-and-not (.-lo s) (- block 1))] (< b (.-hi s)) (set! b + block)
+          (when (aget seen b)
+            (continue))
+
+          (aset seen b true)
+          (let [p0 (.permAt l b)
+              ^{:line 254} uniform true]
+            (for [va b] (< va (+ b block)) (set! va + page)
+              (when (!= (.permAt l va) p0)
+                (set! uniform false)
+                (break)))
+
+
+            (let [(values t err) (walk b)]
+              (when (!= err nil)
+                (return 0 err))
+
+              (let [ix (bit-and (>> b 21) 511)]
+                (when uniform
+                  (when (!= p0 0)
+                    (.PutUint64 binary/LittleEndian (subslice mem (+ t (* ix 8))) ((.-leaf f) b p0 true)))
+
+                  (continue))
+
+                (let [(values pt ^:assign err) (alloc)]
+                  (when (!= err nil)
+                    (return 0 err))
+
+                  (.PutUint64 binary/LittleEndian (subslice mem (+ t (* ix 8))) ((.-table f) pt))
+                  (for [va b] (< va (+ b block)) (set! va + page)
+                    (when [p (.permAt l va)] (!= p 0)
+                      (.PutUint64 binary/LittleEndian (subslice mem (+ pt (* (bit-and (>> va 12) 511) 8))) ((.-leaf f) va p false))))))))))
+
+
+
+
+      (set! (values (.-tablesUsed l) (.-root l)) (values (- next tablesBase) root))
+      (return root nil))))

@@ -1,0 +1,203 @@
+(in-ns 'go.arbace.box.hv) (go/file "hv_amd64_test.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [runtime "runtime"]
+    ^{:line 7} [strings "strings"]
+    ^{:line 8} [syscall "syscall"]
+    ^{:line 9} [testing "testing"]
+    ^{:line 10} [time "time"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+^{:go/end 63} (go/func newTinyGuest "newTinyGuest is a VM of 64 KiB with code at 0x1000 run in real mode, CS\nand DS based so that DS:0 is 0x10000, where no memory is: the smallest\nguest that makes the exits the monitor decodes.\n" [^{:tag (* testing/T)} t ^{:tag (slice byte)} code] :results [VCPU (* VCPUExit)]
+  ^{:go/via [common]} (.Helper t)
+  (when [(values _ err) (os/Stat "/dev/kvm")] (!= err nil)
+    ^{:go/via [common]} (.Skip t "no /dev/kvm"))
+
+  (runtime/LockOSThread)
+  ^{:go/via [common]} (.Cleanup t runtime/UnlockOSThread)
+  (when [err (VMCreate nil)] (!= err nil)
+    ^{:go/via [common]} (.Fatal t err))
+
+  (let [(values mem err) (syscall/Mmap -1 0 0x10000 (bit-or syscall/PROT_READ syscall/PROT_WRITE) (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (copy (subslice mem 0x1000) code)
+    (when [err (VMMap mem 0 (bit-or MemoryRead MemoryWrite MemoryExec))] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [(values v exit ^:assign err) (VCPUCreate)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      ^{:go/via [common]} (.Cleanup t ^{:go/end 47} (fn []
+          (when [err (VCPUDestroy v)] (!= err nil)
+            ^{:go/via [common]} (.Error t err))
+
+          (when [err (VMDestroy)] (!= err nil)
+            ^{:go/via [common]} (.Error t err))
+
+          (syscall/Munmap mem)))
+
+      (range [_ s (lit (slice (struct
+                ^{:line 49 :tag SysReg} r
+                ^{:line 50 :tag uint64} val))
+            (lit _ (.Selector SegCS) 0) (lit _ (.Base SegCS) 0) (lit _ (.Selector SegDS) 0x1000) (lit _ (.Base SegDS) 0x10000))]
+        (when [err (VCPUSetSysReg v (.-r s) (.-val s))] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err)))
+
+
+      (when [err (VCPUSetReg v RegRIP 0x1000)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (when [err (VCPUSetReg v RegRFLAGS 2)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (return v exit))))
+
+
+
+
+
+^{:go/end 103} (go/func TestDoorbellAMD64 "TestDoorbellAMD64: a store where no memory is exits as the framework's\ndata abort -- the address, the size, the register -- with RIP past the\nstore, and the guest goes on.\n" [^{:tag (* testing/T)} t]
+  (let [(values v exit) (newTinyGuest t ^{:go/breaks [2 8 12]} (lit (slice byte)
+          0x66 0xb8 0x78 0x56 0x34 0x12 ; mov eax, 0x12345678
+          0x66 0xa3 0x00 0x00 ; mov [0], eax: DS:0 = 0x10000
+          0xf4))] ; hlt
+
+    (when [err (VCPURun v)] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [s (conv Syndrome (.-Syndrome (.-Exception exit)))]
+      (when (or (!= (.-Reason exit) ExitReasonException) (!= (.EC s) ECDataAbortLower) (not (.ISV s)) (not (.WnR s)) (!= (.SAS s) 2))
+        ^{:go/via [common]} (.Fatalf t "exit %v syndrome %#x, not a 4-byte data abort" (.-Reason exit) (.-Syndrome (.-Exception exit))))
+
+      (when (!= (.-PhysicalAddress (.-Exception exit)) 0x10000)
+        ^{:go/via [common]} (.Fatalf t "the abort at %#x, not 0x10000" (.-PhysicalAddress (.-Exception exit))))
+
+      (let [(values r ok) (RegForSRT (.SRT s))]
+        (when (not ok)
+          ^{:go/via [common]} (.Fatalf t "SRT %d" (.SRT s)))
+
+        (when [(values val _) (VCPUGetReg v r)] (!= val 0x12345678)
+          ^{:go/via [common]} (.Fatalf t "the stored register holds %#x" val))
+
+        (when [(values rip _) (VCPUGetReg v RegRIP)] (!= rip 0x100a)
+          ^{:go/via [common]} (.Fatalf t "RIP %#x after the store, not 0x100a" rip))
+
+        (when [err (VCPURun v)] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (when (or (!= (.-Reason exit) ExitReasonUnknown) (not (strings/Contains (.-Detail exit) "HLT")))
+          ^{:go/via [common]} (.Fatalf t "exit %v %q, not the halt" (.-Reason exit) (.-Detail exit)))
+
+        (when [(values runs _) (Stats v)] (!= runs 2)
+          ^{:go/via [common]} (.Fatalf t "%d KVM_RUNs for two exits" runs))))))
+
+
+
+
+
+^{:go/end 122} (go/func TestVCPUsExitAMD64 "TestVCPUsExitAMD64: a guest spinning is stopped from another goroutine,\nas hv_vcpus_exit does.\n" [^{:tag (* testing/T)} t]
+  (let [(values v exit) (newTinyGuest t (lit (slice byte) 0xeb 0xfe))] ; jmp .
+    (go (^{:go/end 112} (fn []
+          (time/Sleep (* 50 time/Millisecond))
+          (VCPUsExit v))))
+
+    (when [err (VCPURun v)] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when (!= (.-Reason exit) ExitReasonCanceled)
+      ^{:go/via [common]} (.Fatalf t "exit %v, not canceled" (.-Reason exit)))
+
+    (when [(values rip _) (VCPUGetReg v RegRIP)] (!= rip 0x1000)
+      ^{:go/via [common]} (.Fatalf t "RIP %#x" rip))))
+
+
+
+
+
+^{:go/end 140} (go/func TestSysRegsAMD64 "TestSysRegsAMD64: a segment's access rights, written as VMX encodes them,\nread back the same.\n" [^{:tag (* testing/T)} t]
+  (let [(values v _) (newTinyGuest t (lit (slice byte) 0xf4))]
+    (when [err (VCPUSetSysReg v (.AR SegSS) 0xc093)] (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when [(values ar _) (VCPUGetSysReg v (.AR SegSS))] (!= ar 0xc093)
+      ^{:go/via [common]} (.Fatalf t "AR %#x" ar))
+
+    (when [(values _ err) (VCPUGetSysReg v 0x7777)] (!= err BadArgument)
+      ^{:go/via [common]} (.Fatalf t "an unknown register: %v" err))
+
+    (when (or (!= (unsafe/Sizeof (lit kvmSregs)) 312) (!= (unsafe/Sizeof (lit kvmSegment)) 24))
+      ^{:go/via [common]} (.Fatalf t "struct kvm_sregs is %d bytes here, kvm_segment %d" (unsafe/Sizeof (lit kvmSregs)) (unsafe/Sizeof (lit kvmSegment))))))
+
+
+
+
+
+
+
+^{:go/end 205} (go/func TestVCPUsAMD64 "TestVCPUsAMD64: a second vCPU created and run on a thread of its own\nbeside the first (doc/GUEST.md, *SMP*), both spinning, both stopped by\none VCPUsExit; run from a thread not its own it is refused, and once\ndestroyed VCPUsExit names it no more.\n" [^{:tag (* testing/T)} t]
+  (let [(values v0 exit0) (newTinyGuest t (lit (slice byte) 0xeb 0xfe)) ; jmp .
+      ^{:line 148} created (make (chan VCPU))
+      ^{:line 149} ran (make (chan error))
+      ^{:line 150} destroy (make (chan (struct)))]
+    (go (^{:go/end 175} (fn []
+          (runtime/LockOSThread)
+          (defer (runtime/UnlockOSThread))
+          (let [(values v exit err) (VCPUCreate)]
+            (when (!= err nil)
+              (>! ran err)
+              (return))
+
+            (range [_ s (lit (slice (struct
+                      ^{:line 160 :tag SysReg} r
+                      ^{:line 161 :tag uint64} val))
+                  (lit _ (.Selector SegCS) 0) (lit _ (.Base SegCS) 0))]
+              (VCPUSetSysReg v (.-r s) (.-val s)))
+
+            (VCPUSetReg v RegRIP 0x1000)
+            (VCPUSetReg v RegRFLAGS 2)
+            (>! created v)
+            (set! err (VCPURun v))
+            (when (and (== err nil) (!= (.-Reason exit) ExitReasonCanceled))
+              (set! err (fmt/Errorf "vCPU 1: exit %v, not canceled" (.-Reason exit))))
+
+            (>! ran err)
+            (<! destroy)
+            (>! ran (VCPUDestroy v))))))
+
+    (let [^VCPU v1 (zero VCPU)]
+      (select
+        (case (set! v1 (<! created)))
+        (case [err (<! ran)]
+          ^{:go/via [common]} (.Fatal t err)))
+
+      (when (== v1 v0)
+        ^{:go/via [common]} (.Fatalf t "both vCPUs are %d" v0))
+
+      (when [err (VCPURun v1)] (== err nil)
+        ^{:go/via [common]} (.Fatal t "vCPU 1 ran on vCPU 0's thread"))
+
+      (go (^{:go/end 191} (fn []
+            (time/Sleep (* 50 time/Millisecond))
+            (VCPUsExit v0 v1))))
+
+      (when [err (VCPURun v0)] (or (!= err nil) (!= (.-Reason exit0) ExitReasonCanceled))
+        ^{:go/via [common]} (.Fatalf t "vCPU 0: %v, exit %v" err (.-Reason exit0)))
+
+      (when [err (<! ran)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (close destroy)
+      (when [err (<! ran)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (when [err (VCPUsExit v1)] (!= err BadArgument)
+        ^{:go/via [common]} (.Fatalf t "VCPUsExit of a destroyed vCPU: %v" err)))))

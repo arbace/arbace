@@ -1,0 +1,48 @@
+(in-ns 'go.arbace.box.vmm) (go/file "park_linux.go" :imports [
+
+
+    ^{:line 4} [atomic "sync/atomic"]
+    ^{:line 5} [syscall "syscall"]
+    ^{:line 6} [time "time"]
+    ^{:line 7} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+(go/type parker "A parker is a vCPU's park on Linux: a wake token in a word, waited for\nby futex with a timeout of nanoseconds.  The host's Go timers cannot\ntime a park: a wait under a millisecond in a program whose threads are\nall blocked is netpoll's epoll_wait of one millisecond, so a park of 20\nor 80 µs lasted 1.1 ms, and every stop of the Go guest's world on\nseveral vCPUs waited that long for an idle one (doc/LISP-SANDBOX.md,\n*The collector in the box*).  futex is in the filter already.\n" (struct ^atomic/Uint32 word))
+
+(go/const
+  ^{:line 20} [^{:val 128} futexWaitPrivate (bit-or 128 0)] ; FUTEX_PRIVATE_FLAG | FUTEX_WAIT
+  ^{:line 21} [^{:val 129} futexWakePrivate (bit-or 128 1)]) ; FUTEX_PRIVATE_FLAG | FUTEX_WAKE
+
+
+^{:go/end 24} (go/method init [^{:tag (* parker)} p])
+
+
+^{:go/end 31} (go/method wake "wake ends the park, or the next: the token kept until it is taken.\n" [^{:tag (* parker)} p]
+  (when (== (.Swap (.-word p) 1) 0)
+    (syscall/Syscall6 syscall/SYS_FUTEX (conv uintptr (conv unsafe/Pointer (addr (.-word p)))) futexWakePrivate 1 0 0 0)))
+
+
+
+
+^{:go/end 50} (go/method wait "wait waits for a wake, until until (zero: no limit): true when woken.\n" ^bool [^{:tag (* parker)} p ^time/Time until]
+  (while true
+    (when (== (.Swap (.-word p) 0) 1)
+      (return true))
+
+    (let [^{:tag (* syscall/Timespec)} ts (zero (* syscall/Timespec))]
+      (when (not (.IsZero until))
+        (let [d (time/Until until)]
+          (when (<= d 0)
+            (return false))
+
+          (let [t (syscall/NsecToTimespec (conv int64 d))]
+            (set! ts (addr t)))))
+
+      (syscall/Syscall6 syscall/SYS_FUTEX (conv uintptr (conv unsafe/Pointer (addr (.-word p)))) futexWaitPrivate 0 (conv uintptr (conv unsafe/Pointer ts)) 0 0))))

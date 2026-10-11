@@ -1,0 +1,250 @@
+
+
+;; The macOS backend: Hypervisor.framework's arm64 C API called through
+;; purego (github.com/ebitengine/purego) -- the framework loaded by Dlopen,
+;; each hv_* function bound to a Go function of its C signature by
+;; RegisterLibFunc -- with no cgo, so `GOOS=darwin GOARCH=arm64
+;; CGO_ENABLED=0 go build` compiles it anywhere (doc/GUEST.md, *Decided*).
+;; Run on the M2 Max (milestone 4: doc/GUEST.md, *Running on the Mac*).  The binary
+;; that runs it needs the com.apple.security.hypervisor entitlement (an
+;; ad-hoc codesign with an entitlements plist).
+;;
+;; The mapping is one Go function for one C function; the framework does the
+;; rest -- PC left on a store that exits, the exit record in memory it owns
+;; (copied after each run into the one this package hands out), a vCPU bound
+;; to the thread that created it -- but for one thing KVM does and the
+;; framework is not documented to: KVM/arm64 keeps a VM's vCPUs on one
+;; virtual counter (CNTVOFF_EL2 the same for all), and here each vCPU has a
+;; vTimer offset of its own, so VCPUCreate gives every vCPU the VM's first's
+;; (TestCounterVCPUsARM64).  A guest on several vCPUs reads CNTVCT_EL0 on
+;; each and takes it for one clock: one vCPU's behind another's would run
+;; its time backwards, and the guest's nanotime, a difference from the boot
+;; vCPU's reading, would wrap.
+(in-ns 'go.arbace.box.hv) (go/file "hvf_darwin.go" :build ["//go:build darwin && arm64"] :doc "The macOS backend: Hypervisor.framework's arm64 C API called through\npurego (github.com/ebitengine/purego) -- the framework loaded by Dlopen,\neach hv_* function bound to a Go function of its C signature by\nRegisterLibFunc -- with no cgo, so `GOOS=darwin GOARCH=arm64\nCGO_ENABLED=0 go build` compiles it anywhere (doc/GUEST.md, *Decided*).\nRun on the M2 Max (milestone 4: doc/GUEST.md, *Running on the Mac*).  The binary\nthat runs it needs the com.apple.security.hypervisor entitlement (an\nad-hoc codesign with an entitlements plist).\n\nThe mapping is one Go function for one C function; the framework does the\nrest -- PC left on a store that exits, the exit record in memory it owns\n(copied after each run into the one this package hands out), a vCPU bound\nto the thread that created it -- but for one thing KVM does and the\nframework is not documented to: KVM/arm64 keeps a VM's vCPUs on one\nvirtual counter (CNTVOFF_EL2 the same for all), and here each vCPU has a\nvTimer offset of its own, so VCPUCreate gives every vCPU the VM's first's\n(TestCounterVCPUsARM64).  A guest on several vCPUs reads CNTVCT_EL0 on\neach and takes it for one clock: one vCPU's behind another's would run\nits time backwards, and the guest's nanotime, a difference from the boot\nvCPU's reading, would wrap.\n" :imports [
+
+
+    ^{:line 26} [fmt "fmt"]
+    ^{:line 27} [runtime "runtime"]
+    ^{:line 28} [sync "sync"]
+    ^{:line 29} [unsafe "unsafe"]
+
+    ^{:line 31} [purego "github.com/ebitengine/purego"]])
+
+
+(go/const ^{:val "/System/Library/Frameworks/Hypervisor.framework/Hypervisor"} framework "/System/Library/Frameworks/Hypervisor.framework/Hypervisor")
+
+
+
+
+(go/type cExit "cExit is hv_vcpu_exit_t: reason (hv_exit_reason_t, 32 bits), then\nhv_vcpu_exit_exception_t -- syndrome, virtual_address, physical_address,\n64 bits each.\n" (struct
+    ^{:line 40 :tag uint32} reason
+    ^{:line 41 :tag uint32} _
+    ^{:line 42 :tag uint64} syndrome
+    ^{:line 43 :tag uint64} virtual
+    ^{:line 44 :tag uint64} physical))
+
+
+
+
+(go/var "The framework's functions, bound once.  hv_return_t is a 32-bit\nmach_error_t; hv_vcpu_t a uint64; the config objects pointers.\n"
+  ^{:line 50} [^{:tag (func [] [uintptr])} hvVMConfigCreate]
+  ^{:line 51} [^{:tag (func [^uintptr config ^uint32 bits] [int32])} hvVMConfigSetIPASize]
+  ^{:line 52} [^{:tag (func [^uintptr config] [int32])} hvVMCreate]
+  ^{:line 53} [^{:tag (func [] [int32])} hvVMDestroy]
+  ^{:line 54} [^{:tag (func [^unsafe/Pointer addr ^uint64 ipa ^uintptr size ^uint64 flags] [int32])} hvVMMap]
+  ^{:line 55} [^{:tag (func [^uint64 ipa ^uintptr size] [int32])} hvVMUnmap]
+  ^{:line 56} [^{:tag (func [^{:tag (* uint64)} vcpu ^{:tag (* (* cExit))} exit ^uintptr config] [int32])} hvVCPUCreate]
+  ^{:line 57} [^{:tag (func [^uint64 vcpu] [int32])} hvVCPUDestroy]
+  ^{:line 58} [^{:tag (func [^uint64 vcpu] [int32])} hvVCPURun]
+  ^{:line 59} [^{:tag (func [^{:tag (* uint64)} vcpus ^uint32 count] [int32])} hvVCPUsExit]
+  ^{:line 60} [^{:tag (func [^uint64 vcpu ^uint32 reg ^{:tag (* uint64)} value] [int32])} hvVCPUGetReg]
+  ^{:line 61} [^{:tag (func [^uint64 vcpu ^uint32 reg ^uint64 value] [int32])} hvVCPUSetReg]
+  ^{:line 62} [^{:tag (func [^uint64 vcpu ^uint16 reg ^{:tag (* uint64)} value] [int32])} hvVCPUGetSysReg]
+  ^{:line 63} [^{:tag (func [^uint64 vcpu ^uint16 reg ^uint64 value] [int32])} hvVCPUSetSysReg]
+  ^{:line 64} [^{:tag (func [^uint64 vcpu ^{:tag (* uint64)} offset] [int32])} hvVCPUGetVTimerOff]
+  ^{:line 65} [^{:tag (func [^uint64 vcpu ^uint64 offset] [int32])} hvVCPUSetVTimerOff]
+
+  ^{:line 67} [^sync/Once bind]
+  ^{:line 68} [^error bindErr]
+  ^{:line 69} [^sync/Mutex exitsMu]
+  ^{:line 70} [exits (lit (map VCPU vcpuExits))]
+
+
+  ^{:line 73} [^{:tag uint64 :doc "vmCounter is the VM's vTimer offset, its first vCPU's: every other\nvCPU is given it (under exitsMu; VMCreate forgets it).\n"} vmCounter]
+  ^{:line 74} [^bool vmCounterSet])
+
+
+(go/type vcpuExits (struct
+    ^{:line 78 :tag (* cExit)} c ; the framework's
+    ^{:line 79 :tag (* VCPUExit)} rec)) ; handed out
+
+
+^{:go/end 111} (go/func load ^error []
+  (.Do bind ^{:go/end 109} (fn []
+      (let [(values lib err) (purego/Dlopen framework (bit-or purego/RTLD_NOW purego/RTLD_GLOBAL))]
+        (when (!= err nil)
+          (set! bindErr (fmt/Errorf "%w: %s: %v" NoDevice framework err))
+          (return))
+
+        (range [name fn (lit (map string any)
+              ^{:line 90} ["hv_vm_config_create" (addr hvVMConfigCreate)]
+              ^{:line 91} ["hv_vm_config_set_ipa_size" (addr hvVMConfigSetIPASize)]
+              ^{:line 92} ["hv_vm_create" (addr hvVMCreate)]
+              ^{:line 93} ["hv_vm_destroy" (addr hvVMDestroy)]
+              ^{:line 94} ["hv_vm_map" (addr hvVMMap)]
+              ^{:line 95} ["hv_vm_unmap" (addr hvVMUnmap)]
+              ^{:line 96} ["hv_vcpu_create" (addr hvVCPUCreate)]
+              ^{:line 97} ["hv_vcpu_destroy" (addr hvVCPUDestroy)]
+              ^{:line 98} ["hv_vcpu_run" (addr hvVCPURun)]
+              ^{:line 99} ["hv_vcpus_exit" (addr hvVCPUsExit)]
+              ^{:line 100} ["hv_vcpu_get_reg" (addr hvVCPUGetReg)]
+              ^{:line 101} ["hv_vcpu_set_reg" (addr hvVCPUSetReg)]
+              ^{:line 102} ["hv_vcpu_get_sys_reg" (addr hvVCPUGetSysReg)]
+              ^{:line 103} ["hv_vcpu_set_sys_reg" (addr hvVCPUSetSysReg)]
+              ^{:line 104} ["hv_vcpu_get_vtimer_offset" (addr hvVCPUGetVTimerOff)]
+              ^{:line 105} ["hv_vcpu_set_vtimer_offset" (addr hvVCPUSetVTimerOff)])]
+
+          (purego/RegisterLibFunc fn lib name)))))
+
+
+  ^{:line 110} bindErr)
+
+
+^{:go/end 118} (go/func ret ^error [^int32 r]
+  (when (== r 0)
+    (return nil))
+
+  (conv Return (conv uint32 r)))
+
+
+
+
+^{:go/end 137} (go/func VMCreate "VMCreate is hv_vm_create, with hv_vm_config_set_ipa_size when asked (the\nconfig object is not released: one, for the process's one VM).\n" ^error [^{:tag (* VMConfig)} config]
+  (when [err (load)] (!= err nil)
+    (return err))
+
+  (.Lock exitsMu)
+  (set! vmCounterSet false)
+  (.Unlock exitsMu)
+  (let [c (conv uintptr 0)]
+    (when (and (!= config nil) (!= (.-IPASize config) 0))
+      (set! c (hvVMConfigCreate))
+      (when [err (ret (hvVMConfigSetIPASize c (.-IPASize config)))] (!= err nil)
+        (return err)))
+
+
+    (ret (hvVMCreate c))))
+
+
+
+^{:go/end 140} (go/func VMDestroy "VMDestroy is hv_vm_destroy.\n" ^error [] (ret (hvVMDestroy)))
+
+
+^{:go/end 145} (go/func VMMap "VMMap is hv_vm_map.  mem must be 16 KiB-aligned on Apple silicon.\n" ^error [^{:tag (slice byte)} mem ^IPA ipa ^MemoryFlags flags]
+  (ret (hvVMMap (conv unsafe/Pointer (addr (aget mem 0))) (conv uint64 ipa) (conv uintptr (len mem)) (conv uint64 flags))))
+
+
+
+^{:go/end 148} (go/func VMUnmap "VMUnmap is hv_vm_unmap.\n" ^error [^IPA ipa ^uint64 size] (ret (hvVMUnmap (conv uint64 ipa) (conv uintptr size))))
+
+
+
+
+
+^{:go/end 175} (go/func VCPUCreate "VCPUCreate is hv_vcpu_create, on the calling thread (locked: LockThread),\nthe vCPU put on the VM's virtual counter: the first's vTimer offset\nread, every later one's set to it (hv_vcpu_*_vtimer_offset, on the\nvCPU's own thread).\n" [] :results [VCPU (* VCPUExit) error]
+  (let [^uint64 v (zero uint64)
+      ^{:line 156 :tag (* cExit)} e (zero (* cExit))]
+    (when [err (ret (hvVCPUCreate (addr v) (addr e) 0))] (!= err nil)
+      (return 0 nil err))
+
+    (.Lock exitsMu)
+    (defer (.Unlock exitsMu))
+    (let [^error err (zero error)]
+      (if vmCounterSet
+        (set! err (ret (hvVCPUSetVTimerOff v vmCounter)))
+        (when [(set! err (ret (hvVCPUGetVTimerOff v (addr vmCounter))))] (== err nil)
+          (set! vmCounterSet true)))
+
+      (when (!= err nil)
+        (hvVCPUDestroy v)
+        (return 0 nil (fmt/Errorf "the vCPU's vTimer offset: %w" err)))
+
+      (let [rec (addr (lit VCPUExit))]
+        (aset exits (conv VCPU v) (lit vcpuExits e rec))
+        (return (conv VCPU v) rec nil)))))
+
+
+
+^{:go/end 183} (go/func VCPUDestroy "VCPUDestroy is hv_vcpu_destroy.\n" ^error [^VCPU v]
+  (.Lock exitsMu)
+  (delete exits v)
+  (.Unlock exitsMu)
+  (ret (hvVCPUDestroy (conv uint64 v))))
+
+
+
+
+^{:go/end 203} (go/func VCPURun "VCPURun is hv_vcpu_run, the framework's exit record copied into the one\nhanded out.\n" ^error [^VCPU v]
+  (when [err (ret (hvVCPURun (conv uint64 v)))] (!= err nil)
+    (return err))
+
+  (.Lock exitsMu)
+  ^{:go/breaks [4]} (let [e (aget exits v)]
+    (.Unlock exitsMu)
+    (set! @(.-rec e) ^{:go/breaks [2 4]} (lit VCPUExit
+        :Reason (conv ExitReason (.-reason (.-c e)))
+        :Exception ^{:go/breaks [2 4 6]} (lit VCPUExitException
+          :Syndrome (.-syndrome (.-c e))
+          :VirtualAddress (.-virtual (.-c e))
+          :PhysicalAddress (conv IPA (.-physical (.-c e))))))
+
+
+    nil))
+
+
+
+^{:go/end 215} (go/func VCPUsExit "VCPUsExit is hv_vcpus_exit.\n" ^error [& ^{:tag (slice VCPU)} vcpus]
+  (when (== (len vcpus) 0)
+    (return nil))
+
+  (let [cv (make (slice uint64) (len vcpus))]
+    (range [i v vcpus]
+      (aset cv i (conv uint64 v)))
+
+    (ret (hvVCPUsExit (addr (aget cv 0)) (conv uint32 (len cv))))))
+
+
+
+^{:go/end 222} (go/func VCPUGetReg "VCPUGetReg is hv_vcpu_get_reg.\n" [^VCPU v ^Reg r] :results [uint64 error]
+  (let [^uint64 val (zero uint64)
+      ^{:line 220} err (ret (hvVCPUGetReg (conv uint64 v) (conv uint32 r) (addr val)))]
+    (return val err)))
+
+
+
+^{:go/end 227} (go/func VCPUSetReg "VCPUSetReg is hv_vcpu_set_reg.\n" ^error [^VCPU v ^Reg r ^uint64 val]
+  (ret (hvVCPUSetReg (conv uint64 v) (conv uint32 r) val)))
+
+
+
+^{:go/end 234} (go/func VCPUGetSysReg "VCPUGetSysReg is hv_vcpu_get_sys_reg.\n" [^VCPU v ^SysReg r] :results [uint64 error]
+  (let [^uint64 val (zero uint64)
+      ^{:line 232} err (ret (hvVCPUGetSysReg (conv uint64 v) (conv uint16 r) (addr val)))]
+    (return val err)))
+
+
+
+^{:go/end 239} (go/func VCPUSetSysReg "VCPUSetSysReg is hv_vcpu_set_sys_reg.\n" ^error [^VCPU v ^SysReg r ^uint64 val]
+  (ret (hvVCPUSetSysReg (conv uint64 v) (conv uint16 r) val)))
+
+
+
+^{:go/end 242} (go/func Stats "Stats has no framework counterpart: every hv_vcpu_run is one exit.\n" [VCPU] :results [^uint64 runs ^uint64 spurious] (return 0 0))
+
+
+
+^{:go/end 246} (go/func LockThread "LockThread: the framework requires a vCPU to live on the thread that\ncreated it, for its life.\n" [] (runtime/LockOSThread))
+
+
+
+^{:go/end 250} (go/func ForwardHVC "ForwardHVC has nothing to do on the framework: every HVC exits to the\nmonitor.\n" ^error [^uint32 base ^uint32 n] nil)

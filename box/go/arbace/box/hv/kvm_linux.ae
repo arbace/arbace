@@ -1,0 +1,438 @@
+(in-ns 'go.arbace.box.hv) (go/file "kvm_linux.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [runtime "runtime"]
+    ^{:line 7} [sync "sync"]
+    ^{:line 8} [atomic "sync/atomic"]
+    ^{:line 9} [syscall "syscall"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+
+
+(go/const "The KVM backend: /dev/kvm through raw ioctl.  The request numbers are the\nkernel's stable ABI (include/uapi/linux/kvm.h), spelled out.\n"
+  ^{:line 16} [^{:val 44544} kvmGetAPIVersion 0xae00]
+  ^{:line 17} [^{:val 44545} kvmCreateVM 0xae01]
+  ^{:line 18} [^{:val 44547} kvmCheckExtension 0xae03]
+  ^{:line 19} [^{:val 44548} kvmGetVCPUMmapSize 0xae04]
+  ^{:line 20} [^{:val 44609} kvmCreateVCPU 0xae41]
+  ^{:line 21} [^{:val 1075883590} kvmSetUserMemRegion 0x4020ae46]
+  ^{:line 22} [^{:val 44672} kvmRun 0xae80]
+  ^{:line 23} [^{:val 1075359457} kvmSetDeviceAttr 0x4018aee1]
+  ^{:line 24} [^{:val 136} kvmCapImmediateExit 136]
+  ^{:line 25} [^{:val 74} kvmCapSyncRegs 74]
+  ^{:line 26} [^{:val 2} kvmMemReadonly (<< 1 1)]
+  ^{:line 27} [^{:val 0} kvmExitUnknown 0]
+  ^{:line 28} [^{:val 2} kvmExitIO 2]
+  ^{:line 29} [^{:val 3} kvmExitHypercall 3]
+  ^{:line 30} [^{:val 5} kvmExitHLT 5]
+  ^{:line 31} [^{:val 6} kvmExitMMIO 6]
+  ^{:line 32} [^{:val 8} kvmExitShutdown 8]
+  ^{:line 33} [^{:val 9} kvmExitFailEntry 9]
+  ^{:line 34} [^{:val 10} kvmExitIntr 10]
+  ^{:line 35} [^{:val 17} kvmExitInternalError 17]
+  ^{:line 36} [^{:val 24} kvmExitSystemEvent 24]
+  ^{:line 37} [^{:val 8} kvmRunExitReason 8] ; offsetof(struct kvm_run, exit_reason)
+  ^{:line 38} [^{:val 1} kvmRunImmediateExit 1] ; offsetof(struct kvm_run, immediate_exit)
+  ^{:line 39} [^{:val 32} kvmRunUnion 32] ; the exit's union
+  ^{:line 40} [^{:val 288} kvmRunValidRegs 288] ; kvm_valid_regs
+  ^{:line 41} [^{:val 296} kvmRunDirtyRegs 296] ; kvm_dirty_regs
+  ^{:line 42} [^{:val 304} kvmRunSyncRegs 304] ; s.regs
+  ^{:line 43} [^{:val 32} kvmMMIOPhysAddr kvmRunUnion]
+  ^{:line 44} [^{:val 40} kvmMMIOData (+ kvmRunUnion 8)]
+  ^{:line 45} [^{:val 48} kvmMMIOLen (+ kvmRunUnion 16)]
+  ^{:line 46} [^{:val 52} kvmMMIOIsWrite (+ kvmRunUnion 20)]
+  ^{:line 47} [^{:val 32} kvmIODirection kvmRunUnion]
+  ^{:line 48} [^{:val 33} kvmIOSize (+ kvmRunUnion 1)]
+  ^{:line 49} [^{:val 34} kvmIOPort (+ kvmRunUnion 2)]
+  ^{:line 50} [^{:val 36} kvmIOCount (+ kvmRunUnion 4)]
+  ^{:line 51} [^{:val 40} kvmIODataOffset (+ kvmRunUnion 8)]
+  ^{:line 52} [^{:val 32} kvmHypercallNr kvmRunUnion]
+  ^{:line 53} [^{:val 40} kvmHypercallArgs (+ kvmRunUnion 8)]
+  ^{:line 54} [^{:val 88} kvmHypercallRet (+ kvmRunUnion 56)]
+  ^{:line 55} [^{:val 96} kvmHypercallFlags (+ kvmRunUnion 64)]
+  ^{:line 56} [^{:val 32} kvmFailEntryReason kvmRunUnion]
+  ^{:line 57} [^{:val 32} kvmInternalSuberror kvmRunUnion]
+  ^{:line 58} [^{:val 32} kvmSystemEventType kvmRunUnion]
+  ^{:line 59} [^{:val 100} ioctlRetries 100])
+
+
+
+(go/var ^{:tag (struct sync/Mutex ^int kvm ^int fd ^bool created ^{:tag (map IPA memSlot)} slots ^uint32 nextSlot ^{:tag (slice (* vcpu))} vcpus ^int mmapSize ^vmISA isa) :doc "the one virtual machine of the process, as the framework has it\n"} vm)
+
+
+
+
+
+
+
+
+
+
+(go/type memSlot (struct
+    ^{:line 75 :tag uint32} slot
+    ^{:line 76 :tag uint64} size))
+
+
+
+
+(go/type vcpu "vcpu is a vCPU's KVM state: its fd, its kvm_run page, the exit record\nhanded out, the thread it lives on, and the ISA's register caches.\n" (struct
+    ^{:line 82 :tag int} fd
+    ^{:line 83 :tag (slice byte)} run
+    ^{:line 84 :tag (* VCPUExit)} exit
+    ^{:line 85 :tag int} tid
+    ^{:line 86 :tag atomic/Bool} cancel
+    ^{:line 87 :tag vcpuISA} isa
+    ^{:line 88 :tag uint64} runs
+    ^{:line 89 :tag uint64} spurious)) ; KVM_RUN interrupted by a signal and run again
+
+
+
+
+^{:go/end 106} (go/func ioctl "ioctl is the ioctl req on fd with an argument that is a number, retried\nwhile interrupted.\n" [^int fd ^uintptr req ^uintptr arg] :results [uintptr error]
+  (range [ioctlRetries]
+    (let [(values r _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr fd) req arg)]
+      (when (or (== e syscall/EINTR) (== e syscall/EAGAIN))
+        (continue))
+
+      (when (!= e 0)
+        (return r e))
+
+      (return r nil)))
+
+  (return 0 syscall/EINTR))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 119} (go/func ioctlPtr "ioctlPtr is ioctl with an argument that is the address of an object.  It\nis a pointer until the system call, made a number only in its argument\nlist: a goroutine's stack moves when it grows -- at a function's\nprologue, this one's among them -- and an address taken as a number\nbefore then would still name the old stack, where the kernel would read\na stale copy and write what no one reads.  (Found in the aarch64 VM: a\nGo guest's AP, on a goroutine of its own whose stack grew at its first\nexit, read X0 by KVM_GET_ONE_REG as 0, its store's data as the call\nblock's address, and the monitor took the doorbell for a stray store.)\n" [^int fd ^uintptr req ^unsafe/Pointer arg] :results [uintptr error]
+  (ioctlAt fd req arg nil nil))
+
+
+
+
+
+
+^{:go/end 140} (go/func ioctlAt "ioctlAt is ioctlPtr for an argument that holds the address of another\nobject, as a number the kernel reads (KVM_GET_ONE_REG's addr): *at is\nset to inner's address here, past the last point before the call where\nthe stack can move (syscall.Syscall does not grow it).\n" [^int fd ^uintptr req ^unsafe/Pointer arg ^{:tag (* uint64)} at ^unsafe/Pointer inner] :results [uintptr error]
+  (range [ioctlRetries]
+    (when (!= at nil)
+      (set! @at (conv uint64 (conv uintptr inner))))
+
+    (let [(values r _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr fd) req (conv uintptr arg))]
+      (when (or (== e syscall/EINTR) (== e syscall/EAGAIN))
+        (continue))
+
+      (when (!= e 0)
+        (return r e))
+
+      (return r nil)))
+
+  (return 0 syscall/EINTR))
+
+
+^{:go/end 142} (go/func fail ^error [^Return r ^string op ^error err] (addr (lit errnoError r op err)))
+
+
+^{:go/end 191} (go/func VMCreate "VMCreate is hv_vm_create: the process's one virtual machine.\n" ^error [^{:tag (* VMConfig)} config]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (.-created vm)
+    (return Busy))
+
+  (let [(values kvm err) (syscall/Open "/dev/kvm" (bit-or syscall/O_RDWR syscall/O_CLOEXEC) 0)]
+    (when (!= err nil)
+      (return (fail NoDevice "open /dev/kvm" err)))
+
+    (when [(values v err) (ioctl kvm kvmGetAPIVersion 0)] (or (!= err nil) (!= v 12))
+      (syscall/Close kvm)
+      (return (fail Unsupported "KVM_GET_API_VERSION" (fmt/Errorf "%d, %v" v err))))
+
+    (when [(values ok _) (ioctl kvm kvmCheckExtension kvmCapImmediateExit)] (== ok 0)
+      (syscall/Close kvm)
+      (return (fail Unsupported "KVM_CAP_IMMEDIATE_EXIT" syscall/ENOSYS)))
+
+    (let [typ (conv uintptr 0)]
+      (when (!= config nil)
+        (set! typ (vmType (.-IPASize config))))
+
+      (let [(values fd ^:assign err) (ioctl kvm kvmCreateVM typ)]
+        (when (!= err nil)
+          (syscall/Close kvm)
+          (return (fail NoResources "KVM_CREATE_VM" err)))
+
+        ^{:go/breaks [11]} (let [(values sz ^:assign err) (ioctl kvm kvmGetVCPUMmapSize 0)]
+          (when (!= err nil)
+            (syscall/Close (conv int fd))
+            (syscall/Close kvm)
+            (return (fail Error "KVM_GET_VCPU_MMAP_SIZE" err)))
+
+          (syscall/CloseOnExec (conv int fd))
+          (set! (values (.-kvm vm) (.-fd vm) (.-mmapSize vm)) (values kvm (conv int fd) (conv int sz)))
+          (set! (.-slots vm) (lit (map IPA memSlot)))
+          (set! (.-nextSlot vm) 0)
+          (set! (.-vcpus vm) nil)
+          (set! (.-isa vm) (lit vmISA))
+          (when [err (vmInit)] (!= err nil)
+            (syscall/Close (.-fd vm))
+            (syscall/Close (.-kvm vm))
+            (return err))
+
+          (set! (.-created vm) true)
+          nil)))))
+
+
+
+^{:go/breaks [11] :go/end 209} (go/func VMDestroy "VMDestroy is hv_vm_destroy.  Its vCPUs must have been destroyed.\n" ^error []
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (not (.-created vm))
+    (return BadArgument))
+
+  (range [_ c (.-vcpus vm)]
+    (when (!= c nil)
+      (return Busy)))
+
+
+  (syscall/Close (.-fd vm))
+  (syscall/Close (.-kvm vm))
+  (set! (.-created vm) false)
+  nil)
+
+
+
+(go/type kvmUserspaceMemoryRegion "kvmUserspaceMemoryRegion is struct kvm_userspace_memory_region.\n" (struct
+    ^{:line 213 :tag uint32} slot ^uint32 flags
+    ^{:line 214 :tag uint64} guestPhys ^uint64 size ^uint64 userptr))
+
+
+
+
+
+^{:go/end 240} (go/func VMMap "VMMap is hv_vm_map: mem, page-aligned, as guest RAM at ipa.  KVM has no\nexecute permission to withhold: MemoryExec is the guest's own page\ntables' business there.  A map without MemoryWrite is read-only.\n" ^error [^{:tag (slice byte)} mem ^IPA ipa ^MemoryFlags flags]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (not (.-created vm))
+    (return BadArgument))
+
+  (when (or (== (len mem) 0) (!= (% (conv uintptr (conv unsafe/Pointer (addr (aget mem 0)))) (conv uintptr (os/Getpagesize))) 0) (!= (% (conv uint64 ipa) (conv uint64 (os/Getpagesize))) 0))
+    (return BadArgument))
+
+  ^{:go/breaks [6]} (let [r ^{:go/breaks [8]} (lit kvmUserspaceMemoryRegion :slot (.-nextSlot vm) :guestPhys (conv uint64 ipa) :size (conv uint64 (len mem))
+        :userptr (conv uint64 (conv uintptr (conv unsafe/Pointer (addr (aget mem 0))))))]
+    (when (== (bit-and flags MemoryWrite) 0)
+      (set! (.-flags r) bit-or kvmMemReadonly))
+
+    (when [(values _ err) (ioctlPtr (.-fd vm) kvmSetUserMemRegion (conv unsafe/Pointer (addr r)))] (!= err nil)
+      (return (fail Error "KVM_SET_USER_MEMORY_REGION" err)))
+
+    (aset (.-slots vm) ipa (lit memSlot (.-nextSlot vm) (conv uint64 (len mem))))
+    (inc! (.-nextSlot vm))
+    nil))
+
+
+
+^{:go/end 256} (go/func VMUnmap "VMUnmap is hv_vm_unmap: the mapping made at ipa, of size bytes, removed.\n" ^error [^IPA ipa ^uint64 size]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (let [(values s ok) (aget (.-slots vm) ipa)]
+    (when (or (not ok) (!= (.-size s) size))
+      (return BadArgument))
+
+    ^{:go/breaks [4]} (let [r (lit kvmUserspaceMemoryRegion :slot (.-slot s) :guestPhys (conv uint64 ipa))]
+      (when [(values _ err) (ioctlPtr (.-fd vm) kvmSetUserMemRegion (conv unsafe/Pointer (addr r)))] (!= err nil)
+        (return (fail Error "KVM_SET_USER_MEMORY_REGION" err)))
+
+      (delete (.-slots vm) ipa)
+      nil)))
+
+
+
+
+
+^{:go/end 286} (go/func VCPUCreate "VCPUCreate is hv_vcpu_create: a vCPU on the calling thread, which must be\nlocked to it (runtime.LockOSThread) and is the only one to run it, and\nthe exit record VCPURun fills.\n" [] :results [VCPU (* VCPUExit) error]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (not (.-created vm))
+    (return 0 nil BadArgument))
+
+  (let [id (len (.-vcpus vm))
+      (values fd err) (ioctl (.-fd vm) kvmCreateVCPU (conv uintptr id))]
+    (when (!= err nil)
+      (return 0 nil (fail NoResources "KVM_CREATE_VCPU" err)))
+
+    (syscall/CloseOnExec (conv int fd))
+    (let [(values run ^:assign err) (syscall/Mmap (conv int fd) 0 (.-mmapSize vm) (bit-or syscall/PROT_READ syscall/PROT_WRITE) syscall/MAP_SHARED)]
+      (when (!= err nil)
+        (syscall/Close (conv int fd))
+        (return 0 nil (fail NoResources "mmap kvm_run" err)))
+
+      (let [c (addr (lit vcpu :fd (conv int fd) :run run :exit (addr (lit VCPUExit)) :tid (syscall/Gettid)))]
+        (when [err (vcpuInit c)] (!= err nil)
+          (syscall/Munmap run)
+          (syscall/Close (conv int fd))
+          (return 0 nil err))
+
+        (set! (.-vcpus vm) (append (.-vcpus vm) c))
+        (return (conv VCPU id) (.-exit c) nil)))))
+
+
+^{:go/end 295} (go/func get [^VCPU v] :results [(* vcpu) error]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (or (>= (conv int v) (len (.-vcpus vm))) (== (aget (.-vcpus vm) v) nil))
+    (return nil BadArgument))
+
+  (return (aget (.-vcpus vm) v) nil))
+
+
+
+
+^{:go/end 310} (go/func VCPUDestroy "VCPUDestroy is hv_vcpu_destroy.  It holds the VM's lock, so that a\nVCPUsExit from another thread finds the vCPU whole or not at all.\n" ^error [^VCPU v]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (when (or (>= (conv int v) (len (.-vcpus vm))) (== (aget (.-vcpus vm) v) nil))
+    (return BadArgument))
+
+  ^{:go/breaks [5]} (let [c (aget (.-vcpus vm) v)]
+    (aset (.-vcpus vm) v nil)
+    (syscall/Munmap (.-run c))
+    (syscall/Close (.-fd c))
+    nil))
+
+
+
+
+
+
+
+^{:go/breaks [7] :go/end 330} (go/func VCPUsExit "VCPUsExit is hv_vcpus_exit: each vCPU named, running or about to, returns\nfrom VCPURun with ExitReasonCanceled.  KVM's way: immediate_exit set in\nits kvm_run, and a signal to its thread to end a KVM_RUN under way --\nSIGURG, which the Go runtime takes for a preemption request it did not\nmake, and ignores.\n" ^error [& ^{:tag (slice VCPU)} vcpus]
+  ^{:go/via [Mutex]} (.Lock vm)
+  (defer ^{:go/via [Mutex]} (.Unlock vm))
+  (range [_ v vcpus]
+    (when (or (>= (conv int v) (len (.-vcpus vm))) (== (aget (.-vcpus vm) v) nil))
+      (return BadArgument))
+
+    (let [c (aget (.-vcpus vm) v)]
+      (.Store (.-cancel c) true)
+      (atomic/StoreUint32 (conv (* uint32) (conv unsafe/Pointer (addr (aget (.-run c) 0)))) (<< 1 8)) ; immediate_exit = 1
+      (syscall/Tgkill (syscall/Getpid) (.-tid c) syscall/SIGURG)))
+
+  nil)
+
+
+
+
+
+^{:go/end 386} (go/func VCPURun "VCPURun is hv_vcpu_run: the vCPU runs until it exits, and its exit record\nsays why.  A KVM_RUN interrupted by a signal the caller did not ask for\n(VCPUsExit) is run again, as the framework would not have returned.\n" ^error [^VCPU v]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return err))
+
+    (when (!= (.-tid c) (syscall/Gettid))
+      (return (fail BadArgument "hv_vcpu_run" (fmt/Errorf "vCPU %d created on thread %d, run on %d (runtime.LockOSThread)" v (.-tid c) (syscall/Gettid)))))
+
+    (when [err (beforeRun c)] (!= err nil)
+      (return err))
+
+    (while true
+      (inc! (.-runs c))
+      (let [(values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr (.-fd c)) kvmRun 0)]
+        (when (or (== e syscall/EINTR) (== e syscall/EAGAIN) ^:go/paren (and (== e 0) (== (.u32 c kvmRunExitReason) kvmExitIntr)))
+          (when (.Swap (.-cancel c) false)
+            (atomic/StoreUint32 (conv (* uint32) (conv unsafe/Pointer (addr (aget (.-run c) 0)))) 0)
+            (set! @(.-exit c) (lit VCPUExit :Reason ExitReasonCanceled))
+            (afterRun c false)
+            (return nil))
+
+          (inc! (.-spurious c))
+          (continue))
+
+        (when (!= e 0)
+          (return (fail Error "KVM_RUN" e)))
+
+        (break)))
+
+    (set! @(.-exit c) (lit VCPUExit))
+    (afterRun c true)
+    ^{:go/breaks [6]} (let [reason (.u32 c kvmRunExitReason)]
+      (switch reason
+        (case [kvmExitMMIO]
+          (let [n (conv int (.u32 c kvmMMIOLen))
+              ^{:line 370} write (!= (aget (.-run c) kvmMMIOIsWrite) 0)
+              ^{:line 371 :tag uint64} data (zero uint64)]
+            (for [i (- n 1)] (>= i 0) (dec! i)
+              (set! data (bit-or (<< data 8) (conv uint64 (aget (.-run c) (+ kvmMMIOData i))))))
+
+            (set! (.-Reason (.-exit c)) ExitReasonException)
+            (set! (.-PhysicalAddress (.-Exception (.-exit c))) (conv IPA (.u64 c kvmMMIOPhysAddr)))
+            (set! (.-Syndrome (.-Exception (.-exit c))) (conv uint64 (mmioExit c n write data)))
+            (return nil))))
+
+      (when (isaExit c reason)
+        (return nil))
+
+      (set! (.-Reason (.-exit c)) ExitReasonUnknown)
+      (set! (.-Detail (.-exit c)) (describe c reason))
+      nil)))
+
+
+^{:go/end 408} (go/func describe ^string [^{:tag (* vcpu)} c ^uint32 reason]
+  (switch reason
+    (case [kvmExitHLT]
+      (return "KVM_EXIT_HLT"))
+    (case [kvmExitShutdown]
+      (return "KVM_EXIT_SHUTDOWN (a triple fault)"))
+    (case [kvmExitFailEntry]
+      (return (fmt/Sprintf "KVM_EXIT_FAIL_ENTRY, hardware reason %#x" (.u64 c kvmFailEntryReason))))
+    (case [kvmExitInternalError]
+      (return (fmt/Sprintf "KVM_EXIT_INTERNAL_ERROR, suberror %d" (.u32 c kvmInternalSuberror))))
+    (case [kvmExitSystemEvent]
+      (return (fmt/Sprintf "KVM_EXIT_SYSTEM_EVENT, type %d" (.u32 c kvmSystemEventType))))
+    (case [kvmExitIO]
+      (return (fmt/Sprintf "KVM_EXIT_IO, port %#x" (.u16 c kvmIOPort))))
+    (case [kvmExitHypercall]
+      (return (fmt/Sprintf "KVM_EXIT_HYPERCALL, nr %#x" (.u64 c kvmHypercallNr))))
+    (case [kvmExitUnknown]
+      (return "KVM_EXIT_UNKNOWN")))
+
+  (fmt/Sprintf "KVM exit reason %d" reason))
+
+
+^{:go/end 410} (go/method u16 ^uint16 [^{:tag (* vcpu)} c ^int off] @(conv (* uint16) (conv unsafe/Pointer (addr (aget (.-run c) off)))))
+^{:go/end 411} (go/method u32 ^uint32 [^{:tag (* vcpu)} c ^int off] @(conv (* uint32) (conv unsafe/Pointer (addr (aget (.-run c) off)))))
+^{:go/end 412} (go/method u64 ^uint64 [^{:tag (* vcpu)} c ^int off] @(conv (* uint64) (conv unsafe/Pointer (addr (aget (.-run c) off)))))
+
+
+
+^{:go/end 422} (go/func Stats "Stats is what the backend counted on v: KVM_RUN calls, and those a signal\ninterrupted that were run again.  Not the framework's.\n" [^VCPU v] :results [^uint64 runs ^uint64 spurious]
+  (let [(values c err) (get v)]
+    (when (!= err nil)
+      (return 0 0))
+
+    (return (.-runs c) (.-spurious c))))
+
+
+
+
+
+^{:go/end 427} (go/func LockThread "LockThread is the framework's rule made explicit for Go: the goroutine\nthat creates a vCPU is the one that runs it, on one thread for the vCPU's\nlife.\n" [] (runtime/LockOSThread))
+
+
+
+(go/type errnoError "errnoError is a backend's failure with its cause kept: a Return for the\nframework's caller, the system's error for a person.\n" (struct
+    ^{:line 432 :tag Return} r
+    ^{:line 433 :tag string} op
+    ^{:line 434 :tag error} errn))
+
+
+^{:go/end 437} (go/method Error ^string [^{:tag (* errnoError)} e] (fmt/Sprintf "%s: %s: %v" (.-r e) (.-op e) (.-errn e)))
+^{:go/end 438} (go/method Unwrap ^error [^{:tag (* errnoError)} e] (.-r e))

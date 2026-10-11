@@ -1,0 +1,281 @@
+#!/bin/bash
+# go-whim's box vendored as Go forms (B1b stage S0, doc/go/BOX-NOTES.md): replays the derivation
+# of box/ from go-whim, and proves it.
+#
+#   bin/box-vendor convert   clone go-whim at its commit into WORK/orig and WORK/renamed, move the
+#                            box's packages in WORK/renamed into a module `arbace` (paths
+#                            arbace/box/{abi,board,hv,libsys,vmm}) and rewrite every import of
+#                            them; convert them (bin/g2a convert --tests) for each configuration
+#                            that holds some of their files (linux/amd64, linux/arm64,
+#                            darwin/arm64, tamago/amd64, tamago/arm64) into WORK/forms; merge the
+#                            five trees into OUT/go/arbace/box (one tree for every target: file
+#                            forms identical across configurations, package files without
+#                            :config or :init-order, the assembly copied as other files)
+#   bin/box-vendor check     print OUT (bin/g2a build --print-only --tests --layout lines) into
+#                            WORK/print, put the printed packages in place of the renamed ones in a
+#                            third clone WORK/printed, and check:
+#                            1. gocmp (the round trip's oracle: tree, export, code) of each package
+#                               printed against the renamed original, with tests, per configuration
+#                            2. go-whim's monitor (vmm/cmd/whim-guest: linux/amd64, linux/arm64,
+#                               darwin/arm64) and TamaGo guests (guest/tamago: the editor and
+#                               ./faulty, amd64 and arm64) built from WORK/printed are byte-identical
+#                               to those built from WORK/renamed (-ldflags=-buildid=: the build ID
+#                               hashes the source text, which the printer does not keep), and
+#                               built from WORK/orig (go-whim itself) for comparison
+#                            3. go-whim's tests on WORK/printed, on /dev/kvm: hv, vmm, and the guest
+#                               tests that run the C and the TamaGo guests
+#   bin/box-vendor all       both
+#
+# Options (before the command): --src DIR (default /root/go-whim, read only: cloned), --commit REV
+# (default 80c49bf, S0's), --work DIR (default .tmp/box-vendor), --out DIR (default box/, the
+# forms' source root: OUT/go/arbace/box; check prints OUT). The proof holds for box/ as S0
+# vendored it: once box/ changes (S1's generic dispatch), `check` shows the change.
+# Environment: G2A_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1, the guests'
+# and g2a's toolchain); the monitor is built by `go` (go-whim's own toolchain, go1.27.1).
+# Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+src=/root/go-whim commit=80c49bf work=$root/.tmp/box-vendor out=$root/box
+while [ $# -gt 0 ]; do
+  case $1 in
+    --src) src=$2; shift 2 ;;
+    --commit) commit=$2; shift 2 ;;
+    --work) work=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}
+case $work in /*) ;; *) work=$root/$work ;; esac
+case $out in /*) ;; *) out=$root/$out ;; esac
+tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
+export GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
+pkgs="abi board hv libsys vmm"
+
+# clone DIR: go-whim at the commit, read only from its repository
+clone() {
+  rm -rf "$1"
+  git clone -q "$src" "$1"
+  git -C "$1" checkout -q --detach "$commit"
+}
+
+# rename DIR: the box's packages of the clone DIR moved into the module arbace at DIR/_arbace
+# (a sibling module: arbace/box/... cannot be under github.com/arbace/go-whim), every import of
+# them rewritten; the go.mod files require and replace it. libsys leaves internal/: editor/term
+# (darwin) imports it, and arbace/box/internal would refuse it.
+rename() {
+  local d=$1 p=github.com/arbace/go-whim f m
+  (
+    cd "$d"
+    mkdir -p _arbace/box/vmm
+    git mv hv _arbace/box/hv
+    for f in vmm/*; do [ "$f" = vmm/cmd ] || git mv "$f" _arbace/box/vmm/; done
+    git mv guest/abi _arbace/box/abi
+    git mv guest/tamago/board _arbace/box/board
+    git mv internal/libsys _arbace/box/libsys
+    git ls-files -z '*.go' | xargs -0 sed -i \
+      -e "s#\"$p/hv\"#\"arbace/box/hv\"#" \
+      -e "s#\"$p/vmm\"#\"arbace/box/vmm\"#" \
+      -e "s#\"$p/guest/abi\"#\"arbace/box/abi\"#" \
+      -e "s#\"$p/guest/tamago/board\"#\"arbace/box/board\"#" \
+      -e "s#\"$p/internal/libsys\"#\"arbace/box/libsys\"#"
+    cat > _arbace/go.mod <<'EOF'
+module arbace
+
+go 1.27.1
+
+require (
+	github.com/arbace/go-whim v0.0.0
+	github.com/ebitengine/purego v0.11.1
+)
+
+// for building and comparing this module alone (gocmp); ignored when it is a dependency
+replace (
+	github.com/arbace/go-whim => ../
+	github.com/arbace/go-whim/crefactor => ../crefactor
+)
+EOF
+    grep purego go.sum > _arbace/go.sum
+    printf '\nrequire arbace v0.0.0\n\nreplace arbace => ./_arbace\n' >> go.mod
+    for m in guest/tamago guest/joker; do
+      printf '\nrequire arbace v0.0.0\n\nreplace arbace => ../../_arbace\n' >> $m/go.mod
+    done
+    grep purego go.sum >> guest/tamago/go.sum
+    git add -A .
+    git -c user.name=box-vendor -c user.email=box-vendor@localhost commit -q -m "box: renamed"
+  )
+}
+
+# the configurations converted, and the packages each holds files of
+configs="linux/amd64:abi,hv,vmm linux/arm64:abi,hv,vmm darwin/arm64:abi,hv,libsys,vmm tamago/amd64:abi,board tamago/arm64:abi,board"
+
+convert() {
+  local c goos goarch list args p dir f b
+  clone "$work/orig"
+  clone "$work/renamed"
+  rename "$work/renamed"
+  rm -rf "$work/forms"
+  for c in $configs; do
+    goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
+    args=(); for p in ${list//,/ }; do args+=("arbace/box/$p"); done
+    # the guests' packages from the guest module (GOOS=tamago), the rest from go-whim's
+    dir=$work/renamed; [ "$goos" = tamago ] && dir=$work/renamed/guest/tamago
+    echo "== convert $goos/$goarch: ${args[*]}" >&2
+    (cd "$dir" && "$root/bin/g2a" convert --tests --goos "$goos" --goarch "$goarch" \
+       --out "$work/forms/$goos-$goarch" "${args[@]}") >&2
+    if grep -v '^ok' "$root/.tmp/g2a/dumps.tsv" >&2; then
+      echo "convert $goos/$goarch: a package did not dump" >&2; return 1
+    fi
+  done
+  merge
+}
+
+# merge: the configurations' trees into one, OUT/go/arbace/box
+merge() {
+  local dst=$out/go/arbace/box p c f b files tests others
+  rm -rf "$dst"; mkdir -p "$dst"
+  for p in $pkgs; do
+    mkdir -p "$dst/$p"
+    for c in "$work"/forms/*/; do
+      [ -d "$c/go/arbace/box/$p" ] || continue
+      for f in "$c/go/arbace/box/$p"/*.ae; do
+        b=$(basename "$f")
+        if [ -f "$dst/$p/$b" ]; then
+          cmp -s "$f" "$dst/$p/$b" || { echo "merge: $p/$b differs by configuration" >&2; return 1; }
+        else
+          cp "$f" "$dst/$p/$b"
+        fi
+      done
+    done
+    files=() tests=() others=()
+    for f in $(cd "$dst/$p" && LC_ALL=C ls *.ae); do
+      b=${f%.ae}
+      case $b in *_test) tests+=("$b") ;; *) files+=("$b") ;; esac
+    done
+    for f in $(cd "$work/renamed/_arbace/box/$p" && LC_ALL=C ls); do
+      case $f in *.go) ;; *) others+=("$f"); cp "$work/renamed/_arbace/box/$p/$f" "$dst/$p/" ;; esac
+    done
+    {
+      echo ";; go-whim's box, vendored (box/README.md): the package arbace/box/$p, one tree for"
+      echo ";; every target (its files' build constraints select them)."
+      echo "(ns go.arbace.box.$p"
+      echo "  (:require [arbace.go :as go]))"
+      echo
+      echo "(go/package $p"
+      echo "  :path \"arbace/box/$p\""
+      echo "  :files [$(names .go "${files[@]}")]"
+      [ ${#others[@]} -eq 0 ] || echo "  :other-files [$(names "" "${others[@]}")]"
+      [ ${#tests[@]} -eq 0 ] || echo "  :test-files [$(names .go "${tests[@]}")]"
+      echo "  :positions :lines)"
+      echo
+      for b in "${files[@]}" ${tests[@]+"${tests[@]}"}; do echo "(load \"$p/$b\")"; done
+    } > "$dst/$p.ae"
+  done
+  echo "merged into ${dst#$root/}: $(find "$dst" -name '*.ae' | wc -l) forms files" >&2
+}
+
+wp=github.com/arbace/go-whim
+
+# orig_dir PKG: the package's directory in go-whim
+orig_dir() {
+  case $1 in
+    abi) echo guest/abi ;;
+    board) echo guest/tamago/board ;;
+    libsys) echo internal/libsys ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# names SUFFIX NAME...: "NAME1SUFFIX" "NAME2SUFFIX" ...
+names() {
+  local suffix=$1 s="" n; shift
+  for n in "$@"; do s+="${s:+ }\"$n$suffix\""; done
+  echo "$s"
+}
+
+# bins DIR OUT [LDFLAGS]: go-whim's monitor and TamaGo guests built from the clone DIR
+bins() {
+  local d=$1 o=$2 extra=${3:-} t a p n
+  rm -rf "$o"; mkdir -p "$o"
+  for t in linux/amd64 linux/arm64 darwin/arm64; do
+    (cd "$d" && env GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 \
+       go build -trimpath -buildvcs=false ${extra:+-ldflags "$extra"} -o "$o/whim-guest-${t%/*}-${t#*/}" ./vmm/cmd/whim-guest)
+  done
+  for a in amd64 arm64; do
+    for p in . ./faulty; do
+      n=editor; [ $p = . ] || n=faulty
+      # go-whim's guest build (guest/gotamago.go, tamagoBuild)
+      (cd "$d/guest/tamago" && env GOOS=tamago GOARCH=$a GOOSPKG=github.com/usbarmory/tamago GOROOT="$tg" \
+         CGO_ENABLED=0 "$tg/bin/go" build -trimpath -buildvcs=false -ldflags "-T 0x201000 -R 0x1000${extra:+ $extra}" \
+         -o "$o/guest-$n-$a.elf" $p)
+    done
+  done
+}
+
+check() {
+  local status=0 c goos goarch list p r f gocmp=$work/gocmp
+  [ -d "$work/renamed/_arbace" ] || { echo "no $work/renamed: bin/box-vendor convert first" >&2; return 1; }
+  echo "== print ${out#$root/}/go/arbace/box" >&2
+  rm -rf "$work/print"
+  "$root/bin/g2a" build --print-only --tests --module arbace --layout lines --work "$work/print" "$out" >&2
+  clone "$work/printed"
+  rename "$work/printed"
+  for p in $pkgs; do
+    rm -f "$work/printed/_arbace/box/$p"/*
+    cp "$work/print/mod/box/$p"/* "$work/printed/_arbace/box/$p/"
+  done
+  # and at go-whim's own paths: the printed files, their imports renamed back, in a clone of
+  # go-whim itself
+  clone "$work/printed-orig"
+  for p in $pkgs; do
+    f=$(orig_dir $p)
+    rm -f "$work/printed-orig/$f"/*.go "$work/printed-orig/$f"/*.s
+    cp "$work/print/mod/box/$p"/* "$work/printed-orig/$f/"
+    sed -i -e "s#\"arbace/box/hv\"#\"$wp/hv\"#" -e "s#\"arbace/box/vmm\"#\"$wp/vmm\"#" \
+      -e "s#\"arbace/box/abi\"#\"$wp/guest/abi\"#" -e "s#\"arbace/box/board\"#\"$wp/guest/tamago/board\"#" \
+      -e "s#\"arbace/box/libsys\"#\"$wp/internal/libsys\"#" "$work/printed-orig/$f"/*.go
+  done
+  echo "== the printed packages against the renamed originals (gocmp: tree, export, code; with tests)" >&2
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
+  for c in $configs; do
+    goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
+    for p in ${list//,/ }; do
+      f=$work/gocmp-$goos-$goarch-$p.log
+      if (cd "$work/renamed/_arbace" && env GOOS=$goos GOARCH=$goarch GOROOT="$tg" CGO_ENABLED=0 \
+            "$gocmp" -tests "$work/renamed/_arbace/box/$p" "$work/printed/_arbace/box/$p") > "$f" 2>&1; then
+        r=pass
+      else
+        r=FAIL; status=1
+      fi
+      printf '%-14s %-7s %s  %s\n' "$goos/$goarch" "$p" "$r" "$(tail -1 "$f")"
+    done
+  done
+  echo "== go-whim's binaries from the printed packages, byte for byte (without build IDs or VCS stamps)" >&2
+  bins "$work/orig" "$work/bin-orig" -buildid=
+  bins "$work/renamed" "$work/bin-renamed" -buildid=
+  bins "$work/printed" "$work/bin-printed" -buildid=
+  bins "$work/printed-orig" "$work/bin-printed-orig" -buildid=
+  for f in "$work/bin-renamed"/*; do
+    b=$(basename "$f")
+    if cmp -s "$f" "$work/bin-printed/$b"; then r=identical; else r=DIFFERENT; status=1; fi
+    if cmp -s "$work/bin-orig/$b" "$work/bin-printed-orig/$b"; then r2=identical; else r2=DIFFERENT; status=1; fi
+    printf '%-24s arbace/box: %8d bytes, printed %s; go-whim'"'"'s paths: %8d bytes, printed %s\n' "$b" \
+      "$(stat -c %s "$f")" "$r" "$(stat -c %s "$work/bin-orig/$b")" "$r2"
+  done
+  echo "== go-whim's tests on the printed copy (/dev/kvm)" >&2
+  (
+    cd "$work/printed"
+    export TAMAGO_ROOT=$tg CGO_ENABLED=1
+    go test -count=1 -v arbace/box/hv arbace/box/vmm arbace/box/abi 2>&1 | grep -E '^(--- |ok|FAIL|panic)'
+    go test -count=1 -v -run 'TestHello|TestFault|TestWatchdog|TestGoGuest|TestGoGuestFault|TestGoGuestSMP|TestReadAheadGo|TestReadAheadC' \
+      ./guest/ 2>&1 | grep -E '^(--- |ok|FAIL|panic)'
+  ) || status=1
+  return $status
+}
+
+case $cmd in
+  convert) convert ;;
+  check) check ;;
+  all) convert && check ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

@@ -1,0 +1,64 @@
+(in-ns 'go.arbace.box.vmm) (go/file "layout_test.go" :imports [
+
+
+    ^{:line 4} [elf "debug/elf"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [syscall "syscall"]
+    ^{:line 7} [testing "testing"]
+    ^{:line 8} [unsafe "unsafe"]])
+
+
+
+
+(go/const ^{:val 16384 :doc "hvfPage is Apple silicon's page: hv_vm_map wants the host address, the\nIPA and the size all multiples of it.\n"} hvfPage (<< 16 10))
+
+
+
+
+
+
+
+
+
+^{:go/end 45} (go/func TestLayoutHVFAlignment "TestLayoutHVFAlignment holds the layout to what Hypervisor.framework asks\nof a mapping on the M2 Max (doc/GUEST.md, *Running on the Mac*): the\nmonitor maps one slot, guest-physical [0, size), with one hv_vm_map, so\nits IPA and size must be multiples of 16 KiB, whatever the image's size;\nthe doorbell page must lie outside it (it exits because nothing is mapped\nthere) and below the framework's default 36-bit IPA space.  The guest's\nown tables still use 4 KiB pages inside the slot, which the framework\ndoes not see.\n" [^{:tag (* testing/T)} t]
+  (range [_ end (lit (slice uint64) (+ imageBase page) (+ imageBase (* 3 page) 17) (+ (<< 5 20) 12345) (- (<< 9 20) 1) (<< 64 20))]
+    (let [im (addr (lit image :entry imageBase :vectors imageBase :end end :loads (lit (slice (* elf/Prog))
+              (lit _ :ProgHeader (lit elf/ProgHeader :Type elf/PT_LOAD :Flags (bit-or elf/PF_R elf/PF_X) :Vaddr imageBase :Paddr imageBase :Memsz (- end imageBase))))))
+
+        ^{:line 28} l (plan im 1)
+        ^:const ^{:line 29 :val 0} ipa 0] ; newMachine's one hv_vm_map
+      (when (or (!= (% ipa hvfPage) 0) (!= (% (.-size l) hvfPage) 0))
+        ^{:go/via [common]} (.Errorf t "image to %#x: the slot [%#x, %#x) is not 16 KiB-aligned" end ipa (.-size l)))
+
+      (when (or (> (.-size l) Doorbell) (!= (% Doorbell hvfPage) 0))
+        ^{:go/via [common]} (.Errorf t "image to %#x: the slot ends at %#x, the doorbell at %#x: not outside it on a 16 KiB page" end (.-size l) Doorbell))
+
+      (when (> (+ Doorbell page) (<< 1 36))
+        ^{:go/via [common]} (.Errorf t "the doorbell %#x is beyond a 36-bit IPA space" Doorbell))
+
+      (range [_ s (.-spans l)]
+        (when (and (== (bit-and (.-p s) pDevice) 0) (> (.-hi s) (.-size l)))
+          ^{:go/via [common]} (.Errorf t "image to %#x: span [%#x, %#x) is past the slot's end %#x" end (.-lo s) (.-hi s) (.-size l)))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 66} (go/func TestSlotHostAlignment "TestSlotHostAlignment maps a slot as newMachine does and holds its host\naddress to the machine's page and to 16 KiB on a machine whose page that\nis (Apple silicon): where the test runs on the Mac, it checks hv_vm_map's\nhost-side condition for real.\n" [^{:tag (* testing/T)} t]
+  (let [^:const ^{:val 67108864} size (<< 64 20)
+      (values mem err) (syscall/Mmap -1 0 size (bit-or syscall/PROT_READ syscall/PROT_WRITE)
+        (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON syscall/MAP_NORESERVE))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (defer (syscall/Munmap mem))
+    (let [(values addr pg) (values (conv uintptr (conv unsafe/Pointer (addr (aget mem 0)))) (conv uintptr (os/Getpagesize)))]
+      (when (!= (% addr pg) 0)
+        ^{:go/via [common]} (.Fatalf t "the slot's host address %#x is not on a %d-byte page" addr pg))
+
+      (when (and (>= pg hvfPage) (!= (% addr hvfPage) 0))
+        ^{:go/via [common]} (.Fatalf t "the slot's host address %#x is not 16 KiB-aligned" addr)))))
