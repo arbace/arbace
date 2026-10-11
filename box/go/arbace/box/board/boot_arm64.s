@@ -6,13 +6,14 @@
 
 // cpuinit is TamaGo's CPUInit: the monitor has put the vCPU at EL1t (on
 // SP_EL0, D, A, I and F masked) with the MMU on and identity-mapped
-// (vmm/setup_arm64.go), X0 argc, X1 argv, X2 RamStart, X3 RamSize and X4
-// RamStackOffset (guest/abi).  What is left is the board's: keep them,
-// enable FP and SIMD, which Go's code uses (CPACR_EL1.FPEN), take the
-// counter's rate and zero, put the stack where the runtime expects it, and
+// (vmm/setup_arm64.go), X0 argc, X1 argv, X2 RamStart, X3 RamSize, X4
+// RamStackOffset, X5 the vCPUs and X6 the host's wall clock (guest/abi).
+// What is left is the board's: keep them, enable FP and SIMD, which Go's
+// code uses (CPACR_EL1.FPEN), take the counter's rate and zero, put the stack where the runtime expects it, and
 // start the runtime.
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	R5, ·ncpu(SB)
+	MOVD	R6, ·wallBase(SB)
 	MOVD	R0, ·bootArgc(SB)
 	MOVD	R1, ·bootArgv(SB)
 	MOVD	R2, runtime∕goos·RamStart(SB)

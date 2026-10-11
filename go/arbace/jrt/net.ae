@@ -2,13 +2,13 @@
 ;; jdk.internal.jrt.HostNet (overlay/jdk/java.base/jdk/internal/jrt/HostNet.java), the socket
 ;; table under jrt's HostSocketImpl and the variants of java.net's InetAddress, Inet4AddressImpl
 ;; and Inet6AddressImpl. The network is a host's: NetHost, an interface a Host may implement
-;; besides Host (B1a's OSHost does, over Go's net and syscall); a host without it has no network,
-;; and every native fails with HostNet.UNSUPPORTED.
+;; besides Host (B1a's OSHost does on Linux, over Go's net and syscall: net_linux.ae); a host
+;; without it has no network, and every native fails with HostNet.UNSUPPORTED.
 (in-ns 'go.arbace.jrt)
 
 (go/file "net.go"
-  :imports [[context "context"] [errors "errors"] [io "io"] [net "net"] [os "os"] [strconv "strconv"]
-            [strings "strings"] [sync "sync"] [syscall "syscall"] [time "time"] [unsafe "unsafe"]])
+  :imports [[errors "errors"] [io "io"] [net "net"] [os "os"] [strconv "strconv"]
+            [strings "strings"] [sync "sync"] [syscall "syscall"] [time "time"]])
 
 (go/type NetHost
   "NetHost is the network of a host (java.net's sockets and name service). A Host implements it
@@ -457,126 +457,3 @@ the JVM's text in error[0].\n"
     (when (not ok)
       (return (not ipv6)))
     (.HasFamily nh ipv6)))
-
-;; ---------------------------------------------------------------------------------------
-;; B1a's network: OSHost over Go's net (the pure Go resolver: /etc/hosts, then DNS) and, for
-;; the options, the sockets' descriptors through syscall
-
-(go/method Listen [^OSHost h ^string address] :results [net/Listener error]
-  ;; no keep-alive on accepted connections (the JVM's default; Go's is 15 s)
-  (.Listen (addr (lit net/ListenConfig :KeepAlive -1)) (context/Background) "tcp" address))
-
-(go/method Dial [^OSHost h ^string local ^string remote ^{:tag time/Duration} timeout]
-  :results [net/Conn error]
-  (let [d (lit net/Dialer :Timeout timeout :KeepAlive -1)]
-    (when (!= local "")
-      (let [(values la err) (net/ResolveTCPAddr "tcp" local)]
-        (when (!= err nil)
-          (return nil err))
-        (set! (.-LocalAddr d) la)))
-    (.Dial d "tcp" remote)))
-
-(go/method LookupIP [^OSHost h ^string host] :results [(slice net/IP) error]
-  (net/LookupIP host))
-
-(go/method LookupAddr [^OSHost h ^{:tag net/IP} ip] :results [(slice string) error]
-  (net/LookupAddr (.String ip)))
-
-(go/method Hostname [^OSHost h] :results [string error]
-  (os/Hostname))
-
-(go/method HasFamily ^bool [^OSHost h ^bool ipv6]
-  (let [(values addrs err) (net/InterfaceAddrs)]
-    (when (!= err nil)
-      (return (not ipv6)))
-    (range [_ a addrs]
-      (let [(values ipn ok) (assert (* net/IPNet) a)]
-        (when (and ok (== (== (.To4 (.-IP ipn)) nil) ipv6))
-          (return true))))
-    false))
-
-(go/func rawConn "rawConn is the descriptor access of a listener or a connection.\n"
-  [^any s] :results [syscall/RawConn error]
-  (let [(values sc ok) (assert syscall/Conn s)]
-    (when (not ok)
-      (return nil (errors/New "Socket has no descriptor")))
-    (.SyscallConn sc)))
-
-(go/func sockopt "sockopt is the level and the option of SocketOptions' number opt.\n"
-  [^int opt] :results [int int bool]
-  (switch opt
-    (case [optTcpNoDelay] (return syscall/IPPROTO_TCP syscall/TCP_NODELAY true))
-    (case [optIpTos] (return syscall/IPPROTO_IP syscall/IP_TOS true))
-    (case [optReuseAddr] (return syscall/SOL_SOCKET syscall/SO_REUSEADDR true))
-    (case [optKeepAlive] (return syscall/SOL_SOCKET syscall/SO_KEEPALIVE true))
-    ;; SO_REUSEPORT (15 on amd64 and arm64; amd64's syscall lacks the name)
-    (case [optReusePort] (return syscall/SOL_SOCKET 15 true))
-    (case [optSndBuf] (return syscall/SOL_SOCKET syscall/SO_SNDBUF true))
-    (case [optRcvBuf] (return syscall/SOL_SOCKET syscall/SO_RCVBUF true))
-    (case [optOOBInline] (return syscall/SOL_SOCKET syscall/SO_OOBINLINE true)))
-  (return 0 0 false))
-
-(go/method SetOption ^error [^OSHost h ^any s ^int opt ^int value]
-  (let [(values rc err) (rawConn s)]
-    (when (!= err nil)
-      (return err))
-    (let [^error serr nil]
-      (if (== opt optLinger)
-        (let [l (lit syscall/Linger)]
-          (when (>= value 0)
-            (set! (.-Onoff l) 1)
-            (set! (.-Linger l) (conv int32 value)))
-          (set! err (.Control rc (fn [^uintptr fd]
-                                   (set! serr (syscall/SetsockoptLinger (conv int fd) syscall/SOL_SOCKET
-                                                                        syscall/SO_LINGER (addr l)))))))
-        (let [(values level name ok) (sockopt opt)]
-          (when (not ok)
-            (return (errors/New (+ "Unknown option " (strconv/Itoa opt)))))
-          (set! err (.Control rc (fn [^uintptr fd]
-                                   (set! serr (syscall/SetsockoptInt (conv int fd) level name value)))))))
-      (when (!= err nil)
-        (return err))
-      serr)))
-
-(go/method GetOption [^OSHost h ^any s ^int opt] :results [int error]
-  (let [(values rc err) (rawConn s)]
-    (when (!= err nil)
-      (return 0 err))
-    (let [^int v 0
-          ^error serr nil]
-      (if (== opt optLinger)
-        (let [l (lit syscall/Linger)
-              ^uint32 size (conv uint32 (unsafe/Sizeof l))]
-          (set! err (.Control rc (fn [^uintptr fd]
-                                   (let [(values _ _ e) (syscall/Syscall6 syscall/SYS_GETSOCKOPT fd
-                                                                           (conv uintptr syscall/SOL_SOCKET)
-                                                                           (conv uintptr syscall/SO_LINGER)
-                                                                           (conv uintptr (conv unsafe/Pointer (addr l)))
-                                                                           (conv uintptr (conv unsafe/Pointer (addr size)))
-                                                                           0)]
-                                     (when (!= e 0)
-                                       (set! serr e))))))
-          (if (== (.-Onoff l) 0)
-            (set! v -1)
-            (set! v (conv int (.-Linger l)))))
-        (let [(values level name ok) (sockopt opt)]
-          (when (not ok)
-            (return 0 (errors/New (+ "Unknown option " (strconv/Itoa opt)))))
-          (set! err (.Control rc (fn [^uintptr fd]
-                                   (set! (values v serr) (syscall/GetsockoptInt (conv int fd) level name)))))))
-      (when (!= err nil)
-        (return 0 err))
-      (when (and (== serr nil) (!= opt optLinger) (!= opt optSndBuf) (!= opt optRcvBuf) (!= opt optIpTos) (!= v 0))
-        ;; a boolean option: 1 when set
-        (set! v 1))
-      (return v serr))))
-
-(go/method Available ^int [^OSHost h ^{:tag net/Conn} c]
-  (let [(values rc err) (rawConn c)]
-    (when (!= err nil)
-      (return 0))
-    (let [^int32 n 0]
-      (.Control rc (fn [^uintptr fd]
-                     (syscall/Syscall syscall/SYS_IOCTL fd (conv uintptr syscall/TIOCINQ)
-                                      (conv uintptr (conv unsafe/Pointer (addr n))))))
-      (conv int n))))

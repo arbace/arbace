@@ -46,8 +46,12 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
 
 - S0 done (2026-10-11): go-whim's box vendored unchanged as Go forms under `box/`
   (`bin/box-vendor`; [go/BOX-NOTES.md](go/BOX-NOTES.md)).
-- S1 in progress: the boxed REPL on amd64 (jrt's box host, the launcher, `-e`, `-m` and the
-  REPL over the console doorbell, files in memory, four vCPUs).
+- S1 done (2026-10-11): the boxed REPL on amd64 (`bin/arbace-go --build --box`, the launcher
+  `arbace-box`; REPL, `-e`, `-m`, scripts, four or one vCPUs; amendments BX1-BX10 proposed). Box
+  oracle 21,695 of 21,742 (`test/oracle/known-go-box-amd64.edn`), `bin/box-suite` 19,625 of
+  19,627 (`test/arbace-box-results.edn`).
+- Next: S2, hardening (the launcher's resident memory, R1); the user's decisions on BX1-BX10 and
+  on the box checks in `bin/gate --full` pending.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

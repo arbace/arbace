@@ -1,0 +1,110 @@
+
+
+(in-ns 'go.arbace.box.cmd.arbace_box) (go/file "rlwrap_linux.go" :build ["//go:build linux"] :imports [
+
+
+    ^{:line 6} [os "os"]
+    ^{:line 7} [strconv "strconv"]
+    ^{:line 8} [strings "strings"]
+    ^{:line 9} [syscall "syscall"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+;; The interactive REPL under rlwrap, as the executable's
+;; (go/arbace/cmd/arbace/rlwrap_linux.ae; doc/go/EXEC-NOTES.md, "Line
+;; editing: rlwrap"): the same conditions, flags and ARBACE_RLWRAP
+;; convention, around this program.
+
+
+
+(go/var ^{:doc "rlwrapFlags are clj's: multi-line editing, completion on the words seen,\n\\ and \" as quote characters, Clojure's delimiters as word breaks.\n"} rlwrapFlags (lit (slice string) "-m" "-r" "-q" "\\\"" "-b" "(){}[],^%#@\";:'"))
+
+
+
+
+^{:go/breaks [6] :go/end 40} (go/func startsREPL "startsREPL tells whether arbace.main runs its REPL with these arguments:\nnone, or init options (-i, -e and --report, each with its argument)\nfollowed by -r or --repl.\n" ^bool [^{:tag (slice string)} args]
+  (when (== (len args) 0)
+    (return true))
+
+  (for [i 0] (< i (len args)) _
+    (switch (aget args i)
+      (case ["--report" "-i" "--init" "-e" "--eval"]
+        (set! i + 2))
+      (case ["-r" "--repl"]
+        (return true))
+      (default
+        (return false))))
+
+
+  false)
+
+
+
+^{:go/end 47} (go/func terminal "terminal tells whether fd is a terminal (TCGETS succeeds).\n" ^bool [^uintptr fd]
+  (let [^syscall/Termios t (zero syscall/Termios)
+      (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL fd syscall/TCGETS (conv uintptr (conv unsafe/Pointer (addr t))))]
+    (== e 0)))
+
+
+
+^{:go/end 56} (go/func columns "columns is the width of terminal fd, 0 when unknown.\n" ^int [^uintptr fd]
+  (let [^{:tag (array 4 uint16)} ws (zero (array 4 uint16))]
+    (when [(values _ _ e) (syscall/Syscall syscall/SYS_IOCTL fd syscall/TIOCGWINSZ (conv uintptr (conv unsafe/Pointer (addr ws))))] (!= e 0)
+      (return 0))
+
+    (conv int (aget ws 1))))
+
+
+
+^{:go/end 62} (go/func parentIsRlwrap "parentIsRlwrap tells whether the parent process is rlwrap.\n" ^bool []
+  (let [(values b err) (os/ReadFile (+ "/proc/" (strconv/Itoa (os/Getppid)) "/comm"))]
+    (and (== err nil) (== (strings/TrimSpace (conv string b)) "rlwrap"))))
+
+
+
+
+^{:go/breaks [5] :go/end 76} (go/func lookPath "lookPath is the executable file name in one of PATH's absolute\ndirectories, or \"\".\n" ^string [^string name]
+  (range [_ dir (strings/Split (os/Getenv "PATH") ":")]
+    (when (strings/HasPrefix dir "/")
+      (let [p (+ dir "/" name)]
+        (when [(values fi err) (os/Stat p)] (and (== err nil) (.IsRegular (.Mode fi)) (!= (bit-and (.Mode fi) 0111) 0))
+          (return p)))))
+
+
+
+  "")
+
+
+
+
+
+
+^{:go/end 111} (go/func execRlwrap "execRlwrap replaces the process with rlwrap running this program, when\nthe REPL is to run interactively; otherwise, or when the exec fails, it\nreturns.  ARBACE_RLWRAP=off disables it; ARBACE_RLWRAP=wrapped is set for\nthe child, which does not exec again.\n" []
+  (when [mode (os/Getenv "ARBACE_RLWRAP")] (or (== mode "off") (== mode "wrapped"))
+    (return))
+
+  (when [term (os/Getenv "TERM")] (or (== term "") (== term "dumb"))
+    (return))
+
+  (when (or (not (startsREPL (subslice os/Args 1))) (not (terminal 0)) (not (terminal 1)) (== (columns 0) 0) (parentIsRlwrap))
+    (return))
+
+  (let [path (lookPath "rlwrap")]
+    (when (== path "")
+      (return))
+
+    (let [(values exe err) (os/Executable)]
+      (when (!= err nil)
+        (return))
+
+      (let [argv (append (lit (slice string) "rlwrap") (spread rlwrapFlags))]
+        (set! argv (append argv exe))
+        (set! argv (append argv (spread (subslice os/Args 1))))
+        (let [^{:tag (slice string)} env (zero (slice string))]
+          (range [_ kv (os/Environ)]
+            (when (not (strings/HasPrefix kv "ARBACE_RLWRAP="))
+              (set! env (append env kv))))
+
+
+          (set! env (append env "ARBACE_RLWRAP=wrapped"))
+          (syscall/Exec path argv env))))))

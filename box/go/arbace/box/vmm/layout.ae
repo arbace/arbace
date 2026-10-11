@@ -19,7 +19,7 @@
 
 
 
-(go/const "The guest's memory, one slot from guest-physical 0, identity-mapped by\npage tables the monitor writes before the first run (doc/GUEST.md,\n*Memory*):\n\n\t0x0000             not mapped: a null pointer faults\n\t0x1000 .. 0x4000   the ISA's system tables (amd64: GDT, TSS, IDT)\n\t0x4000 .. 0x10000  the command line: argv's pointers and strings\n\t0x10000 .. 2 MiB   the page tables\n\t2 MiB ..           the image: text read-only and executable, read-only\n\t                   data, data and bss, each with its own permissions\n\tthen, 2 MiB on     a guard page, the stack (StackBytes), the fault stack\n\tthen, 2 MiB on     the heap: 1 GiB, the C host's arena, committed as used\n\tDoorbell           no memory: a store here exits to the monitor\n"
+(go/const "The guest's memory, one slot from guest-physical 0, identity-mapped by\npage tables the monitor writes before the first run (doc/GUEST.md,\n*Memory*):\n\n\t0x0000             not mapped: a null pointer faults\n\t0x1000 .. 0x4000   the ISA's system tables (amd64: GDT, TSS, IDT)\n\t0x4000 .. 0x10000  the command line and environment: their pointers and strings\n\t0x10000 .. 2 MiB   the page tables\n\t2 MiB ..           the image: text read-only and executable, read-only\n\t                   data, data and bss, each with its own permissions\n\tthen, 2 MiB on     a guard page, the stack (StackBytes), the fault stack\n\tthen, 2 MiB on     the heap: 1 GiB, the C host's arena, committed as used\n\tDoorbell           no memory: a store here exits to the monitor\n"
   ^{:line 23} [^{:val 4096} sysBase 0x1000]
   ^{:line 24} [^{:val 16384} argsBase 0x4000]
   ^{:line 25} [^{:val 65536} argsEnd 0x10000]
@@ -182,37 +182,54 @@
 
 
 
-^{:go/end 200} (go/method writeArgs "writeArgs puts argv into the command-line area: the pointers, then the\nstrings, every pointer guest-physical.\n" ^error [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^{:tag (slice string)} args]
-  ^{:go/breaks [5]} (let [ptrs (conv uint64 argsBase)
-      ^{:line 187} strs (+ ptrs (* (conv uint64 (+ (len args) 1)) 8))]
-    (range [i a args]
-      (when (> (+ strs (conv uint64 (len a)) 1) argsEnd)
-        (return (fmt/Errorf "the command line is longer than the guest's %d bytes for it" (- argsEnd argsBase))))
 
-      (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 i) 8))) strs)
-      (copy (subslice mem strs) a)
-      (aset mem (+ strs (conv uint64 (len a))) 0)
-      (set! strs + (+ (conv uint64 (len a)) 1)))
 
-    (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 (len args)) 8))) 0)
-    (set! (values (.-argc l) (.-argv l)) (values (conv uint64 (len args)) ptrs))
-    nil))
+^{:go/end 217} (go/method writeArgs "writeArgs puts argv and the environment into the command-line area: the\nargument pointers and a null, the environment's pointers and a null (as\na Unix process's stack holds them), then the strings, every pointer\nguest-physical.  A guest that reads argc pointers ignores the rest.\n" ^error [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^{:tag (slice string)} args ^{:tag (slice string)} env]
+  (let [ptrs (conv uint64 argsBase)
+      ^{:line 189} strs (+ ptrs (* (conv uint64 (+ (len args) 1 (len env) 1)) 8))]
+    (when (> strs argsEnd)
+      (return (fmt/Errorf "the command line and environment are longer than the guest's %d bytes for them" (- argsEnd argsBase))))
+
+    ^{:go/breaks [7]} (let [put ^{:go/breaks [7] :go/end 202} (fn ^error [^int i ^string a]
+          (when (> (+ strs (conv uint64 (len a)) 1) argsEnd)
+            (return (fmt/Errorf "the command line and environment are longer than the guest's %d bytes for them" (- argsEnd argsBase))))
+
+          (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 i) 8))) strs)
+          (copy (subslice mem strs) a)
+          (aset mem (+ strs (conv uint64 (len a))) 0)
+          (set! strs + (+ (conv uint64 (len a)) 1))
+          nil)]
+
+      (range [i a args]
+        (when [err (put i a)] (!= err nil)
+          (return err)))
+
+
+      (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 (len args)) 8))) 0)
+      (range [i e env]
+        (when [err (put (+ (len args) 1 i) e)] (!= err nil)
+          (return err)))
+
+
+      (.PutUint64 binary/LittleEndian (subslice mem (+ ptrs (* (conv uint64 (+ (len args) 1 (len env))) 8))) 0)
+      (set! (values (.-argc l) (.-argv l)) (values (conv uint64 (len args)) ptrs))
+      nil)))
 
 
 
 
 (go/type ptFormat "ptFormat is how an ISA writes its page-table entries, for 4 KiB pages\nwith 2 MiB leaves one level up.\n" (struct
-    ^{:line 205 :tag int} levels ; tables from the root to the pages: 4 on amd64, 3 on arm64 (a 32-bit space)
-    ^{:line 206 :tag (func [^uint64 pa] [uint64])} table
-    ^{:line 207 :tag (func [^uint64 pa ^perm p ^bool big] [uint64])} leaf))
+    ^{:line 222 :tag int} levels ; tables from the root to the pages: 4 on amd64, 3 on arm64 (a 32-bit space)
+    ^{:line 223 :tag (func [^uint64 pa] [uint64])} table
+    ^{:line 224 :tag (func [^uint64 pa ^perm p ^bool big] [uint64])} leaf))
 
 
 
 
 
-^{:go/end 286} (go/method buildTables "buildTables writes the identity map of l's spans into mem's table area,\n2 MiB leaves where a block is one permission, pages where it is not, and\nreturns the root's address.\n" [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^ptFormat f] :results [uint64 error]
+^{:go/end 303} (go/method buildTables "buildTables writes the identity map of l's spans into mem's table area,\n2 MiB leaves where a block is one permission, pages where it is not, and\nreturns the root's address.\n" [^{:tag (* layout)} l ^{:tag (slice byte)} mem ^ptFormat f] :results [uint64 error]
   (let [next (conv uint64 tablesBase)
-      ^{:line 215} alloc ^{:go/end 222} (fn [] :results [uint64 error]
+      ^{:line 232} alloc ^{:go/end 239} (fn [] :results [uint64 error]
         (when (>= next tablesEnd)
           (return 0 (fmt/Errorf "the page tables need more than %d KiB" (>> (- tablesEnd tablesBase) 10))))
 
@@ -224,13 +241,13 @@
     (when (!= err nil)
       (return 0 err))
 
-    (let [shift ^{:go/end 227} (fn ^uint [^int level] (conv uint (+ 12 (* 9 (- (.-levels f) 1 level)))))
+    (let [shift ^{:go/end 244} (fn ^uint [^int level] (conv uint (+ 12 (* 9 (- (.-levels f) 1 level)))))
         ;; walk to the table that holds 2 MiB entries for va (level levels-2)
-        ^{:line 229} walk ^{:go/end 245} (fn [^uint64 va] :results [uint64 error]
+        ^{:line 246} walk ^{:go/end 262} (fn [^uint64 va] :results [uint64 error]
           (let [t root]
             (for [lv 0] (< lv (- (.-levels f) 2)) (inc! lv)
               (let [ix (bit-and (>> va (shift lv)) 511)
-                  ^{:line 233} e (.Uint64 binary/LittleEndian (subslice mem (+ t (* ix 8))))]
+                  ^{:line 250} e (.Uint64 binary/LittleEndian (subslice mem (+ t (* ix 8))))]
                 (when (== e 0)
                   (let [(values n err) (alloc)]
                     (when (!= err nil)
@@ -243,7 +260,7 @@
 
             (return t nil)))
 
-        ^{:line 246} seen (lit (map uint64 bool))]
+        ^{:line 263} seen (lit (map uint64 bool))]
       (range [_ s (.-spans l)]
         (for [b (bit-and-not (.-lo s) (- block 1))] (< b (.-hi s)) (set! b + block)
           (when (aget seen b)
@@ -251,7 +268,7 @@
 
           (aset seen b true)
           (let [p0 (.permAt l b)
-              ^{:line 254} uniform true]
+              ^{:line 271} uniform true]
             (for [va b] (< va (+ b block)) (set! va + page)
               (when (!= (.permAt l va) p0)
                 (set! uniform false)

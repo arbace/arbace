@@ -360,9 +360,14 @@
      :cases (merge-results part cases (remove :done records))
      :done done :noise noise :err err :exit exit :unreadable bad}))
 
+(def ^:private excluded
+  "The parts of file paths --exclude leaves out (the box's subset: doc/go/BOX-NOTES.md, S1)."
+  (atom []))
+
 (defn- selected [sel part ^File f]
-  (or (empty? sel)
-      (some (fn [^String s] (if (some #{s} parts) (= s part) (.contains ^String (rel f) s))) sel)))
+  (and (or (empty? sel)
+           (some (fn [^String s] (if (some #{s} parts) (= s part) (.contains ^String (rel f) s))) sel))
+       (not-any? (fn [^String s] (.contains ^String (rel f) s)) @excluded)))
 
 ;; With -XX:-OmitStackTraceInFastThrow: once C2 compiles a hot path, the JVM otherwise throws
 ;; preallocated exceptions without their messages (seen under load: NPE messages turned nil)
@@ -427,7 +432,7 @@
                               (assoc r :expected (:cases e) :ms (quot (- (System/nanoTime) t0) 1000000))))
                      work)
         report (StringBuilder.)
-        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom [])]
+        total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]
       (let [ks (conj (result-keys part) :missing)
             ;; compared as printed, so that -0.0 differs from 0.0 and ##NaN equals itself
@@ -445,7 +450,7 @@
                               (when-not done (str ", incomplete (exit " exit ")"))
                               (when (seq noise) (str ", " (count noise) " other stdout lines"))))]
         (swap! total + (count expected)) (swap! bad + (count mism)) (swap! v11 + @accepted)
-        (when-not done (swap! incomplete inc))
+        (when-not done (swap! incomplete inc) (swap! cut conj (rel src)))
         (println line)
         (.append report (str "== " line "\n"))
         (when (and (not done) (not (str/blank? err)))
@@ -466,12 +471,16 @@
     {:ok (and (zero? @bad) (zero? @incomplete))
      :mismatches @ids
      :incomplete @incomplete
+     :incomplete-files @cut
      :files (into #{} (map (fn [[_ src]] (rel src))) work)}))
 
 ;; ----- known mismatches: check --expected FILE, check --write-expected FILE
 ;; A reference lists an implementation's known mismatches in groups, each with its reason:
-;; {:impl "..." :about "..." :mismatches [{:reason "..." :cases [{:case id :form text}...]}...]}
-;; Only the cases' ids (case-id) are compared; their forms are there for the reader.
+;; {:impl "..." :about "..." :mismatches [{:reason "..." :cases [{:case id :form text}...]}...]
+;;  :incomplete [file ...]}
+;; Only the cases' ids (case-id) are compared; their forms are there for the reader. :incomplete
+;; (optional) names the corpus files whose run is known not to complete (the box's memory: a
+;; run's cases after the end are mismatches, recorded as the others).
 
 (defn- id-file [^String id] (subs id 0 (.lastIndexOf id ":")))
 
@@ -484,8 +493,9 @@
 (defn check-known
   "Compares a check's mismatches with the reference f, over the files the check ran: true when
   they are the same set of cases. Prints the new mismatches and the newly passing cases."
-  [^File f {:keys [mismatches incomplete files]}]
-  (let [known (into (sorted-set)
+  [^File f {:keys [mismatches incomplete-files files]}]
+  (let [known-cut (into (sorted-set) (filter #(contains? files %)) (:incomplete (read-known f)))
+        known (into (sorted-set)
                     (for [g (:mismatches (read-known f)) c (:cases g)
                           :when (contains? files (id-file (:case c)))]
                       (:case c)))
@@ -494,18 +504,20 @@
         fixed (remove actual known)]
     (doseq [id new] (println "   new mismatch:" id))
     (doseq [id fixed] (println "   now passing: " id))
+    (when (not= known-cut (set incomplete-files))
+      (println "   incomplete runs:" (vec incomplete-files) "recorded:" (vec known-cut)))
     (println (format "== known mismatches (%s): %d recorded, %d new, %d now passing%s"
                      (.getPath f) (count known) (count new) (count fixed)
                      (if (and (empty? new) (empty? fixed))
                        ", as recorded"
                        "; fix them, or rewrite the reference with --write-expected and give the reasons")))
-    (and (empty? new) (empty? fixed) (zero? incomplete))))
+    (and (empty? new) (empty? fixed) (= known-cut (set incomplete-files)))))
 
 (defn write-known
   "Rewrites the reference f from a check's mismatches: a recorded case of a file the check ran
   stays (with its group's reason) while it still mismatches; a new one goes into a group of
   its own, to be given a reason by hand. True when every run completed."
-  [^File f impl {:keys [mismatches incomplete files]}]
+  [^File f impl {:keys [mismatches incomplete incomplete-files files]}]
   (let [old (read-known f)
         now (into #{} (map :case) mismatches)
         keep? (fn [c] (or (not (contains? files (id-file (:case c)))) (now (:case c))))
@@ -523,6 +535,8 @@
                   ";; keeps the reasons of the cases still mismatching; edit the reasons by hand.\n"
                   "{:impl " (pr-str (or (:impl old) impl)) "\n"
                   (when (:about old) (str " :about " (pr-str (:about old)) "\n"))
+                  (when-let [cut (seq (into (sorted-set) (concat (remove #(contains? files %) (:incomplete old)) incomplete-files)))]
+                    (str " :incomplete " (pr-str (vec cut)) "\n"))
                   " :mismatches\n ["
                   (str/join "\n\n  "
                             (for [g groups]
@@ -545,6 +559,7 @@
                  (= "--timeout" (first args)) (recur (nnext args) (assoc o :timeout (Long/parseLong (second args))))
                  (= "--expected" (first args)) (recur (nnext args) (assoc o :expected (second args)))
                  (= "--write-expected" (first args)) (recur (nnext args) (assoc o :write-expected (second args)))
+                 (= "--exclude" (first args)) (do (swap! excluded conj (second args)) (recur (nnext args) o))
                  :else (recur (next args) (update o :sel conj (first args)))))
         ok (case cmd
              "record" (record (:jobs opts) (:timeout opts) (:sel opts))

@@ -145,6 +145,18 @@ collected by the package file's `load`, but not printed). `bin/jrt`
 JRT-NOTES.md and accepted 2026-10-08 with A2G-SPEC's amendments, §16; it adds options to
 `bin/g2a build` only and changes no form, so nothing of SPEC is amended.)
 
+## The box's guest and other roots (amendment BX6, proposed 2026-10-11)
+
+`--goos tamago` builds the program for B1b's box (doc/go/BOX-NOTES.md, S1): `GOOS=tamago` with
+TamaGo's `goos` module as `GOOSPKG` (`github.com/usbarmory/tamago` v1.27.1: the printed `go.mod`
+requires it, imported by no package, and `go.sum` holds its two hashes, taken from Go's module
+cache, `GOPROXY=off` as always, and checked against the ones `arbace.g2a.build/tamago-goos`
+pins), linked with `-ldflags "-T 0x201000 -R 0x1000 -w"` (go-whim's addresses; the symbol table
+kept, which the monitor reads; DWARF dropped). `--root ROOT` (repeated) adds another source root
+of forms: its packages but a main one join the program (`box/`, whose board and `abi` the guest
+imports, and whose launcher is a program of its own: `bin/g2a build --module arbace box`).
+`--print-only` takes `--root` too. No form changes, so SPEC is not amended.
+
 ## Cross-compilation and arm64
 
 gc cross-compiles without a C toolchain: `--arch arm64` gives an `ARM aarch64` executable on

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # The Go executable's REPL under rlwrap (doc/go/EXEC-NOTES.md, "Line editing: rlwrap"), checked
 # under a pseudo-terminal: bin/arbace-go --smoke runs it on amd64 when python3 and rlwrap are
-# installed. Usage: arbace-go-rlwrap.py EXECUTABLE TMPDIR (rlwrap's HOME, for its history file,
-# is made in TMPDIR). Prints one line per check, exit status 1 when one fails.
+# installed; and the box's launcher's (bin/arbace-go --smoke --box; doc/go/BOX-NOTES.md, S1),
+# which follows the same convention. Usage: arbace-go-rlwrap.py EXECUTABLE TMPDIR (rlwrap's
+# HOME, for its history file, is made in TMPDIR). Prints one line per check, exit status 1 when
+# one fails.
 import os, pty, select, shutil, signal, struct, sys, tempfile, termios, fcntl, time
 
 exe = os.path.abspath(sys.argv[1])
+# the executable's process name (/proc/PID/comm: its file name, at most 15 bytes)
+name = os.path.basename(exe)[:15]
 base_env = {k: v for k, v in os.environ.items() if not k.startswith("ARBACE_RLWRAP")}
 base_env["TERM"] = "xterm"
 # rlwrap keeps its history in ~/.arbace_history: a scratch home
@@ -82,7 +86,7 @@ def check(name, ok, detail=""):
             print("    " + detail)
 
 
-def repl(name, env, expect_rlwrap, args=()):
+def repl(label, env, expect_rlwrap, args=()):
     s = Session(list(args), env)
     prompted = s.read_until(b"user=> ")
     # the process forked onto the pty is rlwrap itself (exec, no lingering parent), and its
@@ -105,26 +109,36 @@ def repl(name, env, expect_rlwrap, args=()):
     status = s.finish()
     text = s.out.decode("utf-8", "replace")
     if expect_rlwrap:
-        check(f"{name}: the REPL runs under rlwrap (the pty's process is rlwrap, its child arbace)",
-              prompted and top == "rlwrap" and kids == ["arbace"], f"process {top}, children {kids}")
-        check(f"{name}: ARBACE_RLWRAP=wrapped in the child", '"wrapped"' in text, repr(text[-400:]))
-        check(f"{name}: the up arrow recalls the last input", got42 and recalled, repr(text[-400:]))
+        check(f"{label}: the REPL runs under rlwrap (the pty's process is rlwrap, its child {name})",
+              prompted and top == "rlwrap" and kids == [name], f"process {top}, children {kids}")
+        check(f"{label}: ARBACE_RLWRAP=wrapped in the child", '"wrapped"' in text, repr(text[-400:]))
+        check(f"{label}: the up arrow recalls the last input", got42 and recalled, repr(text[-400:]))
     else:
-        check(f"{name}: the REPL runs without rlwrap", prompted and top == "arbace" and kids == [],
+        check(f"{label}: the REPL runs without rlwrap", prompted and top == name and kids == [],
               f"process {top}, children {kids}")
         seen = (env or {}).get("ARBACE_RLWRAP")
         shown = f'"{seen}"' if seen else "nil"
-        check(f"{name}: ARBACE_RLWRAP in the REPL is {shown}, not set by the executable",
+        check(f"{label}: ARBACE_RLWRAP in the REPL is {shown}, not set by the executable",
               got42 and ("\n" + shown + "\n") in text.replace("\r", ""), repr(text[-400:]))
-    check(f"{name}: exit status 0 at end of input", status == 0, f"status {status}")
-    check(f"{name}: nothing about rlwrap printed", "rlwrap" not in text, repr(text[-400:]))
+    check(f"{label}: exit status 0 at end of input", status == 0, f"status {status}")
+    check(f"{label}: nothing about rlwrap printed", "rlwrap" not in text, repr(text[-400:]))
 
 
-def one_shot(name, args, expected, env=None):
+def ctrl_c(label, env):
+    """Ctrl-C at the prompt ends the REPL (the terminal's SIGINT), as it ends the JVM's."""
+    s = Session([], env)
+    prompted = s.read_until(b"user=> ")
+    time.sleep(0.2)
+    s.send(b"\x03")
+    status = s.finish(timeout=10.0)
+    check(f"{label}: Ctrl-C ends it", prompted and status is not None, f"status {status}")
+
+
+def one_shot(label, args, expected, env=None):
     s = Session(list(args), env)
     status = s.finish()
     text = s.out.decode("utf-8", "replace").replace("\r", "")
-    check(f"{name}: no rlwrap", status == 0 and text == expected, f"status {status}, output {text!r}")
+    check(f"{label}: no rlwrap", status == 0 and text == expected, f"status {status}, output {text!r}")
 
 
 repl("the REPL on a terminal", {}, True)
@@ -132,6 +146,8 @@ repl("-e then -r", {}, True, ["-e", "(def a 1)", "-r"])
 repl("ARBACE_RLWRAP=off", {"ARBACE_RLWRAP": "off"}, False)
 repl("TERM=dumb", {"TERM": "dumb"}, False)
 repl("rlwrap not on PATH", {"PATH": "/nonexistent"}, False)
+ctrl_c("Ctrl-C under rlwrap", {})
+ctrl_c("Ctrl-C without rlwrap", {"ARBACE_RLWRAP": "off"})
 one_shot("-e on a terminal", ["-e", '(prn (System/getenv "ARBACE_RLWRAP"))'], "nil\n")
 one_shot("-e alone (init options only)", ["-e", "(println 1)"], "1\n")
 shutil.rmtree(home, ignore_errors=True)

@@ -25,23 +25,38 @@
 #                            3. go-whim's tests on WORK/printed, on /dev/kvm: hv, vmm, and the guest
 #                               tests that run the C and the TamaGo guests
 #   bin/box-vendor all       both
+#   bin/box-vendor roundtrip the round trip of box/ as it is (S1 on: Arbace's own changes made): print
+#                            it (with tests) into WORK/rt-print, convert the printed Go for each
+#                            configuration (bin/g2a convert --tests) and merge, as `convert` does,
+#                            into WORK/rt-box, print that into WORK/rt-print2, and compare each
+#                            package of the two printings with gocmp (tree, export, code; with
+#                            tests) per configuration. In bin/gate --full
+#   bin/box-vendor kvm-tests go-whim's tests on box/ as it is, on /dev/kvm: a clone of go-whim at the
+#                            commit, renamed, its box packages replaced by box/ printed, and one
+#                            adaptation: go-whim's editor.Exit given the method ExitCode, which
+#                            vmm.Run recovers since S1 (vmm no longer imports the editor); then
+#                            hv's, vmm's and the guest tests (C and TamaGo guests on the monitor;
+#                            the Go editor guest on the board). In bin/gate --full
 #
 # Options (before the command): --src DIR (default /root/go-whim, read only: cloned), --commit REV
 # (default 80c49bf, S0's), --work DIR (default .tmp/box-vendor), --out DIR (default box/, the
-# forms' source root: OUT/go/arbace/box; check prints OUT). The proof holds for box/ as S0
-# vendored it: once box/ changes (S1's generic dispatch), `check` shows the change.
+# forms' source root: OUT/go/arbace/box; check prints OUT), --from DIR (convert: a renamed clone
+# whose box packages, edited, are converted in place of go-whim's: how S1's changes were made,
+# doc/go/BOX-NOTES.md). The byte-identity proof (check) holds for box/ as S0 vendored it: since
+# S1 changed vmm's dispatch, `check` shows the change; roundtrip and kvm-tests are box/'s checks.
 # Environment: G2A_GOROOT / TAMAGO_ROOT (default /root/tamago-go: TamaGo's go1.27.1, the guests'
 # and g2a's toolchain); the monitor is built by `go` (go-whim's own toolchain, go1.27.1).
 # Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-src=/root/go-whim commit=80c49bf work=$root/.tmp/box-vendor out=$root/box
+src=/root/go-whim commit=80c49bf work=$root/.tmp/box-vendor out=$root/box from=
 while [ $# -gt 0 ]; do
   case $1 in
     --src) src=$2; shift 2 ;;
     --commit) commit=$2; shift 2 ;;
     --work) work=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
+    --from) from=$2; shift 2 ;;
     *) break ;;
   esac
 done
@@ -50,7 +65,7 @@ case $work in /*) ;; *) work=$root/$work ;; esac
 case $out in /*) ;; *) out=$root/$out ;; esac
 tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
 export GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
-pkgs="abi board hv libsys vmm"
+pkgs="abi board hv libsys vmm cmd/arbace-box"
 
 # clone DIR: go-whim at the commit, read only from its repository
 clone() {
@@ -107,13 +122,21 @@ EOF
 }
 
 # the configurations converted, and the packages each holds files of
-configs="linux/amd64:abi,hv,vmm linux/arm64:abi,hv,vmm darwin/arm64:abi,hv,libsys,vmm tamago/amd64:abi,board tamago/arm64:abi,board"
+configs="linux/amd64:abi,hv,vmm,cmd/arbace-box linux/arm64:abi,hv,vmm,cmd/arbace-box darwin/arm64:abi,hv,libsys,vmm tamago/amd64:abi,board tamago/arm64:abi,board"
 
 convert() {
   local c goos goarch list args p dir f b
-  clone "$work/orig"
-  clone "$work/renamed"
-  rename "$work/renamed"
+  if [ -n "$from" ]; then
+    # S1 on (BOX-NOTES.md): the box's Go as edited in FROM, a renamed clone (its packages under
+    # FROM/_arbace/box), converted in place of go-whim's
+    rm -rf "$work/renamed"
+    mkdir -p "$work"
+    cp -a "$from" "$work/renamed"
+  else
+    clone "$work/orig"
+    clone "$work/renamed"
+    rename "$work/renamed"
+  fi
   rm -rf "$work/forms"
   for c in $configs; do
     goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
@@ -132,49 +155,62 @@ convert() {
 
 # merge: the configurations' trees into one, OUT/go/arbace/box
 merge() {
-  local dst=$out/go/arbace/box p c f b files tests others
+  local dst=${merge_dst:-$out/go/arbace/box} src=${merge_src:-$work/renamed/_arbace/box} p fp c f b files tests others
   rm -rf "$dst"; mkdir -p "$dst"
   for p in $pkgs; do
-    mkdir -p "$dst/$p"
-    for c in "$work"/forms/*/; do
-      [ -d "$c/go/arbace/box/$p" ] || continue
-      for f in "$c/go/arbace/box/$p"/*.ae; do
+    [ -d "$src/$p" ] || continue
+    # the forms' directory and file names: the path's, - as _ (SPEC §4.1, as the converter writes)
+    fp=${p//-/_}
+    mkdir -p "$dst/$fp"
+    for c in "${merge_forms:-$work/forms}"/*/; do
+      [ -d "$c/go/arbace/box/$fp" ] || continue
+      for f in "$c/go/arbace/box/$fp"/*.ae; do
         b=$(basename "$f")
-        if [ -f "$dst/$p/$b" ]; then
-          cmp -s "$f" "$dst/$p/$b" || { echo "merge: $p/$b differs by configuration" >&2; return 1; }
+        if [ -f "$dst/$fp/$b" ]; then
+          cmp -s "$f" "$dst/$fp/$b" || { echo "merge: $p/$b differs by configuration" >&2; return 1; }
         else
-          cp "$f" "$dst/$p/$b"
+          cp "$f" "$dst/$fp/$b"
         fi
       done
     done
     files=() tests=() others=()
-    for f in $(cd "$dst/$p" && LC_ALL=C ls *.ae); do
+    for f in $(cd "$dst/$fp" && LC_ALL=C ls *.ae); do
       b=${f%.ae}
       case $b in *_test) tests+=("$b") ;; *) files+=("$b") ;; esac
     done
-    for f in $(cd "$work/renamed/_arbace/box/$p" && LC_ALL=C ls); do
-      case $f in *.go) ;; *) others+=("$f"); cp "$work/renamed/_arbace/box/$p/$f" "$dst/$p/" ;; esac
+    for f in $(cd "$src/$p" && LC_ALL=C ls); do
+      [ -f "$src/$p/$f" ] || continue
+      case $f in *.go) ;; *) others+=("$f"); cp "$src/$p/$f" "$dst/$fp/" ;; esac
     done
     {
-      echo ";; go-whim's box, vendored (box/README.md): the package arbace/box/$p, one tree for"
-      echo ";; every target (its files' build constraints select them)."
-      echo "(ns go.arbace.box.$p"
+      case $p in
+        cmd/*) echo ";; The box's launcher (doc/go/BOX-NOTES.md, S1): the package arbace/box/$p, Arbace's own." ;;
+        *) echo ";; go-whim's box, vendored (box/README.md): the package arbace/box/$p, one tree for"
+           echo ";; every target (its files' build constraints select them)." ;;
+      esac
+      fp=${fp//\//.}
+      echo "(ns go.arbace.box.$fp"
       echo "  (:require [arbace.go :as go]))"
       echo
-      echo "(go/package $p"
+      echo "(go/package $(pkg_name "$p")"
       echo "  :path \"arbace/box/$p\""
       echo "  :files [$(names .go "${files[@]}")]"
       [ ${#others[@]} -eq 0 ] || echo "  :other-files [$(names "" "${others[@]}")]"
       [ ${#tests[@]} -eq 0 ] || echo "  :test-files [$(names .go "${tests[@]}")]"
       echo "  :positions :lines)"
       echo
-      for b in "${files[@]}" ${tests[@]+"${tests[@]}"}; do echo "(load \"$p/$b\")"; done
-    } > "$dst/$p.ae"
+      for b in "${files[@]}" ${tests[@]+"${tests[@]}"}; do echo "(load \"$(basename "${p//-/_}")/$b\")"; done
+    } > "$dst/${p//-/_}.ae"
   done
   echo "merged into ${dst#$root/}: $(find "$dst" -name '*.ae' | wc -l) forms files" >&2
 }
 
 wp=github.com/arbace/go-whim
+
+# pkg_name P: the Go package name of the box's package P (a command's is main)
+pkg_name() {
+  case $1 in cmd/*) echo main ;; *) echo "$1" ;; esac
+}
 
 # orig_dir PKG: the package's directory in go-whim
 orig_dir() {
@@ -273,9 +309,100 @@ check() {
   return $status
 }
 
+# go_sum MODULE VERSION: go.sum's two lines for a module in Go's module cache
+go_sum() {
+  local d
+  d=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)/cache/download/$1/@v
+  [ -f "$d/$2.ziphash" ] || { echo "$1@$2 is not in Go's module cache" >&2; return 1; }
+  printf '%s %s %s\n%s %s/go.mod %s\n' "$1" "$2" "$(cat "$d/$2.ziphash")" "$1" "$2" \
+    "$(python3 -c 'import sys,hashlib,base64; d=open(sys.argv[1],"rb").read(); print("h1:"+base64.b64encode(hashlib.sha256(("%s  go.mod\n" % hashlib.sha256(d).hexdigest()).encode()).digest()).decode())' "$d/$2.mod")"
+}
+
+# print_box DIR: box/ printed with its tests into DIR/mod, a module arbace that builds and
+# type-checks every configuration (purego for darwin from Go's module cache)
+print_box() {
+  rm -rf "$1"
+  "$root/bin/g2a" build --print-only --tests --module arbace --layout lines --work "$1" "$2" >&2 || return 1
+  printf '\nrequire github.com/ebitengine/purego v0.11.1\n' >> "$1/mod/go.mod"
+  go_sum github.com/ebitengine/purego v0.11.1 > "$1/mod/go.sum"
+}
+
+# roundtrip: box/ printed, converted back and printed again; the two printings compared (gocmp)
+roundtrip() {
+  local status=0 c goos goarch list args p f r gocmp=$work/gocmp
+  mkdir -p "$work"
+  echo "== print ${out#$root/}" >&2
+  print_box "$work/rt-print" "$out" || return 1
+  rm -rf "$work/rt-forms"
+  for c in $configs; do
+    goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
+    args=(); for p in ${list//,/ }; do args+=("arbace/box/$p"); done
+    echo "== convert $goos/$goarch: ${args[*]}" >&2
+    (cd "$work/rt-print/mod" && "$root/bin/g2a" convert --tests --goos "$goos" --goarch "$goarch" \
+       --out "$work/rt-forms/$goos-$goarch" "${args[@]}") > "$work/rt-convert-$goos-$goarch.log" 2>&1
+    if grep -v '^ok' "$root/.tmp/g2a/dumps.tsv" >&2; then
+      echo "roundtrip $goos/$goarch: a package did not dump ($work/rt-convert-$goos-$goarch.log)" >&2; return 1
+    fi
+  done
+  rm -rf "$work/rt-box"
+  merge_src=$work/rt-print/mod/box merge_forms=$work/rt-forms merge_dst=$work/rt-box/go/arbace/box merge || return 1
+  echo "== print the converted forms" >&2
+  print_box "$work/rt-print2" "$work/rt-box" || return 1
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
+  echo "== the printings compared (gocmp: tree, export, code; with tests)" >&2
+  for c in $configs; do
+    goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
+    for p in ${list//,/ }; do
+      f=$work/rt-gocmp-$goos-$goarch-${p//\//_}.log
+      if (cd "$work/rt-print/mod" && env GOOS=$goos GOARCH=$goarch GOROOT="$tg" CGO_ENABLED=0 \
+            "$gocmp" -tests "$work/rt-print/mod/box/$p" "$work/rt-print2/mod/box/$p") > "$f" 2>&1; then
+        r=pass
+      else
+        r=FAIL; status=1
+      fi
+      printf '%-14s %-16s %s  %s\n' "$goos/$goarch" "$p" "$r" "$(tail -1 "$f")"
+    done
+  done
+  return $status
+}
+
+# kvm_tests: go-whim's tests on box/ (printed) in a renamed clone of go-whim, on /dev/kvm
+kvm_tests() {
+  local p d=$work/kvm
+  mkdir -p "$work"
+  echo "== print ${out#$root/}" >&2
+  print_box "$work/kvm-print" "$out" || return 1
+  clone "$d"
+  rename "$d"
+  for p in $pkgs; do
+    [ -d "$work/kvm-print/mod/box/$p" ] || continue
+    mkdir -p "$d/_arbace/box/$p"
+    rm -f "$d/_arbace/box/$p"/*
+    cp "$work/kvm-print/mod/box/$p"/* "$d/_arbace/box/$p/"
+  done
+  # vmm.Run recovers an exit panic by its ExitCode method (S1): go-whim's editor.Exit, which
+  # its tests' recording hosts panic with (they serve editor.Main too), given it
+  printf '\n// ExitCode is the code, for arbace/box/vmm.Run (bin/box-vendor kvm-tests).\nfunc (e Exit) ExitCode() int { return int(e) }\n' \
+    >> "$d/editor/host.go"
+  echo "== go-whim's tests on box/ (/dev/kvm)" >&2
+  (
+    cd "$d"
+    export TAMAGO_ROOT=$tg CGO_ENABLED=1
+    s=0
+    go test -count=1 -v arbace/box/hv arbace/box/vmm arbace/box/abi > "$work/kvm-box.log" 2>&1 || s=1
+    grep -E '^(--- |ok|FAIL|panic)' "$work/kvm-box.log"
+    go test -count=1 -v -run 'TestHello|TestFault|TestWatchdog|TestGoGuest|TestGoGuestFault|TestGoGuestSMP|TestReadAheadGo|TestReadAheadC' \
+      ./guest/ > "$work/kvm-guest.log" 2>&1 || s=1
+    grep -E '^(--- |ok|FAIL|panic)' "$work/kvm-guest.log"
+    exit $s
+  )
+}
+
 case $cmd in
   convert) convert ;;
   check) check ;;
   all) convert && check ;;
+  roundtrip) roundtrip ;;
+  kvm-tests) kvm_tests ;;
   *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

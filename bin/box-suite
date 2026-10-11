@@ -1,0 +1,155 @@
+#!/bin/bash
+# Clojure's suite in the box (B1b, doc/go/BOX-NOTES.md, S1): the test namespaces of a subset run
+# in the box's guest (target/arbace-go/box-amd64/arbace-box, bin/arbace-go --build --box), each
+# in its own box, and their counts compared with test/arbace-box-results.edn.
+#
+# The box has no host files: each run's standard input first writes the renamed suite (its
+# test/ tree) and its test libraries into the guest's in-memory file system (/suite/test,
+# /lib/LIB), then is bin/clojure-tests's runner (run NS OUT NSLIST EXPECTED, as with
+# CLOJURE_TESTS_GO), on ARBACE_PATH /lib/...:/suite/test; a shutdown hook prints the result the
+# runner wrote (in memory) to standard output. NSLIST is the suite's list of test namespaces
+# (RUN/namespaces.txt), every one required first, as bin/clojure-tests does: some tests need the
+# assert-expr methods and namespaces others load (clojure.test-helper's fails-with-cause?), and
+# the reducers' tests fail without them, natively as in the box.
+#
+# Usage: bin/box-suite [-j JOBS] [--all] [--record] [NS...]
+#   the namespaces of test/arbace-box-results.edn's :namespaces (default), NS..., or with --all
+#   every namespace of the suite's list but the reference's :excluded; --record rewrites the
+#   reference's counts from this run (its comments and :excluded kept by hand: edit them)
+# Needs the renamed suite of a run of bin/clojure-tests on the Go build (CLOJURE_TESTS_GO; its
+# RUN directory, BOX_SUITE_RUN, default .tmp/clojure-tests/go) and python3 (the input's
+# writer). Environment: ARBACE_BOX_CPUS (the launcher's; default 4), BOX_SUITE_TIMEOUT (900 s).
+# Exit status: 0 when every namespace's counts are the reference's.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+run=${BOX_SUITE_RUN:-$root/.tmp/clojure-tests/go}
+libs=${BOX_SUITE_LIBS:-$(dirname "$run")/lib-arbace}
+box=$root/target/arbace-go/box-amd64/arbace-box
+ref=$root/test/arbace-box-results.edn
+work=$root/.tmp/box-suite
+jobs=8 all= record=
+
+# --run-one NS: one namespace in one box (called by xargs)
+if [ "${BOX_SUITE_ONE:-}" = 1 ]; then
+  ns=$1
+  s=$(date +%s%N)
+  st=0
+  cat "$work/prelude.ae" "$run/run_clojure_tests.clj" \
+    | ARBACE_PATH=$(cat "$work/path.txt") timeout "${BOX_SUITE_TIMEOUT:-900}" "$box" - run "$ns" /out/result.edn /out/nslist.txt /suite/expected.edn \
+      > "$work/out/$ns.log" 2>&1 || st=$?
+  r=$(grep -a '^BOXSUITE ' "$work/out/$ns.log" | tail -1 | cut -c10-)
+  [ -n "$r" ] || r="{:ns $ns :exit $st}"
+  echo "$r" > "$work/out/$ns.edn"
+  printf '%-52s exit %3s %7d ms\n' "$ns" "$st" $(( ($(date +%s%N) - s) / 1000000 ))
+  exit 0
+fi
+
+nss=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -j) jobs=$2; shift 2 ;;
+    --all) all=1; shift ;;
+    --record) record=1; shift ;;
+    -*) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+    *) nss+=("$1"); shift ;;
+  esac
+done
+
+[ -x "$box" ] || { echo "box-suite: no $box (bin/arbace-go --build --box)" >&2; exit 1; }
+[ -d "$run/suite/test" ] && [ -f "$run/run_clojure_tests.clj" ] \
+  || { echo "box-suite: no renamed suite in $run (bin/clojure-tests with CLOJURE_TESTS_GO first)" >&2; exit 1; }
+rm -rf "$work"; mkdir -p "$work/out"
+
+# the namespaces
+if [ ${#nss[@]} -eq 0 ]; then
+  if [ -n "$all" ]; then
+    mapfile -t nss < <(python3 - "$ref" "$run/namespaces.txt" <<'EOF'
+import re, sys
+ref = open(sys.argv[1]).read()
+m = re.search(r':excluded\s*\{(.*?)\}', ref, re.S)
+excluded = set(re.findall(r'^\s*(clojure\.\S+)', m.group(1), re.M)) if m else set()
+for n in open(sys.argv[2]).read().split():
+    if n not in excluded:
+        print(n)
+EOF
+)
+  else
+    mapfile -t nss < <(python3 - "$ref" <<'EOF'
+import re, sys
+ref = open(sys.argv[1]).read()
+m = re.search(r':namespaces\s*\{(.*)\}\s*\}\s*$', ref, re.S)
+for n in re.findall(r'^\s*(clojure\.\S+)\s+\{', m.group(1), re.M):
+    print(n)
+EOF
+)
+  fi
+fi
+
+# the input's prelude: the suite's and the libraries' files written into the guest's memory,
+# the reference (for its skipped tests), the namespace list, and the hook that prints the result
+python3 - "$run/suite/test" "$libs" "$root/test/arbace-go-results.edn" "$work" "$run/namespaces.txt" <<'EOF'
+import json, os, sys
+test, libs, expected, work, nslist = sys.argv[1:6]
+def lit(s):
+    return json.dumps(s, ensure_ascii=False)
+out = []
+def put(path, text):
+    out.append('(let [f (java.io.File. %s)] (.mkdirs (.getParentFile f)) (spit f %s))' % (lit(path), lit(text)))
+def tree(src, dst):
+    for d, _, fs in os.walk(src):
+        for f in sorted(fs):
+            if f.endswith(('.clj', '.cljc', '.ae', '.edn')):
+                p = os.path.join(d, f)
+                put(dst + '/' + os.path.relpath(p, src), open(p, encoding='utf-8').read())
+tree(test, '/suite/test')
+path = []
+for lib in sorted(os.listdir(libs)):
+    tree(os.path.join(libs, lib), '/lib/' + lib)
+    path.append('/lib/' + lib)
+path.append('/suite/test')
+put('/suite/expected.edn', open(expected, encoding='utf-8').read())
+put('/out/nslist.txt', open(nslist, encoding='utf-8').read())
+out.append('(.addShutdownHook (Runtime/getRuntime) (Thread. (fn [] (let [f (java.io.File. "/out/result.edn")] (when (.exists f) (println "BOXSUITE" (slurp f)))))))')
+open(os.path.join(work, 'prelude.ae'), 'w', encoding='utf-8').write('\n'.join(out) + '\n')
+open(os.path.join(work, 'path.txt'), 'w').write(':'.join(path))
+EOF
+echo "box-suite: ${#nss[@]} namespaces, $jobs at a time, in $box (prelude $(stat -c %s "$work/prelude.ae") bytes; logs in $work/out)"
+t0=$(date +%s)
+printf '%s\n' "${nss[@]}" | BOX_SUITE_ONE=1 xargs -P "$jobs" -n 1 "$0"
+echo "box-suite: $(( $(date +%s) - t0 )) s"
+
+# the comparison (or the record)
+python3 - "$ref" "$work/out" "${record:-}" "${nss[@]}" <<'EOF'
+import os, re, sys
+ref_file, out, record, nss = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+text = open(ref_file).read()
+ref = {n: dict(re.findall(r':(\w+) (\d+)', m)) for n, m in re.findall(r'^\s*(clojure\.\S+)\s+(\{[^}]*\})', text.split(':namespaces', 1)[1], re.M)} if ':namespaces' in text else {}
+got, bad, tot = {}, [], {'test': 0, 'pass': 0, 'fail': 0, 'error': 0}
+for n in nss:
+    r = open(os.path.join(out, n + '.edn')).read()
+    c = {k: v for k, v in re.findall(r':(test|pass|fail|error) (\d+)', r)}
+    if 'load-error' in r:
+        c['load-error'] = '1'
+    if not c:
+        c = {'exit': re.search(r':exit (\d+)', r).group(1) if ':exit' in r else '?'}
+    got[n] = c
+    for k in tot:
+        tot[k] += int(c.get(k, 0))
+    want = ref.get(n)
+    if want is None or {k: want[k] for k in want if k in tot} != {k: c[k] for k in c if k in tot}:
+        bad.append((n, want, c))
+for n, c in got.items():
+    print('%-52s %s' % (n, ' '.join('%s %s' % kv for kv in sorted(c.items()))))
+print('TOTAL %d namespaces: %d tests, %d assertions, %d pass, %d fail, %d error' % (
+    len(got), tot['test'], tot['pass'] + tot['fail'] + tot['error'], tot['pass'], tot['fail'], tot['error']))
+if record:
+    head, _, rest = text.partition(':namespaces')
+    body = '\n'.join('  %s {:test %s, :pass %s, :fail %s, :error %s}' % (n, c.get('test', 0), c.get('pass', 0), c.get('fail', 0), c.get('error', 0))
+                     for n, c in sorted(got.items()))
+    open(ref_file, 'w').write(head + ':namespaces\n {\n' + body + '\n }}\n')
+    print('recorded', ref_file)
+    sys.exit(0)
+for n, w, c in bad:
+    print('DIFFERENT %s: reference %s, box %s' % (n, w, c))
+sys.exit(1 if bad else 0)
+EOF
