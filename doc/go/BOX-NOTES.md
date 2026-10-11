@@ -786,3 +786,155 @@ The whole suite, 12 at a time: the box's subset (67 namespaces, 685 tests, 19,64
 - The watchdog stays off by default; `ARBACE_BOX_WATCHDOG` sets one.
 - BX11's mapped start: measured first on a host without nested KVM before any change in the
   monitor (copying the read-only data, or prefaulting).
+
+## S6, the amd64 half: the guest's own Go as forms (2026-10-11)
+
+Branch `box-s6`. BOX-SURVEY §6, S6: the Go the box's guest is built with, TamaGo's runtime and
+its whole standard library and TamaGo's `goos` module, held as Go forms in the repository and
+built from them; the guest image byte-identical to one built from the originals. The amd64 half
+(`tamago/amd64`); arm64 is the next milestone's, with S4.
+
+### What is held (`tamago/`, BX22, BX23)
+
+A source root of its own, `tamago/` (tamago/README.md), beside `box/`, in two roots of forms:
+
+| | packages | from | forms files | bytes |
+|---|---|---|---|---|
+| `tamago/goroot/go/` | 371 of std for tamago/amd64 (the runtime, `internal/...`, `vendor/golang.org/x/...`; not `cmd/`, not tests), with 68 assembly and header files | TamaGo's go1.27.1 tree (`/root/tamago-go`, https://github.com/usbarmory/tamago-go, `VERSION` go1.27.1, 2026-08-28), `src/` | 2,105 | 31.4 MB (30.6 MB of forms, 579,502 lines; 0.77 MB of assembly) |
+| `tamago/goroot/src/` | GOROOT/src's `go.mod`, `go.sum`, `vendor/modules.txt` and `runtime/cgo/abi_amd64.h` (the runtime's `asm_amd64.s` includes it; `runtime/cgo` has no Go files with cgo off) | the same | | 5 KB |
+| `tamago/goos/` | 69 of the module's 94 packages (those that build for tamago/amd64: `goos`, `amd64`, `kvm/...`, `soc/intel/...`, `board/...` for amd64 machines), 19 assembly files, its `go.mod` | `github.com/usbarmory/tamago` v1.27.1, Go's module cache | 224 | 0.8 MB |
+
+In all 32.2 MB, 2,422 files; 6.4 MB as a gzipped tar (`git`'s pack grows by about as much; the
+repository's pack was 16.4 MB). Left out of std, and proposed as such: the 6 packages with test
+files only, and the 2 that embed third-party data and that only `cmd/trace` or tests import,
+which no program outside GOROOT can import (`internal/trace/traceviewer`: Catapult's 2.7 MB
+trace viewer; `encoding/json/internal/jsontest`: 0.3 MB of JSON corpora). Not converted: the
+tests, `cmd/` (the toolchain stays the binaries of `/root/tamago-go`), other configurations.
+
+The forms are the converter's output unchanged, one configuration (each package file keeps its
+`:config` and `:init-order`), laid out as SPEC §4.1 (`tamago/goroot/go/runtime.ae`,
+`runtime/proc.ae` ...), other files in the forms directories (SPEC §9.5) as `box/` holds them.
+For arm64 the next milestone either merges the trees as `box/`'s were (where a file's forms
+are the same for both architectures) or holds a second tree; std's files with
+architecture-dependent constants may not merge, unmeasured.
+
+### How (`bin/tamago-vendor`, after `bin/box-vendor`)
+
+- `convert`: the toolchain's `src/` checked against a pinned digest (every file but `src/cmd/`),
+  std dumped afresh and converted (`bin/g2a convert --corpus amd64`), the goos module copied
+  from Go's module cache (its pinned hash checked) and converted (`bin/g2a convert --goos tamago
+  --goarch amd64 ./...`, the packages that dump without errors kept), assembled into `tamago/`
+  with their other files and the headers included from outside the packages. About 25 s.
+- `verify`: a fresh conversion compared with `tamago/` (`diff -r`): identical. About 25 s.
+- `print [DIR]`: `tamago/` printed (lines layout) into a GOROOT, `DIR/goroot` (its `src/` the
+  printed std and GOROOT/src's files, the rest of the toolchain's tree linked: `bin`, `pkg`, the
+  compiler, linker and `pkg/include`), the module `DIR/goos`, and jrt's runtime overlay for that
+  GOROOT; reused while `tamago/`'s hash is unchanged. About 20 s (printed in parallel).
+- `check` (after `bin/arbace-go --build --box`): below.
+
+`bin/g2a build` gained `--print-only --module std` (packages at their import paths, no
+`go.mod`) and `--goos-dir DIR` (the goos module from DIR by a `replace`, no `go.sum`) (BX21).
+
+### The proof (`bin/tamago-vendor check`)
+
+1. std printed against GOROOT/src, package by package (`bin/g2a-check`: gocmp's tree, export
+   and code levels), against the round trip's reference: 371 of 371 pass (`unsafe` skipped at
+   export and code, as in the reference), no regression.
+2. The goos module's 69 packages printed against the originals (gocmp): 69 of 69 at all three
+   levels.
+3. The guest image: a2g's program of the box build (`target/arbace-go/work-box-amd64/mod`)
+   built twice, as `bin/arbace-go` links it (`-T 0x201000 -R 0x1000 -w`, the version), with
+   `-buildid=`: once with GOROOT `/root/tamago-go` and the goos module from Go's module cache,
+   once with GOROOT the printed one and the printed module (by a `replace`, `-modfile`), each
+   with jrt's runtime overlay (`proc.go`, `runtime2.go`, `arbace_local.go`, printed from
+   `overlay/go`) mapped onto its GOROOT; then both cut to the monitor's symbols as `bin/arbace-go`
+   ships them (`tools/elfsyms`, S2). On main `b3d119b` merged into the branch:
+
+   | image | bytes | sha256 |
+   |---|---:|---|
+   | as linked, from the originals | 76,766,368 | `612ed53b7e91f1e8...` |
+   | as linked, from the forms | 76,766,368 | `612ed53b7e91f1e8...` |
+   | symbols cut, from the originals | 65,909,034 | `b7ab8106f5cdeb37...` |
+   | symbols cut, from the forms | 65,909,034 | `b7ab8106f5cdeb37...` |
+
+   **Identical**, both. (Before the merge, on `e4e9033`'s box: 76,766,123 bytes, identical.)
+   About 1 min 50 s, mostly std compiled for the printed GOROOT (Go's build cache keys it by
+   path and contents: the first build after a change of `tamago/` compiles it anew).
+
+The build ID is the one difference left without `-buildid=`: it hashes the source text, and
+the printer keeps no comments. The shipped guests, from the forms and with
+`ARBACE_BOX_GO=orig`, differ in 80 bytes, all of the build ID; each is reproducible (two
+builds from the forms gave the same bytes).
+
+**What the proof found** (BX20): in the lines layout a literal that begins a Go line (a final
+`return true`, `return nil`, `return 0`) was recorded only as a break (`:go/breaks [i]`), and
+the printer put it on the line after the last it wrote; with blank or comment lines, or a
+closing brace, between, gc's line table differed (a hello program for `GOOS=tamago`: 16 bytes
+of `.gopclntab`, 8 functions, such as `runtime.isMarkedOrNotInHeap` at `mbitmap.go:1291`
+printed `:1281`, `sync.(*Pool).getSlow` at `pool.go:197` printed `:196`). The round trip's code
+level compares the code, not the line tables, and did not see it. The converter now writes
+`[i line]` for such a literal (`arbace/g2a/layout.ae`) and the printer honours it
+(`print_code.ae`); SPEC §10.1 amended. `overlay/go/runtime/proc.ae` took the conversion's 10
+changed breaks (`bin/jrt overlay --check` passes), so the executables' `proc.go` lines are now
+the original's there too (the Linux executable's bytes change by it; nothing else does). `box/`'s
+forms keep the old breaks (valid: an index alone still means the next line); converted again,
+they would take the new ones.
+
+### The build (BX22)
+
+`bin/arbace-go --build --box` prints `tamago/` into `target/arbace-go/tamago` (`bin/tamago-vendor
+print`) and builds the amd64 guest with that GOROOT and module, jrt's overlay mapped onto it
+(`ARBACE_BOX_GO=forms`, the default); `ARBACE_BOX_GO=orig` builds as before, from the
+toolchain's tree and Go's module cache; arm64 guests from the toolchain's tree until S6's arm64
+half. The launcher (a Linux program) is built by the toolchain as before. Cost: the print,
+about 20 s when `tamago/` changed, seconds otherwise; the guest's compile, 97 s against 94-96 s
+(Go's build cache holds both). Recommended and done: the forms are what the box is built from,
+so that the proof is about what ships.
+
+### Checks
+
+- `bin/tamago-vendor verify`: identical; `check`: as above.
+- `bin/arbace-go --build` (amd64, 66,519,200 bytes after the merge) and `--build --box` (from the
+  forms; the guest 65,909,070 bytes, the launcher with it 69,644,638), `--smoke --box`: 70 of 70
+  on 4 and 1 vCPUs and on a terminal (64 of 64 before the merge).
+- `bin/g2a test` (150 assertions) and `bin/g2a-print-tests` (256): pass. `bin/jrt overlay
+  --check`: passes.
+- `bin/g2a roundtrip amd64`: no regression against `test/g2a/roundtrip-amd64.edn` (49 s);
+  `bin/box-vendor roundtrip`: 16 of 16 at all three levels.
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`arbace/g2a`
+  is a tool's, `go/`, `test/jrt/`, `tamago/`, `bin/` are not compiled by it).
+- `test/jrt/tables.ae` follows RP1 (the JVM's order only for the CDS archive's classes, else by
+  descriptor): regenerated, `reflect_tables.ae` changes order in five tables (`Thread$Builder$OfVirtual.name`,
+  `Condition.await`, `ReentrantReadWriteLock`'s `ReadLock`/`WriteLock.tryLock`,
+  `Semaphore.tryAcquire`), each name's overloads of different arities, so `Reflector`'s choice
+  is unchanged; two runs give the same file.
+
+### Amendments (proposed 2026-10-11)
+
+- **BX20 (SPEC §10.1) A literal break's line**: `:go/breaks` entries `[index line]` when the
+  literal's Go line is not the line after the last written; the converter writes them, the
+  printer honours them.
+- **BX21 (BUILD.md) `bin/g2a build --print-only --module std` and `--goos-dir`**.
+- **BX22 (box build) The guest's Go from `tamago/`** by default (`ARBACE_BOX_GO=forms|orig`),
+  printed by `bin/tamago-vendor print`.
+- **BX23 (`tamago/`) What is held**: std's 371 packages for tamago/amd64 (not the 6 test-only
+  ones, not `internal/trace/traceviewer` and `encoding/json/internal/jsontest`), GOROOT/src's
+  module files and the one outside header, the goos module's 69 packages for tamago/amd64 and
+  its `go.mod`; the converter's output unchanged; not tests, not `cmd/`.
+- **BX24 (checks) `bin/tamago-vendor verify` and `check`**, proposed for `bin/gate --full`'s box
+  step: `verify` (25 s) always; `check` after the Go chain's box build (about 2 minutes, plus the
+  box build, about 1 min 40 s, which `--full` does not make today), or only when `tamago/`,
+  `arbace/g2a`, `overlay/go` or the toolchain change.
+
+### For the user
+
+- The size: 32 MB of tracked forms (6.4 MB compressed), the largest tree of the repository,
+  committed on the branch as a commit of its own (`tamago/: ...`) so that it can be replaced.
+  Alternatives, if it is too much: (a) only the image's closure (116 packages of std's
+  371 with the goos module's `goos`: S5's netstack and TLS would add what they import when they come), with `convert`
+  regenerating the rest on demand; (b) a compact encoding (the forms gzipped in the tree, the
+  printer reading them; git compresses them anyway, so it saves the checkout, not the history);
+  (c) the forms not tracked, `convert` run by the build (then the forms are not the source of
+  truth, against the direction). Recommended: as committed.
+- The two std packages left out (third-party data, unimportable by guests); the test files not
+  converted.

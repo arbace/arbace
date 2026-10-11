@@ -81,7 +81,12 @@ Prior art:
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
   (arm64). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the TamaGo board,
   vendored as Go forms from go-whim (`box/README.md` records the origin; `bin/box-vendor`
-  reproduces and proves it); import paths `arbace/box/*`. `bin/arbace-go --build --box` builds the
+  reproduces and proves it); import paths `arbace/box/*`. `tamago/` holds the guest's own Go as Go
+  forms (S6): TamaGo's runtime and standard library (`tamago/goroot/`, GOROOT/src's layout) and
+  its `goos` module (`tamago/goos/`), for tamago/amd64, converted by `bin/tamago-vendor`
+  (`convert`, `verify`; `check` proves the guest image built from them byte-identical to one
+  built from the originals); the box's guest is built from them printed (`ARBACE_BOX_GO=orig`:
+  from the toolchain's tree). `bin/arbace-go --build --box` builds the
   guest image and Arbace's launcher `arbace-box` (`--smoke --box`; `bin/box-suite`).
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's

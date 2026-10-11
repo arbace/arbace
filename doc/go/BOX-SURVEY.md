@@ -4,7 +4,8 @@ Status: survey, 2026-10-10, for B1b ([B1-PLAN.md](B1-PLAN.md), "B1b, after the f
 box"). The decisions (§10) are the user's, taken 2026-10-11, after the `arbace-for-golang`
 freeze. Stage S0 is done (2026-10-11: go-whim's box vendored as Go forms under `box/`;
 [BOX-NOTES.md](BOX-NOTES.md)), S1 (2026-10-11: the boxed REPL on amd64, BOX-NOTES.md, S1)
-and S2 (2026-10-11: measured and hardened, BOX-NOTES.md, S2); the rest of this document is the
+and S2 (2026-10-11: measured and hardened, BOX-NOTES.md, S2), and S6's amd64 half (2026-10-11:
+the guest's Go as forms in `tamago/`, BOX-NOTES.md, S6); the rest of this document is the
 survey as written. The experiments (§9) ran in `.tmp/boxsurvey/` on copies; go-whim
 was read only.
 
@@ -377,7 +378,7 @@ each re-running S6's byte-identity proof; S4 (arm64, the Mac) and S6's arm64 hal
 | **S3 the store** | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
 | **S4 arm64** | the same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the Mac (the user's run, go-whim's `mac.sh` as the model) | the S1 gate in the aarch64 VM and on the Mac |
 | **S5 the network** | the design first (R5): a stream proxy (`NetHost` over calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and TLS in the guest, go-whim's sketch); the socket REPL from the host | `java.net`'s oracle forms; a socket REPL session from the host |
-| **S6 the image's Go as forms** | the board, TamaGo's runtime and std in the image as round-tripped Go forms; the image byte-identical to one built from the originals (B1-PLAN.md, B1b) | byte identity, amd64 and arm64 |
+| **S6 the image's Go as forms**. *amd64 half done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S6): TamaGo's std (371 packages) and goos module (69) for tamago/amd64 as forms in `tamago/` (`bin/tamago-vendor`), the guest built from them printed by default; the guest image byte-identical to the originals' (`bin/tamago-vendor check`); arm64 the next milestone* | the board, TamaGo's runtime and std in the image as round-tripped Go forms; the image byte-identical to one built from the originals (B1-PLAN.md, B1b) | byte identity, amd64 and arm64 |
 
 Not staged: processes (cut for good in the box), the terminal's raw mode.
 
