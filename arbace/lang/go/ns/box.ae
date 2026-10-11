@@ -1,0 +1,201 @@
+;; The Go build's own namespace (doc/go/BOX-NOTES.md, S3; embedded as arbace/box.ae: a2g's
+;; namespace variants, arbace/lang/go/ns/): the store, in the box and in the native executable.
+(ns arbace.box
+  "The store: blobs, immutable byte strings named by their SHA-256 (a hash: 64 lowercase
+  hexadecimal digits), and refs, names pointing at blobs, the store's only mutable state, changed
+  by compare-and-set. In the box the monitor keeps it, in the directory the launcher is given
+  (ARBACE_BOX_STORE=DIR, or arbace-box --store DIR); in the native executable jrt keeps it in the
+  directory ARBACE_BOX_STORE names, in the same format, so that the same programs run in both and
+  one directory serves both. A ref's name is 1 to 64 of [A-Za-z0-9._-], not beginning with a dot.
+
+    (put x)              store x (a string, as UTF-8, or a byte array): its hash
+    (get h)              blob h as a string (UTF-8), nil when there is none
+    (get-bytes h)        blob h as a byte array, nil when there is none
+    (size h)             its size, nil when there is none
+    (ref name)           the hash ref name points at, nil when none
+    (ref! name h)        point name at blob h: true
+    (ref! name h old)    only if it points at old (nil: if there is no such ref): true, or false
+                         when it does not (another write came first)
+    (put! name x)        (ref! name (put x)), x's hash
+    (load name)          the string ref name's blob holds, nil when there is no such ref
+    (load-ref name)      evaluate the source ref name's blob holds, as load-file a file
+    (save-fs! ref)       the in-memory file system (the box's) as a tar, stored, ref pointed at it;
+    (save-fs! ref dir)   or dir's files (natively a directory must be named): the tar's hash
+    (load-fs! ref)       the tar ref points at written into the file system (the box's), or
+    (load-fs! ref dir)   under dir
+    (store?)             is there a store?
+
+  Scripts and namespaces load from refs: arbace.main takes ref:NAME as a script or an -i file, and
+  an ARBACE_PATH entry store:PREFIX makes require and load find namespace a.b-c in ref
+  PREFIXa.b_c.ae (its path's '/'s made '.'s). ARBACE_BOX_FS=REF seeds the box's in-memory file
+  system from the snapshot REF at its start.
+
+  What the store refuses throws an ex-info whose data's :arbace.box/error is :no-store (none
+  configured), :bad-name, :bad-hash, :too-large (beyond ARBACE_BOX_STORE_MAX, by default 256 MiB),
+  :no-blob (a ref to a blob the store has not), :no-ref (load-ref, load-fs!) or :refused (the
+  host's error)."
+  (:refer-clojure :exclude [get load ref])
+  (:import (jdk.internal.jrt HostStore)
+           (java.io StringReader)
+           (java.nio.charset StandardCharsets)))
+
+(defn- fail [kind ^String msg data]
+  (throw (ex-info msg (assoc data ::error kind))))
+
+(defn- answer
+  "Throws for a negative answer of HostStore (what, the operation; data, its arguments)."
+  [^long code what data]
+  (case code
+    -3 (fail :no-store (str what ": no store (ARBACE_BOX_STORE names none, or the launcher's --store)") data)
+    -4 (fail :too-large (str what ": larger than the store takes (ARBACE_BOX_STORE_MAX)") data)
+    -5 (fail :bad-name (str what ": not a name the store takes (1 to 64 of [A-Za-z0-9._-], not beginning with a dot): "
+                            (pr-str (:name data))) data)
+    (fail :refused (str what ": the store refused") data)))
+
+(defn- hash-bytes
+  "The 32 bytes of hash h."
+  ^bytes [h what]
+  (when-not (and (string? h) (re-matches #"[0-9a-f]{64}" h))
+    (fail :bad-hash (str what ": not a hash (64 lowercase hexadecimal digits): " (pr-str h)) {:hash h}))
+  (let [b (byte-array 32)]
+    (dotimes [i 32]
+      (aset b i (unchecked-byte (Integer/parseInt (subs h (* 2 i) (+ 2 (* 2 i))) 16))))
+    b))
+
+(defn- hex
+  "Hash bytes b as its 64 hexadecimal digits."
+  [^bytes b]
+  (let [sb (StringBuilder. 64)]
+    (dotimes [i (alength b)]
+      (let [x (bit-and (aget b i) 0xff)]
+        (.append sb (Character/forDigit (bit-shift-right x 4) 16))
+        (.append sb (Character/forDigit (bit-and x 15) 16))))
+    (str sb)))
+
+(defn store?
+  "Is there a store (ARBACE_BOX_STORE, or the launcher's --store)?"
+  []
+  (zero? (HostStore/status)))
+
+(defn put
+  "Stores x, a string (its UTF-8) or a byte array: its hash."
+  [x]
+  (let [^bytes b (cond (string? x) (.getBytes ^String x StandardCharsets/UTF_8)
+                       (bytes? x) x
+                       :else (throw (IllegalArgumentException.
+                                      (str "arbace.box/put: a string or a byte array, not " (class x)))))
+        h (byte-array 32)
+        code (HostStore/put b 0 (alength b) h)]
+    (when-not (zero? code)
+      (answer code "arbace.box/put" {:size (alength b)}))
+    (hex h)))
+
+(defn get-bytes
+  "Blob h as a byte array, nil when the store has none."
+  [h]
+  (let [hb (hash-bytes h "arbace.box/get-bytes")
+        n (HostStore/size hb)]
+    (cond
+      (= n -1) nil
+      (neg? n) (answer n "arbace.box/get-bytes" {:hash h})
+      :else (HostStore/read hb))))
+
+(defn get
+  "Blob h as a string (its bytes as UTF-8), nil when the store has none."
+  [h]
+  (when-let [b (get-bytes h)]
+    (String. ^bytes b StandardCharsets/UTF_8)))
+
+(defn size
+  "The size of blob h, nil when the store has none."
+  [h]
+  (let [n (HostStore/size (hash-bytes h "arbace.box/size"))]
+    (cond
+      (= n -1) nil
+      (neg? n) (answer n "arbace.box/size" {:hash h})
+      :else n)))
+
+(defn ref
+  "The hash ref name points at, nil when there is no such ref."
+  [^String name]
+  (let [h (byte-array 32)
+        code (HostStore/ref (str name) h)]
+    (case code
+      0 (hex h)
+      -1 nil
+      (answer code "arbace.box/ref" {:name name}))))
+
+(defn- ref!-answer [code name h]
+  (cond
+    (= code -2) false
+    (and (= code -1) (nil? (size h)))
+      (fail :no-blob (str "arbace.box/ref!: no blob " h) {:name name :hash h})
+    :else (answer code "arbace.box/ref!" {:name name :hash h})))
+
+(defn ref!
+  "Points ref name at blob h: true. With old, only if the ref points at old now (old nil: if
+  there is no such ref): true, or false when it does not."
+  ([name h]
+   (let [code (HostStore/setRef (str name) (hash-bytes h "arbace.box/ref!") nil)]
+     (or (zero? code) (ref!-answer code name h))))
+  ([name h old]
+   (let [ob (if (nil? old) (byte-array 32) (hash-bytes old "arbace.box/ref!"))
+         code (HostStore/setRef (str name) (hash-bytes h "arbace.box/ref!") ob)]
+     (or (zero? code) (ref!-answer code name h)))))
+
+(defn put!
+  "Stores x and points ref name at it: its hash."
+  [name x]
+  (let [h (put x)]
+    (ref! name h)
+    h))
+
+(defn load
+  "The string ref name's blob holds, nil when there is no such ref."
+  [name]
+  (some-> (ref name) get))
+
+(defn load-ref
+  "Evaluates the source ref name's blob holds, as load-file a file: the last form's value. Its
+  source path is ref:NAME."
+  [name]
+  (let [src (load name)]
+    (when (nil? src)
+      (fail :no-ref (str "arbace.box/load-ref: no ref " name) {:name name}))
+    (arbace.lang.Compiler/load (StringReader. src) (str "ref:" name) (str name))))
+
+(defn- boxed? []
+  (= "Tamago" (System/getProperty "os.name")))
+
+(defn- fs-dir [dir what]
+  (cond
+    (some? dir) (str dir)
+    (boxed?) "/"
+    :else (throw (IllegalArgumentException.
+                   (str what ": natively, a directory must be named (the box's file system is its memory)")))))
+
+(defn save-fs!
+  "Stores a snapshot of the files under dir (by default, in the box, its whole in-memory file
+  system) as a tar (directories and regular files, the times the epoch: the same files are the
+  same blob) and points ref at it: the tar's hash."
+  ([ref] (save-fs! ref nil))
+  ([ref dir]
+   (let [d (fs-dir dir "arbace.box/save-fs!")
+         err (make-array String 1)
+         tar (HostStore/tar d err)]
+     (when (nil? tar)
+       (fail :refused (str "arbace.box/save-fs!: " d ": " (aget err 0)) {:name ref :dir d}))
+     (put! ref tar))))
+
+(defn load-fs!
+  "Writes the tar ref points at (save-fs!'s, or any tar's directories and regular files) under
+  dir (by default, in the box, /): nil."
+  ([ref] (load-fs! ref nil))
+  ([ref dir]
+   (let [d (fs-dir dir "arbace.box/load-fs!")
+         tar (some-> (arbace.box/ref ref) get-bytes)]
+     (when (nil? tar)
+       (fail :no-ref (str "arbace.box/load-fs!: no ref " ref) {:name ref}))
+     (when-let [e (HostStore/untar tar d)]
+       (fail :refused (str "arbace.box/load-fs!: " d ": " e) {:name ref :dir d}))
+     nil)))

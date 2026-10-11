@@ -1,0 +1,161 @@
+;; jrt: the native executable's store (doc/go/BOX-NOTES.md, S3): OSHost's StoreHost, a directory
+;; of the host's in the format of the box's monitor (arbace/box/vmm's DirStore: blobs/HASH,
+;; refs/NAME holding the hash in hex and a newline), so that one directory serves the native
+;; program and boxes, in turn or at once: refs are read and written under the lock of
+;; refs/.lock (fcntl's, as the monitor's), a ref replaced by a rename (a reader never sees one
+;; half written), a blob written to a temporary name and renamed to its hash (never short), both
+;; 0644 as the monitor writes them. The
+;; directory is ARBACE_BOX_STORE's; without it the program has no store. Blobs are limited as
+;; ARBACE_BOX_STORE_MAX says (StoreMax).
+(in-ns 'go.arbace.jrt)
+
+(go/file "store_linux.go"
+  :build ["//go:build linux"]
+  :imports [[sha256 "crypto/sha256"] [hex "encoding/hex"] [errors "errors"] [fmt "fmt"] [io "io"]
+            [os "os"] [filepath "path/filepath"] [strings "strings"] [sync "sync"] [syscall "syscall"]])
+
+(go/var ^{:tag sync/Once} osStoreOnce)
+(go/var ^{:tag Store} osStore)
+
+(go/method Store
+  "Store is the directory store ARBACE_BOX_STORE names (made when missing), opened once; nil
+without it. A store that cannot be opened, or an ARBACE_BOX_STORE_MAX that is no size, is
+reported on standard error once, and the program has no store.\n"
+  ^Store [^OSHost h]
+  (.Do osStoreOnce
+    (fn []
+      (let [dir (os/Getenv "ARBACE_BOX_STORE")]
+        (when (== dir "")
+          (return))
+        (let [(values limit ok) (StoreMax (os/Getenv "ARBACE_BOX_STORE_MAX"))]
+          (when (not ok)
+            (fmt/Fprintln os/Stderr "arbace: ARBACE_BOX_STORE_MAX: not a size (bytes, KiB, MiB, GiB, TiB) or off")
+            (return))
+          (let [(values s err) (OpenDirStore dir)]
+            (when (!= err nil)
+              (fmt/Fprintln os/Stderr "arbace: ARBACE_BOX_STORE:" err)
+              (return))
+            (set! (.-Max s) limit)
+            (set! osStore s))))))
+  osStore)
+
+(go/type dirStore
+  "dirStore is a store in a directory of the host's, in the box monitor's format (unexported: the\nimage registers jrt's exported struct types, and this one is Linux's).\n"
+  (struct ^string dir
+          ^{:tag int64 :doc "Max is the largest blob Put takes, ErrStoreTooLarge beyond; 0 none.\n"} Max
+          ^{:tag sync/Mutex} mu
+          ^{:tag (* os/File)} lock))
+
+(go/func OpenDirStore
+  "OpenDirStore is the store in dir, its directories and refs/.lock made when missing.\n"
+  [^string dir] :results [(* dirStore) error]
+  (range [_ d (lit (slice string) "blobs" "refs")]
+    (when [err (os/MkdirAll (filepath/Join dir d) 0755)] (!= err nil)
+      (return nil err)))
+  (let [(values lock err) (os/OpenFile (filepath/Join dir "refs" ".lock") (bit-or os/O_RDWR os/O_CREATE) 0644)]
+    (when (!= err nil)
+      (return nil err))
+    (return (addr (lit dirStore :dir dir :lock lock)) nil)))
+
+(go/method blob ^string [^{:tag (* dirStore)} s ^{:tag (array 32 byte)} h]
+  (filepath/Join (.-dir s) "blobs" (hex/EncodeToString (subslice h))))
+
+(go/method lockRefs
+  "lockRefs takes the refs' lock between processes (syscall.F_RDLCK or F_WRLCK; F_UNLCK releases
+it), waiting for it.\n"
+  ^error [^{:tag (* dirStore)} s ^int16 typ]
+  (let [lk (lit syscall/Flock_t :Type typ)]
+    (while true
+      (let [err (syscall/FcntlFlock (.Fd (.-lock s)) syscall/F_SETLKW (addr lk))]
+        (when (!= err syscall/EINTR)
+          (return err))))))
+
+(go/method Put [^{:tag (* dirStore)} s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (when (and (> (.-Max s) 0) (> (conv int64 (len data)) (.-Max s)))
+    (return (lit (array 32 byte)) ErrStoreTooLarge))
+  (let [h (sha256/Sum256 data)]
+    (when [(values _ ok) (.load s h)] ok
+      (return h nil))
+    (let [(values f err) (os/CreateTemp (filepath/Join (.-dir s) "blobs") ".put-*")]
+      (when (!= err nil)
+        (return h err))
+      (do (set! err (.Chmod f 0644))
+        (when (== err nil)
+          (set! (values _ err) (.Write f data)))
+        (when [cerr (.Close f)] (== err nil)
+          (set! err cerr))
+        (when (== err nil)
+          (set! err (os/Rename (.Name f) (.blob s h))))
+        (when (!= err nil)
+          (os/Remove (.Name f)))
+        (return h err)))))
+
+(go/method load
+  "load is blob h, held to its hash (a blob a write left short, or changed, is none).\n"
+  [^{:tag (* dirStore)} s ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (let [(values b err) (os/ReadFile (.blob s h))]
+    (when (or (!= err nil) (!= (sha256/Sum256 b) h))
+      (return nil false))
+    (return b true)))
+
+(go/method Size [^{:tag (* dirStore)} s ^{:tag (array 32 byte)} h] :results [int64 bool]
+  (let [(values b ok) (.load s h)]
+    (return (conv int64 (len b)) ok)))
+
+(go/method Get [^{:tag (* dirStore)} s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
+  (let [(values b ok) (.load s h)]
+    (when (or (not ok) (< off 0))
+      (return 0 false))
+    (when (>= off (conv int64 (len b)))
+      (return 0 true))
+    (return (copy p (subslice b off)) true)))
+
+(go/method Ref [^{:tag (* dirStore)} s ^string name] :results [(array 32 byte) bool]
+  (when (not (StoreName name))
+    (return (lit (array 32 byte)) false))
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when (!= (.lockRefs s syscall/F_RDLCK) nil)
+    (return (lit (array 32 byte)) false))
+  (defer (.lockRefs s syscall/F_UNLCK))
+  (.ref s name))
+
+(go/method ref "ref is ref name, read under the refs' locks.\n"
+  [^{:tag (* dirStore)} s ^string name] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))
+        (values b err) (os/ReadFile (filepath/Join (.-dir s) "refs" name))]
+    (when (!= err nil)
+      (return h false))
+    (let [(values n ^:assign err) (hex/Decode (subslice h) (conv (slice byte) (strings/TrimSpace (conv string b))))]
+      (return h (and (== err nil) (== n 32))))))
+
+(go/method SetRef ^error [^{:tag (* dirStore)} s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
+  (when (not (StoreName name))
+    (return ErrStoreName))
+  (when [(values _ ok) (.load s h)] (not ok)
+    (return (errors/New (+ "ref " name ": no such blob"))))
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when [err (.lockRefs s syscall/F_WRLCK)] (!= err nil)
+    (return err))
+  (defer (.lockRefs s syscall/F_UNLCK))
+  (when (!= old nil)
+    (let [(values cur ok) (.ref s name)]
+      (when (or (!= ok (!= @old (lit (array 32 byte)))) (and ok (!= cur @old)))
+        (return ErrStoreConflict))))
+  (let [dir (filepath/Join (.-dir s) "refs")
+        (values f err) (os/CreateTemp dir ".set-*")]
+    (when (!= err nil)
+      (return err))
+    (do (set! err (.Chmod f 0644))
+      (when (== err nil)
+        (set! (values _ err) (io/WriteString f (+ (hex/EncodeToString (subslice h)) "\n"))))
+      (when [cerr (.Close f)] (== err nil)
+        (set! err cerr))
+      (when (== err nil)
+        (set! err (os/Rename (.Name f) (filepath/Join dir name))))
+      (when (!= err nil)
+        (os/Remove (.Name f)))
+      (return err))))

@@ -87,7 +87,9 @@ Prior art:
   (`convert`, `verify`; `check` proves the guest image built from them byte-identical to one
   built from the originals); the box's guest is built from them printed (`ARBACE_BOX_GO=orig`:
   from the toolchain's tree). `bin/arbace-go --build --box` builds the
-  guest image and Arbace's launcher `arbace-box` (`--smoke --box`; `bin/box-suite`).
+  guest image and Arbace's launcher `arbace-box` (`--smoke --box`; `bin/box-suite`). The store (S3):
+  blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
+  its tool), the Go build's namespace `arbace.box` over it in the box and natively.
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an

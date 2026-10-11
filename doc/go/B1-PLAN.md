@@ -5,8 +5,8 @@ D6 the same day (below); D6 was partly reversed on 2026-10-09 and 2026-10-10 (`p
 fork-join pool and streams, dates, `defclass`, files, sockets, processes, java.time,
 java.util.concurrent, java.security's basics, java.text: D6 below). Steps 0-8 are done: B1a
 ended with its freeze on 2026-10-11 (the branch `arbace-for-golang`, the tag
-`arbace-for-go1.27.1-v1`). B1b, the box, started the same day (below): S0, S1 and S2 done,
-S6's amd64 half done (branch `box-s6`, amendments BX20-BX24 proposed), S3 next.
+`arbace-for-go1.27.1-v1`). B1b, the box, started the same day (below): S0, S1, S2 and S6's
+amd64 half done, S3 done on amd64 (branch `box-s3`, amendments BX30-BX36 proposed), S5 next.
 B1 is the milestone after g2a's G0-G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's
 decisions of 2026-10-07 put the box built by gc + TamaGo first; on 2026-10-08 the user proposed
 to postpone the box and arm64, and to reach first **a standalone static `linux/amd64` Go
@@ -130,6 +130,12 @@ native (amendments BX12-BX17 proposed). S6's amd64 half done 2026-10-11 (BOX-NOT
 the guest's own Go, TamaGo's runtime and standard library and its `goos` module, held as Go
 forms in `tamago/` (`bin/tamago-vendor`), the box's guest built from them printed by default,
 byte-identical to the guest built from the originals (without build IDs; amendments BX20-BX24
+accepted). S3 done on amd64 2026-10-11 (BOX-NOTES.md, S3): the store, blobs by SHA-256 and refs
+with compare-and-set, in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`), the
+namespace `arbace.box` over it in the box (the monitor's calls) and natively (jrt's directory
+store, the same format, one directory shareable), scripts and namespaces loaded from refs
+(`ref:NAME`, `ARBACE_PATH` entries `store:PREFIX`), the in-memory file system's snapshot as a
+tar (`arbace.box/save-fs!`, `ARBACE_BOX_FS`), the launcher's store tool (amendments BX30-BX36
 proposed).
 
 ## Decisions (the user's, 2026-10-08)

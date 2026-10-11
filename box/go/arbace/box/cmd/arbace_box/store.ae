@@ -1,0 +1,187 @@
+(in-ns 'go.arbace.box.cmd.arbace_box) (go/file "store.go" :imports [
+
+
+    ^{:line 4} [hex "encoding/hex"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [io "io"]
+    ^{:line 8} [os "os"]
+    ^{:line 9} [filepath "path/filepath"]
+    ^{:line 10} [sort "sort"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [vmm "arbace/box/vmm"]])
+
+
+
+
+(go/const ^{:val 268435456 :doc "defaultStoreMax is the largest blob the store takes when\nARBACE_BOX_STORE_MAX does not say: 256 MiB (doc/go/BOX-NOTES.md, S3).\n"} defaultStoreMax (<< 256 20))
+
+
+
+^{:go/end 34} (go/func openStore "openStore is the store in dir (vmm.DirStore), its blobs limited as\nARBACE_BOX_STORE_MAX says.\n" [^string dir] :results [(* vmm/DirStore) error]
+  (let [(values max err) (storeMax (os/Getenv "ARBACE_BOX_STORE_MAX"))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values st ^:assign err) (vmm/OpenDirStore dir)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-Max st) max)
+      (return st nil))))
+
+
+
+
+
+^{:go/end 60} (go/func storeMax "storeMax reads ARBACE_BOX_STORE_MAX as Go's runtime reads GOMEMLIMIT: a\ncount of bytes with an optional unit B, KiB, MiB, GiB or TiB, or off (no\nlimit: 0); empty, defaultStoreMax.\n" [^string s] :results [int64 error]
+  (switch s
+    (case [""]
+      (return defaultStoreMax nil))
+    (case ["off"]
+      (return 0 nil)))
+
+  (let [(values unit n) (values (conv int64 1) s)]
+    (range [i u (lit (slice string) "KiB" "MiB" "GiB" "TiB")]
+      (when (strings/HasSuffix n u)
+        (set! (values unit n) (values (<< (conv int64 1) (* 10 (+ i 1))) (strings/TrimSuffix n u)))))
+
+
+    (when (== unit 1)
+      (set! n (strings/TrimSuffix n "B")))
+
+    (let [(values v err) (strconv/ParseInt n 10 64)]
+      (when (or (!= err nil) (<= v 0) (> v (/ (<< 1 62) unit)))
+        (return 0 (fmt/Errorf "ARBACE_BOX_STORE_MAX=%s: not a positive size (bytes, KiB, MiB, GiB, TiB) or off" s)))
+
+      (return (* v unit) nil))))
+
+
+
+^{:go/end 65} (go/func storeCommand "storeCommand tells whether a is one of the store tool's commands.\n" ^bool [^string a]
+  (or (== a "put") (== a "get") (== a "ref") (== a "ls")))
+
+
+(go/const ^{:val "usage: arbace-box --store DIR put FILE|- [NAME]   store FILE's bytes (- standard input), print the hash; point ref NAME at it\n       arbace-box --store DIR get HASH|NAME          write the blob (by hash, or ref NAME's) to standard output\n       arbace-box --store DIR ref NAME [HASH]        print the hash ref NAME points at, or point it at HASH\n       arbace-box --store DIR ls                     the refs: hash and name, by name"} storeUsage "usage: arbace-box --store DIR put FILE|- [NAME]   store FILE's bytes (- standard input), print the hash; point ref NAME at it\n       arbace-box --store DIR get HASH|NAME          write the blob (by hash, or ref NAME's) to standard output\n       arbace-box --store DIR ref NAME [HASH]        print the hash ref NAME points at, or point it at HASH\n       arbace-box --store DIR ls                     the refs: hash and name, by name")
+
+
+
+
+
+
+
+^{:go/end 161} (go/func storeTool "storeTool is the store's tool on the host (doc/go/BOX-NOTES.md, S3): the\nstore in dir as the guest's arbace.box sees it, without a guest.  Its\nexit status: 0, 1 when it refused or found nothing, 2 for a usage error.\n" ^int [^string dir ^{:tag (slice string)} args]
+  (let [(values st err) (openStore dir)]
+    (when (!= err nil)
+      (fmt/Fprintln os/Stderr "arbace-box:" err)
+      (return 1))
+
+    ^{:go/breaks [[3 160]]} (let [usage ^{:go/breaks [3] :go/end 84} (fn ^int []
+          (fmt/Fprintln os/Stderr storeUsage)
+          2)
+
+        ^{:line 85} refuse ^{:go/breaks [3] :go/end 88} (fn ^int [^error err]
+          (fmt/Fprintln os/Stderr "arbace-box --store:" err)
+          1)]
+
+      (switch [(values cmd rest) (values (aget args 0) (subslice args 1))]
+        (case [(and (== cmd "put") ^:go/paren (or (== (len rest) 1) (== (len rest) 2)))]
+          (let [^{:tag (slice byte)} data (zero (slice byte))]
+            (if (== (aget rest 0) "-")
+              (set! (values data err) (io/ReadAll os/Stdin))
+
+              (set! (values data err) (os/ReadFile (aget rest 0))))
+
+            (when (!= err nil)
+              (return (refuse err)))
+
+            (let [(values h err) (.Put st data)]
+              (when (errors/Is err vmm/ErrTooLarge)
+                (return (refuse (fmt/Errorf "%s: %d bytes, larger than the store takes (%d: ARBACE_BOX_STORE_MAX)" (aget rest 0) (len data) (.-Max st)))))
+
+              (when (!= err nil)
+                (return (refuse err)))
+
+              (when (== (len rest) 2)
+                (when [err (.SetRef st (aget rest 1) h nil)] (!= err nil)
+                  (return (refuse err))))
+
+
+              (fmt/Println (hex/EncodeToString (subslice h))))))
+        (case [(and (== cmd "get") (== (len rest) 1))]
+          (let [(values h ok) (parseHash (aget rest 0))]
+            (when (not ok)
+              (when [(set! (values h ok) (.Ref st (aget rest 0)))] (not ok)
+                (return (refuse (fmt/Errorf "no ref %s, and not a hash" (aget rest 0))))))
+
+
+            (let [(values b ^:assign ok) (readBlob st h)]
+              (when (not ok)
+                (return (refuse (fmt/Errorf "no blob %x" h))))
+
+              (.Write os/Stdout b))))
+        (case [(and (== cmd "ref") (== (len rest) 1))]
+          (when (not (vmm/RefName (aget rest 0)))
+            (return (refuse (fmt/Errorf "ref %q: not a name the store takes (1 to 64 of [A-Za-z0-9._-], not beginning with a dot)" (aget rest 0)))))
+
+          (let [(values h ok) (.Ref st (aget rest 0))]
+            (when (not ok)
+              (return (refuse (fmt/Errorf "no ref %s" (aget rest 0)))))
+
+            (fmt/Println (hex/EncodeToString (subslice h)))))
+        (case [(and (== cmd "ref") (== (len rest) 2))]
+          (let [(values h ok) (parseHash (aget rest 1))]
+            (when (not ok)
+              (return (refuse (fmt/Errorf "%s: not a hash (64 hexadecimal digits)" (aget rest 1)))))
+
+            (when [err (.SetRef st (aget rest 0) h nil)] (!= err nil)
+              (return (refuse err)))))
+
+        (case [(and (== cmd "ls") (== (len rest) 0))]
+          (let [(values names err) (os/ReadDir (filepath/Join dir "refs"))]
+            (when (!= err nil)
+              (return (refuse err)))
+
+            (let [^{:tag (slice string)} out (zero (slice string))]
+              (range [_ e names]
+                (when [(values h ok) (.Ref st (.Name e))] ok
+                  (set! out (append out (+ (hex/EncodeToString (subslice h)) " " (.Name e))))))
+
+
+              (sort/Slice out ^{:go/end 153} (fn ^bool [^int i ^int j] (< (subslice (aget out i) 65) (subslice (aget out j) 65))))
+              (range [_ l out]
+                (fmt/Println l)))))
+
+        (default
+          (return (usage))))
+
+      0)))
+
+
+
+^{:go/end 171} (go/func parseHash "parseHash is s as a blob's hash: 64 hexadecimal digits.\n" [^string s] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
+    (when (!= (len s) 64)
+      (return h false))
+
+    (let [(values n err) (hex/Decode (subslice h) (conv (slice byte) s))]
+      (return h (and (== err nil) (== n 32))))))
+
+
+
+^{:go/end 188} (go/func readBlob "readBlob is blob h whole.\n" [^vmm/Store st ^{:tag (array 32 byte)} h] :results [(slice byte) bool]
+  (let [(values n ok) (.Size st h)]
+    (when (not ok)
+      (return nil false))
+
+    (let [b (make (slice byte) n)]
+      (for [off 0] (< off (len b)) _
+        (let [(values k ok) (.Get st h (conv int64 off) (subslice b off))]
+          (when (or (not ok) (<= k 0))
+            (return nil false))
+
+          (set! off + k)))
+
+      (return b true))))

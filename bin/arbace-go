@@ -241,6 +241,37 @@ run_for() { # run_for SECONDS ARCH ARG...: run, killed after SECONDS (status 124
   timeout "$s" "${exec_cmd[@]}" "$@"
 }
 
+# store_checks RUN T: the store (doc/go/BOX-NOTES.md, S3) through arbace.box, for the program the
+# function RUN runs (the executable, or the box's launcher), its directory T/store (ARBACE_BOX_STORE):
+# no store, blobs and refs, compare-and-set, the refusals (names, hashes, blobs, sizes), a
+# script by ref (ref:NAME, -i ref:NAME), namespaces from ARBACE_PATH's store entries. Uses the
+# caller's check
+store_checks() {
+  local run=$1 s=$2/store h st
+  unset ARBACE_BOX_STORE ARBACE_BOX_STORE_MAX ARBACE_BOX_FS
+  rm -rf "$s"
+  local e='(do (require (quote [arbace.box :as box])) (defn e [f] (try (f) :ok (catch Exception x (or (:arbace.box/error (ex-data x)) (.getName (class x)))))) nil)'
+  check "the store: none configured, arbace.box refuses" "[false :no-store :no-store]" \
+    "$($run -e "$e" -e '(prn [(box/store?) (e #(box/put "x")) (e #(box/ref "x"))])' 2>&1)"
+  h=$(printf hello | sha256sum | cut -c1-64)
+  check "the store: put, get, size, ref!, ref" "[\"$h\" \"hello\" 5 true \"$h\" nil nil true]" \
+    "$(ARBACE_BOX_STORE=$s $run -e "$e" -e '(let [h (box/put "hello")] (prn [h (box/get h) (box/size h) (box/ref! "greeting" h) (box/ref "greeting") (box/ref "none") (box/get (apply str (repeat 64 "0"))) (box/store?)]))' 2>&1)"
+  check "the store: a ref's compare-and-set" "[true false true false \"b\"]" \
+    "$(ARBACE_BOX_STORE=$s $run -e "$e" -e '(let [a (box/put "a") b (box/put "b")] (prn [(box/ref! "c" a nil) (box/ref! "c" b nil) (box/ref! "c" b a) (box/ref! "c" a a) (box/load "c")]))' 2>&1)"
+  check "the store refuses names, hashes, refs to no blob" "[:bad-name :bad-name :bad-name :ok :bad-hash :no-blob :no-ref]" \
+    "$(ARBACE_BOX_STORE=$s $run -e "$e" -e '(let [h (box/put "x")] (prn [(e #(box/ref ".x")) (e #(box/ref! "a/b" h)) (e #(box/ref (apply str (repeat 65 "a")))) (e #(box/ref (apply str (repeat 64 "a")))) (e #(box/get "ABC")) (e #(box/ref! "r" (apply str (repeat 64 "0")))) (e #(box/load-ref "none"))]))' 2>&1)"
+  check "the store refuses a blob beyond ARBACE_BOX_STORE_MAX" "[:ok :too-large]" \
+    "$(ARBACE_BOX_STORE=$s ARBACE_BOX_STORE_MAX=16 $run -e "$e" -e '(prn [(e #(box/put (apply str (repeat 16 "x")))) (e #(box/put (apply str (repeat 17 "x"))))])' 2>&1)"
+  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "hello.ae" "(prn [:from-ref *command-line-args*])")' > /dev/null 2>&1
+  check "a script run from a ref (ref:NAME)" '[:from-ref ("a" "b")]' "$(ARBACE_BOX_STORE=$s $run ref:hello.ae a b 2>&1)"
+  check "an -i file from a ref" "$(printf '[:from-ref nil]\n:after')" "$(ARBACE_BOX_STORE=$s $run -i ref:hello.ae -e '(prn :after)' 2>&1)"
+  ARBACE_BOX_STORE=$s $run ref:nope > "$s.err" 2>&1; st=$?
+  check "a script from a ref that is not: status 1, the reason" "1 no ref nope" "$st $(grep -o 'no ref nope' "$s.err" | head -1)"
+  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "st.lib.ae" "(ns st.lib) (defn f [] :lib)") (box/put! "p.st.two.ae" "(ns st.two (:require [st.lib])) (defn g [] [:two (st.lib/f)])")' > /dev/null 2>&1
+  check "namespaces loaded from the store (ARBACE_PATH store:p.:store:)" "[:two :lib]" \
+    "$(ARBACE_BOX_STORE=$s ARBACE_PATH=/none:store:p.:store: $run -e '(require (quote st.two)) (prn ((resolve (quote st.two/g))))' 2>&1)"
+}
+
 smoke() {
   local status=0 t
   t=$(mktemp -d "$root/.tmp/arbace-go-smoke.XXXXXX")
@@ -324,6 +355,14 @@ EOF
     check "... without Go's deadlock crash" "" "$(grep -o 'fatal error.*' "$t/agents.txt")"
     run_for 60 "$a" -e '(do (send (agent 1) inc) (deref (future 2)) (shutdown-agents))' > /dev/null 2>&1; st=$?
     check "agents with shutdown-agents end the process" "0" "$st"
+    # the store (doc/go/BOX-NOTES.md, S3), a directory natively; snapshots of a named directory
+    native() { run "$a" "$@"; }
+    store_checks native "$t"
+    mkdir -p "$t/fsrc/d" && echo A > "$t/fsrc/a.txt" && echo B > "$t/fsrc/d/b.ae"
+    check "a directory's snapshot saved to the store and loaded into another" "[\"A\\n\" \"B\\n\" true]" \
+      "$(ARBACE_BOX_STORE=$t/store run "$a" -e "(require (quote [arbace.box :as box])) (let [h (box/save-fs! \"snap\" \"$t/fsrc\")] (box/load-fs! \"snap\" \"$t/fdst\") (prn [(slurp \"$t/fdst/a.txt\") (slurp \"$t/fdst/d/b.ae\") (= h (box/save-fs! \"snap2\" \"$t/fdst\"))]))" 2>&1)"
+    check "natively, a snapshot names its directory" "java.lang.IllegalArgumentException" \
+      "$(ARBACE_BOX_STORE=$t/store run "$a" -e '(require (quote arbace.box))' -e '(try (arbace.box/save-fs! "snap") (catch Exception e (print (.getName (class e)))))' 2>&1)"
     # the interactive REPL under rlwrap (doc/go/EXEC-NOTES.md, "Line editing: rlwrap"), on a
     # pseudo-terminal: amd64 only (under qemu-aarch64 rlwrap would run the arm64 executable
     # directly), when python3 and rlwrap are installed. The checks above run without a
@@ -556,6 +595,35 @@ EOF
         "$( { printf '(future (Thread/sleep 300) (println "late"))\n'; sleep 2; printf '(+ 1 1)\n'; } | box 2>&1 | sed -e 's/user=> //g' | grep -v '^#object\|^Arbace' | grep .)"
       [ $fails -eq 0 ] || status=1
     done
+    # the store (doc/go/BOX-NOTES.md, S3), on 4 vCPUs: arbace.box over the monitor's calls, the
+    # launcher's --store and its tool, the in-memory file system's snapshot (ARBACE_BOX_FS), a
+    # directory shared with the native executable
+    cpus=4
+    local fails=0
+    echo "== box $a: the store"
+    store_checks box "$t"
+    local s=$t/store
+    printf 'from the host' > "$t/tool.txt"
+    check "the launcher's tool: put, then the guest's arbace.box/load" "$(sha256sum < "$t/tool.txt" | cut -c1-64) from the host" \
+      "$("$b" --store "$s" put "$t/tool.txt" tool) $(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "tool"))' 2>&1)"
+    box --store "$s" -e '(require (quote arbace.box))' -e '(arbace.box/put! "back" "from the guest")' > /dev/null 2>&1
+    check "the launcher's tool: get by ref, ref, ls" "from the guest $("$b" --store "$s" ref back) yes" \
+      "$("$b" --store "$s" get back) $("$b" --store "$s" ref back) $("$b" --store "$s" ls | grep -q ' tool$' && echo yes)"
+    "$b" --store "$s" ref .bad > /dev/null 2>&1; st=$?
+    check "the launcher's tool refuses a bad name" "1" "$st"
+    box --store "$s" -e '(require (quote arbace.box))' -e '(do (spit "/tmp/a.txt" "A") (.mkdirs (java.io.File. "/w/d")) (spit "/w/d/b.ae" "(ns b)") (arbace.box/save-fs! "fs") nil)' > /dev/null 2>&1
+    check "the in-memory file system seeded from its snapshot (ARBACE_BOX_FS)" '["A" "(ns b)"]' \
+      "$(ARBACE_BOX_FS=fs box --store "$s" -e '(prn [(slurp "/tmp/a.txt") (slurp "/w/d/b.ae")])' 2>&1)"
+    check "the snapshot is a tar the host reads" "tmp/a.txt w/d/b.ae" \
+      "$("$b" --store "$s" get fs | tar tf - | grep -x 'tmp/a.txt\|w/d/b.ae' | sort | paste -sd' ')"
+    ARBACE_BOX_FS=nofs box --store "$s" -e '(print :ran)' > "$t/fs.err" 2>&1; st=$?
+    check "a snapshot that is not: status 1, the reason" "1 ARBACE_BOX_FS=nofs: no such ref" "$st $(grep -o 'ARBACE_BOX_FS=nofs: no such ref' "$t/fs.err")"
+    if [ -x "$dir/$a/arbace" ]; then
+      ARBACE_BOX_STORE=$s "$dir/$a/arbace" -e '(require (quote arbace.box))' -e '(arbace.box/put! "native" "from the native executable")' > /dev/null 2>&1
+      check "a store directory shared with the native executable" "from the native executable" \
+        "$(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "native"))' 2>&1)"
+    fi
+    [ $fails -eq 0 ] || status=1
     # the launcher's REPL under rlwrap, and Ctrl-C, on a pseudo-terminal
     if command -v python3 > /dev/null && command -v rlwrap > /dev/null; then
       echo "== box $a on a terminal"
