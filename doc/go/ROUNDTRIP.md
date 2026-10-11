@@ -65,17 +65,18 @@ GOROOT=/root/tamago-go GOOS=tamago GOARCH=amd64 \
 GOOS=linux GOARCH=amd64 gocmp tests [-v] $GOROOT/test
 ```
 
-A is the original, a package directory or a program (a `.go` file, or `F.go,G.go,...`: files of
-one directory, the others named relative to F's) that the go command can build for the
-configuration in the environment; B is the candidate, a directory with a file of the same
-name for each of A's files for the configuration (other files in B are ignored), or the files
-of a program, spelled as A. gocmp sets `CGO_ENABLED=0` unless the environment sets it (on a
-linux host the go command would otherwise turn cgo on for `GOOS=linux`). With `-tests`, A is a package directory with its `_test.go` files
-(see "Test files" below). `gocmp tests` prints the corpus's test programs (below). The go command is `$GOCMP_GO`, else `$GOROOT/bin/go`, else `go`. The output gives, per
-level, `pass`, `fail` with the first difference (path to the node, the symbol or the export data
-element, with both sides' source or listing), `error` or `skip`, then a line
-`RESULT tree=... export=... code=...`. Exit status: 0 equal, 1 different, 2 error, 3 the
-original does not build (export and code skipped). Its unit tests: `cd tools/gocmp && go test`.
+A is the original, a package directory or a program (a `.go` file, or `F.go,G.go,...`: files of one
+directory, the others named relative to F's) that the go command can build for the configuration in
+the environment; B is the candidate, a directory with a file of the same name for each of A's files
+for the configuration (other files in B are ignored), or the files of a program, spelled as A. gocmp
+sets `CGO_ENABLED=0` unless the environment sets it (on a linux host the go command would otherwise
+turn cgo on for `GOOS=linux`). With `-tests`, A is a package directory with its `_test.go` files
+(see "Test files" below). `gocmp tests` prints the corpus's test programs (below). The go command is
+`$GOCMP_GO`, else `$GOROOT/bin/go`, else `go`. The output gives, per level, `pass`, `fail` with the
+first difference (path to the node, the symbol or the export data element, with both sides' source
+or listing), `error` or `skip`, then a line `RESULT tree=... export=... code=...`. Exit status: 0
+equal, 1 different, 2 error, 3 the original does not build (export and code skipped). Its unit
+tests: `cd tools/gocmp && go test`.
 
 ## The corpus and the configuration
 
@@ -93,30 +94,30 @@ and §15 Q20; `:goos` `"tamago"` or `"linux"` and the cgo-only lists empty every
 SPEC §4.2; cgo out of scope for every configuration, L3, SPEC §9.4.)
 
 - **Packages:** every package of `go list std` (which leaves out `cmd`) with Go files for the
-  configuration: for tamago 373 of 379 on amd64, 372 on arm64; for linux 376 of 382 on amd64,
-  374 of 380 on arm64 (linux adds `internal/cgrouptest`, `internal/runtime/syscall/linux` and,
-  on amd64, `runtime/race/internal/amd64v1`; its std has 1,834 Go files on amd64 against
-  tamago's 1,742: 173 files for linux only, the system calls, `os`, `net`, `internal/poll`,
-  `internal/syscall/unix` and the runtime's linux files, 81 for tamago only). The six without Go files are test-only
+  configuration: for tamago 373 of 379 on amd64, 372 on arm64; for linux 376 of 382 on amd64, 374 of
+  380 on arm64 (linux adds `internal/cgrouptest`, `internal/runtime/syscall/linux` and, on amd64,
+  `runtime/race/internal/amd64v1`; its std has 1,834 Go files on amd64 against tamago's 1,742: 173
+  files for linux only, the system calls, `os`, `net`, `internal/poll`, `internal/syscall/unix` and
+  the runtime's linux files, 81 for tamago only). The six without Go files are test-only
   (`crypto/internal/fips140test`, `embed/internal/embedtest`, `internal/copyright`,
-  `internal/coverage/test`, `internal/runtime/wasitest`, `net/internal/cgotest`). The files
-  compared are the package's `GoFiles` for the configuration (not its `_test.go` files).
-  `unsafe` has no export data or code: those two levels report `skip` for it.
-- **Test programs** (`gocmp tests`, the one rule for the oracle's corpus and the helper's,
-  `bin/g2c corpus test`): the `.go` files of the directories of Go's test driver
-  (`cmd/internal/testdir`, `dirs`) whose action (the first line after build constraints, read
-  as the driver reads it, `//run` too) is `run`, `runoutput`, `build`, `buildrun`, `compile`
-  or `asmcheck`, that need no other `GOEXPERIMENT` (`-goexperiment` on the action line), and
-  that go/build matches for the configuration (build constraints and file name, cgo off):
-  for tamago 1,707 on amd64, 1,702 on arm64; for linux 1,713 on amd64 (29 left out by their
-  build constraints or names, against tamago's 35), 1,707 on arm64. The extra files an action line names join the program
+  `internal/coverage/test`, `internal/runtime/wasitest`, `net/internal/cgotest`). The files compared
+  are the package's `GoFiles` for the configuration (not its `_test.go` files). `unsafe` has no
+  export data or code: those two levels report `skip` for it.
+- **Test programs** (`gocmp tests`, the one rule for the oracle's corpus and the helper's, `bin/g2c
+  corpus test`): the `.go` files of the directories of Go's test driver (`cmd/internal/testdir`,
+  `dirs`) whose action (the first line after build constraints, read as the driver reads it, `//run`
+  too) is `run`, `runoutput`, `build`, `buildrun`, `compile` or `asmcheck`, that need no other
+  `GOEXPERIMENT` (`-goexperiment` on the action line), and that go/build matches for the
+  configuration (build constraints and file name, cgo off): for tamago 1,707 on amd64, 1,702 on
+  arm64; for linux 1,713 on amd64 (29 left out by their build constraints or names, against tamago's
+  35), 1,707 on arm64. The extra files an action line names join the program
   (`cmplxdivide.go,cmplxdivide1.go`). Programs are compiled as the test driver compiles them,
-  without `-complete` (`-gcflags=-complete=false` after the go command's own `-complete`), so
-  that the 18 `compile` programs declaring functions without bodies build; the flag only
-  allows body-less functions (`noder/writer.go`) and changes no code. (Until 2026-10-08 the
-  oracle took every directory and the programs that `go list -export F.go` compiles, which
-  applies no build constraints to named files: 19 programs differed from the helper's list
-  either way.) The list is written to `corpus-tests.txt`.
+  without `-complete` (`-gcflags=-complete=false` after the go command's own `-complete`), so that
+  the 18 `compile` programs declaring functions without bodies build; the flag only allows body-less
+  functions (`noder/writer.go`) and changes no code. (Until 2026-10-08 the oracle took every
+  directory and the programs that `go list -export F.go` compiles, which applies no build
+  constraints to named files: 19 programs differed from the helper's list either way.) The list is
+  written to `corpus-tests.txt`.
 
 ## Level 1: the trees
 
@@ -255,13 +256,13 @@ than of the layouts, **both sides are compiled from a canonical layout of their 
 - directives stand on their own lines; automatic semicolons become explicit; other comments are
   dropped; raw strings become interpreted ones (their newlines would count).
 
-Parentheses, trailing commas, literal spellings, elided literal types, import order and
-grouping, the grouping of declarations, fields and parameters then change neither a position
-nor a physical line (`tools/gocmp/tree_test.go` checks an example). Positions must not all be equal: with every token at one position, frame
-slot merging was found to depend on map order (`internal/trace/internal/tracev1`), so the layout
-keeps statements apart. Under the canonical layout DWARF is compared too (variable names, scopes,
-inlining); with `gocmp -keep-positions` both sides compile from their own layouts and DWARF is
-left out.
+Parentheses, trailing commas, literal spellings, elided literal types, import order and grouping,
+the grouping of declarations, fields and parameters then change neither a position nor a physical
+line (`tools/gocmp/tree_test.go` checks an example). Positions must not all be equal: with every
+token at one position, frame slot merging was found to depend on map order
+(`internal/trace/internal/tracev1`), so the layout keeps statements apart. Under the canonical
+layout DWARF is compared too (variable names, scopes, inlining); with `gocmp -keep-positions` both
+sides compile from their own layouts and DWARF is left out.
 
 ## Positions: what is compared
 
@@ -294,8 +295,9 @@ arm64.
 - **reprint** is `gocmp reprint`: each file parsed, its comments dropped except the directives,
   every position reset, printed again by `go/printer`, the directives put back before what they
   preceded, then `go/format`ted (which also sorts imports). It is what a printer from a tree
-  without positions or comments produces, which is what the forms printer will be. The files
-  that do not parse (45 under `testdata/`, 80 error tests of `GOROOT/test`) are copied as they
+  without positions or comments produces, which is what a forms printer without positions
+  would produce; the forms printer keeps lines (its lines layout, PRINTER-NOTES.md). The files
+  that do not parse (45 under `testdata/`, 80 error tests of `$GOROOT/test`) are copied as they
   are and listed; none is in the corpus.
 - **canon** is `gocmp reprint -canon`: reprint after respelling the trees in every way level 1
   normalizes: imports one per declaration in reverse order, `var` and `type` groups split, field
@@ -315,8 +317,9 @@ arm64.
     54 tests); export differs in 6 packages and 3 tests, code in 1 package and 10 tests (the
     dictionaries).
 
-  The forms printer should therefore not add parentheses around `&&` and `||` operands, and must
-  keep the field groups of generic declarations.
+  The forms printer therefore adds no parentheses around `&&` and `||` operands beyond
+  precedence (the source's are kept, `^:go/paren`, amendment C3) and keeps the field groups of
+  generic declarations (`^:go/grouped`, A1; PRINTER-NOTES.md).
 - **Mutations** (`--mutations`): for each corpus entry and operation, one site of its files,
   chosen from the seed, is changed, and the result compared with the original. Every mutant is
   caught by the tree level (swaps whose operands are equal trees are not generated: that

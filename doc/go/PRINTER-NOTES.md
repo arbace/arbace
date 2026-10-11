@@ -113,9 +113,9 @@ checks that every head of §13.5, the metadata the printer reads and the `go/pac
 | §4.3 | `go/file` `:build`, `:directives`, `:doc`, `:package`, `:imports` (`[name "path"]`, `^:alias`, `_`, `.`, a `go/directive` among them: C4) | `s04_files`, `s04_testpkg`, `s15_roundtrip` |
 | §4.4 | `pkg/Name`, dot-imported names, labels, `go/call` (`fn`, `len`), `go/id` (`true`; tagged as a parameter name: C5), heads as plain symbols (`do`, `when`) | `s04_files`, `s15_roundtrip` |
 | §5.1-5.2 | `* slice array map chan func struct interface \| tilde inst`, `(G T...)`, `(array ... T)`, `chan (<-chan T)`, `unsafe/Pointer` | `s05_types`, `s07_exprs` |
-| §5.3 | parameters, unnamed and variadic (`&`), single and named results, results vectors of function types | `s05_types`, `s06_decls` |
+| §5.3 | parameters, unnamed and variadic (`&`), single and named results, results vectors of function types | `s05_types`, `s06_decls`, `s05_groups` |
 | §5.4 | fields, embedded (also `*T`, generic), `:go/tag`, `:doc`, interface methods, embedded interfaces, type sets | `s05_types`, `s10_positions` |
-| §5.5 | `:type-params` (constraints, trailing comma `[P *int,]`), generic receivers, generic methods (Go 1.27), `inst`, `:inst` | `s05_types`, `s06_decls`, `s07_exprs`, `s12_printer` |
+| §5.5 | `:type-params` (constraints, trailing comma `[P *int,]`), generic receivers, generic methods (Go 1.27), `inst`, `:inst`; field groups of generic declarations (`^:go/grouped`, A1) | `s05_types`, `s06_decls`, `s07_exprs`, `s12_printer`, `s05_groups` |
 | §6 | `go/type` (alias, generic alias, groups, a group of one), `go/const` (`values`, implicit repetition, `:val`), `go/var` (no init, `nil` init, `values`, groups), `go/func`, `go/method` (unnamed receiver, `^:extern`, `init`, implicit return, `panic`), doc comments | `s06_decls`, `s09_directives` |
 | §7.1-7.4 | `let` (`:=`, `values`, `^:assign`, `var` with `zero`, `^:var`, `^:const`; a local `const` group, `^:go/grouped`, `^:go/implicit`: C2; `:go/label`: C9), `let-type` (`^:alias`; a local generic type's `:type-params`: C6), `set!` (3 shapes, the 11 operators), `inc!`, `dec!`, `aset`, `do` | `s07_stmts`, `s14_5_amended`, `s15_roundtrip` |
 | §7.5 | every operator, n-ary chains, precedence and parentheses, unary combinations, `^:go/paren` operands of `and` and `or` (C3) | `s07_exprs`, `s12_printer`, `s14_5_amended`, `s15_roundtrip` |
@@ -150,17 +150,16 @@ Other tests: `package-build` (§12.4), `forms-in-memory` (the converter's path: 
 lines through `collect-forms`, printed in the gofmt layout, gocmp all levels), `line-file`
 (`--line-file`, golines), `spec-coverage`.
 
-Result (2026-10-08, tamago/amd64, go1.27.1): 5 tests, 256 assertions, all pass (with the
-cases `s14_5_amended` and `s15_roundtrip` of the round trip's forms; `spec-coverage` also
-checks the metadata of the amendments: `:go/grouped`, `:go/implicit`, `:go/label`,
-`:go/paren`, `:type-params`). The 19 cases with an original are equal to it at the tree, export and code levels in both layouts; the
-gofmt layout of every case but `s12_printer` is gofmt's fixed point; the 5 `lines` cases (and
-the `line-file` test) have the original's lines. In the lines layout `s14_3_sort` is
-byte-identical to its original; `s02_search`, `s14_1_sample_lines` and `s14_2_utf8` differ
-only in ordinary comments and literal spellings; `s10_positions` only in its imports (two
-`import` declarations printed as one group, so the next declaration gets `//line :6:1`). A
-forms file of 32,000 table elements and 3,000 statements prints in 2.5 s, the JVM's start
-included.
+Result (2026-10-08, tamago/amd64, go1.27.1): 5 tests, 256 assertions, all pass (with the cases
+`s14_5_amended` and `s15_roundtrip` of the round trip's forms; `spec-coverage` also checks the
+metadata of the amendments: `:go/grouped`, `:go/implicit`, `:go/label`, `:go/paren`,
+`:type-params`). The 19 cases with an original are equal to it at the tree, export and code levels
+in both layouts; the gofmt layout of every case but `s12_printer` is gofmt's fixed point; the 5
+`lines` cases (and the `line-file` test) have the original's lines. In the lines layout `s14_3_sort`
+is byte-identical to its original; `s02_search`, `s14_1_sample_lines` and `s14_2_utf8` differ only
+in ordinary comments and literal spellings; `s10_positions` only in its imports (two `import`
+declarations printed as one group, so the next declaration gets `//line :6:1`). A forms file of
+32,000 table elements and 3,000 statements prints in 2.5 s, the JVM's start included.
 
 ## Findings: amendments to SPEC.md (accepted 2026-10-08)
 
@@ -237,14 +236,14 @@ wins over the printer's over the helper's; the cases are noted below.
 
 ## The round trip
 
-Closed (milestone G2, 2026-10-08): `bin/g2c roundtrip` converts std and `$GOROOT/test`,
-prints them in the lines layout and checks them with `bin/g2c-check` at the tree, export and
-code levels against a recorded reference; std (373 packages on amd64, 372 on arm64) and the
-`$GOROOT/test` programs (1,707 and 1,702) pass every level on both architectures, and so does
-std with its tests apart from nine known differences (embedded sources). For `GOOS=linux`
-(B1a, 2026-10-08) std (376 and 374 packages) and the programs (1,713 and 1,707) pass every
-level too (`bin/g2c roundtrip linux/amd64`, `linux/arm64`), with no change to the printer. The table, times and
-what it took are in [CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
+Closed (milestone G2, 2026-10-08): `bin/g2c roundtrip` converts std and `$GOROOT/test`, prints them
+in the lines layout and checks them with `bin/g2c-check` at the tree, export and code levels against
+a recorded reference; std (373 packages on amd64, 372 on arm64) and the `$GOROOT/test` programs
+(1,707 and 1,702) pass every level on both architectures, and so does std with its tests apart from
+nine known differences (embedded sources). For `GOOS=linux` (B1a, 2026-10-08) std (376 and 374
+packages) and the programs (1,713 and 1,707) pass every level too (`bin/g2c roundtrip linux/amd64`,
+`linux/arm64`), with no change to the printer. The table, times and what it took are in
+[CONVERTER-NOTES.md](CONVERTER-NOTES.md), "The round trip".
 
 What remains:
 
