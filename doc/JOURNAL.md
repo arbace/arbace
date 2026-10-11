@@ -174,3 +174,34 @@ the first. The history before it is on the frozen branches and in git history:
 - The user's decisions: keep `box/`; pin `goos` at S1 and decide purego at S4 (the Mac); the
   round trip and go-whim's KVM tests join `bin/gate --full`, the byte-identity proof stays a
   one-time S0 proof (S1 changes `vmm`).
+
+## 2026-10-11: Tidy-up: files no longer useful at this stage
+
+- A survey of tracked files (`.tmp/obsolete-files.md`) found nothing clearly dead; the user took
+  all four of its proposals. Agent, branch `tidy` (`860e654`..`da5a2f6`), merged into main;
+  the essential `bin/gate` passed on its tree (7m10s; Clojure's suite 20,750 of 20,750, class
+  forms tests 136 of 136, the Go smoke test).
+- `.gitignore`: `.cpcache/` and `.nrepl-port` dropped (GitHub's Clojure template; no deps.edn, no
+  nREPL).
+- The JVM-era benchmark (`bin/arbace-bench`, `test/bench/{driver.ae,workload.clj,
+  repl-session.clj}`, `doc/BENCHMARKS.md`) removed from main: `arbace-for-java-26` has its own
+  copies (its driver as `test/bench/driver.clj`); the README links the branch's BENCHMARKS.md.
+  `test/bench/eval-bench.ae` stays.
+- jrt's tools, misfiled under `test/g2a` as `g2a.*`, moved to `test/jrt/{java_surface,
+  jrt_coverage,jrt_sources}.ae` as `jrt.*`. `bin/jrt-convert` again 835 files (830 identical, 5
+  known differences); `bin/jrt-coverage` byte-identical to `doc/go/java-base-coverage.edn`
+  (55.9%). `arbace/inspector.ae` and `xml.ae` begin with a module guard before their `ns`, which
+  had broken `bin/java-surface`; it now reads forms up to the `ns`.
+- The one-off checks run once more: kept `bin/a2g-check -- --program` (9,022 of 9,022 steps on
+  amd64 and arm64, after a fix: it embedded only `.ae` resources, while a2g's main package embeds
+  `*.ae.z` since SZ2, so all 50 builds failed), `bin/a2g-evalproof` (as expected, both
+  architectures), `bin/a2g-race` (the 4 known reports on the `int32` hash caches; it matters for
+  the box's four vCPUs), `bin/g2a-build-tests` (30 of 30) and `bin/net-check` (5 of 5). Retired
+  to `arbace-for-golang` (there as `bin/c2g-regex`, `bin/c2g-perf`): `a2g-regex` (1,161 of 1,233:
+  its program, rooted at `RegexCheck#run`, no longer reaches `Properties.setProperty` that a class
+  initializer now calls; the oracle's regex part checks the same corpus on the executable, 1,233
+  of 1,233, in `--full`) and `a2g-perf` (its ratios unchanged from SPEED-NOTES' "after" column).
+- AGENDA's Done sections trimmed to records pointing to the frozen branches; B1-PLAN marks step 8
+  done and B1b started.
+- Open: `doc/go/java-surface.edn` lags stage 2 (for instance class-forms 1,449 → 1,454 classes);
+  it is a build input, so regenerating it is a step of its own.
