@@ -39,7 +39,7 @@ Prior art:
   from the tag, extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline, and checks the result against `test/baseline-results.edn` (Arbace's:
-  `test/arbace-results.edn`).
+  `test/arbace-results.edn`; the Go build's, `CLOJURE_TESTS_GO`: `test/arbace-go-results.edn`).
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
@@ -57,6 +57,17 @@ Prior art:
     with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
     --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
   - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
+  - `arbace/j2c/`: the Java → class forms converter.
+  - `arbace/g2c/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
+    `tools/gocmp`; `bin/g2c`).
+  - `arbace/c2g/`: the class forms → Go forms translator (spec `doc/go/C2G-SPEC.md`; `bin/c2g`).
+- The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. c2g translates
+  the runtime, with the Go-build variants of Clojure's classes and namespaces in
+  `arbace/lang/go/`, and jrt, the Java runtime on Go (`go/arbace/jrt`, hand-written Go forms;
+  `overlay/jdk/`, its own Java and variants of JDK classes; the jdk26u sources converted by
+  `bin/jrt-convert`; `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
+  (`--build`, `--build-tests`, `--pgo`), smoke-tests and runs it. The oracle (`bin/oracle`,
+  `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an
@@ -74,7 +85,6 @@ Prior art:
   on Go the longest): run it when
   the class forms compiler, j2c, g2c, c2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
   cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
-  - `arbace/j2c/`: the Java → class forms converter.
 
 ## Records
 

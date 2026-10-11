@@ -3,9 +3,13 @@
 Status: survey, 2026-10-07. The user decided its open questions (§9) the same day. Two
 decisions differ from the survey's recommendations: phase a (G3-G6) is skipped, and the build
 configuration is `GOOS=tamago`. The decisions are in
-[JOURNAL.md](JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions) and noted in §9; the survey
-is otherwise left as written. Nothing here is implemented in `arbace/`. The experiments it cites
-ran in `.tmp/g2c/` (§10).
+the journal on `arbace-for-java-26` ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions)) and noted in §9; the survey
+is otherwise left as written. Nothing here was implemented in `arbace/` when it was written; since
+then G0-G2 are done (`arbace/g2c/`, `tools/godump`, `tools/gocmp`, `bin/g2c`; spec
+[go/SPEC.md](go/SPEC.md), the round trip in `bin/gate --full`), Go's BSD-3-Clause is in
+`LICENSE.md` (§9, question 8), and B1 was replanned as B1a, a static executable through c2g
+and jrt, and B1b, the box ([go/B1-PLAN.md](go/B1-PLAN.md), [go/BOX-SURVEY.md](go/BOX-SURVEY.md)).
+The experiments it cites ran in `.tmp/g2c/` (§10).
 
 g2c is a Go → Clojure mechanism, the counterpart of j2c (`arbace/j2c/`,
 [classes/CONVERTER-NOTES.md](classes/CONVERTER-NOTES.md)). It would let Arbace take in what the
@@ -1012,7 +1016,7 @@ grows down the table.
 ## 9. Open questions for the user
 
 The user answered all ten on 2026-10-07 ("Decisions on g2c's open questions" in
-[JOURNAL.md](JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions)). Each answer is noted
+[JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md#2026-10-07-decisions-on-g2cs-open-questions) on `arbace-for-java-26`). Each answer is noted
 after its question.
 
 1. **Priority of the phases.** Is phase a, Go libraries on the JVM before the freeze, worth
@@ -1076,7 +1080,7 @@ All on 2026-10-07: Go 1.27.1 (`/usr/lib/go`, Alpine package, no test files), Ope
      `^{...}` metadata on the form (Clojure reader).
    - Then `:init-order`.
    - Reading: `readedn.clj` (`clojure.edn/read`) and `readclj.clj` (`clojure.core/read` with
-     `*read-eval*` false) on the frozen `clojure/`: `java -cp /root/arbace clojure.main
+     `*read-eval*` false) on the frozen `clojure/` (now on `arbace-for-java-26`): `java -cp /root/arbace clojure.main
      readclj.clj FILE`.
    - Sample package `.tmp/g2c/sample/sample.go`: structs with embedding, pointer and value
      receivers, a generic `Stack[T]`, `iota`, `1 << 100`, uint8 wraparound, `defer`/`recover`
@@ -1148,7 +1152,7 @@ Local:
   `crefactor/togo/`.
 - golang.org/x/tools `v0.44.1-0.20260420230617-19499e7caabc` (module cache): `go/ssa`.
 - Arbace: `doc/classes/SPEC.md`, `doc/classes/CONVERTER-NOTES.md`, `doc/MODERN-COMPILER.md` (on the branch `arbace-for-java-26` since the freeze),
-  `doc/JOURNAL.md` (2026-10-07 entries), `arbace/j2c/`.
+  `doc/JOURNAL.md` (2026-10-07 entries; on `arbace-for-java-26` since the freeze), `arbace/j2c/`.
 
 Web (checked 2026-10-07):
 

@@ -4,7 +4,8 @@ Arbace against upstream Clojure 1.12 and the frozen baseline `clojure/`, all on 
 with `bin/arbace-bench` (pre-freeze item 4). Measured on 2026-10-08 at Arbace `fc77cba` with
 the AOT cache trained without method profiles (the change of that day, committed as `fb8d58e`;
 see "The AOT cache's method profiles"); the first run, on 2026-10-07 at `e311a30` with
-profiles, is summarized there.
+profiles, is summarized there. All of it is the JVM Arbace; the Go executable's speed is in
+[go/SPEED-NOTES.md](go/SPEED-NOTES.md) and its start-up in [go/EXEC-NOTES.md](go/EXEC-NOTES.md).
 
 ## Method
 
@@ -32,7 +33,8 @@ profiles, is summarized there.
     with every launch.
 - **JVM options**: steady state uses `-Xms2g -Xmx2g -XX:+UseCompactObjectHeaders` for all three
   (Arbace's launcher uses compact headers by default). Startup and load use each
-  implementation as shipped: `bin/arbace` (the jar, compact headers, the AOT cache), and
+  implementation as shipped: `bin/arbace` (the jar, compact headers, the AOT cache; `bin/arbace-j`
+  since 2026-10-10), and
   `java -cp ... clojure.main` for Clojure.
 - **Ratios** are Arbace / Clojure 1.12.6 and baseline / Clojure 1.12.6: below 1 is faster than
   Clojure 1.12.6, above 1 slower.
@@ -197,7 +199,7 @@ Arbace without a cache did, and close to Clojure 1.12.6. The JIT trusts profiles
 the short training session, which do not fit long hot loops. A cache trained without profiles
 (`-XX:-AOTRecordTraining`) loads as fast (0.2 s) and is 2 MB smaller; it costs a short REPL
 session about 40 ms of warm-up (450 against 410 ms). At the user's decision (2026-10-08) the
-cache is now made that way (`bin/arbace --aot-train`), and so is the `clojure-aot` cache here.
+cache is now made that way (`bin/arbace-j --aot-train`), and so is the `clojure-aot` cache here.
 This run shows the result: `reduce-vector` 0.99x and `vector-transient` 1.00x. The profiles
 had helped a few benchmarks, which are now even with Clojure: `keyword-record` (0.80x then),
 `str-apply` (1.00x then, 1.16x now) and `keyword-map` (0.67x then, 0.76x now).
@@ -220,4 +222,5 @@ not tracked (`.tmp/bench/full2.edn`).
   but do not remove them.
 - `atom-contended`, `future` and `pmap` depend on thread scheduling and are the most sensitive
   to other load on the machine.
-- Startup and load times include the bash launcher for `bin/arbace` (a few ms).
+- Startup and load times include the bash launcher for `bin/arbace` (`bin/arbace-j` since
+  2026-10-10; a few ms).

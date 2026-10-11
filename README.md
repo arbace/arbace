@@ -28,9 +28,10 @@ can be repeated. Prior art: [Clojure](https://github.com/clojure/clojure),
 
 The branch `arbace-for-java-26` preserves the final state of Arbace on the JVM, binary compatible
 with the Java ecosystem, before main leaves the JVM behind. Its releases are tags:
-`arbace-for-java-26-v1` (the freeze), `-v2` (a fix) and `-v3` (for the server side: a runtime
+`arbace-for-java-26-v1` (the freeze), `-v2` (a fix), `-v3` (for the server side: a runtime
 image of `java.base` and `jdk.unsupported` only, and an Alpine package, `arbace-java26`, with
-the commands `arbace` and `arb`). [doc/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/FREEZE.md)
+the commands `arbace` and `arb`) and `-v4` (`reduce` without an init over an
+`IReduceInit`-only reducible, `bean`'s key order). [doc/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/FREEZE.md)
 and [doc/ALPINE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/ALPINE.md) on
 the branch describe what it holds, how to build, run and verify it, and its known limits.
 
@@ -47,11 +48,12 @@ bin/arbace-image         # target/arbace-image: a self-contained jlink image (ja
 
 Arbace as one static executable for Linux, amd64 and arm64, with no JVM
 ([doc/go/B1-PLAN.md](doc/go/B1-PLAN.md)): c2g translates Arbace's runtime and the part of
-jdk26u it needs (`java.base`'s collections, concurrency, time, regex, files and sockets, among
-others) into Go, built with go1.27.1; the evaluator analyses forms and runs them as
+jdk26u it needs (`java.base`'s collections, concurrency, time, regex, files, sockets,
+processes and security basics, among others) into Go, built with go1.27.1; the evaluator analyses forms and runs them as
 compiled closures; the core namespaces are prepared at build time, so it starts in about 0.2 s.
-On amd64 it is about 62 MB, passes Clojure's test suite as far as it runs (19,628 of 19,632
-assertions) and matches the JVM on 99.96% of the oracle's 21,800 forms; it leaves out
+On amd64 it is about 65 MB, passes Clojure's test suite as far as it runs (on its test build,
+with the suite's Java fixtures: 76 namespaces, 20,506 of 20,520 assertions) and matches the JVM
+on all but 7 of the oracle's about 22,100 cases; it leaves out
 `gen-class`, XML, Java serialization and Swing. It is to be frozen as the branch
 `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`).
 
@@ -68,9 +70,12 @@ bin/arbace-go            # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)'
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/C2G-SPEC.md](doc/go/C2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
-  [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements
+  [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
+  [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md),
+  the box (B1b, after the freeze); the rest of `doc/go/`, the notes of each part
+- [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): g2c, Go as Arbace forms
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
-- [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace against Clojure 1.12
+- [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace on the JVM against Clojure 1.12
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and its origin
 - [LICENSE.md](LICENSE.md): the Eclipse Public License 1.0, like Clojure, and the licenses of
   all vendored and translated code (ASM's BSD-3-Clause, the JDK's GPLv2 with the Classpath

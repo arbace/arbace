@@ -30,7 +30,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 | `test/arbace-results.edn` | the suite's reference for Arbace's stages (`test/baseline-results.edn` is the frozen baseline's) |
 | `seed/arbace-seed.jar`, `seed/arbace-seed.jar.sha256`, `bin/seed` | the binary seed, stage 0 of the bootstrap since 2026-10-08, and its pinned SHA-256 (below, "The binary seed") |
 | `bin/build-arbace` | builds stages 1 to 3 into `target/` and checks the fixpoint; `--suite` runs the test suite on stages 1 and 2 |
-| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-07) |
+| `target/stage1`, `target/stage2`, `target/stage3` | build output (gitignored, `/target/`): each stage's classes, those of the class forms under `arbace/` and the stage's AOT-compiled namespaces (below, "Compiled namespaces"; 5,756 classes per stage on 2026-10-08, the seed's) |
 
 `clojure/version.properties` is not vendored (below). Nothing under `clojure/` changed.
 
@@ -186,7 +186,8 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   `bin/clojure-tests` also uses: `arbace.core` ... `arbace.repl.deps`), then
   `arbace.classes.boot` (the class forms compiler). Direct linking, as Clojure's release jar.
   4,276 classes per stage (2,941 of them the 35 namespaces, 1,335 `arbace.classes`), in about
-  6 s. `arbace.j2c` stays source (a stage-0 tool, run by the frozen `clojure/`); the package
+  6 s. `arbace.j2c` stays source (a stage-0 tool, run by the frozen `clojure/`; since 2026-10-08
+  on `target/stage2`); the package
   files `arbace/lang.clj`, `arbace/asm.clj`, `arbace/java/api.clj` are not namespaces to compile
   (they load the class forms). The next stage is built by these classes.
 - **The fixpoint covers them**: stages 1, 2 and 3 are byte-identical, 5,091 classes each (815
@@ -205,7 +206,7 @@ The first recommendation of `doc/MODERN-COMPILER.md` (§1, §3.1, §4.15), in `b
   namespace's `__init` class only when it is strictly newer than its source, and `jar --date`
   gives every entry the same time (with it all namespaces loaded from source).
 - **`target/arbace.aot`**: a JDK AOT cache (JEP 483, 514; 36 MB at first, 39.4 MB on
-  2026-10-08), made by a training run `bin/arbace --aot-train < test/aot-training.clj`
+  2026-10-08), made by a training run `bin/arbace-j --aot-train < test/aot-training.clj`
   (`-XX:AOTCacheOutput`, one step): a REPL session requiring the common libraries, a
   `defclass`, deftype/defrecord/protocols, `arbace.test`, futures, `pmap`, agents, `doc` and
   `source`. The cache refuses directories on the
@@ -278,7 +279,7 @@ module): `bin/arbace-image`, also run by `bin/build-arbace --image`, makes
 - **Layout**: the image's `bin/arbace` (since 2026-10-10 `bin/arbace-j`) is the repository's
   launcher, which, when it finds `bin/java` and `lib/arbace/arbace.jar` beside it, runs that
   `java` and that jar (and `lib/arbace/arbace.aot`). The jar is copied unchanged.
-- **The AOT cache** is trained by the image's own `java` (`bin/arbace --aot-train` inside the
+- **The AOT cache** is trained by the image's own `java` (`bin/arbace-j --aot-train` inside the
   image, the same `test/aot-training.clj`), then the image is launched once with it. A JDK
   26.0.2 problem showed up here: with AOT class linking (the default of `-XX:AOTCacheOutput`),
   the cache of a `jlink` image of some module sets stops the JVM at startup ("Unexpected
@@ -293,7 +294,7 @@ module): `bin/arbace-image`, also run by `bin/build-arbace --image`, makes
   `jdk.unsupported.desktop` (a few classes; it requires only `java.desktop`). As a safeguard,
   if the launch with the cache fails, the script trains again with `-XX:-AOTClassLinking`
   (classes still come from the cache, not linked; about 45 ms slower to launch) and writes
-  that option to `lib/arbace/aot-train-options`, which `bin/arbace --aot-train` reads in the
+  that option to `lib/arbace/aot-train-options`, which `bin/arbace-j --aot-train` reads in the
   image.
 - **Relocation**: the image runs from any directory and needs no JDK on the `PATH`
   (`env -i image/bin/arbace`). The cache still applies after a move: the JVM matches the
@@ -810,8 +811,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
     pick; the choice itself (`find-protocol-impl`, upstream's) is unchanged. Shared with the
     Go build, which embeds `protocols.clj` as it is (it returned 55 for the eduction and threw
     for `iteration`). Regression tests: `test/native/reduce_test.clj` (run by the bootstrap on
-    stage 1) and cases in `test/oracle/forms/seqs.clj`, whose expected result
-    for `iteration` (line 474) had recorded the exception. (On `arbace-for-java-26`, after v3:
+    stage 2) and cases in `test/oracle/forms/seqs.clj`, whose expected result
+    for `iteration` (line 474) had recorded the exception. (On `arbace-for-java-26` from v4:
     hand change 17.)
 
     **A dialect divergence, not a bug fix** (recorded 2026-10-10, the user's decision): upstream
@@ -832,12 +833,26 @@ step 4 (2026-10-07); the others came with later work, as each says:
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
 (`clojure.*` → `arbace.*`) and Java 26: code written for one may not behave the same on the
 other. The list for c2a, the Clojure → Arbace translator (after the `arbace-for-golang` freeze),
-and for anyone porting code.
+and for anyone porting code. Included: differences in what code computes, prints or can name;
+the runtime-visible renames are listed once, as c2a's mechanical part.
 
 - **`reduce` without an init on an `IReduceInit`-only reducible** (hand change 18; on
   `arbace-for-java-26` from v4, hand change 17): Arbace reduces it, seeded with the first item;
   upstream throws `ClassCastException` by design, or, for `eduction`, works or throws depending
   on the JVM's class archive (CLJ-2656).
+- **`SecurityManager` is not a default import** (hand change 11): code naming it unqualified
+  fails to compile; `java.lang.SecurityManager` resolves.
+- **A multimethod's ambiguity message** (hand change 14) names two classes in the order of
+  their names, not of the method table.
+- **`bean`** (hand change 15) ignores explicit `BeanInfo` classes: for `javax.swing.JLabel` it
+  lists all of `java.awt.Component`'s properties.
+- **Optional modules** (hand changes 16, 17): without `java.sql`, `#inst` still reads (to a
+  `java.util.Date`; upstream then has no `#inst`); without `java.xml` or
+  `java.desktop`, `arbace.xml`, `arbace.inspector` and `arbace.java.browse-ui` throw an
+  `UnsupportedOperationException` naming the module when loaded.
+- **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
+  thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
+  and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
 
 ## Spec (2026-10-07)
 
@@ -985,7 +1000,7 @@ Go's minimum bootstrap toolchain, if the class forms come to use a construct the
 does not know, either the change waits or the seed is replaced by a newer reproducible jar (a
 new tag), recorded in the journal with its hash.
 
-## Open decisions for the user
+## Step 4's open decisions, all taken
 
 1. (decided, above) `arbace.clj` and the class `arbace.main`.
 2. (decided, above) the leftover `clojure` identifiers.
