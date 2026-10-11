@@ -208,8 +208,13 @@
   part of module `module` against the running JDK's compiled classes. The files are copied
   into patch directories under .tmp, one per chunk of packages, so javac takes everything else
   from the system image; the chunks are converted in parallel."
-  [out module module-src paths {:keys [javac-opts check] :as opts}]
+  [out module module-src paths {:keys [javac-opts check origins] :as opts}]
   (let [src (.getCanonicalPath (io/file module-src))
+        ;; the name each converted file's header gives its source: the original file, not the
+        ;; copy in the numbered patch directory (which depends on the chunking); with
+        ;; --origins F, F's name for the file's path below module-src ({path name}, read)
+        origin-names (when origins (with-open [r (PushbackReader. (io/reader origins))] (binding [*read-eval* false] (read r))))
+        origin-of (fn [rel] (or (get origin-names rel) (str src "/" rel)))
         files (remove #(re-find #"/snippet-files/" %)
                       (java-files (map #(str src "/" %) (or (seq paths) ["."]))))
         t0 (System/nanoTime)
@@ -231,6 +236,10 @@
                                            (io/make-parents c)
                                            (io/copy (io/file f) c)
                                            (.getPath c))))])))
+        origin-by-copy (into {} (for [[i fs] work f fs
+                                      :let [rel (subs f (inc (count src)))
+                                            rel (if (str/starts-with? rel "./") (subs rel 2) rel)]]
+                                  [(.getCanonicalPath (io/file (patch-of i) rel)) (origin-of rel)]))
         ;; J2A_PATCH_ALL: each chunk sees the other chunks' sources too (its own first), for
         ;; sources whose packages the running JDK lacks (bin/jrt-convert's jrt Java, used
         ;; across packages)
@@ -253,7 +262,8 @@
         futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
         results (mapv deref futures)
         _ (.shutdown pool)
-        units (vec (mapcat :units results))
+        units (vec (for [u (mapcat :units results)]
+                     (assoc u :origin (get origin-by-copy (.getCanonicalPath (io/file (:source u))) (:source u)))))
         failures (vec (mapcat :failures results))
         errors (vec (mapcat :errors results))
         stats (apply merge-with + (map :stats results))]
@@ -268,6 +278,7 @@
           "--rename" (let [[from to] (str/split b #"=")] (recur more (assoc-in opts [:rename from] to) pos))
           "--javac" (recur more (update opts :javac-opts conj b) pos)
           "--check" (recur (rest args) (assoc opts :check true) pos)
+          "--origins" (recur more (assoc opts :origins b) pos)
           (recur (rest args) opts (conj pos a)))))))
 
 (defn -main [cmd & args]

@@ -227,7 +227,9 @@ context class loader with resources (`getResourceAsStream` from the host, `getRe
 `data_readers.clj`; since `gofix` both, by URL: JRT-NOTES.md "Resources by URL"), `String.format`
 and the regex methods, `System.out`, `CASE_INSENSITIVE_ORDER`; a nil pointer result is null (`Box`);
 and overloads are listed in the JVM's order, which `Reflector`'s choice among applicable overloads
-follows (`(Math/floorDiv c 1461)` with `c` an `Object` chose `(int, int)` before).
+follows (`(Math/floorDiv c 1461)` with `c` an `Object` chose `(int, int)` before); since
+2026-10-11 only for the classes of the JDK's CDS archive, whose order is stable, the others' by
+descriptor (A2G-SPEC §5.11, RP1).
 
 ## Deviations from EVAL-PLAN
 

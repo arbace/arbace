@@ -452,7 +452,8 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   names their forms mention (qualified symbols and their namespaces, import lists, metadata), and
   registers those the JVM has (from the JDK, `arbace.lang` or `arbace.asm`) and the world lacks,
   with the JDK classes their public members name (one level), as cut classes whose member tables
-  come from the JVM's reflection and whose members throw `UnsupportedOperationException("... is
+  come from the JVM's reflection (sorted: methods by name, parameter and return types; fields by
+  name; constructors by parameter types) and whose members throw `UnsupportedOperationException("... is
   not in the Go build")`; likewise, the member tables of translated classes list their public
   methods and constructors that do not exist in Go (`RT.toUrl`, `FileInputStream(File)`),
   throwing. Code naming them analyzes, as on the JVM, and fails when it runs (D6's "names exist
@@ -1145,7 +1146,14 @@ The tables' entry types (jrt's `class.ae`):
   (a2g's tables by `getDeclaredMethods` of the class on the JVM running a2g, jrt's by
   `getMethods`, `test/jrt/tables.ae`), since `Reflector`'s choice among applicable overloads
   follows the order (amendment M4, accepted 2026-10-09: `(Math/floorDiv c 1461)` with `c` an
-  `Object` chose `(int, int)` before). Interfaces list their abstract, default and static methods
+  `Object` chose `(int, int)` before). The JVM's order is stable only for a class of the JDK's
+  CDS archive (its `lib/classlist`, when the JVM maps the archive): HotSpot sorts a class's
+  methods by the address of their name's `Symbol`, which for a class it parses (Arbace's own,
+  the JDK's outside the archive: `NormalizerImpl`, `CompactByteArray`) changes from one JVM
+  process to the next, so a2g's output did (as the JVM's own choice among such overloads does).
+  a2g follows the JVM's order for the archive's classes, and orders every other class's
+  overloads, and those the JVM does not list, by descriptor (amendment RP1, proposed
+  2026-10-11). Interfaces list their abstract, default and static methods
   and their constants; an enum's `values`, `valueOf` and constants are ordinary members.
 - A `volatile` field that is not final has a `Set`, a volatile write (§8.2), as its `Get` is a
   volatile read (amendment M8, accepted 2026-10-09; the tables had no `Set` for them).
@@ -4266,6 +4274,15 @@ constructors: §12 (R17), JRT-NOTES.md. TL8 the shape check's known difference i
 evaluator's yield: `Compiler$CodeRun.tick`, a native counted at every method run and `recur`,
 `runtime.Gosched` every 65,536 on TamaGo, which does not preempt (BOX-SURVEY R2), an empty
 function on Linux (`boxYield`): SPEED-NOTES.md's closure compiler, jrt's `natives.ae`.
+
+**Reproducibility** (byte-identical builds, B1b S6; proposed 2026-10-11): RP1 a name's
+overloads in a member table in the JVM's order only for the classes of the JDK's CDS archive,
+by descriptor otherwise (the JVM's order of the others varies run to run): §5.11; the cut
+classes' tables ordered by return type too after name and parameters (a bridge's pair): §4.1.
+The oracle met it once: `(.schedule sched ^Callable f ...)` on an unhinted `sched`, a
+`ScheduledThreadPoolExecutor` (outside the archive), chose `schedule(Callable)` by the order of
+the JVM running a2g and `schedule(Runnable)` by descriptor; `test/oracle/forms/concurrency.ae`
+now hints `sched`, so that both resolve the call when compiling it.
 
 The 23 questions, each with its recommendation, which the user accepted on 2026-10-08 and the
 text above follows:
